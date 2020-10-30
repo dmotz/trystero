@@ -145,7 +145,9 @@ export function joinRoom(ns) {
     return [
       data => {
         const payload = JSON.stringify({type, payload: data})
-        Object.values(peerMap).forEach(peer => peer.connection.send(payload))
+        Object.values(peerMap).forEach(peer =>
+          peer.whenReady.then(() => peer.connection.send(payload))
+        )
       },
       f => (actionMap[type] = f)
     ]
