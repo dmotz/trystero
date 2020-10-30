@@ -1,6 +1,6 @@
 {
   "name": "trystero",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "main": "src/index.js",
   "author": {
     "name": "Dan Motzenbecker",
@@ -10,7 +10,7 @@
   "license": "MIT",
   "dependencies": {
     "firebase": "^7.24.0",
-    "simple-peer": "^9.7.2",
+    "simple-peer": "^9.8.0",
     "uuid": "^8.3.1"
   }
 }
