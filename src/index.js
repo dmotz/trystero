@@ -202,14 +202,10 @@ export function joinRoom(ns, limit) {
     ]
   }
 
-  function sendStream(peer, stream) {
-    peer.whenReady.then(() => {
-      if (peer.givenStream) {
-        return
-      }
-      peer.connection.addStream(stream)
-      peer.givenStream = true
-    })
+  async function sendStream(peer, stream) {
+    await peer.whenReady
+    peer.connection.addStream(stream)
+    peer.givenStream = true
   }
 
   const fns = {
