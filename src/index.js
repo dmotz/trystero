@@ -6,7 +6,6 @@ import {v4 as genId} from 'uuid'
 const libName = 'Trystero'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const presencePath = '_'
-const sdpPurgeTime = 10000
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
 const getPath = (...xs) => xs.join('/')
