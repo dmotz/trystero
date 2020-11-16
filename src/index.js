@@ -201,7 +201,9 @@ export function joinRoom(ns) {
         peer.connection.destroy()
         delete peerMap[id]
       })
+      selfRef.off()
       selfRef.remove()
+      roomRef.off()
       delete occupiedRooms[ns]
     },
 
