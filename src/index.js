@@ -110,7 +110,7 @@ export function joinRoom(ns) {
     peer
       .on('signal', sdp => {
         const ref = db.ref(getPath(rootPath, ns, key, selfId)).push()
-        ref.set(sdp)
+        ref.set(JSON.stringify(sdp))
         ref.onDisconnect().remove()
       })
       .on('connect', () => {
