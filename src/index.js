@@ -142,7 +142,12 @@ export function joinRoom(ns) {
 
         actionMap[type](key, payload)
       })
-      .on('error', () => null)
+      .on('error', e => {
+        if (e.code === 'ERR_DATA_CHANNEL') {
+          return
+        }
+        console.error(e)
+      })
 
     return obj
   }
