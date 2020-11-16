@@ -32,7 +32,7 @@ export function init(fbConfig, options = {}) {
 
   didInit = true
   db = firebase.database()
-  rootPath = options.rootPath ?? defaultRootPath
+  rootPath = options.rootPath || defaultRootPath
 }
 
 export function joinRoom(ns) {
