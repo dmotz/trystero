@@ -98,7 +98,7 @@ export function joinRoom(ns) {
     }
 
     let setReadiness
-    const peer = new Peer({initiator, trickle: false})
+    const peer = new Peer({initiator})
     const obj = {
       connection: peer,
       whenReady: new Promise(res => (setReadiness = res)),
