@@ -6,6 +6,7 @@ import {v4 as genId} from 'uuid'
 const libName = 'Trystero'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const presencePath = '_'
+const occupiedRooms = {}
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
 const getPath = (...xs) => xs.join('/')
@@ -37,6 +38,10 @@ export function init(fbConfig, options = {}) {
 export function joinRoom(ns) {
   if (!didInit) {
     throw mkErr('must call init() before joining room')
+  }
+
+  if (occupiedRooms[ns]) {
+    throw mkErr(`already joined room ${ns}`)
   }
 
   const peerMap = {}
@@ -197,6 +202,7 @@ export function joinRoom(ns) {
         delete peerMap[id]
       })
       selfRef.remove()
+      delete occupiedRooms[ns]
     },
 
     getPeers: () => Object.keys(peerMap),
