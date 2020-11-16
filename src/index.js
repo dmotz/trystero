@@ -35,13 +35,17 @@ export function init(fbConfig, options = {}) {
   rootPath = options.rootPath || defaultRootPath
 }
 
-export function joinRoom(ns) {
+export function joinRoom(ns, limit) {
   if (!didInit) {
     throw mkErr('must call init() before joining room')
   }
 
   if (occupiedRooms[ns]) {
     throw mkErr(`already joined room ${ns}`)
+  }
+
+  if (limit <= 0) {
+    throw mkErr('invalid limit value')
   }
 
   const peerMap = {}
@@ -55,6 +59,8 @@ export function joinRoom(ns) {
   let onPeerLeave = noOp
   let onPeerStream = noOp
   let selfStream
+  let limitRes
+  let limitRej
 
   occupiedRooms[ns] = true
 
@@ -88,7 +94,20 @@ export function joinRoom(ns) {
   })
   selfRef.onDisconnect().remove()
 
-  roomRef.once('value', () => (didSyncRoom = true))
+  roomRef.once('value', data => {
+    didSyncRoom = true
+
+    if (!limit) {
+      return
+    }
+
+    if (Object.keys(data.val()).length > limit) {
+      fns.leave()
+      limitRej(mkErr(`room ${ns} is full (limit: ${limit})`))
+    } else {
+      limitRes(fns)
+    }
+  })
   roomRef.on('child_added', ({key}) => {
     if (!didSyncRoom || key === selfId) {
       return
@@ -193,7 +212,7 @@ export function joinRoom(ns) {
     })
   }
 
-  return {
+  const fns = {
     makeAction,
 
     leave: () => {
@@ -230,4 +249,11 @@ export function joinRoom(ns) {
 
     onPeerStream: f => (onPeerStream = f)
   }
+
+  return limit
+    ? new Promise((res, rej) => {
+        limitRes = res
+        limitRej = rej
+      })
+    : fns
 }
