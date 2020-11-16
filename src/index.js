@@ -137,7 +137,7 @@ export function joinRoom(ns) {
         }
 
         if (!actionMap[type]) {
-          throw mkErr('received message with unregistered type')
+          throw mkErr(`received message with unregistered type: ${type}`)
         }
 
         actionMap[type](key, payload)
