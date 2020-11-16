@@ -41,6 +41,7 @@ export function joinRoom(ns) {
   }
 
   const peerMap = {}
+  const peerSigs = {}
   const actionMap = {}
   const roomRef = db.ref(getPath(rootPath, ns))
   const selfRef = roomRef.child(selfId)
@@ -51,13 +52,33 @@ export function joinRoom(ns) {
   let onPeerStream = noOp
   let selfStream
 
+  occupiedRooms[ns] = true
+
   selfRef.set({[presencePath]: true})
   selfRef.on('child_added', data => {
     const peerId = data.key
     if (peerId !== presencePath) {
       data.ref.on('child_added', data => {
-        getPeer(peerId, false).connection.signal(data.val())
-        setTimeout(() => data.ref.remove(), sdpPurgeTime)
+        if (!(peerId in peerSigs)) {
+          peerSigs[peerId] = {}
+        }
+
+        if (data.key in peerSigs[peerId]) {
+          return
+        }
+
+        peerSigs[peerId][data.key] = true
+
+        let val
+
+        try {
+          val = JSON.parse(data.val())
+        } catch (e) {
+          console.error(`${libName}: received malformed SDP JSON`)
+        }
+
+        getPeer(peerId, false).connection.signal(val)
+        data.ref.remove()
       })
     }
   })
