@@ -40,6 +40,10 @@ export function joinRoom(ns, limit) {
     throw mkErr('must call init() before joining room')
   }
 
+  if (!ns) {
+    throw mkErr('namespace argument required')
+  }
+
   if (occupiedRooms[ns]) {
     throw mkErr(`already joined room ${ns}`)
   }
