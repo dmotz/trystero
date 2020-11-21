@@ -227,7 +227,7 @@ Returns an object with the following methods:
   - `currentPeersOnly` - **(optional)** If `true` the stream will be sent only
     to peers currently in the room. By default, the stream is automatically sent
     to peers who arrive after the stream is initially broadcast unless a
-    `peerId` argument is given or `currentPeersOnly` is true.
+    `peerId` argument is given or `currentPeersOnly` is `true`.
 
 - ### `onPeerJoin(callback)`
 
@@ -263,11 +263,15 @@ Returns an object with the following methods:
   onPeerStream((id, stream) => console.log(`got stream from ${id}`, stream))
   ```
 
-- ### `makeAction(type)`
+- ### `makeAction(type, [isBinary])`
 
   Listen for and send custom data actions.
 
   - `type` - A string to register this action consistently among all peers.
+
+  - `isBinary` - **(optional)** If `true`, data sent will be interpreted as raw
+    bytes and not JSON or a primitive. This should be used if an action is for
+    sending files, images, etc.
 
   Returns a pair containing a function to send the action to peers and a
   function to register a listener. The sender function takes any
