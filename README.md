@@ -103,7 +103,7 @@ room.addStream(
 Send and subscribe to custom P2P actions:
 
 ```javascript
-;[sendDrink, getDrink] = room.makeAction('buy-drink')
+;[sendDrink, getDrink] = room.makeAction('drink')
 
 // buy drink for a friend
 sendDrink({drink: 'negroni', withIce: true}, friendId)
@@ -113,6 +113,20 @@ sendDrink({drink: 'mezcal', withIce: false})
 
 // listen for drinks sent to you
 getDrink((id, data) => console.log(`got a ${data.drink} from ${id}`))
+```
+
+You can also create actions that send and receive binary data, like images:
+
+```javascript
+// pass true as the second argument to makeAction to make it binary capable
+;[sendPic, getPic] = room.makeAction('pic', true)
+
+// blobs are automatically handled, as are any form of TypedArray
+canvas.toBlob(blob => sendPic(blob))
+
+// binary data is received as raw ArrayBuffers so your handling code should
+// interpret it in a way that makes sense
+getPic((id, data) => (img.src = URL.createObjectURL(new Blob([data]))))
 ```
 
 ## Advanced
