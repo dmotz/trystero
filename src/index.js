@@ -189,6 +189,10 @@ export function joinRoom(ns, limit) {
   }
 
   function makeAction(type) {
+    if (!type) {
+      throw mkErr('action type argument is required')
+    }
+
     if (actionMap[type]) {
       throw mkErr(`action '${type}' already registered`)
     }
