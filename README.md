@@ -6,6 +6,8 @@ Trystero manages a clandestine courier network that lets your application's
 users commmunicate directly with one another, encrypted and without a server
 middleman.
 
+---
+
 - [Setup](#setup)
 - [Install](#install)
 - [Initialize](#initialize)
