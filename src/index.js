@@ -164,7 +164,7 @@ export function joinRoom(ns, limit) {
           }
         } else {
           type = binaryActionMap[data[0]]
-          payload = data.slice(1)
+          payload = data.buffer.slice(1)
         }
 
         if (!type) {
