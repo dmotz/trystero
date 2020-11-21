@@ -6,6 +6,7 @@ import {v4 as genId} from 'uuid'
 const libName = 'Trystero'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const presencePath = '_'
+const nullString = String.fromCharCode(0)
 const occupiedRooms = {}
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
@@ -55,6 +56,7 @@ export function joinRoom(ns, limit) {
   const peerMap = {}
   const peerSigs = {}
   const actionMap = {}
+  const binaryActionMap = [null]
   const roomRef = db.ref(getPath(rootPath, ns))
   const selfRef = roomRef.child(selfId)
 
@@ -154,10 +156,15 @@ export function joinRoom(ns, limit) {
         let type
         let payload
 
-        try {
-          ;({type, payload} = JSON.parse(data.toString()))
-        } catch (e) {
-          throw mkErr('failed parsing message')
+        if (data[0] === 0) {
+          try {
+            ;({type, payload} = JSON.parse(data.toString().slice(1)))
+          } catch (e) {
+            throw mkErr('failed parsing message')
+          }
+        } else {
+          type = binaryActionMap[data[0]]
+          payload = data.slice(1)
         }
 
         if (!type) {
@@ -188,7 +195,7 @@ export function joinRoom(ns, limit) {
     onPeerLeave(id)
   }
 
-  function makeAction(type) {
+  function makeAction(type, isBinary) {
     if (!type) {
       throw mkErr('action type argument is required')
     }
@@ -199,9 +206,31 @@ export function joinRoom(ns, limit) {
 
     actionMap[type] = noOp
 
+    let actionIndex
+
+    if (isBinary) {
+      actionIndex = binaryActionMap.length
+      if (actionIndex > 255) {
+        throw mkErr('maximum binary actions for this room exceeded')
+      }
+      binaryActionMap[actionIndex] = type
+    }
+
     return [
-      data => {
-        const payload = JSON.stringify({type, payload: data})
+      async data => {
+        let payload
+
+        if (isBinary) {
+          const buffer = data instanceof Blob ? await data.arrayBuffer() : data
+          const tagged = new Uint8Array(buffer.byteLength + 1)
+
+          tagged.set([actionIndex], 0)
+          tagged.set(new Uint8Array(buffer), 1)
+          payload = tagged.buffer
+        } else {
+          payload = nullString + JSON.stringify({type, payload: data})
+        }
+
         Object.values(peerMap).forEach(peer =>
           peer.whenReady.then(() => peer.connection.send(payload))
         )
