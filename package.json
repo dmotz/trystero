@@ -7,6 +7,10 @@
     "email": "dan@oxism.com",
     "url": "https://oxism.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/dmotz/trystero.git"
+  },
   "license": "MIT",
   "dependencies": {
     "firebase": "^7.24.0",
