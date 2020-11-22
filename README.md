@@ -277,7 +277,10 @@ Returns an object with the following methods:
   function to register a listener. The sender function takes any
   JSON-serializable value as its first argument (primitve or object) and takes
   an optional second argument of a peer ID to send to. By default it will
-  broadcast the value to all peers in the room.
+  broadcast the value to all peers in the room. If `makeAction()` was called
+  with a second argument of `true`, the sender function will accept binary
+  data types (`Blob`, `TypedArray`) and the receiver function with be called
+  with an `ArrayBuffer` of agnostic bytes.
 
   ```javascript
   const numberStations = {}
