@@ -131,7 +131,7 @@ getPic((id, data) => (img.src = URL.createObjectURL(new Blob([data]))))
 
 ## Advanced
 
-### Capped Rooms
+### Capped rooms
 
 You can create rooms that are capped at a fixed number of members by passing a
 second argument to `joinRoom`. Since the process of checking the number of
