@@ -191,7 +191,9 @@ connection process.
 - `options` - **(optional)** Configuration object containing the following keys:
 
   - `rootPath` - Where Trystero writes its matchmaking data in your database
-    (`'__trystero__'` by default).
+    (`'__trystero__'` by default). Changing this is useful if you want to run
+    multiple apps using the same database and don't want to worry about
+    namespace collisions.
 
 ### `joinRoom(namespace, [limit])`
 
