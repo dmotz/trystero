@@ -8,6 +8,7 @@ const defaultRootPath = `__${libName.toLowerCase()}__`
 const presencePath = '_'
 const nullString = String.fromCharCode(0)
 const occupiedRooms = {}
+const {keys, values, entries} = Object
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
 const getPath = (...xs) => xs.join('/')
@@ -107,7 +108,7 @@ export function joinRoom(ns, limit) {
       return
     }
 
-    if (Object.keys(data.val()).length > limit) {
+    if (keys(data.val()).length > limit) {
       fns.leave()
       limitRej(mkErr(`room ${ns} is full (limit: ${limit})`))
     } else {
@@ -231,7 +232,7 @@ export function joinRoom(ns, limit) {
           payload = nullString + JSON.stringify({type, payload: data})
         }
 
-        Object.values(peerMap).forEach(peer =>
+        values(peerMap).forEach(peer =>
           peer.whenReady.then(() => peer.connection.send(payload))
         )
       },
@@ -249,7 +250,7 @@ export function joinRoom(ns, limit) {
     makeAction,
 
     leave: () => {
-      Object.entries(peerMap).forEach(([id, peer]) => {
+      entries(peerMap).forEach(([id, peer]) => {
         peer.connection.destroy()
         delete peerMap[id]
       })
@@ -259,7 +260,7 @@ export function joinRoom(ns, limit) {
       delete occupiedRooms[ns]
     },
 
-    getPeers: () => Object.keys(peerMap),
+    getPeers: () => keys(peerMap),
 
     addStream: (stream, peerId, currentPeersOnly) => {
       if (peerId) {
@@ -272,7 +273,7 @@ export function joinRoom(ns, limit) {
         if (!currentPeersOnly) {
           selfStream = stream
         }
-        Object.values(peerMap).forEach(peer => sendStream(peer, stream))
+        values(peerMap).forEach(peer => sendStream(peer, stream))
       }
     },
 
