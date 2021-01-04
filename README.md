@@ -123,7 +123,7 @@ canvas.toBlob(blob => sendPic(blob))
 
 // binary data is received as raw ArrayBuffers so your handling code should
 // interpret it in a way that makes sense
-getPic((id, data) => (img.src = URL.createObjectURL(new Blob([data]))))
+getPic((id, data) => (imgs[id].src = URL.createObjectURL(new Blob([data]))))
 ```
 
 ## Advanced
