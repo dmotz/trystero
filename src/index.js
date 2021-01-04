@@ -295,3 +295,15 @@ export function joinRoom(ns, limit) {
       })
     : fns
 }
+
+export function getOccupants(ns) {
+  if (!didInit) {
+    throw mkErr('must call init() before calling getOccupants()')
+  }
+
+  return new Promise(res =>
+    db
+      .ref(getPath(rootPath, ns))
+      .once('value', data => res(keys(data.val() || {})))
+  )
+}
