@@ -19,22 +19,26 @@ let rootPath
 
 export const selfId = genId()
 
-export function init(fbConfig, options = {}) {
-  if (!fbConfig) {
-    throw mkErr('init() requires a Firebase config as the first argument')
-  }
-
+export function init(config) {
   if (didInit) {
     return
   }
 
   if (!firebase.apps.length) {
-    firebase.initializeApp(fbConfig)
+    if (!config) {
+      throw mkErr('init() requires a config map as the first argument')
+    }
+
+    if (!config.dbUrl) {
+      throw mkErr('config map is missing dbUrl field')
+    }
+
+    firebase.initializeApp({databaseURL: config.dbUrl})
   }
 
   didInit = true
   db = firebase.database()
-  rootPath = options.rootPath || defaultRootPath
+  rootPath = (config && config.rootPath) || defaultRootPath
 }
 
 export function joinRoom(ns, limit) {
