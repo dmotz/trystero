@@ -192,6 +192,19 @@ connection process.
     want to run multiple apps using the same database and don't want to worry
     about namespace collisions.
 
+### `getOccupants(namespace)`
+
+Returns a promise that resolves to a list of user ids present in the given
+namespace. This is useful for checking how many users are in a room without
+joining it.
+
+Example:
+
+```javascript
+console.log((await trystero.getOccupants('the_scope')).length)
+// => 3
+```
+
 ### `joinRoom(namespace, [limit])`
 
 Adds local user to room whereby other peers in the same namespace will open
@@ -280,6 +293,8 @@ Returns an object with the following methods:
   with a second argument of `true`, the sender function will accept binary
   data types (`Blob`, `TypedArray`) and the receiver function with be called
   with an `ArrayBuffer` of agnostic bytes.
+
+  Example:
 
   ```javascript
   const numberStations = {}
