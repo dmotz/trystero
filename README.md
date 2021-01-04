@@ -46,7 +46,7 @@ npm i trystero
 Begin by initializing Trystero:
 
 ```javascript
-import * as trystero from '../src'
+import * as trystero from 'trystero'
 
 trystero.init({
   /* your Firebase config */
