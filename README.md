@@ -3,8 +3,7 @@
 **Easy WebRTC matchmaking for painless P2P**
 
 Trystero manages a clandestine courier network that lets your application's
-users commmunicate directly with one another, encrypted and without a server
-middleman.
+users talk directly with one another, encrypted and without a server middleman.
 
 ---
 
