@@ -198,6 +198,8 @@ Returns a promise that resolves to a list of user ids present in the given
 namespace. This is useful for checking how many users are in a room without
 joining it.
 
+- `namespace` - A namespace string that you'd pass to `joinRoom()`.
+
 Example:
 
 ```javascript
