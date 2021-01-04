@@ -48,9 +48,7 @@ Begin by initializing Trystero:
 ```javascript
 import * as trystero from 'trystero'
 
-trystero.init({
-  /* your Firebase config */
-})
+trystero.init({dbUrl: 'https://your-firebase-instance-here.firebaseio.com'})
 ```
 
 This should be called just once globally for your app.
@@ -179,20 +177,20 @@ ahead of time.
 A unique ID string other peers will know the local user as globally across
 rooms.
 
-### `init(firebaseConfig, [options])`
+### `init(config)`
 
 Required to be called once in an application's lifespan to bootstrap peer
 connection process.
 
-- `firebaseConfig` - An object containing a Firebase realtime database
-  configuration.
+- `config` - Configuration object containing the following keys:
 
-- `options` - **(optional)** Configuration object containing the following keys:
+  - `dbUrl` - A URL string pointing at your Firebase database (`databaseURL` in
+    the Firebase config object).
 
-  - `rootPath` - Where Trystero writes its matchmaking data in your database
-    (`'__trystero__'` by default). Changing this is useful if you want to run
-    multiple apps using the same database and don't want to worry about
-    namespace collisions.
+  - `rootPath` - **(optional)** Where Trystero writes its matchmaking data in
+    your database (`'__trystero__'` by default). Changing this is useful if you
+    want to run multiple apps using the same database and don't want to worry
+    about namespace collisions.
 
 ### `joinRoom(namespace, [limit])`
 
