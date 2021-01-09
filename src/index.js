@@ -6,7 +6,7 @@ import {v4 as genId} from 'uuid'
 const libName = 'Trystero'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const presencePath = '_'
-const nullString = String.fromCharCode(0)
+const nullStr = String.fromCharCode(0)
 const occupiedRooms = {}
 const {keys, values, entries} = Object
 const noOp = () => {}
@@ -161,7 +161,7 @@ export function joinRoom(ns, limit) {
         let type
         let payload
 
-        if (data[0] === 0) {
+        if (data[0] === nullStr) {
           try {
             ;({type, payload} = JSON.parse(data.toString().slice(1)))
           } catch (e) {
@@ -233,7 +233,7 @@ export function joinRoom(ns, limit) {
           tagged.set(new Uint8Array(buffer), 1)
           payload = tagged.buffer
         } else {
-          payload = nullString + JSON.stringify({type, payload: data})
+          payload = nullStr + JSON.stringify({type, payload: data})
         }
 
         values(peerMap).forEach(peer =>
