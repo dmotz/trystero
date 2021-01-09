@@ -294,7 +294,7 @@ Returns an object with the following methods:
   an optional second argument of a peer ID to send to. By default it will
   broadcast the value to all peers in the room. If `makeAction()` was called
   with a second argument of `true`, the sender function will accept binary
-  data types (`Blob`, `TypedArray`) and the receiver function with be called
+  data types (`Blob`, `TypedArray`) and the receiver function will be called
   with an `ArrayBuffer` of agnostic bytes.
 
   Example:
