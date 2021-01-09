@@ -1,6 +1,6 @@
 import firebase from '@firebase/app'
 import '@firebase/database'
-import Peer from 'simple-peer'
+import Peer from 'simple-peer-light'
 import {v4 as genId} from 'uuid'
 
 const libName = 'Trystero'
@@ -142,52 +142,51 @@ export function joinRoom(ns, limit) {
 
     peerMap[key] = obj
 
-    peer
-      .on('signal', sdp => {
-        const ref = db.ref(getPath(rootPath, ns, key, selfId)).push()
-        ref.set(JSON.stringify(sdp))
-        ref.onDisconnect().remove()
-      })
-      .on('connect', () => {
-        setReadiness()
-        onPeerJoin(key)
-        if (selfStream) {
-          sendStream(obj, selfStream)
-        }
-      })
-      .on('close', () => exitPeer(key))
-      .on('stream', stream => onPeerStream(key, stream))
-      .on('data', data => {
-        let type
-        let payload
+    peer.on('signal', sdp => {
+      const ref = db.ref(getPath(rootPath, ns, key, selfId)).push()
+      ref.set(JSON.stringify(sdp))
+      ref.onDisconnect().remove()
+    })
+    peer.on('connect', () => {
+      setReadiness()
+      onPeerJoin(key)
+      if (selfStream) {
+        sendStream(obj, selfStream)
+      }
+    })
+    peer.on('close', () => exitPeer(key))
+    peer.on('stream', stream => onPeerStream(key, stream))
+    peer.on('data', data => {
+      let type
+      let payload
 
-        if (data[0] === nullStr) {
-          try {
-            ;({type, payload} = JSON.parse(data.toString().slice(1)))
-          } catch (e) {
-            throw mkErr('failed parsing message')
-          }
-        } else {
-          type = binaryActionMap[data[0]]
-          payload = data.buffer.slice(1)
+      if (data[0] === nullStr) {
+        try {
+          ;({type, payload} = JSON.parse(data.toString().slice(1)))
+        } catch (e) {
+          throw mkErr('failed parsing message')
         }
+      } else {
+        type = binaryActionMap[data[0]]
+        payload = data.buffer.slice(1)
+      }
 
-        if (!type) {
-          throw mkErr('received message missing type')
-        }
+      if (!type) {
+        throw mkErr('received message missing type')
+      }
 
-        if (!actionMap[type]) {
-          throw mkErr(`received message with unregistered type: ${type}`)
-        }
+      if (!actionMap[type]) {
+        throw mkErr(`received message with unregistered type: ${type}`)
+      }
 
-        actionMap[type](key, payload)
-      })
-      .on('error', e => {
-        if (e.code === 'ERR_DATA_CHANNEL') {
-          return
-        }
-        console.error(e)
-      })
+      actionMap[type](key, payload)
+    })
+    peer.on('error', e => {
+      if (e.code === 'ERR_DATA_CHANNEL') {
+        return
+      }
+      console.error(e)
+    })
 
     return obj
   }

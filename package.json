@@ -13,7 +13,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "simple-peer": "^9.9.3",
+    "simple-peer-light": "^1.0.0",
     "uuid": "^8.3.1"
   },
   "peerDependencies": {
