@@ -290,7 +290,7 @@ Returns an object with the following methods:
 
   Returns a pair containing a function to send the action to peers and a
   function to register a listener. The sender function takes any
-  JSON-serializable value as its first argument (primitve or object) and takes
+  JSON-serializable value as its first argument (primitive or object) and takes
   an optional second argument of a peer ID to send to. By default it will
   broadcast the value to all peers in the room. If `makeAction()` was called
   with a second argument of `true`, the sender function will accept binary
