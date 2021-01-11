@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git://github.com/dmotz/trystero.git"
+    "url": "https://github.com/dmotz/trystero.git"
   },
   "license": "MIT",
   "dependencies": {
@@ -18,5 +18,13 @@
   },
   "peerDependencies": {
     "firebase": "^8.2.2"
-  }
+  },
+  "keywords": [
+    "webrtc",
+    "p2p",
+    "peer to peer",
+    "chat",
+    "pairing",
+    "matchmaking"
+  ]
 }
