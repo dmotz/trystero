@@ -313,3 +313,7 @@ Returns an object with the following methods:
     numberStations[id].push(n)
   })
   ```
+
+---
+
+Trystero by [Dan Motzenbecker](https://oxism.com)
