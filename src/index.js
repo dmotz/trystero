@@ -265,15 +265,15 @@ export function joinRoom(ns, limit) {
 
     getPeers: () => keys(peerMap),
 
-    addStream: (stream, peerId, currentPeersOnly) => {
-      if (peerId) {
+    addStream: (stream, peerId) => {
+      if (typeof peerId === 'string') {
         const peer = peerMap[peerId]
         if (!peer) {
           throw mkErr(`no peer with id ${peerId} found`)
         }
         sendStream(peer, stream)
       } else {
-        if (!currentPeersOnly) {
+        if (!peerId) {
           selfStream = stream
         }
         values(peerMap).forEach(peer => sendStream(peer, stream))
