@@ -195,7 +195,7 @@ connection process.
 
 ### `getOccupants(namespace)`
 
-Returns a promise that resolves to a list of user ids present in the given
+Returns a promise that resolves to a list of user IDs present in the given
 namespace. This is useful for checking how many users are in a room without
 joining it.
 
@@ -237,12 +237,13 @@ Returns an object with the following methods:
   - `stream` - A `MediaStream` with audio/video to send to peers in the room.
 
   - `peerId` - **(optional)** If specified, the stream is sent only to the
-    target peer and not all users.
+    target peer ID (string) and not all users.
 
   - `currentPeersOnly` - **(optional)** If `true` the stream will be sent only
     to peers currently in the room. By default, the stream is automatically sent
     to peers who arrive after the stream is initially broadcast unless a
-    `peerId` argument is given or `currentPeersOnly` is `true`.
+    `peerId` argument is given or `currentPeersOnly` is `true`. Note that this
+    function takes a maximum of 2 arguments.
 
 - ### `onPeerJoin(callback)`
 
