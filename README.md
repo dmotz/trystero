@@ -28,8 +28,8 @@ maintenance, and can be used (for this purpose) for free or very cheaply.
 Trystero may adopt more signalling strategies in the future, but for now
 Firebase is the sole medium.
 
-**To be clear: Beyond peer discovery, your app's data never touches Firebase and
-is sent directly peer-to-peer and end-to-end encrypted between users.**
+**Beyond peer discovery, your app's data never touches Firebase and is sent
+directly peer-to-peer and end-to-end encrypted between users.**
 
 If you don't have an existing Firebase project:
 
@@ -245,8 +245,8 @@ Returns an object with the following methods:
   - `currentPeersOnly` - **(optional)** If `true` the stream will be sent only
     to peers currently in the room. By default, the stream is automatically sent
     to peers who arrive after the stream is initially broadcast unless a
-    `peerId` argument is given or `currentPeersOnly` is `true`. Note that this
-    function takes a maximum of 2 arguments.
+    `peerId` argument is given or `currentPeersOnly` is `true`. Note that these
+    optional arguments are mutually exclusive so pass at most only one.
 
 - ### `onPeerJoin(callback)`
 
