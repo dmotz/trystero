@@ -221,7 +221,7 @@ export function joinRoom(ns, limit) {
     }
 
     return [
-      async data => {
+      async (data, peerId) => {
         let payload
 
         if (isBinary) {
@@ -235,9 +235,18 @@ export function joinRoom(ns, limit) {
           payload = nullStr + JSON.stringify({type, payload: data})
         }
 
-        values(peerMap).forEach(peer =>
+        const transmit = peer =>
           peer.whenReady.then(() => peer.connection.send(payload))
-        )
+
+        if (peerId) {
+          const peer = peerMap[peerId]
+          if (!peer) {
+            throw mkErr(`no peer with id ${peerId} found`)
+          }
+          transmit(peer)
+        } else {
+          values(peerMap).forEach(transmit)
+        }
       },
       f => (actionMap[type] = f)
     ]
