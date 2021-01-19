@@ -267,8 +267,6 @@ export function joinRoom(ns, limit) {
               ])
             )
 
-            console.log(meta.byteLength)
-
             const payload = new Uint8Array(
               meta.byteLength +
                 (chunkN === chunkTotal - 1
