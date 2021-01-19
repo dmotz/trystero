@@ -158,29 +158,46 @@ export function joinRoom(ns, limit) {
     peer.on('close', () => exitPeer(key))
     peer.on('stream', stream => onPeerStream(key, stream))
     peer.on('data', data => {
-      let type
-      let payload
+      const nonce = new Uint32Array(data.slice(0, 4).buffer)[0]
+      const actionN = new Uint32Array(data.slice(4, 8).buffer)[0]
+      const chunkN = new Uint32Array(data.slice(8, 12).buffer)[0]
+      const chunkTotal = new Uint32Array(data.slice(12, 16).buffer)[0]
 
-      if (data[0] === nullStr) {
+      if (!actions[actionN]) {
+        throw mkErr('received message with unregistered type')
+      }
+
+      const chunks = !pendingTransmissions[nonce]
+        ? (pendingTransmissions[nonce] = [])
+        : pendingTransmissions[nonce]
+
+      chunks[chunkN] = data.subarray(16)
+
+      if (chunkN === chunkTotal - 1) {
+        let payload
+
+        if (chunks.length === 1) {
+          payload = chunks[0]
+        } else {
+          payload = new Uint8Array(chunks.reduce((a, c) => a + c.byteLength, 0))
+          pendingTransmissions[nonce].forEach((b, i) =>
+            payload.set(b, i && chunks[i - 1].byteLength)
+          )
+        }
+
         try {
-          ;({type, payload} = JSON.parse(data.toString().slice(1)))
+          actions[actionN].fn(
+            key,
+            actions[actionN].isBinary
+              ? payload
+              : JSON.parse(new TextDecoder().decode(payload))
+          )
         } catch (e) {
           throw mkErr('failed parsing message')
         }
-      } else {
-        type = binaryActionMap[data[0]]
-        payload = data.buffer.slice(1)
-      }
 
-      if (!type) {
-        throw mkErr('received message missing type')
+        delete pendingTransmissions[nonce]
       }
-
-      if (!actionMap[type]) {
-        throw mkErr(`received message with unregistered type: ${type}`)
-      }
-
-      actionMap[type](key, payload)
     })
     peer.on('error', e => {
       if (e.code === 'ERR_DATA_CHANNEL') {
