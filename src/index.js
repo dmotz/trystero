@@ -6,9 +6,10 @@ import {v4 as genId} from 'uuid'
 const libName = 'Trystero'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const presencePath = '_'
-const nullStr = String.fromCharCode(0)
+const buffLowEvent = 'bufferedamountlow'
 const occupiedRooms = {}
 const {keys, values, entries} = Object
+const chunkSize = 16 * 1024 - 16
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
 const getPath = (...xs) => xs.join('/')
@@ -60,8 +61,8 @@ export function joinRoom(ns, limit) {
 
   const peerMap = {}
   const peerSigs = {}
-  const actionMap = {}
-  const binaryActionMap = [null]
+  const actions = []
+  const pendingTransmissions = {}
   const roomRef = db.ref(getPath(rootPath, ns))
   const selfRef = roomRef.child(selfId)
 
@@ -204,39 +205,68 @@ export function joinRoom(ns, limit) {
       throw mkErr('action type argument is required')
     }
 
-    if (actionMap[type]) {
+    if (actions.find(a => a.type === type)) {
       throw mkErr(`action '${type}' already registered`)
     }
 
-    actionMap[type] = noOp
-
-    let actionIndex
-
-    if (isBinary) {
-      actionIndex = binaryActionMap.length
-      if (actionIndex > 255) {
-        throw mkErr('maximum binary actions for this room exceeded')
-      }
-      binaryActionMap[actionIndex] = type
-    }
+    const aMap = {type, isBinary, fn: noOp}
+    const actionN = actions.push(aMap) - 1
 
     return [
       async (data, peerId) => {
-        let payload
+        const buffer = isBinary
+          ? new Uint8Array(
+              data instanceof Blob ? await data.arrayBuffer() : data
+            )
+          : new TextEncoder().encode(
+              typeof data === 'object' ? JSON.stringify(data) : data
+            )
 
-        if (isBinary) {
-          const buffer = data instanceof Blob ? await data.arrayBuffer() : data
-          const tagged = new Uint8Array(buffer.byteLength + 1)
+        const nonce = Math.floor(Math.random() * (2 ** 32 - 1))
+        const chunkTotal = Math.ceil(buffer.byteLength / chunkSize)
 
-          tagged.set([actionIndex], 0)
-          tagged.set(new Uint8Array(buffer), 1)
-          payload = tagged.buffer
-        } else {
-          payload = nullStr + JSON.stringify({type, payload: data})
+        const transmit = async peer => {
+          await peer.whenReady
+          const chan = peer.connection._channel
+          let chunkN = 0
+
+          while (chunkN < chunkTotal) {
+            if (chan.bufferedAmount > chan.bufferedAmountLowThreshold) {
+              await new Promise(res => {
+                const next = () => {
+                  chan.removeEventListener(buffLowEvent, next)
+                  res()
+                }
+                chan.addEventListener(buffLowEvent, next)
+              })
+            }
+
+            const meta = Uint8Array.from(
+              [nonce, actionN, chunkN, chunkTotal].flatMap(n => [
+                0xff & n,
+                0xff & (n >> 8),
+                0xff & (n >> 16),
+                0xff & (n >> 24)
+              ])
+            )
+
+            console.log(meta.byteLength)
+
+            const payload = new Uint8Array(
+              meta.byteLength +
+                (chunkN === chunkTotal - 1
+                  ? buffer.byteLength - chunkSize * (chunkTotal - 1)
+                  : chunkSize)
+            )
+
+            payload.set(meta)
+            payload.set(
+              buffer.subarray(chunkN * chunkSize, ++chunkN * chunkSize),
+              meta.byteLength
+            )
+            peer.connection.send(payload)
+          }
         }
-
-        const transmit = peer =>
-          peer.whenReady.then(() => peer.connection.send(payload))
 
         if (peerId) {
           const peer = peerMap[peerId]
@@ -248,7 +278,7 @@ export function joinRoom(ns, limit) {
           values(peerMap).forEach(transmit)
         }
       },
-      f => (actionMap[type] = f)
+      f => (aMap.fn = f)
     ]
   }
 
