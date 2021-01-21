@@ -65,6 +65,11 @@ Join the user to a room with a namespace:
 const room = trystero.joinRoom('yoyodyne')
 ```
 
+Why rooms? Browsers can only handle a limited amount of WebRTC connections at
+a time so it's recommended to design your app such that users are divided into
+groups (or rooms, or namespaces, or channels... whatever you'd like to call
+them).
+
 ## Listen for events
 
 Listen for peers joining the room:
