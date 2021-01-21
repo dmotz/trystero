@@ -28,10 +28,12 @@ maintenance, and can be used (for this purpose) for free or very cheaply.
 Trystero may adopt more signalling strategies in the future, but for now
 Firebase is the sole medium.
 
-> ⚠️
+> 🔒
 >
 > Beyond peer discovery, your app's data never touches Firebase and is sent
 > directly peer-to-peer and end-to-end encrypted between users.
+>
+> 👆
 
 If you don't have an existing Firebase project:
 
