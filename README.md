@@ -139,6 +139,24 @@ canvas.toBlob(blob => sendPic(blob))
 getPic((id, data) => (imgs[id].src = URL.createObjectURL(new Blob([data]))))
 ```
 
+Let's say we want users to be able to name themselves:
+
+```javascript
+const idsToNames = {}
+
+;[sendName, getName] = room.makeAction('name')
+
+// tell other peers our name
+sendName('Oedipa')
+
+// listen for peers naming themselves
+getName((id, name) => (idsToNames[id] = name))
+
+room.onPeerLeave(id =>
+  console.log(`${idsToNames[id] || 'a weird stranger'} left`)
+)
+```
+
 ## Advanced
 
 ### Capped rooms
