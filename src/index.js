@@ -162,46 +162,57 @@ export function joinRoom(ns, limit) {
     peer.on('close', () => exitPeer(key))
     peer.on('stream', stream => onPeerStream(key, stream))
     peer.on('data', data => {
-      const nonce = new Uint32Array(data.slice(0, 4).buffer)[0]
-      const actionN = new Uint32Array(data.slice(4, 8).buffer)[0]
-      const chunkN = new Uint32Array(data.slice(8, 12).buffer)[0]
-      const chunkTotal = new Uint32Array(data.slice(12, 16).buffer)[0]
+      const buffer = new Uint8Array(data)
+      const action = new TextDecoder().decode(buffer.subarray(0, typeByteLimit))
+      const nonce = buffer.subarray(typeByteLimit, typeByteLimit + 1)[0]
+      const tag = buffer.subarray(typeByteLimit + 1, typeByteLimit + 2)[0]
+      const payload = buffer.subarray(typeByteLimit + 2)
+      const isLast = !!(tag & 1)
+      const isMeta = !!(tag & (1 << 1))
+      const isBinary = !!(tag & (1 << 2))
+      const isJson = !!(tag & (1 << 3))
 
-      if (!actions[actionN]) {
-        throw mkErr('received message with unregistered type')
+      if (!actions[action]) {
+        throw mkErr(`received message with unregistered type (${action})`)
       }
 
-      const chunks = !pendingTransmissions[nonce]
-        ? (pendingTransmissions[nonce] = [])
-        : pendingTransmissions[nonce]
-
-      chunks[chunkN] = data.subarray(16)
-
-      if (chunkN === chunkTotal - 1) {
-        let payload
-
-        if (chunks.length === 1) {
-          payload = chunks[0]
-        } else {
-          payload = new Uint8Array(chunks.reduce((a, c) => a + c.byteLength, 0))
-          pendingTransmissions[nonce].forEach((b, i) =>
-            payload.set(b, i && chunks[i - 1].byteLength)
-          )
-        }
-
-        try {
-          actions[actionN].fn(
-            key,
-            actions[actionN].isBinary
-              ? payload
-              : JSON.parse(new TextDecoder().decode(payload))
-          )
-        } catch (e) {
-          throw mkErr('failed parsing message')
-        }
-
-        delete pendingTransmissions[nonce]
+      if (!pendingTransmissions[key]) {
+        pendingTransmissions[key] = {}
       }
+
+      if (!pendingTransmissions[key][action]) {
+        pendingTransmissions[key][action] = {}
+      }
+
+      let target = pendingTransmissions[key][action][nonce]
+
+      if (!target) {
+        target = pendingTransmissions[key][action][nonce] = {chunks: []}
+      }
+
+      if (isMeta) {
+        target.meta = JSON.parse(new TextDecoder().decode(payload))
+      } else {
+        target.chunks.push(payload)
+      }
+
+      if (!isLast) {
+        return
+      }
+
+      const {chunks} = target
+      const full = new Uint8Array(chunks.reduce((a, c) => a + c.byteLength, 0))
+
+      chunks.forEach((b, i) => full.set(b, i && chunks[i - 1].byteLength))
+
+      if (isBinary) {
+        actions[action](key, full, target.meta)
+      } else {
+        const text = new TextDecoder().decode(full)
+        actions[action](key, isJson ? JSON.parse(text) : text)
+      }
+
+      delete pendingTransmissions[key][action][nonce]
     })
     peer.on('error', e => {
       if (e.code === 'ERR_DATA_CHANNEL') {
@@ -218,6 +229,7 @@ export function joinRoom(ns, limit) {
       return
     }
     delete peerMap[id]
+    delete pendingTransmissions[id]
     onPeerLeave(id)
   }
 
