@@ -113,7 +113,7 @@ room.addStream(
 Send and subscribe to custom P2P actions:
 
 ```javascript
-;[sendDrink, getDrink] = room.makeAction('drink')
+const [sendDrink, getDrink] = room.makeAction('drink')
 
 // buy drink for a friend
 sendDrink({drink: 'negroni', withIce: true}, friendId)
@@ -129,7 +129,7 @@ You can also create actions that send and receive binary data, like images:
 
 ```javascript
 // pass true as the second argument to makeAction to make it binary capable
-;[sendPic, getPic] = room.makeAction('pic', true)
+const [sendPic, getPic] = room.makeAction('pic', true)
 
 // blobs are automatically handled, as are any form of TypedArray
 canvas.toBlob(blob => sendPic(blob))
@@ -143,8 +143,7 @@ Let's say we want users to be able to name themselves:
 
 ```javascript
 const idsToNames = {}
-
-;[sendName, getName] = room.makeAction('name')
+const [sendName, getName] = room.makeAction('name')
 
 // tell other peers our name
 sendName('Oedipa')
@@ -332,8 +331,7 @@ Returns an object with the following methods:
 
   ```javascript
   const numberStations = {}
-
-  ;[sendNumber, getNumber] = room.makeAction('number')
+  const [sendNumber, getNumber] = room.makeAction('number')
 
   sendNumber(33)
 
