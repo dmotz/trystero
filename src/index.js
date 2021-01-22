@@ -226,27 +226,79 @@ export function joinRoom(ns, limit) {
       throw mkErr('action type argument is required')
     }
 
-    if (actions.find(a => a.type === type)) {
+    if (actions[type]) {
       throw mkErr(`action '${type}' already registered`)
     }
 
-    const aMap = {type, isBinary, fn: noOp}
-    const actionN = actions.push(aMap) - 1
+    const typeEncoded = new TextEncoder().encode(type)
+
+    const typeBytes = new Uint8Array(typeByteLimit)
+    typeBytes.set(typeEncoded)
+
+    const typePadded = new TextDecoder().decode(typeBytes)
+
+    let nonce = 0
+
+    actions[typePadded] = noOp
+    pendingTransmissions[type] = {}
 
     return [
-      async (data, peerId) => {
+      async (data, peerId, meta) => {
+        const peers = entries(peerMap)
+
+        if (!peers.length) {
+          return
+        }
+
+        const isJson = typeof data === 'object' || typeof data === 'number'
+        const isBlob = data instanceof Blob
+        const isBinary =
+          isBlob || data instanceof ArrayBuffer || data instanceof TypedArray
+
         const buffer = isBinary
-          ? new Uint8Array(
-              data instanceof Blob ? await data.arrayBuffer() : data
-            )
-          : new TextEncoder().encode(
-              typeof data === 'object' ? JSON.stringify(data) : data
-            )
+          ? new Uint8Array(isBlob ? await data.arrayBuffer() : data)
+          : new TextEncoder().encode(isJson ? JSON.stringify(data) : data)
 
-        const nonce = Math.floor(Math.random() * (2 ** 32 - 1))
-        const chunkTotal = Math.ceil(buffer.byteLength / chunkSize)
+        const metaEncoded = meta
+          ? new TextEncoder().encode(JSON.stringify(meta))
+          : null
 
-        const transmit = async peer => {
+        const chunkTotal =
+          Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0)
+
+        const chunks = new Array(chunkTotal).fill().map((_, i) => {
+          const isLast = i === chunkTotal - 1
+          const isMeta = meta && i === 0
+          const chunk = new Uint8Array(
+            metaTagSize +
+              (isMeta
+                ? metaEncoded.byteLength
+                : isLast
+                ? buffer.byteLength - chunkSize * (chunkTotal - (meta ? 2 : 1))
+                : chunkSize)
+          )
+
+          chunk.set(typeBytes)
+          chunk.set([nonce], typeBytes.byteLength)
+          chunk.set(
+            [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
+            typeBytes.byteLength + 1
+          )
+          chunk.set(
+            meta
+              ? isMeta
+                ? metaEncoded
+                : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
+              : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
+            metaTagSize
+          )
+
+          return chunk
+        })
+
+        nonce = (nonce + 1) & 0xff
+
+        const transmit = async ([id, peer]) => {
           await peer.whenReady
           const chan = peer.connection._channel
           let chunkN = 0
@@ -262,28 +314,7 @@ export function joinRoom(ns, limit) {
               })
             }
 
-            const meta = Uint8Array.from(
-              [nonce, actionN, chunkN, chunkTotal].flatMap(n => [
-                0xff & n,
-                0xff & (n >> 8),
-                0xff & (n >> 16),
-                0xff & (n >> 24)
-              ])
-            )
-
-            const payload = new Uint8Array(
-              meta.byteLength +
-                (chunkN === chunkTotal - 1
-                  ? buffer.byteLength - chunkSize * (chunkTotal - 1)
-                  : chunkSize)
-            )
-
-            payload.set(meta)
-            payload.set(
-              buffer.subarray(chunkN * chunkSize, ++chunkN * chunkSize),
-              meta.byteLength
-            )
-            peer.connection.send(payload)
+            peer.connection.send(chunks[chunkN++])
           }
         }
 
@@ -292,12 +323,12 @@ export function joinRoom(ns, limit) {
           if (!peer) {
             throw mkErr(`no peer with id ${peerId} found`)
           }
-          transmit(peer)
+          transmit([peerId, peer])
         } else {
-          values(peerMap).forEach(transmit)
+          peers.forEach(transmit)
         }
       },
-      f => (aMap.fn = f)
+      f => (actions[typePadded] = f)
     ]
   }
 
