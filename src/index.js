@@ -17,6 +17,8 @@ const chunkSize = 16 * (2 ^ 10) - metaTagSize
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
 const getPath = (...xs) => xs.join('/')
+const encodeBytes = txt => new TextEncoder().encode(txt)
+const decodeBytes = txt => new TextDecoder().decode(txt)
 
 let didInit = false
 let db
@@ -163,7 +165,7 @@ export function joinRoom(ns, limit) {
     peer.on('stream', stream => onPeerStream(key, stream))
     peer.on('data', data => {
       const buffer = new Uint8Array(data)
-      const action = new TextDecoder().decode(buffer.subarray(0, typeByteLimit))
+      const action = decodeBytes(buffer.subarray(0, typeByteLimit))
       const nonce = buffer.subarray(typeByteLimit, typeByteLimit + 1)[0]
       const tag = buffer.subarray(typeByteLimit + 1, typeByteLimit + 2)[0]
       const payload = buffer.subarray(typeByteLimit + 2)
@@ -191,7 +193,7 @@ export function joinRoom(ns, limit) {
       }
 
       if (isMeta) {
-        target.meta = JSON.parse(new TextDecoder().decode(payload))
+        target.meta = JSON.parse(decodeBytes(payload))
       } else {
         target.chunks.push(payload)
       }
@@ -208,7 +210,7 @@ export function joinRoom(ns, limit) {
       if (isBinary) {
         actions[action](key, full, target.meta)
       } else {
-        const text = new TextDecoder().decode(full)
+        const text = decodeBytes(full)
         actions[action](key, isJson ? JSON.parse(text) : text)
       }
 
@@ -242,7 +244,7 @@ export function joinRoom(ns, limit) {
       throw mkErr(`action '${type}' already registered`)
     }
 
-    const typeEncoded = new TextEncoder().encode(type)
+    const typeEncoded = encodeBytes(type)
 
     if (typeEncoded.byteLength > typeByteLimit) {
       throw mkErr(
@@ -254,7 +256,7 @@ export function joinRoom(ns, limit) {
     const typeBytes = new Uint8Array(typeByteLimit)
     typeBytes.set(typeEncoded)
 
-    const typePadded = new TextDecoder().decode(typeBytes)
+    const typePadded = decodeBytes(typeBytes)
 
     let nonce = 0
 
@@ -276,11 +278,9 @@ export function joinRoom(ns, limit) {
 
         const buffer = isBinary
           ? new Uint8Array(isBlob ? await data.arrayBuffer() : data)
-          : new TextEncoder().encode(isJson ? JSON.stringify(data) : data)
+          : encodeBytes(isJson ? JSON.stringify(data) : data)
 
-        const metaEncoded = meta
-          ? new TextEncoder().encode(JSON.stringify(meta))
-          : null
+        const metaEncoded = meta ? encodeBytes(JSON.stringify(meta)) : null
 
         const chunkTotal =
           Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0)
