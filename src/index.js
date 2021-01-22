@@ -244,6 +244,13 @@ export function joinRoom(ns, limit) {
 
     const typeEncoded = new TextEncoder().encode(type)
 
+    if (typeEncoded.byteLength > typeByteLimit) {
+      throw mkErr(
+        `action type string "${type}" (${typeEncoded.byteLength}b) exceeds ` +
+          `byte limit (${typeByteLimit}). Hint: choose a shorter name.`
+      )
+    }
+
     const typeBytes = new Uint8Array(typeByteLimit)
     typeBytes.set(typeEncoded)
 
