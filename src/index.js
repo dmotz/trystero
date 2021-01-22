@@ -346,10 +346,10 @@ export function joinRoom(ns, limit) {
           if (!peer) {
             throw mkErr(`no peer with id ${peerId} found`)
           }
-          transmit([peerId, peer])
-        } else {
-          peers.forEach(transmit)
+          return transmit([peerId, peer])
         }
+
+        return Promise.all(peers.map(transmit))
       },
       f => (actions[typePadded] = f)
     ]
