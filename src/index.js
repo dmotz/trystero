@@ -9,7 +9,11 @@ const presencePath = '_'
 const buffLowEvent = 'bufferedamountlow'
 const occupiedRooms = {}
 const {keys, values, entries} = Object
-const chunkSize = 16 * 1024 - 16
+const TypedArray = Object.getPrototypeOf(Uint8Array)
+const typeByteLimit = 12
+const metaTagSize = typeByteLimit + 2
+const chunkSize = 16 * (2 ^ 10) - metaTagSize
+
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
 const getPath = (...xs) => xs.join('/')
@@ -61,7 +65,7 @@ export function joinRoom(ns, limit) {
 
   const peerMap = {}
   const peerSigs = {}
-  const actions = []
+  const actions = {}
   const pendingTransmissions = {}
   const roomRef = db.ref(getPath(rootPath, ns))
   const selfRef = roomRef.child(selfId)
@@ -217,7 +221,7 @@ export function joinRoom(ns, limit) {
     onPeerLeave(id)
   }
 
-  function makeAction(type, isBinary) {
+  function makeAction(type) {
     if (!type) {
       throw mkErr('action type argument is required')
     }
