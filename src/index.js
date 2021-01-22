@@ -333,6 +333,10 @@ export function joinRoom(ns, limit) {
               })
             }
 
+            if (!peerMap[id]) {
+              break
+            }
+
             peer.connection.send(chunks[chunkN++])
           }
         }
