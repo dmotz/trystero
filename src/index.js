@@ -404,6 +404,18 @@ export function joinRoom(ns, limit) {
       }
     },
 
+    removeStream: (stream, peerId) => {
+      if (peerId) {
+        const peer = peerMap[peerId]
+        if (!peer) {
+          throw mkErr(`no peer with id ${peerId} found`)
+        }
+        peer.connection.removeStream(stream)
+      } else {
+        values(peerMap).forEach(peer => peer.connection.removeStream(stream))
+      }
+    },
+
     onPeerJoin: f => (onPeerJoin = f),
 
     onPeerLeave: f => (onPeerLeave = f),
