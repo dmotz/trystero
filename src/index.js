@@ -167,7 +167,7 @@ export function joinRoom(ns, limit) {
       }
     })
     peer.on('close', () => exitPeer(key))
-    peer.on('stream', stream => onPeerStream(key, stream))
+    peer.on('stream', stream => onPeerStream(stream, key))
     peer.on('data', data => {
       const buffer = new Uint8Array(data)
       const action = decodeBytes(buffer.subarray(0, typeByteLimit))
