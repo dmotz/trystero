@@ -312,24 +312,19 @@ Returns an object with the following methods:
   onPeerStream((id, stream) => console.log(`got stream from ${id}`, stream))
   ```
 
-- ### `makeAction(type, [isBinary])`
+- ### `makeAction(type)`
 
   Listen for and send custom data actions.
 
   - `type` - A string to register this action consistently among all peers.
 
-  - `isBinary` - **(optional)** If `true`, data sent will be interpreted as raw
-    bytes and not JSON or a primitive. This should be used if an action is for
-    sending files, images, etc.
-
   Returns a pair containing a function to send the action to peers and a
   function to register a listener. The sender function takes any
-  JSON-serializable value as its first argument (primitive or object) and takes
-  an optional second argument of a peer ID to send to. By default it will
-  broadcast the value to all peers in the room. If `makeAction()` was called
-  with a second argument of `true`, the sender function will accept binary
-  data types (`Blob`, `TypedArray`) and the receiver function will be called
-  with an `ArrayBuffer` of agnostic bytes.
+  JSON-serializable value (primitive or object) or binary data as its first
+  argument and takes an optional second argument of a peer ID to send to. By
+  default it will broadcast the value to all peers in the room. If the sender
+  function is called with binary data (`Blob`, `TypedArray`), it will be
+  received on the other end as an `ArrayBuffer` of agnostic bytes.
 
   Example:
 
