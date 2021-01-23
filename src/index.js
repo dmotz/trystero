@@ -1,7 +1,6 @@
 import firebase from '@firebase/app'
 import '@firebase/database'
 import Peer from 'simple-peer-light'
-import {v4 as genId} from 'uuid'
 
 const libName = 'Trystero'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -13,6 +12,10 @@ const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12
 const metaTagSize = typeByteLimit + 2
 const chunkSize = 16 * (2 ^ 10) - metaTagSize
+const charSet = new Array(62)
+  .fill()
+  .map((_, i) => String.fromCharCode(i + (i > 9 ? (i > 35 ? 61 : 55) : 48)))
+  .join('')
 
 const noOp = () => {}
 const mkErr = msg => new Error(`${libName}: ${msg}`)
@@ -24,7 +27,10 @@ let didInit = false
 let db
 let rootPath
 
-export const selfId = genId()
+export const selfId = new Array(32)
+  .fill()
+  .map(() => charSet[Math.floor(Math.random() * charSet.length)])
+  .join('')
 
 export function init(config) {
   if (didInit) {
