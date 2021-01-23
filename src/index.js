@@ -213,10 +213,10 @@ export function joinRoom(ns, limit) {
       chunks.forEach((b, i) => full.set(b, i && chunks[i - 1].byteLength))
 
       if (isBinary) {
-        actions[action](key, full, target.meta)
+        actions[action](full, key, target.meta)
       } else {
         const text = decodeBytes(full)
-        actions[action](key, isJson ? JSON.parse(text) : text)
+        actions[action](isJson ? JSON.parse(text) : text, key)
       }
 
       delete pendingTransmissions[key][action][nonce]
