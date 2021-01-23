@@ -155,6 +155,11 @@ room.onPeerLeave(id =>
 )
 ```
 
+> Actions are smart and handle serialization and chunking for you behind the
+> scenes. This means you can send very large files and whatever data you send
+> will be received on the other side as the same type (a number as a number,
+> a string as a string, an object as an object, binary as binary, etc.).
+
 ## Advanced
 
 ### Capped rooms
