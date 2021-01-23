@@ -303,13 +303,22 @@ Returns an object with the following methods:
   - `stream` - A `MediaStream` with audio/video to send to peers in the room.
 
   - `peerId` - **(optional)** If specified, the stream is sent only to the
-    target peer ID (string) and not all users.
+    target peer ID (string) and not all peers.
 
   - `currentPeersOnly` - **(optional)** If `true` the stream will be sent only
     to peers currently in the room. By default, the stream is automatically sent
     to peers who arrive after the stream is initially broadcast unless a
     `peerId` argument is given or `currentPeersOnly` is `true`. Note that these
     optional arguments are mutually exclusive so pass at most only one.
+
+- ### `removeStream(stream, [peerId])`
+
+  Stops sending previously sent media stream to other peers.
+
+  - `stream` - A previously sent `MediaStream` to stop sending.
+
+  - `peerId` - **(optional)** If specified, the stream is removed only from the
+    target peer, not all peers.
 
 - ### `onPeerJoin(callback)`
 
