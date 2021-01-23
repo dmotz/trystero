@@ -201,6 +201,17 @@ getFile((id, data, meta) =>
 sendFile(buffer, null, {name: 'The Courierʼs Tragedy', type: 'application/pdf'})
 ```
 
+### Action promises
+
+Action sender functions return a promise that resolves when they're done
+sending. You can optionally use this to indicate to the user when a large
+transfer is done.
+
+```javascript
+await sendFile(hugeFile)
+console.log('done sending')
+```
+
 ### Security rules
 
 You can limit activity in your Firebase instance by setting these security
