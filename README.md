@@ -179,6 +179,28 @@ try {
 }
 ```
 
+### Binary metadata
+
+Let's say your app supports sending various types of files and you want to
+annotate the raw bytes being sent with metadata about how they should be
+interpreted. Instead of manually adding metadata bytes to the buffer you can
+simply pass a metadata argument in the sender action for your binary payload:
+
+```javascript
+const [sendFile, getFile] = makeAction('file')
+
+getFile((id, data, meta) =>
+  console.log(
+    `got a file (${meta.name}) from ${id} with type ${meta.type}`,
+    data
+  )
+)
+
+// to send metadata, pass a third argument
+// to broadcast to the whole room, set the second peer ID argument to null
+sendFile(buffer, null, {name: 'The Courierʼs Tragedy', type: 'application/pdf'})
+```
+
 ### Security rules
 
 You can limit activity in your Firebase instance by setting these security
