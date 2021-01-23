@@ -125,11 +125,10 @@ sendDrink({drink: 'mezcal', withIce: false})
 getDrink((id, data) => console.log(`got a ${data.drink} from ${id}`))
 ```
 
-You can also create actions that send and receive binary data, like images:
+You can also use actions to send binary data, like images:
 
 ```javascript
-// pass true as the second argument to makeAction to make it binary capable
-const [sendPic, getPic] = room.makeAction('pic', true)
+const [sendPic, getPic] = room.makeAction('pic')
 
 // blobs are automatically handled, as are any form of TypedArray
 canvas.toBlob(blob => sendPic(blob))
