@@ -122,7 +122,11 @@ sendDrink({drink: 'negroni', withIce: true}, friendId)
 sendDrink({drink: 'mezcal', withIce: false})
 
 // listen for drinks sent to you
-getDrink((id, data) => console.log(`got a ${data.drink} from ${id}`))
+getDrink((data, id) =>
+  console.log(
+    `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${id}`
+  )
+)
 ```
 
 You can also use actions to send binary data, like images:
@@ -135,7 +139,7 @@ canvas.toBlob(blob => sendPic(blob))
 
 // binary data is received as raw ArrayBuffers so your handling code should
 // interpret it in a way that makes sense
-getPic((id, data) => (imgs[id].src = URL.createObjectURL(new Blob([data]))))
+getPic((data, id) => (imgs[id].src = URL.createObjectURL(new Blob([data]))))
 ```
 
 Let's say we want users to be able to name themselves:
@@ -148,7 +152,7 @@ const [sendName, getName] = room.makeAction('name')
 sendName('Oedipa')
 
 // listen for peers naming themselves
-getName((id, name) => (idsToNames[id] = name))
+getName((name, id) => (idsToNames[id] = name))
 
 room.onPeerLeave(id =>
   console.log(`${idsToNames[id] || 'a weird stranger'} left`)
@@ -189,7 +193,7 @@ simply pass a metadata argument in the sender action for your binary payload:
 ```javascript
 const [sendFile, getFile] = makeAction('file')
 
-getFile((id, data, meta) =>
+getFile((data, id, meta) =>
   console.log(
     `got a file (${meta.name}) from ${id} with type ${meta.type}`,
     data
@@ -378,7 +382,7 @@ Returns an object with the following methods:
 
   sendNumber(33)
 
-  getNumber((id, n) => {
+  getNumber((n, id) => {
     if (!numberStations[id]) {
       numberStations[id] = []
     }
