@@ -149,8 +149,7 @@ export function joinRoom(ns, limit) {
     const peer = new Peer({initiator})
     const obj = {
       connection: peer,
-      whenReady: new Promise(res => (setReadiness = res)),
-      givenStream: false
+      whenReady: new Promise(res => (setReadiness = res))
     }
 
     peerMap[key] = obj
@@ -372,7 +371,6 @@ export function joinRoom(ns, limit) {
   async function sendStream(peer, stream) {
     await peer.whenReady
     peer.connection.addStream(stream)
-    peer.givenStream = true
   }
 
   const fns = {
