@@ -91,7 +91,7 @@ room.onPeerLeave(id => console.log(`${id} left`))
 Listen for peers sending their audio/video streams:
 
 ```javascript
-room.onPeerStream((id, stream) => (peerElements[id].video.srcObject = stream))
+room.onPeerStream((stream, id) => (peerElements[id].video.srcObject = stream))
 ```
 
 To unsubscribe from events, leave the room:
@@ -355,7 +355,7 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerStream((id, stream) => console.log(`got stream from ${id}`, stream))
+  onPeerStream((stream, id) => console.log(`got stream from ${id}`, stream))
   ```
 
 - ### `makeAction(type)`
