@@ -324,7 +324,9 @@ Returns an object with the following methods:
   argument and takes an optional second argument of a peer ID to send to. By
   default it will broadcast the value to all peers in the room. If the sender
   function is called with binary data (`Blob`, `TypedArray`), it will be
-  received on the other end as an `ArrayBuffer` of agnostic bytes.
+  received on the other end as an `ArrayBuffer` of agnostic bytes. The sender
+  function returns a promise that resolves when all target peers are finished
+  receiving data.
 
   Example:
 
