@@ -277,6 +277,10 @@ export function joinRoom(ns, limit) {
           return
         }
 
+        if (meta && typeof meta !== 'object') {
+          throw mkErr('meta argument must be an object')
+        }
+
         const isJson = typeof data === 'object' || typeof data === 'number'
         const isBlob = data instanceof Blob
         const isBinary =
