@@ -278,13 +278,17 @@ export function joinRoom(ns, limit) {
         }
 
         if (meta && typeof meta !== 'object') {
-          throw mkErr('meta argument must be an object')
+          throw mkErr('action meta argument must be an object')
         }
 
         const isJson = typeof data === 'object' || typeof data === 'number'
         const isBlob = data instanceof Blob
         const isBinary =
           isBlob || data instanceof ArrayBuffer || data instanceof TypedArray
+
+        if (meta && !isBinary) {
+          throw mkErr('action meta argument can only be used with binary data')
+        }
 
         const buffer = isBinary
           ? new Uint8Array(isBlob ? await data.arrayBuffer() : data)
