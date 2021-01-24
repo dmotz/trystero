@@ -11,7 +11,7 @@ const {keys, values, entries} = Object
 const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12
 const metaTagSize = typeByteLimit + 2
-const chunkSize = 16 * (2 ^ 10) - metaTagSize
+const chunkSize = 16 * 2 ** 10 - metaTagSize
 const charSet = new Array(62)
   .fill()
   .map((_, i) => String.fromCharCode(i + (i > 9 ? (i > 35 ? 61 : 55) : 48)))
