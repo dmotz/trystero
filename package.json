@@ -1,6 +1,6 @@
 {
   "name": "trystero",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "main": "src/index.js",
   "author": {
     "name": "Dan Motzenbecker",
