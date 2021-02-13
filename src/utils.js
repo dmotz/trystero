@@ -9,6 +9,18 @@ export const genId = n =>
     .map(() => charSet[Math.floor(Math.random() * charSet.length)])
     .join('')
 
+export const initGuard = f => config => {
+  if (!config) {
+    throw mkErr('init() requires a config map as the first argument')
+  }
+
+  if (!config.appId) {
+    throw mkErr('config map is missing appId field')
+  }
+
+  return f(config)
+}
+
 export const libName = 'Trystero'
 
 export const selfId = genId(20)
