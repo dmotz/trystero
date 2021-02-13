@@ -10,7 +10,7 @@ const occupiedRooms = {}
 const dbs = {}
 const getPath = (...xs) => xs.join('/')
 
-const init = initGuard(config =>
+const init = config =>
   dbs[config.appId]
     ? dbs[config.appId]
     : (dbs[config.appId] = firebase
@@ -18,9 +18,8 @@ const init = initGuard(config =>
           databaseURL: `https://${config.appId}.firebaseio.com`
         })
         .database())
-)
 
-export default (config, ns) => {
+export default initGuard((config, ns) => {
   const db = init(config)
 
   if (!ns) {
@@ -107,6 +106,6 @@ export default (config, ns) => {
       delete occupiedRooms[ns]
     }
   )
-}
+})
 
 export {selfId} from './utils'
