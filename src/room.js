@@ -33,6 +33,10 @@ export default (onPeer, onSelfLeave) => {
   let selfStream
 
   onPeer((peer, id) => {
+    if (peerMap[id]) {
+      return
+    }
+
     peerMap[id] = peer
 
     if (selfStream) {
