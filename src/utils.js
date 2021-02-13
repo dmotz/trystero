@@ -1,7 +1,4 @@
-const charSet = new Array(62)
-  .fill()
-  .map((_, i) => String.fromCharCode(i + (i > 9 ? (i > 35 ? 61 : 55) : 48)))
-  .join('')
+const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
 
 export const genId = n =>
   new Array(n)
