@@ -101,7 +101,7 @@ export default (onPeer, onSelfLeave) => {
       console.error(e)
     })
 
-    onPeerJoin(id)
+    setTimeout(onPeerJoin, 0, id)
   })
 
   return {
