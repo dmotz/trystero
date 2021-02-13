@@ -1,7 +1,7 @@
 import firebase from '@firebase/app'
 import '@firebase/database'
 import Peer from 'simple-peer-light'
-import {libName, mkErr, noOp, selfId} from './utils'
+import {initGuard, libName, mkErr, noOp, selfId} from './utils'
 import joinRoom from './room'
 
 const presencePath = '_'
@@ -10,23 +10,15 @@ const occupiedRooms = {}
 const dbs = {}
 const getPath = (...xs) => xs.join('/')
 
-const init = config => {
-  if (!config) {
-    throw mkErr('init() requires a config map as the first argument')
-  }
-
-  if (!config.appId) {
-    throw mkErr('config map is missing appId field')
-  }
-
-  return dbs[config.appId]
+const init = initGuard(config =>
+  dbs[config.appId]
     ? dbs[config.appId]
     : (dbs[config.appId] = firebase
         .initializeApp({
           databaseURL: `https://${config.appId}.firebaseio.com`
         })
         .database())
-}
+)
 
 export default (config, ns) => {
   const db = init(config)
