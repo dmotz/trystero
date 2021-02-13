@@ -7,34 +7,29 @@ import joinRoom from './room'
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const occupiedRooms = {}
+const dbs = {}
 const getPath = (...xs) => xs.join('/')
 
-let didInit = false
-let db
-
 const init = config => {
-  if (!firebase.apps.length) {
-    if (!config) {
-      throw mkErr('init() requires a config map as the first argument')
-    }
-
-    if (!config.appId) {
-      throw mkErr('config map is missing appId field')
-    }
-
-    firebase.initializeApp({
-      databaseURL: `https://${config.appId}.firebaseio.com`
-    })
+  if (!config) {
+    throw mkErr('init() requires a config map as the first argument')
   }
 
-  didInit = true
-  db = firebase.database()
+  if (!config.appId) {
+    throw mkErr('config map is missing appId field')
+  }
+
+  return dbs[config.appId]
+    ? dbs[config.appId]
+    : (dbs[config.appId] = firebase
+        .initializeApp({
+          databaseURL: `https://${config.appId}.firebaseio.com`
+        })
+        .database())
 }
 
 export default (config, ns) => {
-  if (!didInit) {
-    init(config)
-  }
+  const db = init(config)
 
   if (!ns) {
     throw mkErr('namespace argument required')
