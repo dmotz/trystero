@@ -10,7 +10,7 @@ import {
   selfId,
   values
 } from './utils'
-import joinRoom from './room'
+import room from './room'
 
 const occupiedRooms = {}
 const sockets = {}
@@ -28,7 +28,7 @@ const defaultTrackerUrls = [
   'wss://tracker.files.fm:7073/announce'
 ]
 
-export default initGuard((config, ns) => {
+export const joinRoom = initGuard((config, ns) => {
   if (occupiedRooms[ns]) {
     throw mkErr(`already joined room ${ns}`)
   }
@@ -239,7 +239,7 @@ export default initGuard((config, ns) => {
 
   announceAll()
 
-  return joinRoom(
+  return room(
     f => (onPeerConnect = f),
     async () => {
       const infoHash = await infoHashP
