@@ -28,10 +28,6 @@ const defaultTrackerUrls = [
 ]
 
 export default initGuard((config, ns) => {
-  if (!ns) {
-    throw mkErr('namespace argument required')
-  }
-
   const trackerUrls = config.trackerUrls || defaultTrackerUrls
   const connectedPeers = {}
 
