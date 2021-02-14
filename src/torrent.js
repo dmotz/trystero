@@ -18,8 +18,9 @@ const socketListeners = {}
 const hashLimit = 20
 const offerPoolSize = 10
 const defaultRedundancy = 2
+const defaultAnnounceSecs = 33
+const maxAnnounceSecs = 120
 const trackerAction = 'announce'
-const announceMs = 33333
 const defaultTrackerUrls = [
   'wss://tracker.openwebtorrent.com/',
   'wss://tracker.sloppyta.co:443/announce',
@@ -90,6 +91,16 @@ export default initGuard((config, ns) => {
     if (failure) {
       console.warn(`${libName}: torrent tracker failure (${failure})`)
       return
+    }
+
+    if (
+      val.interval &&
+      val.interval > announceSecs &&
+      val.interval <= maxAnnounceSecs
+    ) {
+      clearInterval(announceInterval)
+      announceSecs = val.interval
+      announceInterval = setInterval(announceAll, announceSecs * 1000)
     }
 
     if (val.offer && val.offer_id) {
@@ -222,7 +233,8 @@ export default initGuard((config, ns) => {
 
   const onDisconnect = id => delete connectedPeers[id]
 
-  const announceInterval = setInterval(announceAll, announceMs)
+  let announceSecs = defaultAnnounceSecs
+  let announceInterval = setInterval(announceAll, announceSecs * 1000)
   let onPeerConnect = noOp
   let handledOffers = {}
   let offerPool
