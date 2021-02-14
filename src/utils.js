@@ -6,7 +6,7 @@ export const genId = n =>
     .map(() => charSet[Math.floor(Math.random() * charSet.length)])
     .join('')
 
-export const initGuard = f => (config, ...args) => {
+export const initGuard = f => (config, ns) => {
   if (!config) {
     throw mkErr('init() requires a config map as the first argument')
   }
@@ -15,7 +15,11 @@ export const initGuard = f => (config, ...args) => {
     throw mkErr('config map is missing appId field')
   }
 
-  return f(config, ...args)
+  if (!ns) {
+    throw mkErr('namespace argument required')
+  }
+
+  return f(config, ns)
 }
 
 export const libName = 'Trystero'
