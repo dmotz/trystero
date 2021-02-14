@@ -2,7 +2,7 @@ import firebase from '@firebase/app'
 import '@firebase/database'
 import Peer from 'simple-peer-light'
 import {initGuard, keys, libName, mkErr, noOp, selfId} from './utils'
-import joinRoom from './room'
+import room from './room'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -19,7 +19,7 @@ const init = config =>
         })
         .database())
 
-export default initGuard((config, ns) => {
+export const joinRoom = initGuard((config, ns) => {
   if (occupiedRooms[ns]) {
     throw mkErr(`already joined room ${ns}`)
   }
@@ -94,7 +94,7 @@ export default initGuard((config, ns) => {
     makePeer(key, true)
   })
 
-  return joinRoom(
+  return room(
     f => (onPeerConnect = f),
     () => {
       selfRef.off()
