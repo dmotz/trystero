@@ -28,6 +28,10 @@ const defaultTrackerUrls = [
 ]
 
 export default initGuard((config, ns) => {
+  if (occupiedRooms[ns]) {
+    throw mkErr(`already joined room ${ns}`)
+  }
+
   const trackerUrls = config.trackerUrls || defaultTrackerUrls
   const connectedPeers = {}
 
