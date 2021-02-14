@@ -27,7 +27,7 @@ export default initGuard((config, ns) => {
   const db = init(config)
   const peerMap = {}
   const peerSigs = {}
-  const rootPath = (config && config.rootPath) || defaultRootPath
+  const rootPath = config.rootPath || defaultRootPath
   const roomRef = db.ref(getPath(rootPath, ns))
   const selfRef = roomRef.child(selfId)
 
