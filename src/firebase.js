@@ -1,7 +1,7 @@
 import firebase from '@firebase/app'
 import '@firebase/database'
 import Peer from 'simple-peer-light'
-import {initGuard, libName, mkErr, noOp, selfId} from './utils'
+import {initGuard, keys, libName, mkErr, noOp, selfId} from './utils'
 import joinRoom from './room'
 
 const presencePath = '_'
@@ -104,5 +104,14 @@ export default initGuard((config, ns) => {
     }
   )
 })
+
+export const getOccupants = initGuard(
+  (config, ns) =>
+    new Promise(res =>
+      init(config)
+        .ref(getPath(config.rootPath || defaultRootPath, ns))
+        .once('value', data => res(keys(data.val() || {})))
+    )
+)
 
 export {selfId} from './utils'
