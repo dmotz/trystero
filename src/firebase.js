@@ -22,10 +22,6 @@ const init = config =>
 export default initGuard((config, ns) => {
   const db = init(config)
 
-  if (!ns) {
-    throw mkErr('namespace argument required')
-  }
-
   if (occupiedRooms[ns]) {
     throw mkErr(`already joined room ${ns}`)
   }
