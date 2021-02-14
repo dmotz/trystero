@@ -82,7 +82,6 @@ export default initGuard((config, ns) => {
     }
 
     if (val.peer_id && val.peer_id === selfId) {
-      console.log('got message from self, ignoring')
       return
     }
 
@@ -104,7 +103,6 @@ export default initGuard((config, ns) => {
     }
 
     if (val.offer && val.offer_id) {
-      console.log(`offer from ${val.peer_id}`, socket.url)
       if (connectedPeers[val.peer_id]) {
         return
       }
