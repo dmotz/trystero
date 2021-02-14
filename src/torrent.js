@@ -32,8 +32,13 @@ export default initGuard((config, ns) => {
     throw mkErr(`already joined room ${ns}`)
   }
 
-  const trackerUrls = config.trackerUrls || defaultTrackerUrls
   const connectedPeers = {}
+  const trackerUrls = (config.trackerUrls || defaultTrackerUrls).slice(
+    0,
+    config.trackerUrls
+      ? config.trackerUrls.length
+      : config.trackerRedundancy || defaultRedundancy
+  )
 
   if (!trackerUrls.length) {
     throw mkErr('trackerUrls is empty')
@@ -185,17 +190,15 @@ export default initGuard((config, ns) => {
 
     offerPool = makeOffers()
 
-    trackerUrls
-      .slice(0, config.trackerRedundancy || defaultRedundancy)
-      .forEach(async url => {
-        const socket = makeSocket(url, infoHash)
+    trackerUrls.forEach(async url => {
+      const socket = makeSocket(url, infoHash)
 
-        if (socket.readyState === WebSocket.OPEN) {
-          announce(socket, infoHash)
-        } else if (socket.readyState !== WebSocket.CONNECTING) {
-          announce(await makeSocket(url, infoHash), infoHash)
-        }
-      })
+      if (socket.readyState === WebSocket.OPEN) {
+        announce(socket, infoHash)
+      } else if (socket.readyState !== WebSocket.CONNECTING) {
+        announce(await makeSocket(url, infoHash), infoHash)
+      }
+    })
   }
 
   const cleanPool = () => {
