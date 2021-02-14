@@ -8,7 +8,7 @@ export const genId = n =>
 
 export const initGuard = f => (config, ns) => {
   if (!config) {
-    throw mkErr('init() requires a config map as the first argument')
+    throw mkErr('requires a config map as the first argument')
   }
 
   if (!config.appId) {
