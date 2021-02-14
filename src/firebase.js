@@ -20,12 +20,11 @@ const init = config =>
         .database())
 
 export default initGuard((config, ns) => {
-  const db = init(config)
-
   if (occupiedRooms[ns]) {
     throw mkErr(`already joined room ${ns}`)
   }
 
+  const db = init(config)
   const peerMap = {}
   const peerSigs = {}
   const rootPath = (config && config.rootPath) || defaultRootPath
@@ -51,6 +50,8 @@ export default initGuard((config, ns) => {
 
   let didSyncRoom = false
   let onPeerConnect = noOp
+
+  occupiedRooms[ns] = true
 
   selfRef.set({[presencePath]: true})
   selfRef.onDisconnect().remove()
