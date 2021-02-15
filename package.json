@@ -18,6 +18,9 @@
   "peerDependencies": {
     "firebase": "^8.2.2"
   },
+  "scripts": {
+    "sizes": "./bundle-sizes.sh"
+  },
   "keywords": [
     "webrtc",
     "p2p",
