@@ -2,6 +2,7 @@ import {
   keys,
   values,
   entries,
+  events,
   mkErr,
   noOp,
   encodeBytes,
@@ -43,9 +44,9 @@ export default (onPeer, onSelfLeave) => {
       peer.addStream(selfStream)
     }
 
-    peer.on('close', () => exitPeer(id))
-    peer.on('stream', stream => onPeerStream(stream, id))
-    peer.on('data', data => {
+    peer.on(events.close, () => exitPeer(id))
+    peer.on(events.stream, stream => onPeerStream(stream, id))
+    peer.on(events.data, data => {
       const buffer = new Uint8Array(data)
       const action = decodeBytes(buffer.subarray(0, typeByteLimit))
       const nonce = buffer.subarray(typeByteLimit, typeByteLimit + 1)[0]
@@ -98,7 +99,7 @@ export default (onPeer, onSelfLeave) => {
 
       delete pendingTransmissions[id][action][nonce]
     })
-    peer.on('error', e => {
+    peer.on(events.error, e => {
       if (e.code === 'ERR_DATA_CHANNEL') {
         return
       }
