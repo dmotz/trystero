@@ -240,6 +240,7 @@ export const joinRoom = initGuard((config, ns) => {
   let handledOffers = {}
   let offerPool
 
+  occupiedRooms[ns] = true
   announceAll()
 
   return room(
