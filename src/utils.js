@@ -6,7 +6,11 @@ export const genId = n =>
     .map(() => charSet[Math.floor(Math.random() * charSet.length)])
     .join('')
 
-export const initGuard = f => (config, ns) => {
+export const initGuard = (occupiedRooms, f) => (config, ns) => {
+  if (occupiedRooms[ns]) {
+    throw mkErr(`already joined room ${ns}`)
+  }
+
   if (!config) {
     throw mkErr('requires a config map as the first argument')
   }
