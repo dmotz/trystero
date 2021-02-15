@@ -2,6 +2,7 @@ import Peer from 'simple-peer-light'
 import {
   encodeBytes,
   entries,
+  events,
   genId,
   initGuard,
   libName,
@@ -61,7 +62,7 @@ export const joinRoom = initGuard((config, ns) => {
 
         return [
           genId(hashLimit),
-          {peer, offerP: new Promise(res => peer.once('signal', res))}
+          {peer, offerP: new Promise(res => peer.once(events.signal, res))}
         ]
       })
     )
@@ -114,7 +115,7 @@ export const joinRoom = initGuard((config, ns) => {
       handledOffers[val.offer_id] = true
 
       const peer = new Peer({trickle: false})
-      peer.once('signal', answer => {
+      peer.once(events.signal, answer => {
         socket.send(
           JSON.stringify({
             answer,
@@ -127,8 +128,8 @@ export const joinRoom = initGuard((config, ns) => {
         )
       })
 
-      peer.on('connect', () => onConnect(peer, val.peer_id))
-      peer.on('close', () => onDisconnect(val.peer_id))
+      peer.on(events.connect, () => onConnect(peer, val.peer_id))
+      peer.on(events.close, () => onDisconnect(val.peer_id))
       peer.signal(val.offer)
       return
     }
@@ -152,8 +153,10 @@ export const joinRoom = initGuard((config, ns) => {
         }
 
         handledOffers[val.offer_id] = true
-        peer.on('connect', () => onConnect(peer, val.peer_id, val.offer_id))
-        peer.on('close', () => onDisconnect(val.peer_id))
+        peer.on(events.connect, () =>
+          onConnect(peer, val.peer_id, val.offer_id)
+        )
+        peer.on(events.close, () => onDisconnect(val.peer_id))
         peer.signal(val.answer)
       }
     }
