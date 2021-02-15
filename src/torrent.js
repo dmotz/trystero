@@ -29,11 +29,7 @@ const defaultTrackerUrls = [
   'wss://tracker.files.fm:7073/announce'
 ]
 
-export const joinRoom = initGuard((config, ns) => {
-  if (occupiedRooms[ns]) {
-    throw mkErr(`already joined room ${ns}`)
-  }
-
+export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const connectedPeers = {}
   const trackerUrls = (config.trackerUrls || defaultTrackerUrls).slice(
     0,
