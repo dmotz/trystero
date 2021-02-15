@@ -9,6 +9,7 @@ const defaultRootPath = `__${libName.toLowerCase()}__`
 const occupiedRooms = {}
 const dbs = {}
 const getPath = (...xs) => xs.join('/')
+const fbEvents = {childAdded: 'child_added', value: 'value'}
 
 const init = config =>
   dbs[config.appId]
@@ -55,10 +56,10 @@ export const joinRoom = initGuard((config, ns) => {
 
   selfRef.set({[presencePath]: true})
   selfRef.onDisconnect().remove()
-  selfRef.on('child_added', data => {
+  selfRef.on(fbEvents.childAdded, data => {
     const peerId = data.key
     if (peerId !== presencePath) {
-      data.ref.on('child_added', data => {
+      data.ref.on(fbEvents.childAdded, data => {
         if (!(peerId in peerSigs)) {
           peerSigs[peerId] = {}
         }
@@ -86,8 +87,8 @@ export const joinRoom = initGuard((config, ns) => {
     }
   })
 
-  roomRef.once('value', () => (didSyncRoom = true))
-  roomRef.on('child_added', ({key}) => {
+  roomRef.once(fbEvents.value, () => (didSyncRoom = true))
+  roomRef.on(fbEvents.childAdded, ({key}) => {
     if (!didSyncRoom || key === selfId) {
       return
     }
@@ -110,7 +111,7 @@ export const getOccupants = initGuard(
     new Promise(res =>
       init(config)
         .ref(getPath(config.rootPath || defaultRootPath, ns))
-        .once('value', data => res(keys(data.val() || {})))
+        .once(fbEvents.value, data => res(keys(data.val() || {})))
     )
 )
 
