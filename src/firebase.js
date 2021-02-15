@@ -1,7 +1,7 @@
 import firebase from '@firebase/app'
 import '@firebase/database'
 import Peer from 'simple-peer-light'
-import {events, initGuard, keys, libName, mkErr, noOp, selfId} from './utils'
+import {events, initGuard, keys, libName, noOp, selfId} from './utils'
 import room from './room'
 
 const presencePath = '_'
@@ -20,11 +20,7 @@ const init = config =>
         })
         .database())
 
-export const joinRoom = initGuard((config, ns) => {
-  if (occupiedRooms[ns]) {
-    throw mkErr(`already joined room ${ns}`)
-  }
-
+export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const db = init(config)
   const peerMap = {}
   const peerSigs = {}
