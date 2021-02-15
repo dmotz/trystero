@@ -1,7 +1,7 @@
 import firebase from '@firebase/app'
 import '@firebase/database'
 import Peer from 'simple-peer-light'
-import {initGuard, keys, libName, mkErr, noOp, selfId} from './utils'
+import {events, initGuard, keys, libName, mkErr, noOp, selfId} from './utils'
 import room from './room'
 
 const presencePath = '_'
@@ -37,8 +37,8 @@ export const joinRoom = initGuard((config, ns) => {
     }
     const peer = new Peer({initiator})
 
-    peer.on('connect', () => onPeerConnect(peer, id))
-    peer.on('signal', sdp => {
+    peer.on(events.connect, () => onPeerConnect(peer, id))
+    peer.on(events.signal, sdp => {
       const ref = db.ref(getPath(rootPath, ns, id, selfId)).push()
       ref.onDisconnect().remove()
       ref.set(JSON.stringify(sdp))
