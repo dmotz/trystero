@@ -350,6 +350,37 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 // => 3
 ```
 
+## Firebase setup
+
+If you want to use the Firebase strategy and don't have an existing project:
+
+1. Create a [Firebase](https://firebase.google.com/) project
+1. Create a new Realtime Database
+1. Copy the Firebase project ID and use it as the `appId` in your Trystero
+   config
+1. [*Optional*] Configure the database with [security rules](#security-rules)
+   to limit activity:
+
+```json
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "__trystero__": {
+      ".read": false,
+      ".write": false,
+      "$room_id": {
+        ".read": true,
+        ".write": true
+      }
+    }
+  }
+}
+```
+
+These rules ensure room peer presence is only readable if the room namespace is
+known ahead of time.
+
 ---
 
 Trystero by [Dan Motzenbecker](https://oxism.com)
