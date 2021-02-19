@@ -48,25 +48,34 @@ You can [compare strategies here](#strategy-comparison).
 npm i trystero
 ```
 
-## Initialize
-
-Begin by initializing Trystero:
-
-```javascript
-import * as trystero from 'trystero'
-
-trystero.init({dbUrl: 'https://your-firebase-instance-here.firebaseio.com'})
-```
-
-This should be called just once globally for your app.
-
 ## Join a room
 
-Join the user to a room with a namespace:
+First import Trystero:
 
 ```javascript
-const room = trystero.joinRoom('yoyodyne')
+import {joinRoom} from 'trystero'
 ```
+
+By default this uses the torrent strategy; to use a different one just deep
+import like so (your bundler should handle including only relevant code):
+
+```javascript
+import {joinRoom} from 'trystero/firebase'
+// or
+import {joinRoom} from 'trystero/ipfs'
+```
+
+Next, join the user to a room with a namespace:
+
+```javascript
+const config = {appId: 'san_narciso'}
+const room = trystero.joinRoom(config, 'yoyodyne')
+```
+
+The first argument is a configuration object that requires an `appId`. This
+should be a completely unique identifier for your app (for the torrent
+strategy) or your Firebase project ID if you're using Firebase. The second
+argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
 > a time so it's recommended to design your app such that users are divided into
