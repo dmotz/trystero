@@ -212,52 +212,22 @@ console.log('done sending')
 
 ## API
 
-### `selfId`
-
-A unique ID string other peers will know the local user as globally across
-rooms.
-
-### `init(config)`
-
-Required to be called once in an application's lifespan to bootstrap peer
-connection process.
-
-- `config` - Configuration object containing the following keys:
-
-  - `dbUrl` - A URL string pointing at your Firebase database (`databaseURL` in
-    the Firebase config object).
-
-  - `rootPath` - **(optional)** Where Trystero writes its matchmaking data in
-    your database (`'__trystero__'` by default). Changing this is useful if you
-    want to run multiple apps using the same database and don't want to worry
-    about namespace collisions.
-
-### `getOccupants(namespace)`
-
-Returns a promise that resolves to a list of user IDs present in the given
-namespace. This is useful for checking how many users are in a room without
-joining it.
-
-- `namespace` - A namespace string that you'd pass to `joinRoom()`.
-
-Example:
-
-```javascript
-console.log((await trystero.getOccupants('the_scope')).length)
-// => 3
-```
-
-### `joinRoom(namespace, [limit])`
+### `joinRoom(config, namespace)`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events.
 
-- `namespace` - A string to namespace peers and events.
+- `config` - Configuration object containing the following keys:
 
-- `limit` - **(optional)** A positive integer defining a limit to the number of
-  users allowed in the room. If defined, a promise is returned that resolves
-  with the methods below. If the room is full, the local user does not join and
-  the promise rejects.
+  - `appId` - **(required)** A unique string identifying your app. If using
+    Firebase this should be the Firebase instance ID.
+
+  - `rootPath` - **(optional, Firebase only)** Where Trystero writes its
+    matchmaking data in your database (`'__trystero__'` by default). Changing
+    this is useful if you want to run multiple apps using the same database and
+    don't want to worry about namespace collisions.
+
+- `namespace` - A string to namespace peers and events within a room.
 
 Returns an object with the following methods:
 
@@ -327,11 +297,11 @@ Returns an object with the following methods:
   onPeerStream((stream, id) => console.log(`got stream from ${id}`, stream))
   ```
 
-- ### `makeAction(type)`
+- ### `makeAction(namespace)`
 
   Listen for and send custom data actions.
 
-  - `type` - A string to register this action consistently among all peers.
+  - `namespace` - A string to register this action consistently among all peers.
 
   Returns a pair containing a function to send the action to peers and a
   function to register a listener. The sender function takes any
