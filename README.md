@@ -329,6 +329,27 @@ Returns an object with the following methods:
   })
   ```
 
+### `selfId`
+
+A unique ID string other peers will know the local user as globally across
+rooms.
+
+### `getOccupants(config, namespace)`
+
+**(Firebase only)** Returns a promise that resolves to a list of user IDs
+present in the given namespace. This is useful for checking how many users are
+in a room without joining it.
+
+- `config` - A configuration object
+- `namespace` - A namespace string that you'd pass to `joinRoom()`.
+
+Example:
+
+```javascript
+console.log((await trystero.getOccupants(config, 'the_scope')).length)
+// => 3
+```
+
 ---
 
 Trystero by [Dan Motzenbecker](https://oxism.com)
