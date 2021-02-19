@@ -177,23 +177,6 @@ room.onPeerLeave(id =>
 
 ## Advanced
 
-### Capped rooms
-
-You can create rooms that are capped at a fixed number of members by passing a
-second argument to `joinRoom`. Since the process of checking the number of
-participants is async, in this case `joinRoom` will return a promise that throws
-if the room is full.
-
-```javascript
-let exclusiveRoom
-
-try {
-  exclusiveRoom = await trystero.join('vips_only', 49)
-} catch (e) {
-  console.log('room is full')
-}
-```
-
 ### Binary metadata
 
 Let's say your app supports sending various types of files and you want to
