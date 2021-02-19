@@ -156,8 +156,11 @@ Let's say we want users to be able to name themselves:
 const idsToNames = {}
 const [sendName, getName] = room.makeAction('name')
 
-// tell other peers our name
+// tell other peers currently in the room our name
 sendName('Oedipa')
+
+// tell newcomers
+room.onPeerJoin(id => sendName('Oedipa', id))
 
 // listen for peers naming themselves
 getName((name, id) => (idsToNames[id] = name))
