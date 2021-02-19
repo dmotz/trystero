@@ -73,8 +73,8 @@ const room = trystero.joinRoom(config, 'yoyodyne')
 ```
 
 The first argument is a configuration object that requires an `appId`. This
-should be a completely unique identifier for your app (for the torrent
-strategy) or your Firebase project ID if you're using Firebase. The second
+should be a completely unique identifier for your app (for the torrent and IPFS
+strategies) or your Firebase project ID if you're using Firebase. The second
 argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
