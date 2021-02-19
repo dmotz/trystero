@@ -5,6 +5,8 @@
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
+Peers can connect via 🌊 Torrents, 🔥 Firebase, or 🪐 IPFS – all using same API.
+
 ---
 
 - [Setup](#setup)
