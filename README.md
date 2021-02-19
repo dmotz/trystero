@@ -10,14 +10,15 @@ all using same API.
 
 ---
 
-- [Setup](#setup)
+- [How it works](#how-it-works)
 - [Install](#install)
-- [Initialize](#initialize)
 - [Join a room](#join-a-room)
 - [Listen for events](#listen-for-events)
 - [Broadcast events](#broadcast-events)
 - [Advanced](#advanced)
 - [API](#api)
+- [Strategy comparison](#strategy-comparison)
+- [Firebase setup](#firebase-setup)
 
 ---
 
