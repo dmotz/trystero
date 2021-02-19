@@ -350,6 +350,27 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 // => 3
 ```
 
+## Strategy comparison
+
+**Loose, (overly) simple advice for choosing a strategy:** Use the torrent or
+IPFS strategy for experiments or when your heart yearns for fuller
+decentralization, use Firebase for "production" apps where you need full control
+and reliability.
+
+|                         | setup¹  | reliability²            | bundle size³ | realtime occupancy polling⁴ |
+| ----------------------- | ------- | ----------------------- | ------------ | --------------------------- |
+| 🌊 **Torrent trackers** | none ✅ | variable                | ~24K ✅      | none                        |
+| 🔥 **Firebase**         | ~5 mins | reliable, 99.95% SLA ✅ | ~270K        | yes ✅                      |
+| 🪐 **IPFS**             | none ✅ | variable                |              | none                        |
+
+- ¹ Firebase requires an account and project which take a few minutes to set up.
+- ² The torrent strategy uses public trackers which may go down/misbehave at
+  their own whim. Trystero has a built-in redundancy approach that connects to
+  multiple trackers simultaneously to avoid issues.
+- ³ Calculated via Rollup bundling + Terser compression.
+- ⁴ Firebase supports calling `getOccupants()` on a room to see which/how many
+  users are currently present without joining the room.
+
 ## Firebase setup
 
 If you want to use the Firebase strategy and don't have an existing project:
