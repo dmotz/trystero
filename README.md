@@ -40,13 +40,7 @@ The important point to remember is this:
 >
 > 👆
 
-If you don't have an existing Firebase project:
-
-1. Create a [Firebase](https://firebase.google.com/) project
-1. Create a new Realtime Database
-1. Copy the Firebase config's `databaseURL` by registering a new web app in
-   settings
-1. [*Optional*] Configure the database with [security rules](#security-rules)
+You can [compare strategies here](#strategy-comparison).
 
 ## Install
 
