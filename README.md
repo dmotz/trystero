@@ -210,31 +210,6 @@ await sendFile(amplePayload)
 console.log('done sending')
 ```
 
-### Security rules
-
-You can limit activity in your Firebase instance by setting these security
-rules:
-
-```json
-{
-  "rules": {
-    ".read": false,
-    ".write": false,
-    "__trystero__": {
-      ".read": false,
-      ".write": false,
-      "$room_id": {
-        ".read": true,
-        ".write": true
-      }
-    }
-  }
-}
-```
-
-These ensure room peer presence is only readable if the room namespace is known
-ahead of time.
-
 ## API
 
 ### `selfId`
