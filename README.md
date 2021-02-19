@@ -206,7 +206,7 @@ sending. You can optionally use this to indicate to the user when a large
 transfer is done.
 
 ```javascript
-await sendFile(hugeFile)
+await sendFile(amplePayload)
 console.log('done sending')
 ```
 
