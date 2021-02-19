@@ -20,20 +20,23 @@ Peers can connect via 🌊 Torrents, 🔥 Firebase, or 🪐 IPFS – all using s
 
 ---
 
-## Setup
+## How it works
+
+👉 **If you just want to try out Trystero, you can skip this explainer and [jump to the how-to](#install).**
 
 To establish a direct peer-to-peer connection with WebRTC, a signalling channel
 is needed to exchange peer information
-([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)).
-Trystero uses Firebase to do so as it's trivial to set up, requires no server
-maintenance, and can be used (for this purpose) for free or very cheaply.
-Trystero may adopt more signalling strategies in the future, but for now
-Firebase is the sole medium.
+([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
+this involves running your own matchmaking server but Trystero abstracts this
+away for you and offers multiple "serverless" strategies for connecting peers
+(currently, torrent trackers, Firebase, and IPFS).
+
+The important point to remember is this:
 
 > 🔒
 >
-> Beyond peer discovery, your app's data never touches Firebase and is sent
-> directly peer-to-peer and end-to-end encrypted between users.
+> Beyond peer discovery, your app's data never touches the strategy medium and
+> is sent directly peer-to-peer and end-to-end encrypted between users.
 >
 > 👆
 
