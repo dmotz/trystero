@@ -43,3 +43,11 @@ export const decodeBytes = txt => new TextDecoder().decode(txt)
 export const events = Object.fromEntries(
   ['close', 'connect', 'data', 'error', 'signal', 'stream'].map(k => [k, k])
 )
+
+export const combineChunks = chunks => {
+  const full = new Uint8Array(chunks.reduce((a, c) => a + c.byteLength, 0))
+
+  chunks.forEach((b, i) => full.set(b, i && chunks[i - 1].byteLength))
+
+  return full
+}
