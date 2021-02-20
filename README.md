@@ -366,11 +366,11 @@ IPFS strategy for experiments or when your heart yearns for fuller
 decentralization, use Firebase for "production" apps where you need full control
 and reliability.
 
-|                         | setup¹  | reliability²            | bundle size³ | realtime occupancy polling⁴ |
-| ----------------------- | ------- | ----------------------- | ------------ | --------------------------- |
-| 🌊 **Torrent trackers** | none ✅ | variable                | ~24K ✅      | none                        |
-| 🔥 **Firebase**         | ~5 mins | reliable, 99.95% SLA ✅ | ~270K        | yes ✅                      |
-| 🪐 **IPFS**             | none ✅ | variable                |              | none                        |
+|                 | setup¹  | reliability²            | bundle size³ | occupancy polling⁴ |
+| --------------- | ------- | ----------------------- | ------------ | ------------------ |
+| 🌊 **Torrent**  | none ✅ | variable                | ~24K ✅      | none               |
+| 🔥 **Firebase** | ~5 mins | reliable, 99.95% SLA ✅ | ~275K        | yes ✅             |
+| 🪐 **IPFS**     | none ✅ | variable                | ~1.77M 👀    | none               |
 
 - ¹ Firebase requires an account and project which take a few minutes to set up.
 - ² The torrent strategy uses public trackers which may go down/misbehave at
