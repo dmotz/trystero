@@ -30,7 +30,7 @@ export const libName = 'Trystero'
 
 export const selfId = genId(20)
 
-export const {keys, values, entries} = Object
+export const {keys, values, entries, fromEntries} = Object
 
 export const noOp = () => {}
 
