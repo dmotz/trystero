@@ -6,7 +6,8 @@ import {
   mkErr,
   noOp,
   encodeBytes,
-  decodeBytes
+  decodeBytes,
+  combineChunks
 } from './utils'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
@@ -85,10 +86,7 @@ export default (onPeer, onSelfLeave) => {
         return
       }
 
-      const {chunks} = target
-      const full = new Uint8Array(chunks.reduce((a, c) => a + c.byteLength, 0))
-
-      chunks.forEach((b, i) => full.set(b, i && chunks[i - 1].byteLength))
+      const full = combineChunks(target.chunks)
 
       if (isBinary) {
         actions[action](full, id, target.meta)
