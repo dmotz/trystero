@@ -1,8 +1,10 @@
 import Peer from 'simple-peer-light'
+import room from './room'
 import {
   encodeBytes,
   entries,
   events,
+  fromEntries,
   genId,
   initGuard,
   libName,
@@ -11,7 +13,6 @@ import {
   selfId,
   values
 } from './utils'
-import room from './room'
 
 const occupiedRooms = {}
 const sockets = {}
@@ -52,7 +53,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     )
 
   const makeOffers = () =>
-    Object.fromEntries(
+    fromEntries(
       new Array(offerPoolSize).fill().map(() => {
         const peer = new Peer({initiator: true, trickle: false})
 

@@ -1,8 +1,8 @@
 import firebase from '@firebase/app'
 import '@firebase/database'
 import Peer from 'simple-peer-light'
-import {events, initGuard, keys, libName, noOp, selfId} from './utils'
 import room from './room'
+import {events, initGuard, keys, libName, noOp, selfId} from './utils'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
