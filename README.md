@@ -372,16 +372,17 @@ and reliability.
 | 🔥 **Firebase** | ~5 mins | reliable, 99.95% SLA ✅ | ~275K        | yes ✅             |
 | 🪐 **IPFS**     | none ✅ | variable                | ~1.77M 👀    | none               |
 
-¹ Firebase requires an account and project which take a few minutes to set up.
+**¹** Firebase requires an account and project which take a few minutes to set
+up.
 
-² The torrent strategy uses public trackers which may go down/misbehave at their
-own whim. Trystero has a built-in redundancy approach that connects to multiple
-trackers simultaneously to avoid issues. IPFS relies on public gateways which
-are also prone to downtime.
+**²** The torrent strategy uses public trackers which may go down/misbehave at
+their own whim. Trystero has a built-in redundancy approach that connects to
+multiple trackers simultaneously to avoid issues. IPFS relies on public gateways
+which are also prone to downtime.
 
-³ Calculated via Rollup bundling + Terser compression.
+**³** Calculated via Rollup bundling + Terser compression.
 
-⁴ Firebase supports calling `getOccupants()` on a room to see which/how many
+**⁴** Firebase supports calling `getOccupants()` on a room to see which/how many
 users are currently present without joining the room.
 
 ## Firebase setup
