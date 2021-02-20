@@ -28,7 +28,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   let rootPoll
   let selfPoll
 
-  init().then(async node => {
+  const nodeP = init().then(async node => {
     const selfPath = `${path}/${selfId}`
     const seenFiles = {}
 
@@ -123,13 +123,16 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         })
       })
     }, pollMs)
+
+    return node
   })
 
   return room(
     f => (onPeerConnect = f),
-    () => {
+    async () => {
       clearInterval(selfPoll)
       clearInterval(rootPoll)
+      ;(await nodeP).files.rm(`${path}/${selfId}`)
     }
   )
 })
