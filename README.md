@@ -366,11 +366,11 @@ IPFS strategy for experiments or when your heart yearns for fuller
 decentralization, use Firebase for "production" apps where you need full control
 and reliability.
 
-|                 | setup¹  | reliability²            | bundle size³ | occupancy polling⁴ |
-| --------------- | ------- | ----------------------- | ------------ | ------------------ |
-| 🌊 **Torrent**  | none ✅ | variable                | ~24K ✅      | none               |
-| 🔥 **Firebase** | ~5 mins | reliable, 99.95% SLA ✅ | ~275K        | yes ✅             |
-| 🪐 **IPFS**     | none ✅ | variable                | ~1.77M 👀    | none               |
+|                 | setup¹  | reliability²            | connection speed³ | bundle size⁴ | occupancy polling⁵ |
+| --------------- | ------- | ----------------------- | ----------------- | ------------ | ------------------ |
+| 🌊 **Torrent**  | none ✅ | variable                | better            | ~24K ✅      | none               |
+| 🔥 **Firebase** | ~5 mins | reliable, 99.95% SLA ✅ | best ✅           | ~275K        | yes ✅             |
+| 🪐 **IPFS**     | none ✅ | variable                | good              | ~1.77M 👀    | none               |
 
 **¹** Firebase requires an account and project which take a few minutes to set
 up.
@@ -380,10 +380,13 @@ their own whim. Trystero has a built-in redundancy approach that connects to
 multiple trackers simultaneously to avoid issues. IPFS relies on public gateways
 which are also prone to downtime.
 
-**³** Calculated via Rollup bundling + Terser compression.
+**³** Relative speed of peers connecting to each other when joining a room.
+Firebase is near-instantaneous while the other strategies are a bit slower.
 
-**⁴** Firebase supports calling `getOccupants()` on a room to see which/how many
-users are currently present without joining the room.
+**⁴** Calculated via Rollup bundling + Terser compression.
+
+**⁵** The Firebase strategy supports calling `getOccupants()` on a room to see
+which/how many users are currently present without joining the room.
 
 ## Firebase setup
 
