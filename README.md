@@ -229,6 +229,9 @@ communication channels and send events.
     this is useful if you want to run multiple apps using the same database and
     don't want to worry about namespace collisions.
 
+  - `trackerUrls` - **(optional, Torrent only)** Custom list of torrent tracker
+    URLs to use. They must support WebSocket connections.
+
 - `namespace` - A string to namespace peers and events within a room.
 
 Returns an object with the following methods:
