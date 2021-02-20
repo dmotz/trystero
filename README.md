@@ -371,19 +371,19 @@ just change a single import line:
 import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
 ```
 
-|                 | setup¹  | reliability²            | connection speed³ | bundle size⁴ | occupancy polling⁵ |
-| --------------- | ------- | ----------------------- | ----------------- | ------------ | ------------------ |
-| 🌊 **Torrent**  | none ✅ | variable                | better            | ~24K ✅      | none               |
-| 🔥 **Firebase** | ~5 mins | reliable, 99.95% SLA ✅ | best ✅           | ~275K        | yes ✅             |
-| 🪐 **IPFS**     | none ✅ | variable                | good              | ~1.77M 👀    | none               |
+|                 | setup¹  | reliability² | connection speed³ | bundle size⁴ | occupancy polling⁵ |
+| --------------- | ------- | ------------ | ----------------- | ------------ | ------------------ |
+| 🌊 **Torrent**  | none ✅ | variable     | better            | ~24K ✅      | none               |
+| 🔥 **Firebase** | ~5 mins | reliable ✅  | best ✅           | ~275K        | yes ✅             |
+| 🪐 **IPFS**     | none ✅ | variable     | good              | ~1.77M 👀    | none               |
 
 **¹** Firebase requires an account and project which take a few minutes to set
 up.
 
-**²** The torrent strategy uses public trackers which may go down/misbehave at
-their own whim. Trystero has a built-in redundancy approach that connects to
-multiple trackers simultaneously to avoid issues. IPFS relies on public gateways
-which are also prone to downtime.
+**²** Firebase has a 99.95% SLA. The torrent strategy uses public trackers which
+may go down/misbehave at their own whim. Trystero has a built-in redundancy
+approach that connects to multiple trackers simultaneously to avoid issues. IPFS
+relies on public gateways which are also prone to downtime.
 
 **³** Relative speed of peers connecting to each other when joining a room.
 Firebase is near-instantaneous while the other strategies are a bit slower.
