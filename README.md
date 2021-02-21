@@ -368,8 +368,11 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 **Loose, (overly) simple advice for choosing a strategy:** Use the torrent or
 IPFS strategy for experiments or when your heart yearns for fuller
 decentralization, use Firebase for "production" apps where you need full control
-and reliability. Trystero makes it trivial to switch between strategies – just
-change a single import line:
+and reliability. IPFS is itself in alpha so the Trystero IPFS strategy should be
+considered experimental.
+
+Trystero makes it trivial to switch between strategies – just change a single
+import line:
 
 ```javascript
 import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
