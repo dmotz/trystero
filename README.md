@@ -11,8 +11,7 @@ all using the same API.
 ---
 
 - [How it works](#how-it-works)
-- [Install](#install)
-- [Join a room](#join-a-room)
+- [Get started](#get-started)
 - [Listen for events](#listen-for-events)
 - [Broadcast events](#broadcast-events)
 - [Advanced](#advanced)
@@ -24,7 +23,7 @@ all using the same API.
 
 ## How it works
 
-👉 **If you just want to try out Trystero, you can skip this explainer and [jump to the how-to](#install).**
+👉 **If you just want to try out Trystero, you can skip this explainer and [jump to the how-to](#get-started).**
 
 To establish a direct peer-to-peer connection with WebRTC, a signalling channel
 is needed to exchange peer information
@@ -44,15 +43,9 @@ The important point to remember is this:
 
 You can [compare strategies here](#strategy-comparison).
 
-## Install
+## Get started
 
-```
-npm i trystero
-```
-
-## Join a room
-
-First import Trystero:
+After running `npm i trystero`, import Trystero into your codebase:
 
 ```javascript
 import {joinRoom} from 'trystero'
