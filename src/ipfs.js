@@ -1,128 +1,125 @@
-import {create} from 'ipfs'
+import * as ipfs from 'ipfs-core/dist/index.min.js'
 import Peer from 'simple-peer-light'
 import room from './room'
-import {
-  combineChunks,
-  decodeBytes,
-  events,
-  fromEntries,
-  initGuard,
-  libName,
-  noOp,
-  selfId,
-  values
-} from './utils'
+import {decodeBytes, events, initGuard, libName, noOp, selfId} from './utils'
 
 const occupiedRooms = {}
-const pollMs = 999
-
-const init = () => nodeP || (nodeP = create())
+const swarmPollMs = 999
+const announceMs = 3333
+const init = () =>
+  nodeP ||
+  (nodeP = ipfs.default.create({
+    repo: libName.toLowerCase() + Math.random(),
+    EXPERIMENTAL: {
+      pubsub: true
+    },
+    config: {
+      Addresses: {
+        Swarm: [
+          '/dns4/wrtc-star1.par.dwebops.pub/tcp/443/wss/p2p-webrtc-star/',
+          '/dns4/wrtc-star2.sjc.dwebops.pub/tcp/443/wss/p2p-webrtc-star/',
+          '/dns4/webrtc-star.discovery.libp2p.io/tcp/443/wss/p2p-webrtc-star/'
+        ]
+      }
+    }
+  }))
 
 let nodeP
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
+  const rootTopic = `${libName.toLowerCase()}:${config.appId}:${ns}`
+  const selfTopic = `${rootTopic}:${selfId}`
   const offers = {}
-  const path = `/${libName.toLowerCase()}/${config.appId}/${ns}`
+  const seenPeers = {}
+  const connectedPeers = {}
+  const connectPeer = (peer, peerId) => {
+    onPeerConnect(peer, peerId)
+    connectedPeers[peerId] = peer
+  }
 
   let onPeerConnect = noOp
-  let rootPoll
-  let selfPoll
+  let announceInterval
+  let swarmPollTimeout
 
   const nodeP = init().then(async node => {
-    const selfPath = `${path}/${selfId}`
-    const seenFiles = {}
+    const awaitPeers = async cb => {
+      const peers = await node.swarm.peers()
 
-    const listFiles = async path => {
-      const files = []
-      for await (const file of node.files.ls(path)) {
-        files.push(file)
+      if (!peers || !peers.length) {
+        swarmPollTimeout = setTimeout(awaitPeers, swarmPollMs, cb)
+      } else {
+        cb()
       }
-      return files
     }
 
-    const checkSelf = async () => {
-      ;(await listFiles(selfPath)).forEach(async file => {
-        if (file.type !== 0 || seenFiles[selfPath + file.name]) {
+    await new Promise(awaitPeers)
+    await Promise.all([
+      node.pubsub.subscribe(rootTopic, msg => {
+        const peerId = decodeBytes(msg.data)
+
+        if (peerId === selfId || connectedPeers[peerId] || seenPeers[peerId]) {
           return
         }
 
-        seenFiles[selfPath + file.name] = true
+        seenPeers[peerId] = true
 
-        const peerId = file.name
-        const chunks = []
-
-        for await (const chunk of node.files.read(`${selfPath}/${file.name}`)) {
-          chunks.push(chunk)
-        }
-
-        let parsed
-
-        try {
-          parsed = JSON.parse(decodeBytes(combineChunks(chunks)))
-        } catch (e) {
-          console.error(`${libName}: received malformed SDP JSON`)
-        }
-
-        if (offers[peerId]) {
-          offers[peerId].signal(parsed)
-          return
-        }
-
-        const answerPath = `${path}/${peerId}/${selfId}`
-        const peer = new Peer({initiator: false, trickle: false})
-
-        peer.once(events.signal, answer =>
-          node.files.write(answerPath, JSON.stringify(answer), {create: true})
-        )
-        peer.on(events.connect, () => {
-          onPeerConnect(peer, peerId)
-          node.files.rm(answerPath)
-        })
-        peer.signal(parsed)
-      })
-    }
-
-    await node.files.mkdir(path, {parents: true})
-
-    const [files] = await Promise.all([
-      listFiles(path),
-      node.files.mkdir(selfPath, {parents: true})
-    ])
-
-    const staleDirs = fromEntries(values(files).map(f => [f.name, true]))
-
-    checkSelf()
-
-    selfPoll = setInterval(checkSelf, pollMs)
-    rootPoll = setInterval(async () => {
-      ;(await listFiles(path)).forEach(file => {
-        if (staleDirs[file.name] || seenFiles[path + file.name]) {
-          return
-        }
-
-        seenFiles[path + file.name] = true
-
-        const peerId = file.name
-
-        if (file.type === 0 || peerId === selfId) {
-          return
-        }
-
-        const offerPath = `${path}/${peerId}/${selfId}`
         const peer = (offers[peerId] = new Peer({
           initiator: true,
           trickle: false
         }))
 
-        peer.once(events.signal, offer =>
-          node.files.write(offerPath, JSON.stringify(offer), {create: true})
-        )
-        peer.on(events.connect, () => {
-          onPeerConnect(peer, peerId)
-          node.files.rm(offerPath)
+        peer.once(events.signal, offer => {
+          node.pubsub.publish(
+            `${rootTopic}:${peerId}`,
+            JSON.stringify({peerId: selfId, offer})
+          )
+
+          setTimeout(() => {
+            if (connectedPeers[peerId]) {
+              return
+            }
+
+            delete seenPeers[peerId]
+            peer.destroy()
+          }, announceMs * 2)
         })
+
+        peer.once(events.connect, () => connectPeer(peer, peerId))
+      }),
+
+      node.pubsub.subscribe(selfTopic, msg => {
+        let payload
+
+        try {
+          payload = JSON.parse(decodeBytes(msg.data))
+        } catch (e) {
+          console.error(`${libName}: received malformed JSON`)
+          return
+        }
+
+        const {peerId, offer, answer} = payload
+
+        if (offers[peerId] && answer) {
+          offers[peerId].signal(answer)
+          return
+        }
+
+        const peer = new Peer({initiator: false, trickle: false})
+
+        peer.once(events.signal, answer =>
+          node.pubsub.publish(
+            `${rootTopic}:${peerId}`,
+            JSON.stringify({peerId: selfId, answer})
+          )
+        )
+        peer.on(events.connect, () => connectPeer(peer, peerId))
+        peer.signal(offer)
       })
-    }, pollMs)
+    ])
+
+    const announce = () => node.pubsub.publish(rootTopic, selfId)
+    announceInterval = setInterval(announce, announceMs)
+    announce()
 
     return node
   })
@@ -130,9 +127,11 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   return room(
     f => (onPeerConnect = f),
     async () => {
-      clearInterval(selfPoll)
-      clearInterval(rootPoll)
-      ;(await nodeP).files.rm(`${path}/${selfId}`)
+      const node = await nodeP
+      node.pubsub.unsubscribe(rootTopic)
+      node.pubsub.unsubscribe(selfTopic)
+      clearInterval(announceInterval)
+      clearTimeout(swarmPollTimeout)
     }
   )
 })
