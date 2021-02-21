@@ -234,7 +234,11 @@ communication channels and send events.
 
   - `trackerRedundancy` - **(optional, Torrent only)** Integer specifying how
     many torrent trackers to connect to simultaneously in case some fail.
-    Defaults to 2, maximum of 4. Passing a `trackerUrls` option will cause this option to be ignored as the entire list will be used.
+    Defaults to 2, maximum of 4. Passing a `trackerUrls` option will cause this
+    option to be ignored as the entire list will be used.
+
+  - `swarmAddresses` - **(optional, IPFS only)** List of IPFS multiaddrs to be
+    passed to `config.Addresses.Swarm`.
 
 - `namespace` - A string to namespace peers and events within a room.
 
