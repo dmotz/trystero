@@ -224,21 +224,21 @@ communication channels and send events.
   - `appId` - **(required)** A unique string identifying your app. If using
     Firebase this should be the Firebase instance ID.
 
-  - `rootPath` - **(optional, Firebase only)** Where Trystero writes its
+  - `rootPath` - **(optional, 🔥 Firebase only)** Where Trystero writes its
     matchmaking data in your database (`'__trystero__'` by default). Changing
     this is useful if you want to run multiple apps using the same database and
     don't want to worry about namespace collisions.
 
-  - `trackerUrls` - **(optional, Torrent only)** Custom list of torrent tracker
-    URLs to use. They must support WebSocket connections.
+  - `trackerUrls` - **(optional, 🌊 Torrent only)** Custom list of torrent
+    tracker URLs to use. They must support WebSocket connections.
 
-  - `trackerRedundancy` - **(optional, Torrent only)** Integer specifying how
+  - `trackerRedundancy` - **(optional, 🌊 Torrent only)** Integer specifying how
     many torrent trackers to connect to simultaneously in case some fail.
     Defaults to 2, maximum of 4. Passing a `trackerUrls` option will cause this
     option to be ignored as the entire list will be used.
 
-  - `swarmAddresses` - **(optional, IPFS only)** List of IPFS multiaddrs to be
-    passed to `config.Addresses.Swarm`.
+  - `swarmAddresses` - **(optional, 🪐 IPFS only)** List of IPFS multiaddrs to
+    be passed to `config.Addresses.Swarm`.
 
 - `namespace` - A string to namespace peers and events within a room.
 
@@ -349,7 +349,7 @@ rooms.
 
 ### `getOccupants(config, namespace)`
 
-**(Firebase only)** Returns a promise that resolves to a list of user IDs
+**(🔥 Firebase only)** Returns a promise that resolves to a list of user IDs
 present in the given namespace. This is useful for checking how many users are
 in a room without joining it.
 
