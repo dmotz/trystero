@@ -6,7 +6,7 @@ import {decodeBytes, events, initGuard, libName, noOp, selfId} from './utils'
 const occupiedRooms = {}
 const swarmPollMs = 999
 const announceMs = 3333
-const init = () =>
+const init = config =>
   nodeP ||
   (nodeP = ipfs.default.create({
     repo: libName.toLowerCase() + Math.random(),
@@ -15,7 +15,7 @@ const init = () =>
     },
     config: {
       Addresses: {
-        Swarm: [
+        Swarm: config.swarmAddresses || [
           '/dns4/wrtc-star1.par.dwebops.pub/tcp/443/wss/p2p-webrtc-star/',
           '/dns4/wrtc-star2.sjc.dwebops.pub/tcp/443/wss/p2p-webrtc-star/',
           '/dns4/webrtc-star.discovery.libp2p.io/tcp/443/wss/p2p-webrtc-star/'
@@ -41,7 +41,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   let announceInterval
   let swarmPollTimeout
 
-  const nodeP = init().then(async node => {
+  const nodeP = init(config).then(async node => {
     const awaitPeers = async cb => {
       const peers = await node.swarm.peers()
 
