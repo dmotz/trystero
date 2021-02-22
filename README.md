@@ -5,7 +5,7 @@
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
-Peers can connect via [torrents, Firebase, or IPFS](#strategy-comparison) –
+Peers can connect via [BitTorrent, Firebase, or IPFS](#strategy-comparison) –
 all using the same API.
 
 ---
@@ -30,7 +30,7 @@ is needed to exchange peer information
 ([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
 this involves running your own matchmaking server but Trystero abstracts this
 away for you and offers multiple "serverless" strategies for connecting peers
-(currently, torrent trackers, Firebase, and IPFS).
+(currently BitTorrent, Firebase, and IPFS).
 
 The important point to remember is this:
 
@@ -222,11 +222,11 @@ communication channels and send events.
     this is useful if you want to run multiple apps using the same database and
     don't want to worry about namespace collisions.
 
-  - `trackerUrls` - **(optional, 🌊 Torrent only)** Custom list of torrent
+  - `trackerUrls` - **(optional, 🌊 BitTorrent only)** Custom list of torrent
     tracker URLs to use. They must support WebSocket connections.
 
-  - `trackerRedundancy` - **(optional, 🌊 Torrent only)** Integer specifying how
-    many torrent trackers to connect to simultaneously in case some fail.
+  - `trackerRedundancy` - **(optional, 🌊 BitTorrent only)** Integer specifying
+    how many torrent trackers to connect to simultaneously in case some fail.
     Defaults to 2, maximum of 4. Passing a `trackerUrls` option will cause this
     option to be ignored as the entire list will be used.
 
@@ -371,19 +371,19 @@ import line:
 import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
 ```
 
-|                 | setup¹  | reliability² | connection speed³ | bundle size⁴ | occupancy polling⁵ |
-| --------------- | ------- | ------------ | ----------------- | ------------ | ------------------ |
-| 🌊 **Torrent**  | none ✅ | variable     | better            | ~24K ✅      | none               |
-| 🔥 **Firebase** | ~5 mins | reliable ✅  | best ✅           | ~275K        | yes ✅             |
-| 🪐 **IPFS**     | none ✅ | variable     | good              | ~1.77M 👀    | none               |
+|                   | setup¹  | reliability² | time to connect³ | bundle size⁴ | occupancy polling⁵ |
+| ----------------- | ------- | ------------ | ---------------- | ------------ | ------------------ |
+| 🌊 **BitTorrent** | none ✅ | variable     | better           | ~24K ✅      | none               |
+| 🔥 **Firebase**   | ~5 mins | reliable ✅  | best ✅          | ~275K        | yes ✅             |
+| 🪐 **IPFS**       | none ✅ | variable     | good             | ~1.77M 👀    | none               |
 
 **¹** Firebase requires an account and project which take a few minutes to set
 up.
 
-**²** Firebase has a 99.95% SLA. The torrent strategy uses public trackers which
-may go down/misbehave at their own whim. Trystero has a built-in redundancy
-approach that connects to multiple trackers simultaneously to avoid issues. IPFS
-relies on public gateways which are also prone to downtime.
+**²** Firebase has a 99.95% SLA. The BitTorrent strategy uses public trackers
+which may go down/misbehave at their own whim. Trystero has a built-in
+redundancy approach that connects to multiple trackers simultaneously to avoid
+issues. IPFS relies on public gateways which are also prone to downtime.
 
 **³** Relative speed of peers connecting to each other when joining a room.
 Firebase is near-instantaneous while the other strategies are a bit slower.
