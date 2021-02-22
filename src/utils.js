@@ -40,7 +40,7 @@ export const encodeBytes = txt => new TextEncoder().encode(txt)
 
 export const decodeBytes = txt => new TextDecoder().decode(txt)
 
-export const events = Object.fromEntries(
+export const events = fromEntries(
   ['close', 'connect', 'data', 'error', 'signal', 'stream'].map(k => [k, k])
 )
 
