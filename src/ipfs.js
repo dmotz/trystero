@@ -1,4 +1,4 @@
-import * as ipfs from 'ipfs-core/dist/index.min.js'
+import ipfs from 'ipfs-core/dist/index.min.js'
 import Peer from 'simple-peer-light'
 import room from './room'
 import {decodeBytes, events, initGuard, libName, noOp, selfId} from './utils'
@@ -8,7 +8,7 @@ const swarmPollMs = 999
 const announceMs = 3333
 const init = config =>
   nodeP ||
-  (nodeP = ipfs.default.create({
+  (nodeP = ipfs.create({
     repo: libName.toLowerCase() + Math.random(),
     EXPERIMENTAL: {
       pubsub: true
