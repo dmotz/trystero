@@ -322,16 +322,14 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  const numberStations = {}
-  const [sendNumber, getNumber] = room.makeAction('number')
+  const [sendCursor, getCursor] = room.makeAction('cursormove')
 
-  sendNumber(33)
+  window.addEventListener('mousemove', e => sendCursor([e.clientX, e.clientY]))
 
-  getNumber((n, id) => {
-    if (!numberStations[id]) {
-      numberStations[id] = []
-    }
-    numberStations[id].push(n)
+  getCursor(([x, y], id) => {
+    const peerCursor = cursorMap[id]
+    peerCursor.style.left = x + 'px'
+    peerCursor.style.top = y + 'px'
   })
   ```
 
