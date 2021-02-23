@@ -69,7 +69,7 @@ const room = trystero.joinRoom(config, 'yoyodyne')
 
 The first argument is a configuration object that requires an `appId`. This
 should be a completely unique identifier for your app (for the torrent and IPFS
-strategies) or your Firebase project ID if you're using Firebase. The second
+strategies) or your Firebase database ID if you're using Firebase. The second
 argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
@@ -215,7 +215,7 @@ communication channels and send events.
 - `config` - Configuration object containing the following keys:
 
   - `appId` - **(required)** A unique string identifying your app. If using
-    Firebase this should be the Firebase instance ID.
+    Firebase this should be the database ID.
 
   - `rootPath` - **(optional, 🔥 Firebase only)** Where Trystero writes its
     matchmaking data in your database (`'__trystero__'` by default). Changing
@@ -399,7 +399,7 @@ If you want to use the Firebase strategy and don't have an existing project:
 
 1. Create a [Firebase](https://firebase.google.com/) project
 1. Create a new Realtime Database
-1. Copy the Firebase project ID and use it as the `appId` in your Trystero
+1. Copy the database ID and use it as the `appId` in your Trystero
    config
 1. [*Optional*] Configure the database with [security rules](#security-rules)
    to limit activity:
