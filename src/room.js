@@ -252,6 +252,10 @@ export default (onPeer, onSelfLeave) => {
     makeAction,
 
     ping: async id => {
+      if (!id) {
+        throw mkErr('ping() must be called with target peer ID')
+      }
+
       const start = Date.now()
       sendPing(null, id)
       await new Promise(res => (pendingPongs[id] = res))
