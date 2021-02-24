@@ -21,6 +21,8 @@ export default (onPeer, onSelfLeave) => {
   const peerMap = {}
   const actions = {}
   const pendingTransmissions = {}
+  const pendingPongs = {}
+
   const exitPeer = id => {
     if (!peerMap[id]) {
       return
@@ -235,8 +237,26 @@ export default (onPeer, onSelfLeave) => {
     setTimeout(onPeerJoin, 0, id)
   })
 
+  const [sendPing, getPing] = makeAction('ping')
+  const [sendPong, getPong] = makeAction('pong')
+
+  getPing((_, id) => sendPong(null, id))
+  getPong((_, id) => {
+    if (pendingPongs[id]) {
+      pendingPongs[id]()
+      delete pendingPongs[id]
+    }
+  })
+
   return {
     makeAction,
+
+    ping: async id => {
+      const start = Date.now()
+      sendPing(null, id)
+      await new Promise(res => (pendingPongs[id] = res))
+      return Date.now() - start
+    },
 
     leave: () => {
       entries(peerMap).forEach(([id, peer]) => {
