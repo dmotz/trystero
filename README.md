@@ -333,6 +333,22 @@ Returns an object with the following methods:
   })
   ```
 
+- ### `ping(peerId)`
+
+  Takes a peer ID and returns a promise that resolves to the milliseconds the
+  round-trip to that peer took. Use this for measuring latency.
+
+  - `peerId` - Peer ID string of the target peer.
+
+  Example:
+
+  ```javascript
+  // log round-trip time every 2 seconds
+  room.onPeerJoin(id =>
+    setInterval(async () => console.log(`took ${await ping(id)}ms`), 2000)
+  )
+  ```
+
 ### `selfId`
 
 A unique ID string other peers will know the local user as globally across
