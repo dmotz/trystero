@@ -345,7 +345,7 @@ Returns an object with the following methods:
   ```javascript
   // log round-trip time every 2 seconds
   room.onPeerJoin(id =>
-    setInterval(async () => console.log(`took ${await ping(id)}ms`), 2000)
+    setInterval(async () => console.log(`took ${await room.ping(id)}ms`), 2000)
   )
   ```
 
