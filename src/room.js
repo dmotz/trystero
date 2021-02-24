@@ -7,8 +7,7 @@ import {
   noOp,
   encodeBytes,
   decodeBytes,
-  combineChunks,
-  libName
+  combineChunks
 } from './utils'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
@@ -237,8 +236,8 @@ export default (onPeer, onSelfLeave) => {
     setTimeout(onPeerJoin, 0, id)
   })
 
-  const [sendPing, getPing] = makeAction('ping')
-  const [sendPong, getPong] = makeAction('pong')
+  const [sendPing, getPing] = makeAction('__91n6__')
+  const [sendPong, getPong] = makeAction('__90n6__')
 
   getPing((_, id) => sendPong(null, id))
   getPong((_, id) => {
