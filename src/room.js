@@ -26,8 +26,10 @@ export default (onPeer, onSelfLeave) => {
     if (!peerMap[id]) {
       return
     }
+
     delete peerMap[id]
     delete pendingTransmissions[id]
+    delete pendingPongs[id]
     onPeerLeave(id)
   }
 
