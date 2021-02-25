@@ -288,6 +288,9 @@ Returns an object with the following methods:
   Registers a callback function that will be called when a peer leaves the room.
   If called more than once, only the latest callback registered is ever called.
 
+  - `callback(peerId)` - Function to run whenever a peer leaves, called with the
+    peer's ID.
+
   Example:
 
   ```javascript
