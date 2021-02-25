@@ -303,6 +303,9 @@ Returns an object with the following methods:
   stream. If called more than once, only the latest callback registered is ever
   called.
 
+  - `callback(stream, peerId)` - Function to run whenever a peer sends a media
+    stream, called with the the peer's stream and ID.
+
   Example:
 
   ```javascript
