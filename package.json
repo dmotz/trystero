@@ -13,10 +13,8 @@
   },
   "license": "MIT",
   "dependencies": {
+    "firebase": "^8.2.7",
     "simple-peer-light": "^1.0.0"
-  },
-  "peerDependencies": {
-    "firebase": "^8.2.2"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^17.1.0",
