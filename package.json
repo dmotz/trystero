@@ -32,6 +32,12 @@
     "peer to peer",
     "chat",
     "pairing",
-    "matchmaking"
+    "matchmaking",
+    "serverless",
+    "torrent",
+    "bittorrent",
+    "webtorrent",
+    "ipfs",
+    "firebase"
   ]
 }
