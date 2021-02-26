@@ -1,13 +1,13 @@
 import {
-  keys,
-  values,
+  combineChunks,
+  decodeBytes,
+  encodeBytes,
   entries,
   events,
+  keys,
   mkErr,
   noOp,
-  encodeBytes,
-  decodeBytes,
-  combineChunks
+  values
 } from './utils'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
