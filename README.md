@@ -45,10 +45,18 @@ You can [compare strategies here](#strategy-comparison).
 
 ## Get started
 
-After running `npm i trystero`, import Trystero into your codebase:
+You can install with npm (`npm i trystero`) and import like so:
 
 ```javascript
 import {joinRoom} from 'trystero'
+```
+
+Or maybe you prefer a simple script tag?
+
+```html
+<script type="module">
+  import {joinRoom} from 'https://cdn.skypack.dev/trystero'
+</script>
 ```
 
 By default, the [BitTorrent strategy](#strategy-comparison) is used. To use a
