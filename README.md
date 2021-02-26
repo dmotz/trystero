@@ -51,8 +51,9 @@ After running `npm i trystero`, import Trystero into your codebase:
 import {joinRoom} from 'trystero'
 ```
 
-By default this uses the torrent strategy; to use a different one just deep
-import like so (your bundler should handle including only relevant code):
+By default, the [BitTorrent strategy](#strategy-comparison) is used. To use a
+different one just deep import like so (your bundler should handle including
+only relevant code):
 
 ```javascript
 import {joinRoom} from 'trystero/firebase'
@@ -68,9 +69,9 @@ const room = trystero.joinRoom(config, 'yoyodyne')
 ```
 
 The first argument is a configuration object that requires an `appId`. This
-should be a completely unique identifier for your app (for the torrent and IPFS
-strategies) or your Firebase database ID if you're using Firebase. The second
-argument is the room name.
+should be a completely unique identifier for your app (for the BitTorrent and
+IPFS strategies) or your Firebase database ID if you're using Firebase. The
+second argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
 > a time so it's recommended to design your app such that users are divided into
@@ -381,7 +382,7 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 ## Strategy comparison
 
-**Loose, (overly) simple advice for choosing a strategy:** Use the torrent or
+**Loose, (overly) simple advice for choosing a strategy:** Use the BitTorrent or
 IPFS strategy for experiments or when your heart yearns for fuller
 decentralization, use Firebase for "production" apps where you need full control
 and reliability. IPFS is itself in alpha so the Trystero IPFS strategy should be
