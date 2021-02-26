@@ -1,7 +1,22 @@
 {
   "name": "trystero",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "main": "src/index.js",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./firebase": {
+      "import": "./src/firebase.js"
+    },
+    "./ipfs": {
+      "import": "./src/ipfs.js"
+    },
+    "./torrent": {
+      "import": "./src/torrent.js"
+    }
+  },
   "author": {
     "name": "Dan Motzenbecker",
     "email": "dan@oxism.com",
@@ -13,10 +28,18 @@
   },
   "license": "MIT",
   "dependencies": {
+    "firebase": "^8.2.9",
+    "ipfs-core": "^0.5.2",
     "simple-peer-light": "^1.0.0"
   },
-  "peerDependencies": {
-    "firebase": "^8.2.2"
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^17.1.0",
+    "@rollup/plugin-node-resolve": "^11.2.0",
+    "rollup": "^2.39.1",
+    "terser": "^5.6.0"
+  },
+  "scripts": {
+    "sizes": "./bundle-sizes.sh"
   },
   "keywords": [
     "webrtc",
@@ -24,6 +47,12 @@
     "peer to peer",
     "chat",
     "pairing",
-    "matchmaking"
+    "matchmaking",
+    "serverless",
+    "torrent",
+    "bittorrent",
+    "webtorrent",
+    "ipfs",
+    "firebase"
   ]
 }

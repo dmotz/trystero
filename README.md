@@ -1,73 +1,85 @@
 # 📯 Trystero
 
-**Easy WebRTC matchmaking for painless P2P**
+**Serverless WebRTC matchmaking for painless P2P**
 
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
+Peers can connect via [BitTorrent, Firebase, or IPFS](#strategy-comparison) –
+all using the same API.
+
 ---
 
-- [Setup](#setup)
-- [Install](#install)
-- [Initialize](#initialize)
-- [Join a room](#join-a-room)
+- [How it works](#how-it-works)
+- [Get started](#get-started)
 - [Listen for events](#listen-for-events)
 - [Broadcast events](#broadcast-events)
 - [Advanced](#advanced)
 - [API](#api)
+- [Strategy comparison](#strategy-comparison)
+- [Firebase setup](#firebase-setup)
 
 ---
 
-## Setup
+## How it works
+
+👉 **If you just want to try out Trystero, you can skip this explainer and [jump to the how-to](#get-started).**
 
 To establish a direct peer-to-peer connection with WebRTC, a signalling channel
 is needed to exchange peer information
-([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)).
-Trystero uses Firebase to do so as it's trivial to set up, requires no server
-maintenance, and can be used (for this purpose) for free or very cheaply.
-Trystero may adopt more signalling strategies in the future, but for now
-Firebase is the sole medium.
+([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
+this involves running your own matchmaking server but Trystero abstracts this
+away for you and offers multiple "serverless" strategies for connecting peers
+(currently BitTorrent, Firebase, and IPFS).
+
+The important point to remember is this:
 
 > 🔒
 >
-> Beyond peer discovery, your app's data never touches Firebase and is sent
-> directly peer-to-peer and end-to-end encrypted between users.
+> Beyond peer discovery, your app's data never touches the strategy medium and
+> is sent directly peer-to-peer and end-to-end encrypted between users.
 >
 > 👆
 
-If you don't have an existing Firebase project:
+You can [compare strategies here](#strategy-comparison).
 
-1. Create a [Firebase](https://firebase.google.com/) project
-1. Create a new Realtime Database
-1. Copy the Firebase config's `databaseURL` by registering a new web app in
-   settings
-1. [*Optional*] Configure the database with [security rules](#security-rules)
+## Get started
 
-## Install
-
-```
-npm i trystero
-```
-
-## Initialize
-
-Begin by initializing Trystero:
+You can install with npm (`npm i trystero`) and import like so:
 
 ```javascript
-import * as trystero from 'trystero'
-
-trystero.init({dbUrl: 'https://your-firebase-instance-here.firebaseio.com'})
+import {joinRoom} from 'trystero'
 ```
 
-This should be called just once globally for your app.
+Or maybe you prefer a simple script tag?
 
-## Join a room
+```html
+<script type="module">
+  import {joinRoom} from 'https://cdn.skypack.dev/trystero'
+</script>
+```
 
-Join the user to a room with a namespace:
+By default, the [BitTorrent strategy](#strategy-comparison) is used. To use a
+different one just deep import like so (your bundler should handle including
+only relevant code):
 
 ```javascript
-const room = trystero.joinRoom('yoyodyne')
+import {joinRoom} from 'trystero/firebase'
+// or
+import {joinRoom} from 'trystero/ipfs'
 ```
+
+Next, join the user to a room with a namespace:
+
+```javascript
+const config = {appId: 'san_narciso'}
+const room = trystero.joinRoom(config, 'yoyodyne')
+```
+
+The first argument is a configuration object that requires an `appId`. This
+should be a completely unique identifier for your app (for the BitTorrent and
+IPFS strategies) or your Firebase database ID if you're using Firebase. The
+second argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
 > a time so it's recommended to design your app such that users are divided into
@@ -148,8 +160,11 @@ Let's say we want users to be able to name themselves:
 const idsToNames = {}
 const [sendName, getName] = room.makeAction('name')
 
-// tell other peers our name
+// tell other peers currently in the room our name
 sendName('Oedipa')
+
+// tell newcomers
+room.onPeerJoin(id => sendName('Oedipa', id))
 
 // listen for peers naming themselves
 getName((name, id) => (idsToNames[id] = name))
@@ -165,23 +180,6 @@ room.onPeerLeave(id =>
 > a string as a string, an object as an object, binary as binary, etc.).
 
 ## Advanced
-
-### Capped rooms
-
-You can create rooms that are capped at a fixed number of members by passing a
-second argument to `joinRoom`. Since the process of checking the number of
-participants is async, in this case `joinRoom` will return a promise that throws
-if the room is full.
-
-```javascript
-let exclusiveRoom
-
-try {
-  exclusiveRoom = await trystero.join('vips_only', 49)
-} catch (e) {
-  console.log('room is full')
-}
-```
 
 ### Binary metadata
 
@@ -212,83 +210,39 @@ sending. You can optionally use this to indicate to the user when a large
 transfer is done.
 
 ```javascript
-await sendFile(hugeFile)
+await sendFile(amplePayload)
 console.log('done sending')
 ```
 
-### Security rules
-
-You can limit activity in your Firebase instance by setting these security
-rules:
-
-```json
-{
-  "rules": {
-    ".read": false,
-    ".write": false,
-    "__trystero__": {
-      ".read": false,
-      ".write": false,
-      "$room_id": {
-        ".read": true,
-        ".write": true
-      }
-    }
-  }
-}
-```
-
-These ensure room peer presence is only readable if the room namespace is known
-ahead of time.
-
 ## API
 
-### `selfId`
-
-A unique ID string other peers will know the local user as globally across
-rooms.
-
-### `init(config)`
-
-Required to be called once in an application's lifespan to bootstrap peer
-connection process.
-
-- `config` - Configuration object containing the following keys:
-
-  - `dbUrl` - A URL string pointing at your Firebase database (`databaseURL` in
-    the Firebase config object).
-
-  - `rootPath` - **(optional)** Where Trystero writes its matchmaking data in
-    your database (`'__trystero__'` by default). Changing this is useful if you
-    want to run multiple apps using the same database and don't want to worry
-    about namespace collisions.
-
-### `getOccupants(namespace)`
-
-Returns a promise that resolves to a list of user IDs present in the given
-namespace. This is useful for checking how many users are in a room without
-joining it.
-
-- `namespace` - A namespace string that you'd pass to `joinRoom()`.
-
-Example:
-
-```javascript
-console.log((await trystero.getOccupants('the_scope')).length)
-// => 3
-```
-
-### `joinRoom(namespace, [limit])`
+### `joinRoom(config, namespace)`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events.
 
-- `namespace` - A string to namespace peers and events.
+- `config` - Configuration object containing the following keys:
 
-- `limit` - **(optional)** A positive integer defining a limit to the number of
-  users allowed in the room. If defined, a promise is returned that resolves
-  with the methods below. If the room is full, the local user does not join and
-  the promise rejects.
+  - `appId` - **(required)** A unique string identifying your app. If using
+    Firebase this should be the database ID.
+
+  - `rootPath` - **(optional, 🔥 Firebase only)** Where Trystero writes its
+    matchmaking data in your database (`'__trystero__'` by default). Changing
+    this is useful if you want to run multiple apps using the same database and
+    don't want to worry about namespace collisions.
+
+  - `trackerUrls` - **(optional, 🌊 BitTorrent only)** Custom list of torrent
+    tracker URLs to use. They must support WebSocket connections.
+
+  - `trackerRedundancy` - **(optional, 🌊 BitTorrent only)** Integer specifying
+    how many torrent trackers to connect to simultaneously in case some fail.
+    Defaults to 2, maximum of 4. Passing a `trackerUrls` option will cause this
+    option to be ignored as the entire list will be used.
+
+  - `swarmAddresses` - **(optional, 🪐 IPFS only)** List of IPFS multiaddrs to
+    be passed to `config.Addresses.Swarm`.
+
+- `namespace` - A string to namespace peers and events within a room.
 
 Returns an object with the following methods:
 
@@ -329,6 +283,9 @@ Returns an object with the following methods:
   Registers a callback function that will be called when a peer joins the room.
   If called more than once, only the latest callback registered is ever called.
 
+  - `callback(peerId)` - Function to run whenever a peer joins, called with the
+    peer's ID.
+
   Example:
 
   ```javascript
@@ -339,6 +296,9 @@ Returns an object with the following methods:
 
   Registers a callback function that will be called when a peer leaves the room.
   If called more than once, only the latest callback registered is ever called.
+
+  - `callback(peerId)` - Function to run whenever a peer leaves, called with the
+    peer's ID.
 
   Example:
 
@@ -352,17 +312,20 @@ Returns an object with the following methods:
   stream. If called more than once, only the latest callback registered is ever
   called.
 
+  - `callback(stream, peerId)` - Function to run whenever a peer sends a media
+    stream, called with the the peer's stream and ID.
+
   Example:
 
   ```javascript
   onPeerStream((stream, id) => console.log(`got stream from ${id}`, stream))
   ```
 
-- ### `makeAction(type)`
+- ### `makeAction(namespace)`
 
   Listen for and send custom data actions.
 
-  - `type` - A string to register this action consistently among all peers.
+  - `namespace` - A string to register this action consistently among all peers.
 
   Returns a pair containing a function to send the action to peers and a
   function to register a listener. The sender function takes any
@@ -377,18 +340,121 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  const numberStations = {}
-  const [sendNumber, getNumber] = room.makeAction('number')
+  const [sendCursor, getCursor] = room.makeAction('cursormove')
 
-  sendNumber(33)
+  window.addEventListener('mousemove', e => sendCursor([e.clientX, e.clientY]))
 
-  getNumber((n, id) => {
-    if (!numberStations[id]) {
-      numberStations[id] = []
-    }
-    numberStations[id].push(n)
+  getCursor(([x, y], id) => {
+    const peerCursor = cursorMap[id]
+    peerCursor.style.left = x + 'px'
+    peerCursor.style.top = y + 'px'
   })
   ```
+
+- ### `ping(peerId)`
+
+  Takes a peer ID and returns a promise that resolves to the milliseconds the
+  round-trip to that peer took. Use this for measuring latency.
+
+  - `peerId` - Peer ID string of the target peer.
+
+  Example:
+
+  ```javascript
+  // log round-trip time every 2 seconds
+  room.onPeerJoin(id =>
+    setInterval(async () => console.log(`took ${await room.ping(id)}ms`), 2000)
+  )
+  ```
+
+### `selfId`
+
+A unique ID string other peers will know the local user as globally across
+rooms.
+
+### `getOccupants(config, namespace)`
+
+**(🔥 Firebase only)** Returns a promise that resolves to a list of user IDs
+present in the given namespace. This is useful for checking how many users are
+in a room without joining it.
+
+- `config` - A configuration object
+- `namespace` - A namespace string that you'd pass to `joinRoom()`.
+
+Example:
+
+```javascript
+console.log((await trystero.getOccupants(config, 'the_scope')).length)
+// => 3
+```
+
+## Strategy comparison
+
+**Loose, (overly) simple advice for choosing a strategy:** Use the BitTorrent or
+IPFS strategy for experiments or when your heart yearns for fuller
+decentralization, use Firebase for "production" apps where you need full control
+and reliability. IPFS is itself in alpha so the Trystero IPFS strategy should be
+considered experimental.
+
+Trystero makes it trivial to switch between strategies – just change a single
+import line:
+
+```javascript
+import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
+```
+
+|                   | setup¹  | reliability² | time to connect³ | bundle size⁴ | occupancy polling⁵ |
+| ----------------- | ------- | ------------ | ---------------- | ------------ | ------------------ |
+| 🌊 **BitTorrent** | none ✅ | variable     | better           | ~24K ✅      | none               |
+| 🔥 **Firebase**   | ~5 mins | reliable ✅  | best ✅          | ~275K        | yes ✅             |
+| 🪐 **IPFS**       | none ✅ | variable     | good             | ~1.77M 👀    | none               |
+
+**¹** Firebase requires an account and project which take a few minutes to set
+up.
+
+**²** Firebase has a 99.95% SLA. The BitTorrent strategy uses public trackers
+which may go down/misbehave at their own whim. Trystero has a built-in
+redundancy approach that connects to multiple trackers simultaneously to avoid
+issues. IPFS relies on public gateways which are also prone to downtime.
+
+**³** Relative speed of peers connecting to each other when joining a room.
+Firebase is near-instantaneous while the other strategies are a bit slower.
+
+**⁴** Calculated via Rollup bundling + Terser compression.
+
+**⁵** The Firebase strategy supports calling `getOccupants()` on a room to see
+which/how many users are currently present without joining the room.
+
+## Firebase setup
+
+If you want to use the Firebase strategy and don't have an existing project:
+
+1. Create a [Firebase](https://firebase.google.com/) project
+1. Create a new Realtime Database
+1. Copy the database ID and use it as the `appId` in your Trystero
+   config
+1. [*Optional*] Configure the database with [security rules](#security-rules)
+   to limit activity:
+
+```json
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "__trystero__": {
+      ".read": false,
+      ".write": false,
+      "$room_id": {
+        ".read": true,
+        ".write": true
+      }
+    }
+  }
+}
+```
+
+These rules ensure room peer presence is only readable if the room namespace is
+known ahead of time.
 
 ---
 
