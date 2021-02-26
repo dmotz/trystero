@@ -14,6 +14,7 @@
   "license": "MIT",
   "dependencies": {
     "firebase": "^8.2.7",
+    "ipfs-core": "^0.5.2",
     "simple-peer-light": "^1.0.0"
   },
   "devDependencies": {
