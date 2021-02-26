@@ -1,7 +1,22 @@
 {
   "name": "trystero",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "main": "src/index.js",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./firebase": {
+      "import": "./src/firebase.js"
+    },
+    "./ipfs": {
+      "import": "./src/ipfs.js"
+    },
+    "./torrent": {
+      "import": "./src/torrent.js"
+    }
+  },
   "author": {
     "name": "Dan Motzenbecker",
     "email": "dan@oxism.com",
