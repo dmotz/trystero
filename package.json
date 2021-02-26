@@ -13,14 +13,14 @@
   },
   "license": "MIT",
   "dependencies": {
-    "firebase": "^8.2.7",
+    "firebase": "^8.2.9",
     "ipfs-core": "^0.5.2",
     "simple-peer-light": "^1.0.0"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^17.1.0",
     "@rollup/plugin-node-resolve": "^11.2.0",
-    "rollup": "^2.39.0",
+    "rollup": "^2.39.1",
     "terser": "^5.6.0"
   },
   "scripts": {
