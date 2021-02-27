@@ -5,18 +5,10 @@
   "module": "src/index.js",
   "type": "module",
   "exports": {
-    ".": {
-      "import": "./src/index.js"
-    },
-    "./firebase": {
-      "import": "./src/firebase.js"
-    },
-    "./ipfs": {
-      "import": "./src/ipfs.js"
-    },
-    "./torrent": {
-      "import": "./src/torrent.js"
-    }
+    ".": "./src/index.js",
+    "./firebase": "./src/firebase.js",
+    "./ipfs": "./src/ipfs.js",
+    "./torrent": "./src/torrent.js"
   },
   "author": {
     "name": "Dan Motzenbecker",
