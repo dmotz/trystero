@@ -2,6 +2,7 @@
   "name": "trystero",
   "version": "0.7.0",
   "main": "src/index.js",
+  "module": "src/index.js",
   "type": "module",
   "exports": {
     ".": {
