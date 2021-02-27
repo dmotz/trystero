@@ -72,8 +72,8 @@ import {joinRoom} from 'trystero/ipfs'
 Next, join the user to a room with a namespace:
 
 ```javascript
-const config = {appId: 'san_narciso'}
-const room = trystero.joinRoom(config, 'yoyodyne')
+const config = {appId: 'san_narciso_3d'}
+const room = joinRoom(config, 'yoyodyne')
 ```
 
 The first argument is a configuration object that requires an `appId`. This
