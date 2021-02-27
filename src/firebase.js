@@ -1,5 +1,5 @@
-import firebase from '@firebase/app'
-import '@firebase/database'
+import firebase from 'firebase/app'
+import 'firebase/database'
 import Peer from 'simple-peer-light'
 import room from './room'
 import {events, initGuard, keys, libName, noOp, selfId} from './utils'
