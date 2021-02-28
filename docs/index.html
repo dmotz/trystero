@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <meta name="author" content="Dan Motzenbecker" />
+    <meta name="description" content="" />
+    <link href="images/favicon.png" rel="icon" type="image/png" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Mono:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <title>Trystero</title>
+  </head>
+  <body>
+    <div id="canvas"></div>
+    <header>
+      <h1>📯 Trystero<sup>0.7.5</sup></h1>
+      <h2>Make any site multiplayer in a few lines.</h2>
+      <h2>Serverless WebRTC matchmaking for painless P2P.</h2>
+
+      <a href="https://github.com/dmotz/trystero">git repo</a>
+      <a href="https://github.com/dmotz/trystero/blob/main/README.md">readme</a>
+    </header>
+
+    <main>
+      <p>
+        Below is some code describing whatʼs happening on this site right now.
+      </p>
+
+      <p>
+        Anyone on this page will connect directly to others in real-time,
+        syncing mouse movement and clicks. (Try it, I dare you).
+      </p>
+
+      <p>
+        Trystero is helping peers connect via 🌊
+        <a href="https://en.wikipedia.org/wiki/BitTorrent">BitTorrent</a>
+        right now. It can also connect peers via 🪐
+        <a href="https://en.wikipedia.org/wiki/InterPlanetary_File_System"
+          >IPFS</a
+        >
+        and 🔥 <a href="https://firebase.google.com">Firebase</a>.
+      </p>
+
+      <p id="peer-info">
+        Right now youʼre the only person with the page open, but you can cheat
+        and just open this page in another tab to see what itʼs like with
+        others.
+      </p>
+
+      <hr />
+
+      <p>Hereʼs how you use it.</p>
+
+      <p>Join a room with an app ID and a room ID:</p>
+
+      <pre>
+import {joinRoom} from 'trystero'
+const room = joinRoom({appId: 'trystero-lounge'}, '101')
+</pre
+      >
+
+      <p>
+        Listen for peers joining and leaving (leaving out some boring UI code):
+      </p>
+
+      <pre>
+room.onPeerJoin(addCursor)
+room.onPeerLeave(removeCursor)
+</pre
+      >
+
+      <p>Make some actions to send and respond to:</p>
+
+      <pre>
+const [sendMove, getMove] = room.makeAction('mouseMove')
+const [sendClick, getClick] = room.makeAction('click')
+</pre
+      >
+
+      <p>Broadcast your actions to other peers:</p>
+
+      <pre>
+window.addEventListener('mousemove', e => sendMove([e.clientX, e.clientY]))
+window.addEventListener('click', () => sendClick(randomFruit())
+</pre
+      >
+
+      <p>And listen for when peers send theirs:</p>
+
+      <pre>
+getMove((xy, peerId) => setCursorPosition(peerId, xy))
+getClick((fruit, peerId) => dropFruitFrom(peerId, fruit))
+</pre
+      >
+
+      <p>
+        Thatʼs all this page is doing, but you can do much more like audio/video
+        streams and binary data (like files).
+        <a href="https://github.com/dmotz/trystero/blob/main/README.md"
+          >Check out the readme.</a
+        >
+      </p>
+    </main>
+    <script type="module" src="site.js"></script>
+  </body>
+</html>
