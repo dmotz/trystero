@@ -53,6 +53,17 @@ window.addEventListener('click', () => {
   sendClick(payload)
 })
 
+window.addEventListener('touchstart', e => {
+  const x = e.touches[0].clientX / window.innerWidth
+  const y = e.touches[0].clientY / window.innerHeight
+  const payload = [fruits[Math.floor(Math.random() * fruits.length)], x, y]
+
+  dropFruit(payload)
+  sendMove([x, y])
+  sendClick(payload)
+  moveCursor([x, y], selfId)
+})
+
 function moveCursor([x, y], id) {
   const el = cursors[id]
 
