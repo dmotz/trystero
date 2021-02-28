@@ -1,0 +1,177 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+::selection {
+  color: #000;
+  background-color: #fff;
+}
+
+html {
+  font-size: 10px;
+  cursor: none;
+  font-variant-ligatures: none;
+}
+
+body {
+  background-color: #000;
+  color: #fff;
+  max-width: 800px;
+  margin: 0 auto;
+  font-family: 'Space Mono', monospace;
+  padding: 1rem;
+  padding-bottom: 6rem;
+}
+
+a:hover {
+  cursor: none;
+}
+
+#canvas {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+header {
+  margin-top: 2.4rem;
+  margin-bottom: 6rem;
+  border-top: 10px solid #fff;
+  border-bottom: 10px solid #fff;
+  padding: 3rem 0;
+}
+
+header a {
+  background-color: blue;
+  color: #fff;
+  text-decoration: none;
+  padding: 1rem;
+  font-size: 2rem;
+  font-weight: bold;
+  margin-top: 4rem;
+  display: inline-block;
+  font-style: italic;
+  border-radius: 3px;
+}
+
+header a:hover {
+  background-color: #fff;
+  color: #000;
+}
+
+h1 {
+  font-size: 7rem;
+  text-transform: lowercase;
+  display: inline-block;
+  position: absolute;
+  transform: rotate(-90deg) translateX(-100%) translateY(-70%);
+  transform-origin: 0;
+}
+
+h1 sup {
+  font-style: normal;
+  font-weight: normal;
+  font-size: 2rem;
+  margin-left: 1rem;
+  color: #fff;
+}
+
+h2 {
+  font-size: 2.4rem;
+  line-height: 1.8;
+}
+
+main {
+  font-size: 1.7rem;
+}
+
+hr {
+  margin: 4rem 0;
+  border-bottom: 3px solid #fff;
+}
+p,
+pre {
+  margin-bottom: 2rem;
+}
+
+p a {
+  color: white;
+  text-underline-offset: 1px;
+  text-decoration-thickness: 4px;
+  text-decoration-color: blue;
+  transition: text-decoration-thickness ease-out 0.2s;
+}
+
+p a:hover {
+  text-decoration-color: #fff;
+  text-decoration-thickness: 8px;
+}
+
+pre {
+  font-family: 'Space Mono', monospace;
+  background-color: #222;
+  padding: 1.8rem;
+  font-size: 1.5rem;
+  line-height: 2;
+  color: #ccc;
+  overflow: auto;
+}
+
+.cursor,
+.treat {
+  position: absolute;
+}
+
+.cursor {
+  margin-left: -10px;
+  margin-top: -2px;
+}
+
+.cursor.self p {
+  color: #000;
+  background-color: #fff;
+  font-size: 2rem;
+}
+
+.cursor img {
+  width: 34px;
+  height: 46px;
+  image-rendering: pixelated;
+}
+
+.cursor p {
+  text-align: center;
+  font-size: 1.2rem;
+}
+
+.treat {
+  font-size: 5rem;
+  animation: drop 3s ease-in forwards;
+}
+
+@keyframes drop {
+  from {
+    transform: translateY(0);
+  }
+
+  to {
+    transform: translateY(10000%);
+  }
+}
+
+@media (max-width: 980px) {
+  html {
+    font-size: 8px;
+  }
+
+  h1 {
+    position: static;
+    transform: none;
+  }
+}
