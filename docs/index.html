@@ -95,7 +95,7 @@ window.addEventListener('click', () => sendClick(randomFruit())
       <p>And listen for when peers send theirs:</p>
 
       <pre>
-getMove((xy, peerId) => setCursorPosition(peerId, xy))
+getMove(([x, y], peerId) => setCursorPosition(peerId, x, y))
 getClick((fruit, peerId) => dropFruitFrom(peerId, fruit))
 </pre
       >
