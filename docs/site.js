@@ -1,7 +1,10 @@
 // eslint-disable-next-line
 import {joinRoom, selfId} from 'https://cdn.skypack.dev/trystero'
 
-const canvas = document.getElementById('canvas')
+const byId = document.getElementById.bind(document)
+const canvas = byId('canvas')
+const peerInfo = byId('peer-info')
+const noPeersCopy = peerInfo.innerText
 const cursors = {}
 const room = joinRoom({appId: 'trystero-94db3'}, '101')
 const [sendMove, getMove] = room.makeAction('mouseMove')
@@ -84,17 +87,26 @@ function addCursor(id, isSelf) {
   el.appendChild(img)
   el.appendChild(txt)
   canvas.appendChild(el)
-
+  updatePeerInfo()
   cursors[id] = el
+
   return el
 }
 
 function removeCursor(id) {
-  const el = cursors[id]
-
-  if (el) {
-    canvas.removeChild(el)
+  if (cursors[id]) {
+    canvas.removeChild(cursors[id])
   }
+  updatePeerInfo()
+}
+
+function updatePeerInfo() {
+  const count = room.getPeers().length
+  peerInfo.innerHTML = count
+    ? `Right now <em>${count}</em> other peer${
+        count === 1 ? ' is' : 's are'
+      } connected with you.`
+    : noPeersCopy
 }
 
 function dropFruit([fruit, x, y]) {
