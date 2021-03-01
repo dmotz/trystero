@@ -1,5 +1,5 @@
 // eslint-disable-next-line
-import {joinRoom, selfId} from 'https://cdn.skypack.dev/trystero'
+import {joinRoom, selfId} from 'https://cdn.skypack.dev/trystero?min'
 
 const byId = document.getElementById.bind(document)
 const canvas = byId('canvas')
