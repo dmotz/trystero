@@ -105,13 +105,13 @@ function updatePeerInfo() {
   peerInfo.innerHTML = count
     ? `Right now <em>${count}</em> other peer${
         count === 1 ? ' is' : 's are'
-      } connected with you.`
+      } connected with you. Send them some fruit.`
     : noPeersCopy
 }
 
 function dropFruit([fruit, x, y]) {
   const el = document.createElement('div')
-  el.className = 'treat'
+  el.className = 'fruit'
   el.innerText = fruit
   el.style.left = x * window.innerWidth + 'px'
   el.style.top = y * window.innerHeight + 'px'
