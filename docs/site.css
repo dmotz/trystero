@@ -95,6 +95,7 @@ hr {
   margin: 4rem 0;
   border-bottom: 3px solid #fff;
 }
+
 p,
 pre {
   margin-bottom: 2rem;
@@ -118,6 +119,7 @@ p em {
   background-color: #fff;
   color: #000;
   padding: 0 1rem;
+  animation: pulse 1s ease-in-out infinite alternate;
 }
 
 pre {
@@ -169,6 +171,16 @@ pre {
 
   to {
     transform: translateY(10000%);
+  }
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.4;
+  }
+
+  to {
+    opacity: 1;
   }
 }
 
