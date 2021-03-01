@@ -46,11 +46,7 @@ window.addEventListener('mousemove', ({clientX, clientY}) => {
 })
 
 window.addEventListener('click', () => {
-  const payload = [
-    fruits[Math.floor(Math.random() * fruits.length)],
-    mouseX,
-    mouseY
-  ]
+  const payload = [randomFruit(), mouseX, mouseY]
 
   dropFruit(payload)
   sendClick(payload)
@@ -59,7 +55,7 @@ window.addEventListener('click', () => {
 window.addEventListener('touchstart', e => {
   const x = e.touches[0].clientX / window.innerWidth
   const y = e.touches[0].clientY / window.innerHeight
-  const payload = [fruits[Math.floor(Math.random() * fruits.length)], x, y]
+  const payload = [randomFruit(), x, y]
 
   dropFruit(payload)
   sendMove([x, y])
@@ -118,4 +114,8 @@ function dropFruit([fruit, x, y]) {
   el.style.top = y * window.innerHeight + 'px'
   canvas.appendChild(el)
   setTimeout(() => canvas.removeChild(el), 3000)
+}
+
+function randomFruit() {
+  return fruits[Math.floor(Math.random() * fruits.length)]
 }
