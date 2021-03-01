@@ -1,7 +1,7 @@
 # 📯 Trystero
 
-**Make any site multiplayer in a few lines**
-**Serverless WebRTC matchmaking for painless P2P**
+**Serverless WebRTC matchmaking for painless P2P: make any site multiplayer in a
+few lines**
 
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
