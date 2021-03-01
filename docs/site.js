@@ -82,6 +82,7 @@ function addCursor(id, isSelf) {
   const txt = document.createElement('p')
 
   el.className = `cursor${isSelf ? ' self' : ''}`
+  el.style.left = el.style.top = '-99px'
   img.src = 'images/hand.png'
   txt.innerText = isSelf ? 'you' : id.slice(0, 4)
   el.appendChild(img)
