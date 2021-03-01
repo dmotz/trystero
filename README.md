@@ -1,5 +1,6 @@
 # 📯 Trystero
 
+**Make any site multiplayer in a few lines**
 **Serverless WebRTC matchmaking for painless P2P**
 
 Trystero manages a clandestine courier network that lets your application's
