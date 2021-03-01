@@ -23,7 +23,8 @@ all using the same API.
 
 ## How it works
 
-👉 **If you just want to try out Trystero, you can skip this explainer and [jump to the how-to](#get-started).**
+👉 **If you just want to try out Trystero, you can skip this explainer and
+[jump into using it](#get-started).**
 
 To establish a direct peer-to-peer connection with WebRTC, a signalling channel
 is needed to exchange peer information
