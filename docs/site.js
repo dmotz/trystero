@@ -1,14 +1,20 @@
+// a hack since skypack currently breaks side-effect imports:
 // eslint-disable-next-line
-import {joinRoom, selfId} from 'https://cdn.skypack.dev/trystero?min'
+import 'https://cdn.skypack.dev/firebase/database?min'
+import {
+  joinRoom,
+  selfId,
+  getOccupants
+  // eslint-disable-next-line
+} from 'https://cdn.skypack.dev/trystero/firebase?min'
 
 const byId = document.getElementById.bind(document)
 const canvas = byId('canvas')
 const peerInfo = byId('peer-info')
 const noPeersCopy = peerInfo.innerText
+const config = {appId: 'trystero-94db3'}
 const cursors = {}
-const room = joinRoom({appId: 'trystero-94db3'}, '101')
-const [sendMove, getMove] = room.makeAction('mouseMove')
-const [sendClick, getClick] = room.makeAction('click')
+const roomCap = 33
 const fruits = [
   '🍏',
   '🍎',
@@ -28,28 +34,33 @@ const fruits = [
   '🥥',
   '🥝'
 ]
+const randomFruit = () => fruits[Math.floor(Math.random() * fruits.length)]
 
 let mouseX = 0
 let mouseY = 0
+let room
+let sendMove
+let sendClick
 
-room.onPeerJoin(addCursor)
-room.onPeerLeave(removeCursor)
+init(49)
 addCursor(selfId, true)
-getMove(moveCursor)
-getClick(dropFruit)
 
 window.addEventListener('mousemove', ({clientX, clientY}) => {
   mouseX = clientX / window.innerWidth
   mouseY = clientY / window.innerHeight
   moveCursor([mouseX, mouseY], selfId)
-  sendMove([mouseX, mouseY])
+  if (room) {
+    sendMove([mouseX, mouseY])
+  }
 })
 
 window.addEventListener('click', () => {
   const payload = [randomFruit(), mouseX, mouseY]
 
   dropFruit(payload)
-  sendClick(payload)
+  if (room) {
+    sendClick(payload)
+  }
 })
 
 window.addEventListener('touchstart', e => {
@@ -58,10 +69,35 @@ window.addEventListener('touchstart', e => {
   const payload = [randomFruit(), x, y]
 
   dropFruit(payload)
-  sendMove([x, y])
-  sendClick(payload)
   moveCursor([x, y], selfId)
+
+  if (room) {
+    sendMove([x, y])
+    sendClick(payload)
+  }
 })
+
+async function init(n) {
+  const ns = 'room' + n
+  const members = (await getOccupants(config, ns)).length
+
+  let getMove
+  let getClick
+
+  if (members === roomCap) {
+    return init(n + 1)
+  }
+
+  room = joinRoom(config, ns)
+  ;[sendMove, getMove] = room.makeAction('mouseMove')
+  ;[sendClick, getClick] = room.makeAction('click')
+
+  byId('room-num').innerText = 'room #' + n
+  room.onPeerJoin(addCursor)
+  room.onPeerLeave(removeCursor)
+  getMove(moveCursor)
+  getClick(dropFruit)
+}
 
 function moveCursor([x, y], id) {
   const el = cursors[id]
@@ -84,8 +120,11 @@ function addCursor(id, isSelf) {
   el.appendChild(img)
   el.appendChild(txt)
   canvas.appendChild(el)
-  updatePeerInfo()
   cursors[id] = el
+
+  if (!isSelf) {
+    updatePeerInfo()
+  }
 
   return el
 }
@@ -114,8 +153,4 @@ function dropFruit([fruit, x, y]) {
   el.style.top = y * window.innerHeight + 'px'
   canvas.appendChild(el)
   setTimeout(() => canvas.removeChild(el), 3000)
-}
-
-function randomFruit() {
-  return fruits[Math.floor(Math.random() * fruits.length)]
 }
