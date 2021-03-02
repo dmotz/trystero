@@ -103,6 +103,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 })
 
 export const getOccupants = initGuard(
+  occupiedRooms,
   (config, ns) =>
     new Promise(res =>
       init(config)
