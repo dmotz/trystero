@@ -58,6 +58,7 @@ header a {
   display: inline-block;
   font-style: italic;
   border-radius: 3px;
+  user-select: none;
 }
 
 header a:hover {
