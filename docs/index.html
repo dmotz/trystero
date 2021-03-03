@@ -62,45 +62,40 @@
 
       <p>Join a room with an app ID and a room ID:</p>
 
-      <pre>
+      <pre><code>
 import {joinRoom} from 'trystero'
 const room = joinRoom({appId: 'trystero-lounge'}, '101')
-</pre
-      >
+</code></pre>
 
       <p>
         Listen for peers joining and leaving (leaving out some boring UI code):
       </p>
 
-      <pre>
+      <pre><code>
 room.onPeerJoin(addCursor)
 room.onPeerLeave(removeCursor)
-</pre
-      >
+</code></pre>
 
       <p>Make some actions to send and respond to:</p>
 
-      <pre>
+      <pre><code>
 const [sendMove, getMove] = room.makeAction('mouseMove')
 const [sendClick, getClick] = room.makeAction('click')
-</pre
-      >
+</code></pre>
 
       <p>Broadcast your actions to other peers:</p>
 
-      <pre>
+      <pre><code>
 window.addEventListener('mousemove', e => sendMove([e.clientX, e.clientY]))
 window.addEventListener('click', () => sendClick(randomFruit())
-</pre
-      >
+</code></pre>
 
       <p>And listen for when peers send theirs:</p>
 
-      <pre>
+      <pre><code>
 getMove(([x, y], peerId) => setCursorPosition(peerId, x, y))
 getClick((fruit, peerId) => dropFruitFrom(peerId, fruit))
-</pre
-      >
+</code></pre>
 
       <p>
         Thatʼs all this page is doing, but you can do much more like audio/video
