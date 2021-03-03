@@ -33,7 +33,8 @@
     "terser": "^5.6.0"
   },
   "scripts": {
-    "sizes": "./bundle-sizes.sh"
+    "sizes": "./bundle-sizes.sh",
+    "build-demo": "rollup -p node-resolve -p commonjs docs/site.js --format iife | terser -cm --comments false > docs/build.js"
   },
   "keywords": [
     "webrtc",
