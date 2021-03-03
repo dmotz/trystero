@@ -1,12 +1,4 @@
-// a hack since skypack currently breaks side-effect imports:
-// eslint-disable-next-line
-import 'https://cdn.skypack.dev/firebase/database?min'
-import {
-  joinRoom,
-  selfId,
-  getOccupants
-  // eslint-disable-next-line
-} from 'https://cdn.skypack.dev/trystero/firebase?min'
+import {joinRoom, selfId, getOccupants} from '../src/firebase'
 
 const byId = document.getElementById.bind(document)
 const canvas = byId('canvas')
