@@ -43,6 +43,7 @@ let sendMove
 let sendClick
 
 init(49)
+document.documentElement.className = 'ready'
 addCursor(selfId, true)
 
 window.addEventListener('mousemove', ({clientX, clientY}) => {

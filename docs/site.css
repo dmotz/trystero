@@ -11,7 +11,6 @@
 
 html {
   font-size: 10px;
-  cursor: none;
   font-variant-ligatures: none;
 }
 
@@ -25,7 +24,8 @@ body {
   padding-bottom: 6rem;
 }
 
-a:hover {
+.ready,
+.ready a:hover {
   cursor: none;
 }
 
