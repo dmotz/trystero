@@ -62,8 +62,7 @@
 
       <p>Join a room with an app ID and a room ID:</p>
 
-      <pre><code>
-import {joinRoom} from 'trystero'
+      <pre><code>import {joinRoom} from 'trystero'
 const room = joinRoom({appId: 'trystero-lounge'}, '101')
 </code></pre>
 
@@ -71,29 +70,25 @@ const room = joinRoom({appId: 'trystero-lounge'}, '101')
         Listen for peers joining and leaving (leaving out some boring UI code):
       </p>
 
-      <pre><code>
-room.onPeerJoin(addCursor)
+      <pre><code>room.onPeerJoin(addCursor)
 room.onPeerLeave(removeCursor)
 </code></pre>
 
       <p>Make some actions to send and respond to:</p>
 
-      <pre><code>
-const [sendMove, getMove] = room.makeAction('mouseMove')
+      <pre><code>const [sendMove, getMove] = room.makeAction('mouseMove')
 const [sendClick, getClick] = room.makeAction('click')
 </code></pre>
 
       <p>Broadcast your actions to other peers:</p>
 
-      <pre><code>
-window.addEventListener('mousemove', e => sendMove([e.clientX, e.clientY]))
+      <pre><code>window.addEventListener('mousemove', e => sendMove([e.clientX, e.clientY]))
 window.addEventListener('click', () => sendClick(randomFruit())
 </code></pre>
 
       <p>And listen for when peers send theirs:</p>
 
-      <pre><code>
-getMove(([x, y], peerId) => setCursorPosition(peerId, x, y))
+      <pre><code>getMove(([x, y], peerId) => setCursorPosition(peerId, x, y))
 getClick((fruit, peerId) => dropFruitFrom(peerId, fruit))
 </code></pre>
 
