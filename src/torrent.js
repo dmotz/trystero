@@ -1,4 +1,3 @@
-import Peer from 'simple-peer-light'
 import room from './room'
 import {
   encodeBytes,
@@ -7,6 +6,7 @@ import {
   fromEntries,
   genId,
   initGuard,
+  initPeer,
   libName,
   mkErr,
   noOp,
@@ -55,7 +55,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const makeOffers = () =>
     fromEntries(
       new Array(offerPoolSize).fill().map(() => {
-        const peer = new Peer({initiator: true, trickle: false})
+        const peer = initPeer(true, false, config.rtcConfig)
 
         return [
           genId(hashLimit),
@@ -111,7 +111,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
       handledOffers[val.offer_id] = true
 
-      const peer = new Peer({trickle: false})
+      const peer = initPeer(false, false, config.rtcConfig)
       peer.once(events.signal, answer => {
         socket.send(
           JSON.stringify({
