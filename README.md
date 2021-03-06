@@ -413,8 +413,8 @@ import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
 
 |                   | setup¹  | reliability² | time to connect³ | bundle size⁴ | occupancy polling⁵ |
 | ----------------- | ------- | ------------ | ---------------- | ------------ | ------------------ |
-| 🌊 **BitTorrent** | none ✅ | variable     | better           | ~24K ✅      | none               |
-| 🔥 **Firebase**   | ~5 mins | reliable ✅  | best ✅          | ~250K        | yes ✅             |
+| 🌊 **BitTorrent** | none ✅ | variable     | better           | ~23K ✅      | none               |
+| 🔥 **Firebase**   | ~5 mins | reliable ✅  | best ✅          | ~227K        | yes ✅             |
 | 🪐 **IPFS**       | none ✅ | variable     | good             | ~1.77M 👀    | none               |
 
 **¹** Firebase requires an account and project which take a few minutes to set
