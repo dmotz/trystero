@@ -3,7 +3,7 @@
 **Serverless WebRTC matchmaking for painless P2P: make any site multiplayer in a
 few lines**
 
-👉 **[Try the demo](https://oxism.com/trystero)** 👈
+👉 **[TRY THE DEMO](https://oxism.com/trystero)** 👈
 
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
