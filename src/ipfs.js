@@ -1,7 +1,14 @@
 import ipfs from 'ipfs-core/dist/index.min.js'
-import Peer from 'simple-peer-light'
 import room from './room'
-import {decodeBytes, events, initGuard, libName, noOp, selfId} from './utils'
+import {
+  decodeBytes,
+  events,
+  initGuard,
+  initPeer,
+  libName,
+  noOp,
+  selfId
+} from './utils'
 
 const occupiedRooms = {}
 const swarmPollMs = 999
@@ -63,10 +70,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
         seenPeers[peerId] = true
 
-        const peer = (offers[peerId] = new Peer({
-          initiator: true,
-          trickle: false
-        }))
+        const peer = (offers[peerId] = initPeer(true, false, config.rtcConfig))
 
         peer.once(events.signal, offer => {
           node.pubsub.publish(
@@ -104,7 +108,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
           return
         }
 
-        const peer = new Peer({initiator: false, trickle: false})
+        const peer = initPeer(false, false, config.rtcConfig)
 
         peer.once(events.signal, answer =>
           node.pubsub.publish(
