@@ -1,4 +1,9 @@
+import Peer from 'simple-peer-light'
+
 const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
+
+export const initPeer = (initiator, trickle, config) =>
+  new Peer({initiator, trickle, config})
 
 export const genId = n =>
   new Array(n)
