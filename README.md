@@ -230,6 +230,10 @@ communication channels and send events.
   - `appId` - **(required)** A unique string identifying your app. If using
     Firebase this should be the database ID.
 
+  - `rtcConfig` - **(optional)** Specifies a custom
+    [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
+    for all peer connections.
+
   - `rootPath` - **(optional, 🔥 Firebase only)** Where Trystero writes its
     matchmaking data in your database (`'__trystero__'` by default). Changing
     this is useful if you want to run multiple apps using the same database and
