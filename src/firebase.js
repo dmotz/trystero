@@ -1,8 +1,7 @@
 import firebase from 'firebase/app'
 import 'firebase/database'
-import Peer from 'simple-peer-light'
 import room from './room'
-import {events, initGuard, keys, libName, noOp, selfId} from './utils'
+import {events, initGuard, initPeer, keys, libName, noOp, selfId} from './utils'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -32,7 +31,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     if (peerMap[id]) {
       return peerMap[id]
     }
-    const peer = new Peer({initiator})
+    const peer = initPeer(initiator, true, config.rtcConfig)
 
     peer.on(events.connect, () => onPeerConnect(peer, id))
     peer.on(events.signal, sdp => {
