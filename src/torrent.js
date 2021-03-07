@@ -174,9 +174,12 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       })
     )
 
-  const makeSocket = (url, infoHash) => {
-    if (!sockets[url]) {
-      socketListeners[url] = {[infoHash]: onSocketMessage}
+  const makeSocket = (url, infoHash, forced) => {
+    if (forced || !sockets[url]) {
+      socketListeners[url] = {
+        ...socketListeners[url],
+        [infoHash]: onSocketMessage
+      }
       sockets[url] = new Promise(res => {
         const socket = new WebSocket(url)
         socket.onopen = res.bind(null, socket)
@@ -200,12 +203,12 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     offerPool = makeOffers()
 
     trackerUrls.forEach(async url => {
-      const socket = makeSocket(url, infoHash)
+      const socket = await makeSocket(url, infoHash)
 
       if (socket.readyState === WebSocket.OPEN) {
         announce(socket, infoHash)
       } else if (socket.readyState !== WebSocket.CONNECTING) {
-        announce(await makeSocket(url, infoHash), infoHash)
+        announce(await makeSocket(url, infoHash, true), infoHash)
       }
     })
   }
