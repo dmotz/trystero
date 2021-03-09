@@ -160,6 +160,10 @@ export default (onPeer, onSelfLeave) => {
     ]
   }
 
+  const [sendPing, getPing] = makeAction('__91n6__')
+  const [sendPong, getPong] = makeAction('__90n6__')
+  const [sendSignal, getSignal] = makeAction('__516n4L__')
+
   let onPeerJoin = noOp
   let onPeerLeave = noOp
   let onPeerStream = noOp
@@ -176,6 +180,7 @@ export default (onPeer, onSelfLeave) => {
       peer.addStream(selfStream)
     }
 
+    peer.on(events.signal, sdp => sendSignal(sdp, id))
     peer.on(events.close, () => exitPeer(id))
     peer.on(events.stream, stream => onPeerStream(stream, id))
     peer.on(events.data, data => {
@@ -238,14 +243,18 @@ export default (onPeer, onSelfLeave) => {
     setTimeout(onPeerJoin, 0, id)
   })
 
-  const [sendPing, getPing] = makeAction('__91n6__')
-  const [sendPong, getPong] = makeAction('__90n6__')
-
   getPing((_, id) => sendPong(null, id))
+
   getPong((_, id) => {
     if (pendingPongs[id]) {
       pendingPongs[id]()
       delete pendingPongs[id]
+    }
+  })
+
+  getSignal((sdp, id) => {
+    if (peerMap[id]) {
+      peerMap[id].signal(sdp)
     }
   })
 
