@@ -24,7 +24,7 @@
   "dependencies": {
     "firebase": "^8.2.9",
     "ipfs-core": "^0.5.2",
-    "simple-peer-light": "^1.0.0"
+    "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^17.1.0",
