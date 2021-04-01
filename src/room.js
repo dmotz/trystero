@@ -146,15 +146,20 @@ export default (onPeer, onSelfLeave) => {
           }
         }
 
-        if (peerId) {
-          const peer = peerMap[peerId]
-          if (!peer) {
-            throw mkErr(`no peer with id ${peerId} found`)
-          }
-          return transmit([peerId, peer])
-        }
+        return Promise.all(
+          peerId
+            ? (Array.isArray(peerId) ? peerId : [peerId]).flatMap(id => {
+                const peer = peerMap[id]
 
-        return Promise.all(peers.map(transmit))
+                if (!peer) {
+                  console.warn(`no peer with id ${id} found`)
+                  return []
+                }
+
+                return transmit([id, peer])
+              })
+            : peers.map(transmit)
+        )
       },
       f => (actions[typePadded] = f)
     ]
