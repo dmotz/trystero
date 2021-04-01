@@ -338,12 +338,12 @@ Returns an object with the following methods:
   Returns a pair containing a function to send the action to peers and a
   function to register a listener. The sender function takes any
   JSON-serializable value (primitive or object) or binary data as its first
-  argument and takes an optional second argument of a peer ID to send to. By
-  default it will broadcast the value to all peers in the room. If the sender
-  function is called with binary data (`Blob`, `TypedArray`), it will be
-  received on the other end as an `ArrayBuffer` of agnostic bytes. The sender
-  function returns a promise that resolves when all target peers are finished
-  receiving data.
+  argument and takes an optional second argument of a peer ID or a list of peer
+  IDs to send to. By default it will broadcast the value to all peers in the
+  room. If the sender function is called with binary data (`Blob`,
+  `TypedArray`), it will be received on the other end as an `ArrayBuffer` of
+  agnostic bytes. The sender function returns a promise that resolves when all
+  target peers are finished receiving data.
 
   Example:
 
