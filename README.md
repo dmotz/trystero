@@ -441,8 +441,7 @@ If you want to use the Firebase strategy and don't have an existing project:
 1. Create a new Realtime Database
 1. Copy the database ID and use it as the `appId` in your Trystero
    config
-1. [*Optional*] Configure the database with [security rules](#security-rules)
-   to limit activity:
+1. [*Optional*] Configure the database with security rules to limit activity:
 
 ```json
 {
