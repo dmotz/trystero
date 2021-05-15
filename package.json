@@ -23,14 +23,14 @@
   "license": "MIT",
   "dependencies": {
     "firebase": "^8.2.9",
-    "ipfs-core": "^0.5.2",
+    "ipfs-core": "^0.6.1",
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^18.0.0",
-    "@rollup/plugin-node-resolve": "^11.2.0",
-    "rollup": "^2.39.1",
-    "terser": "^5.6.0"
+    "@rollup/plugin-commonjs": "^19.0.0",
+    "@rollup/plugin-node-resolve": "^13.0.0",
+    "rollup": "^2.47.0",
+    "terser": "^5.7.0"
   },
   "scripts": {
     "sizes": "./bundle-sizes.sh",
