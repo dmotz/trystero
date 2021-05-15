@@ -52,7 +52,10 @@ export const events = fromEntries(
 export const combineChunks = chunks => {
   const full = new Uint8Array(chunks.reduce((a, c) => a + c.byteLength, 0))
 
-  chunks.forEach((b, i) => full.set(b, i && chunks[i - 1].byteLength))
+  chunks.reduce((a, c) => {
+    full.set(c, a)
+    return a + c.byteLength
+  }, 0)
 
   return full
 }
