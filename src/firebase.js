@@ -1,5 +1,16 @@
-import firebase from 'firebase/app'
-import 'firebase/database'
+import {initializeApp} from 'firebase/app'
+import {
+  child,
+  getDatabase,
+  off,
+  onChildAdded,
+  onDisconnect,
+  onValue,
+  push,
+  ref,
+  remove,
+  set
+} from 'firebase/database'
 import room from './room'
 import {events, initGuard, initPeer, keys, libName, noOp, selfId} from './utils'
 
@@ -8,24 +19,22 @@ const defaultRootPath = `__${libName.toLowerCase()}__`
 const occupiedRooms = {}
 const dbs = {}
 const getPath = (...xs) => xs.join('/')
-const fbEvents = {childAdded: 'child_added', value: 'value'}
 
 const init = config =>
-  dbs[config.appId]
-    ? dbs[config.appId]
-    : (dbs[config.appId] = firebase
-        .initializeApp({
-          databaseURL: `https://${config.appId}.firebaseio.com`
-        })
-        .database())
+  dbs[config.appId] ||
+  (dbs[config.appId] = getDatabase(
+    initializeApp({
+      databaseURL: `https://${config.appId}.firebaseio.com`
+    })
+  ))
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const db = init(config)
   const peerMap = {}
   const peerSigs = {}
   const rootPath = config.rootPath || defaultRootPath
-  const roomRef = db.ref(getPath(rootPath, ns))
-  const selfRef = roomRef.child(selfId)
+  const roomRef = ref(db, getPath(rootPath, ns))
+  const selfRef = child(roomRef, selfId)
 
   const makePeer = (id, initiator) => {
     if (peerMap[id]) {
@@ -35,9 +44,9 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
     peer.on(events.connect, () => onPeerConnect(peer, id))
     peer.on(events.signal, sdp => {
-      const ref = db.ref(getPath(rootPath, ns, id, selfId)).push()
-      ref.onDisconnect().remove()
-      ref.set(JSON.stringify(sdp))
+      const signalRef = push(ref(db, getPath(rootPath, ns, id, selfId)))
+      onDisconnect(signalRef).remove()
+      set(signalRef, JSON.stringify(sdp))
     })
 
     peerMap[id] = peer
@@ -49,12 +58,12 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
   occupiedRooms[ns] = true
 
-  selfRef.set({[presencePath]: true})
-  selfRef.onDisconnect().remove()
-  selfRef.on(fbEvents.childAdded, data => {
+  set(selfRef, {[presencePath]: true})
+  onDisconnect(selfRef).remove()
+  onChildAdded(selfRef, data => {
     const peerId = data.key
     if (peerId !== presencePath) {
-      data.ref.on(fbEvents.childAdded, data => {
+      onChildAdded(data.ref, data => {
         if (!(peerId in peerSigs)) {
           peerSigs[peerId] = {}
         }
@@ -77,13 +86,13 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         const peer = makePeer(peerId, false)
 
         peer.signal(val)
-        data.ref.remove()
+        remove(data.ref)
       })
     }
   })
 
-  roomRef.once(fbEvents.value, () => (didSyncRoom = true))
-  roomRef.on(fbEvents.childAdded, ({key}) => {
+  onValue(roomRef, () => (didSyncRoom = true), {onlyOnce: true})
+  onChildAdded(roomRef, ({key}) => {
     if (!didSyncRoom || key === selfId) {
       return
     }
@@ -93,9 +102,9 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   return room(
     f => (onPeerConnect = f),
     () => {
-      selfRef.off()
-      selfRef.remove()
-      roomRef.off()
+      off(selfRef)
+      remove(selfRef)
+      off(roomRef)
       delete occupiedRooms[ns]
     }
   )
@@ -105,9 +114,11 @@ export const getOccupants = initGuard(
   occupiedRooms,
   (config, ns) =>
     new Promise(res =>
-      init(config)
-        .ref(getPath(config.rootPath || defaultRootPath, ns))
-        .once(fbEvents.value, data => res(keys(data.val() || {})))
+      onValue(
+        ref(init(config), getPath(config.rootPath || defaultRootPath, ns)),
+        data => res(keys(data.val() || {})),
+        {onlyOnce: true}
+      )
     )
 )
 
