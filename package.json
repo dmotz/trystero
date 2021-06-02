@@ -1,6 +1,6 @@
 {
   "name": "trystero",
-  "version": "0.7.11",
+  "version": "0.7.12",
   "description": "Serverless WebRTC matchmaking for painless P2P",
   "main": "src/index.js",
   "module": "src/index.js",
