@@ -32,6 +32,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const db = init(config)
   const peerMap = {}
   const peerSigs = {}
+  const connectedPeers = {}
   const rootPath = config.rootPath || defaultRootPath
   const roomRef = ref(db, getPath(rootPath, ns))
   const selfRef = child(roomRef, selfId)
@@ -42,8 +43,16 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
     const peer = initPeer(initiator, true, config.rtcConfig)
 
-    peer.on(events.connect, () => onPeerConnect(peer, id))
+    peer.on(events.connect, () => {
+      onPeerConnect(peer, id)
+      connectedPeers[id] = true
+    })
+
     peer.on(events.signal, sdp => {
+      if (connectedPeers[id]) {
+        return
+      }
+
       const signalRef = push(ref(db, getPath(rootPath, ns, id, selfId)))
       onDisconnect(signalRef).remove()
       set(signalRef, JSON.stringify(sdp))
@@ -62,33 +71,36 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   onDisconnect(selfRef).remove()
   onChildAdded(selfRef, data => {
     const peerId = data.key
-    if (peerId !== presencePath) {
-      onChildAdded(data.ref, data => {
-        if (!(peerId in peerSigs)) {
-          peerSigs[peerId] = {}
-        }
 
-        if (data.key in peerSigs[peerId]) {
-          return
-        }
-
-        peerSigs[peerId][data.key] = true
-
-        let val
-
-        try {
-          val = JSON.parse(data.val())
-        } catch (e) {
-          console.error(`${libName}: received malformed SDP JSON`)
-          return
-        }
-
-        const peer = makePeer(peerId, false)
-
-        peer.signal(val)
-        remove(data.ref)
-      })
+    if (peerId === presencePath || connectedPeers[peerId]) {
+      return
     }
+
+    onChildAdded(data.ref, data => {
+      if (!(peerId in peerSigs)) {
+        peerSigs[peerId] = {}
+      }
+
+      if (data.key in peerSigs[peerId]) {
+        return
+      }
+
+      peerSigs[peerId][data.key] = true
+
+      let val
+
+      try {
+        val = JSON.parse(data.val())
+      } catch (e) {
+        console.error(`${libName}: received malformed SDP JSON`)
+        return
+      }
+
+      const peer = makePeer(peerId, false)
+
+      peer.signal(val)
+      remove(data.ref)
+    })
   })
 
   onValue(roomRef, () => (didSyncRoom = true), {onlyOnce: true})
