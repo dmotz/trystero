@@ -22,8 +22,8 @@
   },
   "license": "MIT",
   "dependencies": {
-    "firebase": "9.0.0-beta.2",
-    "ipfs-core": "^0.6.1",
+    "firebase": "^9.0.0-beta.3",
+    "ipfs-core": "^0.7.1",
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
