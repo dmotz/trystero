@@ -172,7 +172,6 @@ export default (onPeer, onSelfLeave) => {
   let onPeerJoin = noOp
   let onPeerLeave = noOp
   let onPeerStream = noOp
-  let selfStream
 
   onPeer((peer, id) => {
     if (peerMap[id]) {
@@ -180,10 +179,6 @@ export default (onPeer, onSelfLeave) => {
     }
 
     peerMap[id] = peer
-
-    if (selfStream) {
-      peer.addStream(selfStream)
-    }
 
     peer.on(events.signal, sdp => sendSignal(sdp, id))
     peer.on(events.close, () => exitPeer(id))
