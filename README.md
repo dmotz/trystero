@@ -284,7 +284,7 @@ Returns an object with the following methods:
   - `stream` - A previously sent `MediaStream` to stop sending.
 
   - `peerId` - **(optional)** If specified, the stream is removed only from the
-    target peer, not all peers.
+    target peer ID (string) or list of peer IDs (array).
 
 - ### `onPeerJoin(callback)`
 
