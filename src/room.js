@@ -1,14 +1,13 @@
 import {
-  asList,
   combineChunks,
   decodeBytes,
   encodeBytes,
   entries,
   events,
   keys,
+  libName,
   mkErr,
-  noOp,
-  values
+  noOp
 } from './utils'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
@@ -81,13 +80,7 @@ export default (onPeer, onSelfLeave) => {
     pendingTransmissions[type] = {}
 
     return [
-      async (data, peerId, meta) => {
-        const peers = entries(peerMap)
-
-        if (!peers.length) {
-          return
-        }
-
+      async (data, targets, meta) => {
         if (meta && typeof meta !== 'object') {
           throw mkErr('action meta argument must be an object')
         }
@@ -142,42 +135,29 @@ export default (onPeer, onSelfLeave) => {
 
         nonce = (nonce + 1) & 0xff
 
-        const transmit = async ([id, peer]) => {
-          const chan = peer._channel
-          let chunkN = 0
-
-          while (chunkN < chunkTotal) {
-            if (chan.bufferedAmount > chan.bufferedAmountLowThreshold) {
-              await new Promise(res => {
-                const next = () => {
-                  chan.removeEventListener(buffLowEvent, next)
-                  res()
-                }
-                chan.addEventListener(buffLowEvent, next)
-              })
-            }
-
-            if (!peerMap[id]) {
-              break
-            }
-
-            peer.send(chunks[chunkN++])
-          }
-        }
-
         return Promise.all(
-          peerId
-            ? asList(peerId).flatMap(id => {
-                const peer = peerMap[id]
+          iterate(targets, async (id, peer) => {
+            const chan = peer._channel
+            let chunkN = 0
 
-                if (!peer) {
-                  console.warn(`no peer with id ${id} found`)
-                  return []
-                }
+            while (chunkN < chunkTotal) {
+              if (chan.bufferedAmount > chan.bufferedAmountLowThreshold) {
+                await new Promise(res => {
+                  const next = () => {
+                    chan.removeEventListener(buffLowEvent, next)
+                    res()
+                  }
+                  chan.addEventListener(buffLowEvent, next)
+                })
+              }
 
-                return transmit([id, peer])
-              })
-            : peers.map(transmit)
+              if (!peerMap[id]) {
+                break
+              }
+
+              peer.send(chunks[chunkN++])
+            }
+          })
         )
       },
       f => (actions[typePadded] = f)
@@ -307,15 +287,8 @@ export default (onPeer, onSelfLeave) => {
 
     getPeers: () => keys(peerMap),
 
-    addStream: (stream, peerId, meta) =>
-      (peerId ? asList(peerId) : keys(peerMap)).forEach(async id => {
-        const peer = peerMap[id]
-
-        if (!peer) {
-          console.warn(`no peer with id ${id} found`)
-          return
-        }
-
+    addStream: (stream, targets, meta) =>
+      iterate(targets, async (id, peer) => {
         if (meta) {
           await sendStreamMeta(meta, id)
         }
@@ -323,19 +296,8 @@ export default (onPeer, onSelfLeave) => {
         peer.addStream(stream)
       }),
 
-    removeStream: (stream, peerId) => {
-      if (peerId) {
-        const peer = peerMap[peerId]
-
-        if (!peer) {
-          throw mkErr(`no peer with id ${peerId} found`)
-        }
-
-        peer.removeStream(stream)
-      } else {
-        values(peerMap).forEach(peer => peer.removeStream(stream))
-      }
-    },
+    removeStream: (stream, targets) =>
+      iterate(targets, (_, peer) => peer.removeStream(stream)),
 
     onPeerJoin: f => (onPeerJoin = f),
 
