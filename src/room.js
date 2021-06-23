@@ -245,7 +245,7 @@ export default (onPeer, onSelfLeave) => {
       console.error(e)
     })
 
-    setTimeout(onPeerJoin, 0, id)
+    onPeerJoin(id)
   })
 
   getPing((_, id) => sendPong(null, id))

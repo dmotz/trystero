@@ -224,7 +224,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   }
 
   const onConnect = (peer, id, offerId) => {
-    onPeerConnect(peer, id)
+    setTimeout(onPeerConnect, 0, peer, id)
     connectedPeers[id] = true
 
     if (offerId) {
