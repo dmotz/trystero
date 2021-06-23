@@ -21,6 +21,7 @@ export default (onPeer, onSelfLeave) => {
   const actions = {}
   const pendingTransmissions = {}
   const pendingPongs = {}
+  const pendingStreamMetas = {}
 
   const exitPeer = id => {
     if (!peerMap[id]) {
@@ -168,6 +169,7 @@ export default (onPeer, onSelfLeave) => {
   const [sendPing, getPing] = makeAction('__91n6__')
   const [sendPong, getPong] = makeAction('__90n6__')
   const [sendSignal, getSignal] = makeAction('__516n4L__')
+  const [sendStreamMeta, getStreamMeta] = makeAction('__57r34m__')
 
   let onPeerJoin = noOp
   let onPeerLeave = noOp
@@ -182,7 +184,10 @@ export default (onPeer, onSelfLeave) => {
 
     peer.on(events.signal, sdp => sendSignal(sdp, id))
     peer.on(events.close, () => exitPeer(id))
-    peer.on(events.stream, stream => onPeerStream(stream, id))
+    peer.on(events.stream, stream => {
+      onPeerStream(stream, id, pendingStreamMetas[id])
+      delete pendingStreamMetas[id]
+    })
     peer.on(events.data, data => {
       const buffer = new Uint8Array(data)
       const action = decodeBytes(buffer.subarray(0, typeByteLimit))
@@ -258,6 +263,8 @@ export default (onPeer, onSelfLeave) => {
     }
   })
 
+  getStreamMeta((meta, id) => (pendingStreamMetas[id] = meta))
+
   return {
     makeAction,
 
@@ -282,23 +289,26 @@ export default (onPeer, onSelfLeave) => {
 
     getPeers: () => keys(peerMap),
 
-    addStream: (stream, peerId) => {
-      if (typeof peerId === 'string') {
-        const peer = peerMap[peerId]
+    addStream: (stream, peerId, meta) =>
+      (peerId
+        ? Array.isArray(peerId)
+          ? peerId
+          : [peerId]
+        : keys(peerMap)
+      ).forEach(async id => {
+        const peer = peerMap[id]
 
         if (!peer) {
-          throw mkErr(`no peer with id ${peerId} found`)
+          console.warn(`no peer with id ${id} found`)
+          return
+        }
+
+        if (meta) {
+          await sendStreamMeta(meta, id)
         }
 
         peer.addStream(stream)
-      } else {
-        if (!peerId) {
-          selfStream = stream
-        }
-
-        values(peerMap).forEach(peer => peer.addStream(stream))
-      }
-    },
+      }),
 
     removeStream: (stream, peerId) => {
       if (peerId) {
