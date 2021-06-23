@@ -59,3 +59,5 @@ export const combineChunks = chunks => {
 
   return full
 }
+
+export const asList = xs => (Array.isArray(xs) ? xs : [xs])
