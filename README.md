@@ -262,20 +262,21 @@ Returns an object with the following methods:
 
   Returns a list of peer IDs present in room (not including the local user).
 
-- ### `addStream(stream, [peerId], [currentPeersOnly])`
+- ### `addStream(stream, [peerId], [metadata])`
 
   Broadcasts media stream to other peers.
 
-  - `stream` - A `MediaStream` with audio/video to send to peers in the room.
+  - `stream` - A `MediaStream` with audio and/or video to send to peers in the
+    room.
 
   - `peerId` - **(optional)** If specified, the stream is sent only to the
     target peer ID (string) or list of peer IDs (array).
 
-  - `currentPeersOnly` - **(optional)** If `true` the stream will be sent only
-    to peers currently in the room. By default, the stream is automatically sent
-    to peers who arrive after the stream is initially broadcast unless a
-    `peerId` argument is given or `currentPeersOnly` is `true`. Note that these
-    optional arguments are mutually exclusive so pass at most only one.
+  - `metadata` - **(optional)** Additional metadata (any serializable type) to
+    be sent with the stream. This is useful when sending multiple streams so
+    recipients know which is which (e.g. a webcam versus a screen capture). If
+    you want to broadcast a stream to all peers in the room with a metadata
+    argument, pass `null` as the second argument.
 
 - ### `removeStream(stream, [peerId])`
 
