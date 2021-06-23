@@ -269,7 +269,7 @@ Returns an object with the following methods:
   - `stream` - A `MediaStream` with audio/video to send to peers in the room.
 
   - `peerId` - **(optional)** If specified, the stream is sent only to the
-    target peer ID (string) and not all peers.
+    target peer ID (string) or list of peer IDs (array).
 
   - `currentPeersOnly` - **(optional)** If `true` the stream will be sent only
     to peers currently in the room. By default, the stream is automatically sent
