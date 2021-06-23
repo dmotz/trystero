@@ -24,6 +24,23 @@ export default (onPeer, onSelfLeave) => {
   const pendingPongs = {}
   const pendingStreamMetas = {}
 
+  const iterate = (targets, f) =>
+    (targets
+      ? Array.isArray(targets)
+        ? targets
+        : [targets]
+      : keys(peerMap)
+    ).flatMap(id => {
+      const peer = peerMap[id]
+
+      if (!peer) {
+        console.warn(`${libName}: no peer with id ${id} found`)
+        return []
+      }
+
+      return f(id, peer)
+    })
+
   const exitPeer = id => {
     if (!peerMap[id]) {
       return
