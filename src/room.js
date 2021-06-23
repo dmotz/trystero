@@ -1,4 +1,5 @@
 import {
+  asList,
   combineChunks,
   decodeBytes,
   encodeBytes,
@@ -149,7 +150,7 @@ export default (onPeer, onSelfLeave) => {
 
         return Promise.all(
           peerId
-            ? (Array.isArray(peerId) ? peerId : [peerId]).flatMap(id => {
+            ? asList(peerId).flatMap(id => {
                 const peer = peerMap[id]
 
                 if (!peer) {
@@ -290,12 +291,7 @@ export default (onPeer, onSelfLeave) => {
     getPeers: () => keys(peerMap),
 
     addStream: (stream, peerId, meta) =>
-      (peerId
-        ? Array.isArray(peerId)
-          ? peerId
-          : [peerId]
-        : keys(peerMap)
-      ).forEach(async id => {
+      (peerId ? asList(peerId) : keys(peerMap)).forEach(async id => {
         const peer = peerMap[id]
 
         if (!peer) {
