@@ -164,6 +164,57 @@ export default (onPeer, onSelfLeave) => {
     ]
   }
 
+  const handleData = (id, data) => {
+    const buffer = new Uint8Array(data)
+    const action = decodeBytes(buffer.subarray(0, typeByteLimit))
+    const nonce = buffer.subarray(typeByteLimit, typeByteLimit + 1)[0]
+    const tag = buffer.subarray(typeByteLimit + 1, typeByteLimit + 2)[0]
+    const payload = buffer.subarray(typeByteLimit + 2)
+    const isLast = !!(tag & 1)
+    const isMeta = !!(tag & (1 << 1))
+    const isBinary = !!(tag & (1 << 2))
+    const isJson = !!(tag & (1 << 3))
+
+    if (!actions[action]) {
+      throw mkErr(`received message with unregistered type (${action})`)
+    }
+
+    if (!pendingTransmissions[id]) {
+      pendingTransmissions[id] = {}
+    }
+
+    if (!pendingTransmissions[id][action]) {
+      pendingTransmissions[id][action] = {}
+    }
+
+    let target = pendingTransmissions[id][action][nonce]
+
+    if (!target) {
+      target = pendingTransmissions[id][action][nonce] = {chunks: []}
+    }
+
+    if (isMeta) {
+      target.meta = JSON.parse(decodeBytes(payload))
+    } else {
+      target.chunks.push(payload)
+    }
+
+    if (!isLast) {
+      return
+    }
+
+    const full = combineChunks(target.chunks)
+
+    if (isBinary) {
+      actions[action](full, id, target.meta)
+    } else {
+      const text = decodeBytes(full)
+      actions[action](isJson ? JSON.parse(text) : text, id)
+    }
+
+    delete pendingTransmissions[id][action][nonce]
+  }
+
   const [sendPing, getPing] = makeAction('__91n6__')
   const [sendPong, getPong] = makeAction('__90n6__')
   const [sendSignal, getSignal] = makeAction('__516n4L__')
@@ -178,63 +229,16 @@ export default (onPeer, onSelfLeave) => {
       return
     }
 
+    const onData = handleData.bind(null, id)
+
     peerMap[id] = peer
 
     peer.on(events.signal, sdp => sendSignal(sdp, id))
     peer.on(events.close, () => exitPeer(id))
+    peer.on(events.data, onData)
     peer.on(events.stream, stream => {
       onPeerStream(stream, id, pendingStreamMetas[id])
       delete pendingStreamMetas[id]
-    })
-    peer.on(events.data, data => {
-      const buffer = new Uint8Array(data)
-      const action = decodeBytes(buffer.subarray(0, typeByteLimit))
-      const nonce = buffer.subarray(typeByteLimit, typeByteLimit + 1)[0]
-      const tag = buffer.subarray(typeByteLimit + 1, typeByteLimit + 2)[0]
-      const payload = buffer.subarray(typeByteLimit + 2)
-      const isLast = !!(tag & 1)
-      const isMeta = !!(tag & (1 << 1))
-      const isBinary = !!(tag & (1 << 2))
-      const isJson = !!(tag & (1 << 3))
-
-      if (!actions[action]) {
-        throw mkErr(`received message with unregistered type (${action})`)
-      }
-
-      if (!pendingTransmissions[id]) {
-        pendingTransmissions[id] = {}
-      }
-
-      if (!pendingTransmissions[id][action]) {
-        pendingTransmissions[id][action] = {}
-      }
-
-      let target = pendingTransmissions[id][action][nonce]
-
-      if (!target) {
-        target = pendingTransmissions[id][action][nonce] = {chunks: []}
-      }
-
-      if (isMeta) {
-        target.meta = JSON.parse(decodeBytes(payload))
-      } else {
-        target.chunks.push(payload)
-      }
-
-      if (!isLast) {
-        return
-      }
-
-      const full = combineChunks(target.chunks)
-
-      if (isBinary) {
-        actions[action](full, id, target.meta)
-      } else {
-        const text = decodeBytes(full)
-        actions[action](isJson ? JSON.parse(text) : text, id)
-      }
-
-      delete pendingTransmissions[id][action][nonce]
     })
     peer.on(events.error, e => {
       if (e.code === 'ERR_DATA_CHANNEL') {
@@ -244,6 +248,7 @@ export default (onPeer, onSelfLeave) => {
     })
 
     onPeerJoin(id)
+    peer.__drainEarlyData(onData)
   })
 
   getPing((_, id) => sendPong(null, id))
