@@ -22,7 +22,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "firebase": "^9.0.0-beta.5",
+    "firebase": "^9.0.0-beta.6",
     "ipfs-core": "^0.8.0",
     "simple-peer-light": "^9.10.0"
   },
