@@ -19,14 +19,18 @@ const defaultRootPath = `__${libName.toLowerCase()}__`
 const occupiedRooms = {}
 const dbs = {}
 const getPath = (...xs) => xs.join('/')
+const normalizeDbUrl = url =>
+  url.startsWith('https://') ? url : `https://${url}.firebaseio.com`
 
-const init = config =>
-  dbs[config.appId] ||
-  (dbs[config.appId] = getDatabase(
-    initializeApp({
-      databaseURL: `https://${config.appId}.firebaseio.com`
-    })
-  ))
+const init = config => {
+  if (config.firebaseApp) {
+    const url = config.firebaseApp.options.databaseURL
+    return dbs[url] || (dbs[url] = getDatabase(config.firebaseApp))
+  }
+
+  const url = normalizeDbUrl(config.appId)
+  return dbs[url] || (dbs[url] = getDatabase(initializeApp({databaseURL: url})))
+}
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const db = init(config)
