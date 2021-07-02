@@ -33,7 +33,7 @@ export const initGuard = (occupiedRooms, f) => (config, ns) => {
     throw mkErr('requires a config map as the first argument')
   }
 
-  if (!config.appId) {
+  if (!config.appId && !config.firebaseApp) {
     throw mkErr('config map is missing appId field')
   }
 
