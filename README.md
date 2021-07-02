@@ -228,16 +228,12 @@ communication channels and send events.
 - `config` - Configuration object containing the following keys:
 
   - `appId` - **(required)** A unique string identifying your app. If using
-    Firebase this should be the database ID.
+    Firebase this should be the database ID (also see `firebaseApp` below for
+    an alternative way of configuring the Firebase strategy).
 
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
-
-  - `rootPath` - **(optional, 🔥 Firebase only)** Where Trystero writes its
-    matchmaking data in your database (`'__trystero__'` by default). Changing
-    this is useful if you want to run multiple apps using the same database and
-    don't want to worry about namespace collisions.
 
   - `trackerUrls` - **(optional, 🌊 BitTorrent only)** Custom list of torrent
     tracker URLs to use. They must support WebSocket connections.
@@ -246,6 +242,16 @@ communication channels and send events.
     how many torrent trackers to connect to simultaneously in case some fail.
     Defaults to 2, maximum of 4. Passing a `trackerUrls` option will cause this
     option to be ignored as the entire list will be used.
+
+  - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
+    initialized Firebase app instance instead of an `appId`. Normally Trystero
+    will initialize a Firebase app based on the `appId` but this will fail if
+    youʼve already initialized it for use elsewhere.
+
+  - `rootPath` - **(optional, 🔥 Firebase only)** String specifying path where
+    Trystero writes its matchmaking data in your database (`'__trystero__'` by
+    default). Changing this is useful if you want to run multiple apps using the
+    same database and don't want to worry about namespace collisions.
 
   - `swarmAddresses` - **(optional, 🪐 IPFS only)** List of IPFS multiaddrs to
     be passed to `config.Addresses.Swarm`.
