@@ -62,7 +62,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     await new Promise(awaitPeers)
     await Promise.all([
       node.pubsub.subscribe(rootTopic, msg => {
-        const peerId = decodeBytes(msg.data)
+        const peerId = msg.data
 
         if (peerId === selfId || connectedPeers[peerId] || seenPeers[peerId]) {
           return
