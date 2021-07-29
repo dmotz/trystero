@@ -85,7 +85,7 @@ export default (onPeer, onSelfLeave) => {
           throw mkErr('action meta argument must be an object')
         }
 
-        const isJson = typeof data === 'object' || typeof data === 'number'
+        const isJson = typeof data !== 'string'
         const isBlob = data instanceof Blob
         const isBinary =
           isBlob || data instanceof ArrayBuffer || data instanceof TypedArray
