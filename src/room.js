@@ -56,10 +56,6 @@ export default (onPeer, onSelfLeave) => {
       throw mkErr('action type argument is required')
     }
 
-    if (actions[type]) {
-      throw mkErr(`action '${type}' already registered`)
-    }
-
     const typeEncoded = encodeBytes(type)
 
     if (typeEncoded.byteLength > typeByteLimit) {
@@ -73,6 +69,10 @@ export default (onPeer, onSelfLeave) => {
     typeBytes.set(typeEncoded)
 
     const typePadded = decodeBytes(typeBytes)
+
+    if (actions[typePadded]) {
+      throw mkErr(`action '${type}' already registered`)
+    }
 
     let nonce = 0
 
