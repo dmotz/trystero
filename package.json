@@ -22,12 +22,12 @@
   },
   "license": "MIT",
   "dependencies": {
-    "firebase": "9.0.0-beta.7",
+    "firebase": "^9.0.0",
     "ipfs-core": "^0.9.0",
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^19.0.0",
+    "@rollup/plugin-commonjs": "^20.0.0",
     "@rollup/plugin-node-resolve": "^13.0.0",
     "rollup": "^2.47.0",
     "terser": "^5.7.0"
