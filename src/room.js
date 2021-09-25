@@ -320,6 +320,15 @@ export default (onPeer, onSelfLeave) => {
     removeStream: (stream, targets) =>
       iterate(targets, (_, peer) => peer.removeStream(stream)),
 
+    addTrack: (track, stream, targets, meta) =>
+      iterate(targets, async (id, peer) => {
+        if (meta) {
+          await sendTrackMeta(meta, id)
+        }
+
+        peer.addTrack(track, stream)
+      }),
+
     onPeerJoin: f => (onPeerJoin = f),
 
     onPeerLeave: f => (onPeerLeave = f),
