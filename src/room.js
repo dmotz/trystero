@@ -22,6 +22,7 @@ export default (onPeer, onSelfLeave) => {
   const pendingTransmissions = {}
   const pendingPongs = {}
   const pendingStreamMetas = {}
+  const pendingTrackMetas = {}
 
   const iterate = (targets, f) =>
     (targets
@@ -223,10 +224,12 @@ export default (onPeer, onSelfLeave) => {
   const [sendPong, getPong] = makeAction('__90n6__')
   const [sendSignal, getSignal] = makeAction('__516n4L__')
   const [sendStreamMeta, getStreamMeta] = makeAction('__57r34m__')
+  const [sendTrackMeta, getTrackMeta] = makeAction('__7r4ck__')
 
   let onPeerJoin = noOp
   let onPeerLeave = noOp
   let onPeerStream = noOp
+  let onPeerTrack = noOp
 
   onPeer((peer, id) => {
     if (peerMap[id]) {
@@ -240,10 +243,17 @@ export default (onPeer, onSelfLeave) => {
     peer.on(events.signal, sdp => sendSignal(sdp, id))
     peer.on(events.close, () => exitPeer(id))
     peer.on(events.data, onData)
+
     peer.on(events.stream, stream => {
       onPeerStream(stream, id, pendingStreamMetas[id])
       delete pendingStreamMetas[id]
     })
+
+    peer.on(events.track, (track, stream) => {
+      onPeerTrack(track, stream, id, pendingTrackMetas[id])
+      delete pendingTrackMetas[id]
+    })
+
     peer.on(events.error, e => {
       if (e.code === 'ERR_DATA_CHANNEL') {
         return
@@ -271,6 +281,8 @@ export default (onPeer, onSelfLeave) => {
   })
 
   getStreamMeta((meta, id) => (pendingStreamMetas[id] = meta))
+
+  getTrackMeta((meta, id) => (pendingTrackMetas[id] = meta))
 
   return {
     makeAction,
