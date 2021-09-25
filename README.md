@@ -316,7 +316,20 @@ Returns an object with the following methods:
 
   - `stream` - The `MediaStream` the track is attached to.
 
-  - `peerId` - **(optional)** If specified, the stream is removed only from the
+  - `peerId` - **(optional)** If specified, the track is removed only from the
+    target peer ID (string) or list of peer IDs (array).
+
+- ### `replaceTrack(oldTrack, newTrack, stream, [peerId])`
+
+  Replaces a media track with a new one.
+
+  - `oldTrack` - The `MediaStreamTrack` to remove.
+
+  - `newTrack` - A `MediaStreamTrack` to attach.
+
+  - `stream` - The `MediaStream` the `oldTrack` is attached to.
+
+  - `peerId` - **(optional)** If specified, the track is replaced only for the
     target peer ID (string) or list of peer IDs (array).
 
 - ### `onPeerJoin(callback)`
