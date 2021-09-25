@@ -324,6 +324,8 @@ export default (onPeer, onSelfLeave) => {
 
     onPeerLeave: f => (onPeerLeave = f),
 
-    onPeerStream: f => (onPeerStream = f)
+    onPeerStream: f => (onPeerStream = f),
+
+    onPeerTrack: f => (onPeerTrack = f)
   }
 }
