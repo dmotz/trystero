@@ -337,6 +337,22 @@ Returns an object with the following methods:
   onPeerStream((stream, id) => console.log(`got stream from ${id}`, stream))
   ```
 
+- ### `onPeerTrack(callback)`
+
+  Registers a callback function that will be called when a peer sends a media
+  track. If called more than once, only the latest callback registered is ever
+  called.
+
+  - `callback(track, stream, peerId, metadata)` - Function to run whenever a
+    peer sends a media track, called with the the peer's track, attached stream,
+    ID, and optional metadata (see `addTrack()` above for details).
+
+  Example:
+
+  ```javascript
+  onPeerTrack((track, stream, id) => console.log(`got track from ${id}`, track))
+  ```
+
 - ### `makeAction(namespace)`
 
   Listen for and send custom data actions.
