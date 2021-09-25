@@ -329,6 +329,9 @@ export default (onPeer, onSelfLeave) => {
         peer.addTrack(track, stream)
       }),
 
+    removeTrack: (track, stream, targets) =>
+      iterate(targets, (_, peer) => peer.removeTrack(track, stream)),
+
     onPeerJoin: f => (onPeerJoin = f),
 
     onPeerLeave: f => (onPeerLeave = f),
