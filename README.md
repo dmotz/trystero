@@ -284,6 +284,15 @@ Returns an object with the following methods:
     you want to broadcast a stream to all peers in the room with a metadata
     argument, pass `null` as the second argument.
 
+- ### `removeStream(stream, [peerId])`
+
+  Stops sending previously sent media stream to other peers.
+
+  - `stream` - A previously sent `MediaStream` to stop sending.
+
+  - `peerId` - **(optional)** If specified, the stream is removed only from the
+    target peer ID (string) or list of peer IDs (array).
+
 - ### `addTrack(track, stream, [peerId], [metadata])`
 
   Adds a new media track to a stream.
@@ -299,11 +308,13 @@ Returns an object with the following methods:
     be sent with the track. See `metadata` notes for `addStream()` above for
     more details.
 
-- ### `removeStream(stream, [peerId])`
+- ### `removeTrack(track, stream, [peerId])`
 
-  Stops sending previously sent media stream to other peers.
+  Removes a media track from a stream.
 
-  - `stream` - A previously sent `MediaStream` to stop sending.
+  - `track` - The `MediaStreamTrack` to remove.
+
+  - `stream` - The `MediaStream` the track is attached to.
 
   - `peerId` - **(optional)** If specified, the stream is removed only from the
     target peer ID (string) or list of peer IDs (array).
