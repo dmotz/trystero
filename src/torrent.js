@@ -112,7 +112,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       handledOffers[val.offer_id] = true
 
       const peer = initPeer(false, false, config.rtcConfig)
-      peer.once(events.signal, answer => {
+      peer.once(events.signal, answer =>
         socket.send(
           JSON.stringify({
             answer,
@@ -123,7 +123,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
             offer_id: val.offer_id
           })
         )
-      })
+      )
 
       peer.on(events.connect, () => onConnect(peer, val.peer_id))
       peer.on(events.close, () => onDisconnect(val.peer_id))
