@@ -1,4 +1,8 @@
-import {joinRoom, selfId, getOccupants} from '../src/firebase'
+import {
+  joinRoom,
+  selfId,
+  getOccupants
+} from 'https://cdn.skypack.dev/trystero/firebase'
 
 const byId = document.getElementById.bind(document)
 const canvas = byId('canvas')
