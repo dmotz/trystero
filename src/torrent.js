@@ -25,9 +25,8 @@ const maxAnnounceSecs = 120
 const trackerAction = 'announce'
 const defaultTrackerUrls = [
   'wss://tracker.openwebtorrent.com/',
-  'wss://tracker.sloppyta.co:443/announce',
-  'wss://tracker.lab.vvc.niif.hu:443/announce',
-  'wss://tracker.files.fm:7073/announce'
+  'wss://tracker.btorrent.xyz',
+  'wss://spacetradersapi-chatbox.herokuapp.com:443/announce'
 ]
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
