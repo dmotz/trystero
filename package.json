@@ -27,7 +27,7 @@
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^20.0.0",
+    "@rollup/plugin-commonjs": "^21.0.1",
     "@rollup/plugin-node-resolve": "^13.0.0",
     "rollup": "^2.47.0",
     "terser": "^5.7.0"
@@ -47,6 +47,7 @@
     "bittorrent",
     "webtorrent",
     "ipfs",
-    "firebase"
+    "firebase",
+    "realtime"
   ]
 }
