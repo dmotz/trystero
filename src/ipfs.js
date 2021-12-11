@@ -9,7 +9,7 @@ import {
   noOp,
   selfId
 } from './utils'
-import {makeKey, encrypt, decrypt} from './crypto'
+import {genKey, encrypt, decrypt} from './crypto'
 
 const occupiedRooms = {}
 const swarmPollMs = 999
@@ -40,7 +40,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const offers = {}
   const seenPeers = {}
   const connectedPeers = {}
-  const key = config.password && makeKey(config.password, ns)
+  const key = config.password && genKey(config.password, ns)
   const connectPeer = (peer, peerId) => {
     onPeerConnect(peer, peerId)
     connectedPeers[peerId] = peer

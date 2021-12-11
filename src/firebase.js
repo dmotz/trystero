@@ -13,7 +13,7 @@ import {
 } from 'firebase/database'
 import room from './room'
 import {events, initGuard, initPeer, keys, libName, noOp, selfId} from './utils'
-import {makeKey, encrypt, decrypt} from './crypto'
+import {genKey, encrypt, decrypt} from './crypto'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -41,7 +41,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const rootPath = config.rootPath || defaultRootPath
   const roomRef = ref(db, getPath(rootPath, ns))
   const selfRef = child(roomRef, selfId)
-  const key = config.password && makeKey(config.password, ns)
+  const key = config.password && genKey(config.password, ns)
 
   const makePeer = (id, initiator) => {
     if (peerMap[id] && !peerMap[id].destroyed) {

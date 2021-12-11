@@ -11,7 +11,7 @@ const unpack = packed => {
   return new Uint8Array(str.length).map((_, i) => str.charCodeAt(i)).buffer
 }
 
-export const makeKey = async (secret, ns) =>
+export const genKey = async (secret, ns) =>
   crypto.subtle.importKey(
     'raw',
     await crypto.subtle.digest(

@@ -13,7 +13,7 @@ import {
   selfId,
   values
 } from './utils'
-import {makeKey, encrypt, decrypt} from './crypto'
+import {genKey, encrypt, decrypt} from './crypto'
 
 const occupiedRooms = {}
 const sockets = {}
@@ -32,7 +32,7 @@ const defaultTrackerUrls = [
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const connectedPeers = {}
-  const key = config.password && makeKey(config.password, ns)
+  const key = config.password && genKey(config.password, ns)
   const trackerUrls = (config.trackerUrls || defaultTrackerUrls).slice(
     0,
     config.trackerUrls
