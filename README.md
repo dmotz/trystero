@@ -254,7 +254,8 @@ communication channels and send events.
   - `password` - **(optional)** A string to encrypt session descriptions as they
     are passed through the peering medium. If set, session descriptions will be
     encrypted using AES-CBC. The password must match between any peers in the
-    namespace for them to connect. See [encryption](#encryption) for more
+    namespace for them to connect. Your site must be served over HTTPS for the
+    crypto module to be used. See [encryption](#encryption) for more
     details.
 
   - `rtcConfig` - **(optional)** Specifies a custom
