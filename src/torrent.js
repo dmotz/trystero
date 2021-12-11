@@ -13,6 +13,7 @@ import {
   selfId,
   values
 } from './utils'
+import {makeKey, encrypt, decrypt} from './crypto'
 
 const occupiedRooms = {}
 const sockets = {}
@@ -31,6 +32,7 @@ const defaultTrackerUrls = [
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const connectedPeers = {}
+  const key = config.password && makeKey(config.password, ns)
   const trackerUrls = (config.trackerUrls || defaultTrackerUrls).slice(
     0,
     config.trackerUrls
@@ -103,10 +105,13 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       handledOffers[val.offer_id] = true
 
       const peer = initPeer(false, false, config.rtcConfig)
-      peer.once(events.signal, answer =>
+
+      peer.once(events.signal, async answer =>
         socket.send(
           JSON.stringify({
-            answer,
+            answer: key
+              ? {...answer, sdp: await encrypt(key, answer.sdp)}
+              : answer,
             action: trackerAction,
             info_hash: infoHash,
             peer_id: selfId,
@@ -115,10 +120,12 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
           })
         )
       )
-
       peer.on(events.connect, () => onConnect(peer, val.peer_id))
       peer.on(events.close, () => onDisconnect(val.peer_id))
-      peer.signal(val.offer)
+      peer.signal(
+        key ? {...val.offer, sdp: await decrypt(key, val.offer.sdp)} : val.offer
+      )
+
       return
     }
 
@@ -141,7 +148,11 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
           onConnect(peer, val.peer_id, val.offer_id)
         )
         peer.on(events.close, () => onDisconnect(val.peer_id))
-        peer.signal(val.answer)
+        peer.signal(
+          key
+            ? {...val.answer, sdp: await decrypt(key, val.answer.sdp)}
+            : val.answer
+        )
       }
     }
   }
@@ -154,9 +165,16 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         numwant: offerPoolSize,
         peer_id: selfId,
         offers: await Promise.all(
-          entries(offerPool).map(([id, {offerP}]) =>
-            offerP.then(offer => ({offer, offer_id: id}))
-          )
+          entries(offerPool).map(async ([id, {offerP}]) => {
+            const offer = await offerP
+
+            return {
+              offer_id: id,
+              offer: key
+                ? {...offer, sdp: await encrypt(key, offer.sdp)}
+                : offer
+            }
+          })
         )
       })
     )
