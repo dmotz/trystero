@@ -40,7 +40,6 @@ export const encrypt = async (keyP, plaintext) => {
 }
 
 export const decrypt = async (keyP, raw) => {
-  console.log(raw)
   const {c, iv} = JSON.parse(raw)
 
   return decodeBytes(
