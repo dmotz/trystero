@@ -218,6 +218,26 @@ await sendFile(amplePayload)
 console.log('done sending')
 ```
 
+### Encryption
+
+Once peers are connected to each other all of their communications are
+end-to-end encrypted. During the initial connection / discovery process, peers'
+[SDPs](https://en.wikipedia.org/wiki/Session_Description_Protocol) are sent via
+the chosen peering strategy medium. The SDP is encrypted over the wire, but is
+visible in plaintext as it passes through the medium (a public torrent tracker
+for example). This is fine for most use cases but isn't always ideal as the SDP
+contains the peer's IP address. Trystero provides an option for encrypting the
+SDP so it isn't readable by the operator of the peering medium. To opt into
+SDP encryption just pass a `password` parameter, e.g.:
+
+```javascript
+joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
+```
+
+Keep in mind the password has to match for all peers in the room for them to be
+able to connect. An example use case might be a private chat room where users
+learn the password via external means.
+
 ## API
 
 ### `joinRoom(config, namespace)`
@@ -230,6 +250,13 @@ communication channels and send events.
   - `appId` - **(required)** A unique string identifying your app. If using
     Firebase this should be the database ID (also see `firebaseApp` below for
     an alternative way of configuring the Firebase strategy).
+
+  - `password` - **(optional)** A string to encrypt session descriptions as they
+    are passed through the peering medium. If set, session descriptions will be
+    encrypted using AES-CBC. The password must match between any peers in the
+    namespace for them to connect. Your site must be served over HTTPS for the
+    crypto module to be used. See [encryption](#encryption) for more
+    details.
 
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)

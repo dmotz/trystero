@@ -13,6 +13,7 @@ import {
 } from 'firebase/database'
 import room from './room'
 import {events, initGuard, initPeer, keys, libName, noOp, selfId} from './utils'
+import {genKey, encrypt, decrypt} from './crypto'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -40,6 +41,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const rootPath = config.rootPath || defaultRootPath
   const roomRef = ref(db, getPath(rootPath, ns))
   const selfRef = child(roomRef, selfId)
+  const key = config.password && genKey(config.password, ns)
 
   const makePeer = (id, initiator) => {
     if (peerMap[id] && !peerMap[id].destroyed) {
@@ -53,14 +55,16 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       connectedPeers[id] = true
     })
 
-    peer.on(events.signal, sdp => {
+    peer.on(events.signal, async sdp => {
       if (connectedPeers[id]) {
         return
       }
 
+      const payload = JSON.stringify(sdp)
       const signalRef = push(ref(db, getPath(rootPath, ns, id, selfId)))
+
       onDisconnect(signalRef).remove()
-      set(signalRef, JSON.stringify(sdp))
+      set(signalRef, key ? await encrypt(key, payload) : payload)
     })
 
     peerMap[id] = peer
@@ -81,7 +85,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       return
     }
 
-    onChildAdded(data.ref, data => {
+    onChildAdded(data.ref, async data => {
       if (!(peerId in peerSigs)) {
         peerSigs[peerId] = {}
       }
@@ -95,7 +99,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       let val
 
       try {
-        val = JSON.parse(data.val())
+        val = JSON.parse(key ? await decrypt(key, data.val()) : data.val())
       } catch (e) {
         console.error(`${libName}: received malformed SDP JSON`)
         return
