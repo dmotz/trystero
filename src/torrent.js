@@ -24,7 +24,7 @@ const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
 const trackerAction = 'announce'
 const defaultTrackerUrls = [
-  'wss://tracker.openwebtorrent.com/',
+  'wss://tracker.openwebtorrent.com',
   'wss://tracker.btorrent.xyz',
   'wss://spacetradersapi-chatbox.herokuapp.com:443/announce'
 ]
