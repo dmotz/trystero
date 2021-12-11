@@ -74,11 +74,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       return
     }
 
-    if (val.info_hash !== infoHash) {
-      return
-    }
-
-    if (val.peer_id && val.peer_id === selfId) {
+    if (val.info_hash !== infoHash || (val.peer_id && val.peer_id === selfId)) {
       return
     }
 
@@ -100,11 +96,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
 
     if (val.offer && val.offer_id) {
-      if (connectedPeers[val.peer_id]) {
-        return
-      }
-
-      if (handledOffers[val.offer_id]) {
+      if (connectedPeers[val.peer_id] || handledOffers[val.offer_id]) {
         return
       }
 
@@ -131,11 +123,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
 
     if (val.answer) {
-      if (connectedPeers[val.peer_id]) {
-        return
-      }
-
-      if (handledOffers[val.offer_id]) {
+      if (connectedPeers[val.peer_id] || handledOffers[val.offer_id]) {
         return
       }
 
