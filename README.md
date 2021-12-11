@@ -218,6 +218,26 @@ await sendFile(amplePayload)
 console.log('done sending')
 ```
 
+### Encryption
+
+Once peers are connected to each other all of their communications are
+end-to-end encrypted. During the initial connection / discovery process, peers'
+[SDPs](https://en.wikipedia.org/wiki/Session_Description_Protocol) are sent via
+the chosen peering strategy medium. The SDP is encrypted over the wire, but is
+visible in plaintext as it passes through the medium (a public torrent tracker
+for example). This is fine for most use cases but isn't always ideal as the SDP
+contains the peer's IP address. Trystero provides an option for encrypting the
+SDP so it isn't readable by the operator of the peering medium. To opt into
+SDP encryption just pass a `password` parameter, e.g.:
+
+```javascript
+joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
+```
+
+Keep in mind the password has to match for all peers in the room for them to be
+able to connect. An example use case might be a private chat room where users
+learn the password via external means.
+
 ## API
 
 ### `joinRoom(config, namespace)`
