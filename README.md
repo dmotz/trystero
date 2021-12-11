@@ -251,6 +251,12 @@ communication channels and send events.
     Firebase this should be the database ID (also see `firebaseApp` below for
     an alternative way of configuring the Firebase strategy).
 
+  - `password` - **(optional)** A string to encrypt session descriptions as they
+    are passed through the peering medium. If set, session descriptions will be
+    encrypted using AES-CBC. The password must match between any peers in the
+    namespace for them to connect. See [encryption](#encryption) for more
+    details.
+
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
