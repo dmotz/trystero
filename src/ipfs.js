@@ -9,6 +9,7 @@ import {
   noOp,
   selfId
 } from './utils'
+import {makeKey, encrypt, decrypt} from './crypto'
 
 const occupiedRooms = {}
 const swarmPollMs = 999
@@ -39,6 +40,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const offers = {}
   const seenPeers = {}
   const connectedPeers = {}
+  const key = config.password && makeKey(config.password, ns)
   const connectPeer = (peer, peerId) => {
     onPeerConnect(peer, peerId)
     connectedPeers[peerId] = peer
@@ -72,10 +74,15 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
         const peer = (offers[peerId] = initPeer(true, false, config.rtcConfig))
 
-        peer.once(events.signal, offer => {
+        peer.once(events.signal, async offer => {
           node.pubsub.publish(
             `${rootTopic}:${peerId}`,
-            JSON.stringify({peerId: selfId, offer})
+            JSON.stringify({
+              peerId: selfId,
+              offer: key
+                ? {...offer, sdp: await encrypt(key, offer.sdp)}
+                : offer
+            })
           )
 
           setTimeout(() => {
@@ -91,7 +98,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         peer.once(events.connect, () => connectPeer(peer, peerId))
       }),
 
-      node.pubsub.subscribe(selfTopic, msg => {
+      node.pubsub.subscribe(selfTopic, async msg => {
         let payload
 
         try {
@@ -104,20 +111,29 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         const {peerId, offer, answer} = payload
 
         if (offers[peerId] && answer) {
-          offers[peerId].signal(answer)
+          offers[peerId].signal(
+            key ? {...answer, sdp: await decrypt(key, answer.sdp)} : answer
+          )
           return
         }
 
         const peer = initPeer(false, false, config.rtcConfig)
 
-        peer.once(events.signal, answer =>
+        peer.once(events.signal, async answer =>
           node.pubsub.publish(
             `${rootTopic}:${peerId}`,
-            JSON.stringify({peerId: selfId, answer})
+            JSON.stringify({
+              peerId: selfId,
+              answer: key
+                ? {...answer, sdp: await encrypt(key, answer.sdp)}
+                : answer
+            })
           )
         )
         peer.on(events.connect, () => connectPeer(peer, peerId))
-        peer.signal(offer)
+        peer.signal(
+          key ? {...offer, sdp: await decrypt(key, offer.sdp)} : offer
+        )
       })
     ])
 
