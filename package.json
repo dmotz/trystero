@@ -48,6 +48,9 @@
     "webtorrent",
     "ipfs",
     "firebase",
-    "realtime"
+    "realtime",
+    "decentralized",
+    "signaling",
+    "pairing"
   ]
 }
