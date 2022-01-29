@@ -17,6 +17,7 @@ all using the same API.
 - [Get started](#get-started)
 - [Listen for events](#listen-for-events)
 - [Broadcast events](#broadcast-events)
+- [Audio and video](#audio-and-video)
 - [Advanced](#advanced)
   - [Binary metadata](#binary-metadata)
   - [Action promises](#action-promises)
@@ -190,7 +191,7 @@ room.onPeerLeave(peerId =>
 > will be received on the other side as the same type (a number as a number,
 > a string as a string, an object as an object, binary as binary, etc.).
 
-## Audio / Video
+## Audio and video
 
 Here's a simple example of how you could create an audio chatroom:
 
