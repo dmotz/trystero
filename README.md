@@ -223,6 +223,30 @@ room.onPeerStream((stream, peerId) => {
 })
 ```
 
+Doing the same with video is similar, just be sure to add incoming streams to
+video elements in the DOM:
+
+```javascript
+const peerVideos = {}
+const videoContainer = document.getElementById('videos')
+
+room.onPeerStream((stream, peerId) => {
+  let video = peerVideos[peerId]
+
+  // if this peer hasn't sent a stream before, create a video element
+  if (!video) {
+    video = document.createElement('video')
+    video.autoplay = true
+
+    // add video element to the DOM
+    videoContainer.appendChild(video)
+  }
+
+  video.srcObject = stream
+  peerVideos[peerId] = video
+})
+```
+
 ## Advanced
 
 ### Binary metadata
