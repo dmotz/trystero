@@ -290,10 +290,9 @@ end-to-end encrypted. During the initial connection / discovery process, peers'
 [SDPs](https://en.wikipedia.org/wiki/Session_Description_Protocol) are sent via
 the chosen peering strategy medium. The SDP is encrypted over the wire, but is
 visible in plaintext as it passes through the medium (a public torrent tracker
-for example). This is fine for most use cases but isn't always ideal as the SDP
-contains the peer's IP address. Trystero provides an option for encrypting the
-SDP so it isn't readable by the operator of the peering medium. To opt into
-SDP encryption just pass a `password` parameter, e.g.:
+for example). This is fine for most use cases but you can choose to hide SDPs
+from the peering medium with Trystero's encryption option. To opt in, just pass
+a `password` parameter in the app configuration object:
 
 ```javascript
 joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
