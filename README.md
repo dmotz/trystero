@@ -98,19 +98,21 @@ second argument is the room name.
 Listen for peers joining the room:
 
 ```javascript
-room.onPeerJoin(id => console.log(`${id} joined`))
+room.onPeerJoin(peerId => console.log(`${peerId} joined`))
 ```
 
 Listen for peers leaving the room:
 
 ```javascript
-room.onPeerLeave(id => console.log(`${id} left`))
+room.onPeerLeave(peerId => console.log(`${peerId} left`))
 ```
 
 Listen for peers sending their audio/video streams:
 
 ```javascript
-room.onPeerStream((stream, id) => (peerElements[id].video.srcObject = stream))
+room.onPeerStream(
+  (stream, peerId) => (peerElements[peerId].video.srcObject = stream)
+)
 ```
 
 To unsubscribe from events, leave the room:
@@ -141,9 +143,9 @@ sendDrink({drink: 'negroni', withIce: true}, friendId)
 sendDrink({drink: 'mezcal', withIce: false})
 
 // listen for drinks sent to you
-getDrink((data, id) =>
+getDrink((data, peerId) =>
   console.log(
-    `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${id}`
+    `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${peerId}`
   )
 )
 ```
@@ -158,7 +160,9 @@ canvas.toBlob(blob => sendPic(blob))
 
 // binary data is received as raw ArrayBuffers so your handling code should
 // interpret it in a way that makes sense
-getPic((data, id) => (imgs[id].src = URL.createObjectURL(new Blob([data]))))
+getPic(
+  (data, peerId) => (imgs[peerId].src = URL.createObjectURL(new Blob([data])))
+)
 ```
 
 Let's say we want users to be able to name themselves:
@@ -171,13 +175,13 @@ const [sendName, getName] = room.makeAction('name')
 sendName('Oedipa')
 
 // tell newcomers
-room.onPeerJoin(id => sendName('Oedipa', id))
+room.onPeerJoin(peerId => sendName('Oedipa', peerId))
 
 // listen for peers naming themselves
-getName((name, id) => (idsToNames[id] = name))
+getName((name, peerId) => (idsToNames[peerId] = name))
 
-room.onPeerLeave(id =>
-  console.log(`${idsToNames[id] || 'a weird stranger'} left`)
+room.onPeerLeave(peerId =>
+  console.log(`${idsToNames[peerId] || 'a weird stranger'} left`)
 )
 ```
 
