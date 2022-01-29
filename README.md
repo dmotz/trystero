@@ -190,6 +190,39 @@ room.onPeerLeave(peerId =>
 > will be received on the other side as the same type (a number as a number,
 > a string as a string, an object as an object, binary as binary, etc.).
 
+## Audio / Video
+
+Here's a simple example of how you could create an audio chatroom:
+
+```javascript
+// this object can store audio instances for later
+const peerAudios = {}
+
+// get a local audio stream from the microphone
+const selfStream = await navigator.mediaDevices.getUserMedia({
+  audio: true,
+  video: false
+})
+
+// send stream to peers currently in the room
+room.addStream(selfStream)
+
+// send stream to peers who join later
+room.onPeerJoin(peerId => room.addStream(selfStream, peerId))
+
+// handle streams from other peers
+room.onPeerStream((stream, peerId) => {
+  // create an audio instance and set the incoming stream
+  const audio = new Audio()
+  audio.srcObject = stream
+  audio.autoplay = true
+
+  // add the audio to peerAudio object if you want to address it for something
+  // later (volume, etc.)
+  peerAudios[peerId] = audio
+})
+```
+
 ## Advanced
 
 ### Binary metadata
