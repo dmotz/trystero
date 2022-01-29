@@ -189,7 +189,7 @@ export default (onPeer, onSelfLeave) => {
 
   const handleData = (id, data) => {
     const buffer = new Uint8Array(data)
-    const action = decodeBytes(buffer.subarray(0, typeByteLimit))
+    const type = decodeBytes(buffer.subarray(0, typeByteLimit))
     const nonce = buffer.subarray(typeByteLimit, typeByteLimit + 1)[0]
     const tag = buffer.subarray(typeByteLimit + 1, typeByteLimit + 2)[0]
     const progress = buffer.subarray(typeByteLimit + 2, typeByteLimit + 3)[0]
@@ -199,22 +199,22 @@ export default (onPeer, onSelfLeave) => {
     const isBinary = !!(tag & (1 << 2))
     const isJson = !!(tag & (1 << 3))
 
-    if (!actions[action]) {
-      throw mkErr(`received message with unregistered type (${action})`)
+    if (!actions[type]) {
+      throw mkErr(`received message with unregistered type (${type})`)
     }
 
     if (!pendingTransmissions[id]) {
       pendingTransmissions[id] = {}
     }
 
-    if (!pendingTransmissions[id][action]) {
-      pendingTransmissions[id][action] = {}
+    if (!pendingTransmissions[id][type]) {
+      pendingTransmissions[id][type] = {}
     }
 
-    let target = pendingTransmissions[id][action][nonce]
+    let target = pendingTransmissions[id][type][nonce]
 
     if (!target) {
-      target = pendingTransmissions[id][action][nonce] = {chunks: []}
+      target = pendingTransmissions[id][type][nonce] = {chunks: []}
     }
 
     if (isMeta) {
@@ -223,7 +223,7 @@ export default (onPeer, onSelfLeave) => {
       target.chunks.push(payload)
     }
 
-    actions[action].onProgress(progress / oneByteMax, id, target.meta)
+    actions[type].onProgress(progress / oneByteMax, id, target.meta)
 
     if (!isLast) {
       return
@@ -232,13 +232,13 @@ export default (onPeer, onSelfLeave) => {
     const full = combineChunks(target.chunks)
 
     if (isBinary) {
-      actions[action].onComplete(full, id, target.meta)
+      actions[type].onComplete(full, id, target.meta)
     } else {
       const text = decodeBytes(full)
-      actions[action].onComplete(isJson ? JSON.parse(text) : text, id)
+      actions[type].onComplete(isJson ? JSON.parse(text) : text, id)
     }
 
-    delete pendingTransmissions[id][action][nonce]
+    delete pendingTransmissions[id][type][nonce]
   }
 
   const [sendPing, getPing] = makeAction('__91n6__')
