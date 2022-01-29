@@ -78,7 +78,6 @@ export default (onPeer, onSelfLeave) => {
     let nonce = 0
 
     actions[typePadded] = noOp
-    pendingTransmissions[type] = {}
 
     return [
       async (data, targets, meta) => {
