@@ -260,9 +260,9 @@ simply pass a metadata argument in the sender action for your binary payload:
 ```javascript
 const [sendFile, getFile] = makeAction('file')
 
-getFile((data, id, meta) =>
+getFile((data, peerId, metadata) =>
   console.log(
-    `got a file (${meta.name}) from ${id} with type ${meta.type}`,
+    `got a file (${metadata.name}) from ${peerId} with type ${metadata.type}`,
     data
   )
 )
@@ -280,7 +280,7 @@ transfer is done.
 
 ```javascript
 await sendFile(amplePayload)
-console.log('done sending')
+console.log('done sending to all peers')
 ```
 
 ### Encryption
