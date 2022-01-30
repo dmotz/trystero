@@ -18,7 +18,7 @@ const tagIndex = nonceIndex + 1
 const progressIndex = tagIndex + 1
 const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
-const oneByteMax = 2 ** 8 - 1
+const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
 
 export default (onPeer, onSelfLeave) => {
@@ -146,7 +146,7 @@ export default (onPeer, onSelfLeave) => {
           return chunk
         })
 
-        nonce = (nonce + 1) & 0xff
+        nonce = (nonce + 1) & oneByteMax
 
         return Promise.all(
           iterate(targets, async (id, peer) => {
