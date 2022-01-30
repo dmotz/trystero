@@ -12,8 +12,13 @@ import {
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12
-const metaTagSize = typeByteLimit + 2
-const chunkSize = 16 * 2 ** 10 - metaTagSize
+const typeIndex = 0
+const nonceIndex = typeIndex + typeByteLimit
+const tagIndex = nonceIndex + 1
+const progressIndex = tagIndex + 1
+const payloadIndex = progressIndex + 1
+const chunkSize = 16 * 2 ** 10 - payloadIndex
+const oneByteMax = 2 ** 8 - 1
 const buffLowEvent = 'bufferedamountlow'
 
 export default (onPeer, onSelfLeave) => {
@@ -77,10 +82,10 @@ export default (onPeer, onSelfLeave) => {
 
     let nonce = 0
 
-    actions[typePadded] = noOp
+    actions[typePadded] = {onComplete: noOp, onProgress: noOp}
 
     return [
-      async (data, targets, meta) => {
+      async (data, targets, meta, onProgress) => {
         if (meta && typeof meta !== 'object') {
           throw mkErr('action meta argument must be an object')
         }
@@ -111,7 +116,7 @@ export default (onPeer, onSelfLeave) => {
           const isLast = i === chunkTotal - 1
           const isMeta = meta && i === 0
           const chunk = new Uint8Array(
-            metaTagSize +
+            payloadIndex +
               (isMeta
                 ? metaEncoded.byteLength
                 : isLast
@@ -120,10 +125,14 @@ export default (onPeer, onSelfLeave) => {
           )
 
           chunk.set(typeBytes)
-          chunk.set([nonce], typeBytes.byteLength)
+          chunk.set([nonce], nonceIndex)
           chunk.set(
             [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
-            typeBytes.byteLength + 1
+            tagIndex
+          )
+          chunk.set(
+            [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
+            progressIndex
           )
           chunk.set(
             meta
@@ -131,7 +140,7 @@ export default (onPeer, onSelfLeave) => {
                 ? metaEncoded
                 : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
               : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
-            metaTagSize
+            payloadIndex
           )
 
           return chunk
@@ -145,12 +154,15 @@ export default (onPeer, onSelfLeave) => {
             let chunkN = 0
 
             while (chunkN < chunkTotal) {
+              const chunk = chunks[chunkN]
+
               if (chan.bufferedAmount > chan.bufferedAmountLowThreshold) {
                 await new Promise(res => {
                   const next = () => {
                     chan.removeEventListener(buffLowEvent, next)
                     res()
                   }
+
                   chan.addEventListener(buffLowEvent, next)
                 })
               }
@@ -159,42 +171,52 @@ export default (onPeer, onSelfLeave) => {
                 break
               }
 
-              peer.send(chunks[chunkN++])
+              peer.send(chunk)
+              chunkN++
+
+              if (onProgress) {
+                onProgress(chunk[progressIndex] / oneByteMax, id, meta)
+              }
             }
           })
         )
       },
-      f => (actions[typePadded] = f)
+
+      onComplete =>
+        (actions[typePadded] = {...actions[typePadded], onComplete}),
+
+      onProgress => (actions[typePadded] = {...actions[typePadded], onProgress})
     ]
   }
 
   const handleData = (id, data) => {
     const buffer = new Uint8Array(data)
-    const action = decodeBytes(buffer.subarray(0, typeByteLimit))
-    const nonce = buffer.subarray(typeByteLimit, typeByteLimit + 1)[0]
-    const tag = buffer.subarray(typeByteLimit + 1, typeByteLimit + 2)[0]
-    const payload = buffer.subarray(typeByteLimit + 2)
+    const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex))
+    const [nonce] = buffer.subarray(nonceIndex, tagIndex)
+    const [tag] = buffer.subarray(tagIndex, progressIndex)
+    const [progress] = buffer.subarray(progressIndex, payloadIndex)
+    const payload = buffer.subarray(payloadIndex)
     const isLast = !!(tag & 1)
     const isMeta = !!(tag & (1 << 1))
     const isBinary = !!(tag & (1 << 2))
     const isJson = !!(tag & (1 << 3))
 
-    if (!actions[action]) {
-      throw mkErr(`received message with unregistered type (${action})`)
+    if (!actions[type]) {
+      throw mkErr(`received message with unregistered type (${type})`)
     }
 
     if (!pendingTransmissions[id]) {
       pendingTransmissions[id] = {}
     }
 
-    if (!pendingTransmissions[id][action]) {
-      pendingTransmissions[id][action] = {}
+    if (!pendingTransmissions[id][type]) {
+      pendingTransmissions[id][type] = {}
     }
 
-    let target = pendingTransmissions[id][action][nonce]
+    let target = pendingTransmissions[id][type][nonce]
 
     if (!target) {
-      target = pendingTransmissions[id][action][nonce] = {chunks: []}
+      target = pendingTransmissions[id][type][nonce] = {chunks: []}
     }
 
     if (isMeta) {
@@ -203,6 +225,8 @@ export default (onPeer, onSelfLeave) => {
       target.chunks.push(payload)
     }
 
+    actions[type].onProgress(progress / oneByteMax, id, target.meta)
+
     if (!isLast) {
       return
     }
@@ -210,13 +234,13 @@ export default (onPeer, onSelfLeave) => {
     const full = combineChunks(target.chunks)
 
     if (isBinary) {
-      actions[action](full, id, target.meta)
+      actions[type].onComplete(full, id, target.meta)
     } else {
       const text = decodeBytes(full)
-      actions[action](isJson ? JSON.parse(text) : text, id)
+      actions[type].onComplete(isJson ? JSON.parse(text) : text, id)
     }
 
-    delete pendingTransmissions[id][action][nonce]
+    delete pendingTransmissions[id][type][nonce]
   }
 
   const [sendPing, getPing] = makeAction('__91n6__')

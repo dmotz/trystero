@@ -21,6 +21,7 @@ all using the same API.
 - [Advanced](#advanced)
   - [Binary metadata](#binary-metadata)
   - [Action promises](#action-promises)
+  - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
@@ -283,6 +284,47 @@ await sendFile(amplePayload)
 console.log('done sending to all peers')
 ```
 
+### Progress updates
+
+Action sender functions also take an optional callback function that will be
+continuously called as the transmission progresses. This can be used for showing
+a progress bar to the sender for large tranfers. The callback is called with a
+percentage value between 0 and 1 and the receiving peer's ID:
+
+```javascript
+sendFile(
+  payload,
+  // notice the peer target argument for any action sender can be a single peer
+  // ID, an array of IDs, or null (meaning send to all peers in the room)
+  [peerIdA, peerIdB, peerIdC],
+  // metadata, which can also be null if you're only interested in the
+  // progress handler
+  {filename: 'paranoids.flac'},
+  // assuming each peer has a loading bar added to the DOM, its value is
+  // updated here
+  (percent, peerId) => (loadingBars[peerId].value = percent)
+)
+```
+
+Similarly you can listen for progress events as a receiver like this:
+
+```javascript
+const [sendFile, getFile, onFileProgress] = room.makeAction('file')
+
+onFileProgress((percent, peerId, metadata) =>
+  console.log(
+    `${percent * 100}% done receiving ${metadata.filename} from ${peerId}`
+  )
+)
+```
+
+Notice that any metadata is sent with progress events so you can show the
+receiving user that there is a transfer in progress with perhaps the name of the
+incoming file.
+
+Since a peer can send multiple transmissions in parallel, you can also use
+metadata to differentiate between them, e.g. by sending a unique ID.
+
 ### Encryption
 
 Once peers are connected to each other all of their communications are
@@ -434,7 +476,7 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerJoin(id => console.log(`${id} joined`))
+  onPeerJoin(peerId => console.log(`${peerId} joined`))
   ```
 
 - ### `onPeerLeave(callback)`
@@ -448,7 +490,7 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerLeave(id => console.log(`${id} left`))
+  onPeerLeave(peerId => console.log(`${peerId} left`))
   ```
 
 - ### `onPeerStream(callback)`
@@ -464,7 +506,9 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerStream((stream, id) => console.log(`got stream from ${id}`, stream))
+  onPeerStream((stream, peerId) =>
+    console.log(`got stream from ${peerId}`, stream)
+  )
   ```
 
 - ### `onPeerTrack(callback)`
@@ -480,7 +524,9 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerTrack((track, stream, id) => console.log(`got track from ${id}`, track))
+  onPeerTrack((track, stream, peerId) =>
+    console.log(`got track from ${peerId}`, track)
+  )
   ```
 
 - ### `makeAction(namespace)`
@@ -489,15 +535,62 @@ Returns an object with the following methods:
 
   - `namespace` - A string to register this action consistently among all peers.
 
-  Returns a pair containing a function to send the action to peers and a
-  function to register a listener. The sender function takes any
-  JSON-serializable value (primitive or object) or binary data as its first
-  argument and takes an optional second argument of a peer ID or a list of peer
-  IDs to send to. By default it will broadcast the value to all peers in the
-  room. If the sender function is called with binary data (`Blob`,
-  `TypedArray`), it will be received on the other end as an `ArrayBuffer` of
-  agnostic bytes. The sender function returns a promise that resolves when all
-  target peers are finished receiving data.
+  Returns an array of three functions:
+
+  1. #### Sender
+
+     - Sends data to peers and returns a promise that resolves when all
+       target peers are finished receiving data.
+
+     - `(data, [targetPeers], [metadata], [onProgress])`
+
+       - `data` - Any value to send (primitive, object, binary). Serialization
+         and chunking is handled automatically. Binary data (e.g. `Blob`,
+         `TypedArray`) is received by other peer as an agnostic `ArrayBuffer`.
+
+       - `targetPeers` - **(optional)** Either a peer ID (string), an array of
+         peer IDs, or `null` (indicating to send to all peers in the room).
+
+       - `metadata` - **(optional)** If the data is binary, you can send an
+         optional metadata object describing it (see
+         [Binary metadata](#binary-metadata)).
+
+       - `onProgress` - **(optional)** A callback function that will be called
+         as every chunk for every peer is transmitted. The function will be
+         called with a value between 0 and 1 and a peer ID. See
+         [Progress updates](#progress-updates) for an example.
+
+  2. #### Receiver
+
+     - Registers a callback function that runs when data for this action is
+       received from other peers.
+
+     - `(data, peerId, metadata)`
+
+       - `data` - The value transmitted by the sending peer. Deserialization is
+         handled automatically, i.e. a number will be received as a number, an
+         object as an object, etc.
+
+       - `peerId` - The ID string of the sending peer.
+
+       - `metadata` - **(optional)** Optional metadata object supplied by the
+         sender if `data` is binary, e.g. a filename.
+
+  3. #### Progress handler
+
+     - Registers a callback function that runs when partial data is received
+       from peers. You can use this for tracking large binary transfers. See
+       [Progress updates](#progress-updates) for an example.
+
+     - `(percent, peerId, metadata)`
+
+       - `percent` - A number between 0 and 1 indicating the percentage complete
+         of the transfer.
+
+       - `peerId` - The ID string of the sending peer.
+
+       - `metadata` - **(optional)** Optional metadata object supplied by the
+         sender.
 
   Example:
 
@@ -506,8 +599,8 @@ Returns an object with the following methods:
 
   window.addEventListener('mousemove', e => sendCursor([e.clientX, e.clientY]))
 
-  getCursor(([x, y], id) => {
-    const peerCursor = cursorMap[id]
+  getCursor(([x, y], peerId) => {
+    const peerCursor = cursorMap[peerId]
     peerCursor.style.left = x + 'px'
     peerCursor.style.top = y + 'px'
   })
@@ -524,8 +617,11 @@ Returns an object with the following methods:
 
   ```javascript
   // log round-trip time every 2 seconds
-  room.onPeerJoin(id =>
-    setInterval(async () => console.log(`took ${await room.ping(id)}ms`), 2000)
+  room.onPeerJoin(peerId =>
+    setInterval(
+      async () => console.log(`took ${await room.ping(peerId)}ms`),
+      2000
+    )
   )
   ```
 
