@@ -476,7 +476,7 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerJoin(id => console.log(`${id} joined`))
+  onPeerJoin(peerId => console.log(`${peerId} joined`))
   ```
 
 - ### `onPeerLeave(callback)`
@@ -490,7 +490,7 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerLeave(id => console.log(`${id} left`))
+  onPeerLeave(peerId => console.log(`${peerId} left`))
   ```
 
 - ### `onPeerStream(callback)`
@@ -506,7 +506,9 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerStream((stream, id) => console.log(`got stream from ${id}`, stream))
+  onPeerStream((stream, peerId) =>
+    console.log(`got stream from ${peerId}`, stream)
+  )
   ```
 
 - ### `onPeerTrack(callback)`
@@ -522,7 +524,9 @@ Returns an object with the following methods:
   Example:
 
   ```javascript
-  onPeerTrack((track, stream, id) => console.log(`got track from ${id}`, track))
+  onPeerTrack((track, stream, peerId) =>
+    console.log(`got track from ${peerId}`, track)
+  )
   ```
 
 - ### `makeAction(namespace)`
@@ -595,8 +599,8 @@ Returns an object with the following methods:
 
   window.addEventListener('mousemove', e => sendCursor([e.clientX, e.clientY]))
 
-  getCursor(([x, y], id) => {
-    const peerCursor = cursorMap[id]
+  getCursor(([x, y], peerId) => {
+    const peerCursor = cursorMap[peerId]
     peerCursor.style.left = x + 'px'
     peerCursor.style.top = y + 'px'
   })
@@ -613,8 +617,11 @@ Returns an object with the following methods:
 
   ```javascript
   // log round-trip time every 2 seconds
-  room.onPeerJoin(id =>
-    setInterval(async () => console.log(`took ${await room.ping(id)}ms`), 2000)
+  room.onPeerJoin(peerId =>
+    setInterval(
+      async () => console.log(`took ${await room.ping(peerId)}ms`),
+      2000
+    )
   )
   ```
 
