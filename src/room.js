@@ -12,12 +12,12 @@ import {
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12
-const typeSlice = [0, typeByteLimit]
-const nonceSlice = [typeByteLimit, typeByteLimit + 1]
-const tagSlice = [typeByteLimit + 1, typeByteLimit + 2]
-const progressSlice = [typeByteLimit + 2, typeByteLimit + 3]
-const payloadSlice = [typeByteLimit + 3]
-const chunkSize = 16 * 2 ** 10 - payloadSlice[0]
+const typeIndex = 0
+const nonceIndex = typeIndex + typeByteLimit
+const tagIndex = nonceIndex + 1
+const progressIndex = tagIndex + 1
+const payloadIndex = progressIndex + 1
+const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 2 ** 8 - 1
 const buffLowEvent = 'bufferedamountlow'
 
@@ -116,7 +116,7 @@ export default (onPeer, onSelfLeave) => {
           const isLast = i === chunkTotal - 1
           const isMeta = meta && i === 0
           const chunk = new Uint8Array(
-            payloadSlice[0] +
+            payloadIndex +
               (isMeta
                 ? metaEncoded.byteLength
                 : isLast
@@ -125,14 +125,14 @@ export default (onPeer, onSelfLeave) => {
           )
 
           chunk.set(typeBytes)
-          chunk.set([nonce], nonceSlice[0])
+          chunk.set([nonce], nonceIndex)
           chunk.set(
             [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
-            tagSlice[0]
+            tagIndex
           )
           chunk.set(
             [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
-            progressSlice[0]
+            progressIndex
           )
           chunk.set(
             meta
@@ -140,7 +140,7 @@ export default (onPeer, onSelfLeave) => {
                 ? metaEncoded
                 : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
               : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
-            payloadSlice[0]
+            payloadIndex
           )
 
           return chunk
@@ -175,7 +175,7 @@ export default (onPeer, onSelfLeave) => {
               chunkN++
 
               if (onProgress) {
-                onProgress(chunk[progressSlice[0]] / oneByteMax, id, meta)
+                onProgress(chunk[progressIndex] / oneByteMax, id, meta)
               }
             }
           })
@@ -191,11 +191,11 @@ export default (onPeer, onSelfLeave) => {
 
   const handleData = (id, data) => {
     const buffer = new Uint8Array(data)
-    const type = decodeBytes(buffer.subarray(...typeSlice))
-    const nonce = buffer.subarray(...nonceSlice)[0]
-    const tag = buffer.subarray(...tagSlice)[0]
-    const progress = buffer.subarray(...progressSlice)[0]
-    const payload = buffer.subarray(...payloadSlice)
+    const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex))
+    const nonce = buffer.subarray(nonceIndex, tagIndex)[0]
+    const tag = buffer.subarray(tagIndex, progressIndex)[0]
+    const progress = buffer.subarray(progressIndex, payloadIndex)[0]
+    const payload = buffer.subarray(payloadIndex)
     const isLast = !!(tag & 1)
     const isMeta = !!(tag & (1 << 1))
     const isBinary = !!(tag & (1 << 2))
