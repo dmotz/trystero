@@ -537,7 +537,7 @@ Returns an object with the following methods:
 
   Returns an array of three functions:
 
-  0. #### Sender
+  1. #### Sender
 
      - Sends data to peers and returns a promise that resolves when all
        target peers are finished receiving data.
@@ -560,7 +560,7 @@ Returns an object with the following methods:
          called with a value between 0 and 1 and a peer ID. See
          [Progress updates](#progress-updates) for an example.
 
-  1. #### Receiver
+  2. #### Receiver
 
      - Registers a callback function that runs when data for this action is
        received from other peers.
@@ -576,7 +576,7 @@ Returns an object with the following methods:
        - `metadata` - **(optional)** Optional metadata object supplied by the
          sender if `data` is binary, e.g. a filename.
 
-  2. #### Progress handler
+  3. #### Progress handler
 
      - Registers a callback function that runs when partial data is received
        from peers. You can use this for tracking large binary transfers. See
