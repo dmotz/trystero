@@ -21,6 +21,7 @@ all using the same API.
 - [Advanced](#advanced)
   - [Binary metadata](#binary-metadata)
   - [Action promises](#action-promises)
+  - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
@@ -282,6 +283,47 @@ transfer is done.
 await sendFile(amplePayload)
 console.log('done sending to all peers')
 ```
+
+### Progress updates
+
+Action sender functions also take an optional callback function that will be
+continuously called as the transmission progresses. This can be used for showing
+a progress bar to the sender for large tranfers. The callback is called with a
+percentage value between 0 and 1 and the receiving peer's ID:
+
+```javascript
+sendFile(
+  payload,
+  // notice the peer target argument for any action sender can be a single peer
+  // ID, an array of IDs, or null (meaning send to all peers in the room)
+  [peerIdA, peerIdB, peerIdC],
+  // metadata, which can also be null if you're only interested in the
+  // progress handler
+  {filename: 'paranoids.flac'},
+  // assuming each peer has a loading bar added to the DOM, its value is
+  // updated here
+  (percent, peerId) => (loadingBars[peerId].value = percent)
+)
+```
+
+Similarly you can listen for progress events as a receiver like this:
+
+```javascript
+const [sendFile, getFile, onFileProgress] = room.makeAction('file')
+
+onFileProgress((percent, peerId, metadata) =>
+  console.log(
+    `${percent * 100}% done receiving ${metadata.filename} from ${peerId}`
+  )
+)
+```
+
+Notice that any metadata is sent with progress events so you can show the
+receiving user that there is a transfer in progress with perhaps the name of the
+incoming file.
+
+Since a peer can send multiple transmissions in parallel, you can also use
+metadata to differentiate between them, e.g. by sending a unique ID.
 
 ### Encryption
 
