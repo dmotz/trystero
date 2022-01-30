@@ -192,9 +192,9 @@ export default (onPeer, onSelfLeave) => {
   const handleData = (id, data) => {
     const buffer = new Uint8Array(data)
     const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex))
-    const nonce = buffer.subarray(nonceIndex, tagIndex)[0]
-    const tag = buffer.subarray(tagIndex, progressIndex)[0]
-    const progress = buffer.subarray(progressIndex, payloadIndex)[0]
+    const [nonce] = buffer.subarray(nonceIndex, tagIndex)
+    const [tag] = buffer.subarray(tagIndex, progressIndex)
+    const [progress] = buffer.subarray(progressIndex, payloadIndex)
     const payload = buffer.subarray(payloadIndex)
     const isLast = !!(tag & 1)
     const isMeta = !!(tag & (1 << 1))
