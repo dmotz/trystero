@@ -531,15 +531,62 @@ Returns an object with the following methods:
 
   - `namespace` - A string to register this action consistently among all peers.
 
-  Returns a pair containing a function to send the action to peers and a
-  function to register a listener. The sender function takes any
-  JSON-serializable value (primitive or object) or binary data as its first
-  argument and takes an optional second argument of a peer ID or a list of peer
-  IDs to send to. By default it will broadcast the value to all peers in the
-  room. If the sender function is called with binary data (`Blob`,
-  `TypedArray`), it will be received on the other end as an `ArrayBuffer` of
-  agnostic bytes. The sender function returns a promise that resolves when all
-  target peers are finished receiving data.
+  Returns an array of three functions:
+
+  0. #### Sender
+
+     - Sends data to peers and returns a promise that resolves when all
+       target peers are finished receiving data.
+
+     - `(data, [targetPeers], [metadata], [onProgress])`
+
+       - `data` - Any value to send (primitive, object, binary). Serialization
+         and chunking is handled automatically. Binary data (e.g. `Blob`,
+         `TypedArray`) is received by other peer as an agnostic `ArrayBuffer`.
+
+       - `targetPeers` - **(optional)** Either a peer ID (string), an array of
+         peer IDs, or `null` (indicating to send to all peers in the room).
+
+       - `metadata` - **(optional)** If the data is binary, you can send an
+         optional metadata object describing it (see
+         [Binary metadata](#binary-metadata)).
+
+       - `onProgress` - **(optional)** A callback function that will be called
+         as every chunk for every peer is transmitted. The function will be
+         called with a value between 0 and 1 and a peer ID. See
+         [Progress updates](#progress-updates) for an example.
+
+  1. #### Receiver
+
+     - Registers a callback function that runs when data for this action is
+       received from other peers.
+
+     - `(data, peerId, metadata)`
+
+       - `data` - The value transmitted by the sending peer. Deserialization is
+         handled automatically, i.e. a number will be received as a number, an
+         object as an object, etc.
+
+       - `peerId` - The ID string of the sending peer.
+
+       - `metadata` - **(optional)** Optional metadata object supplied by the
+         sender if `data` is binary, e.g. a filename.
+
+  2. #### Progress handler
+
+     - Registers a callback function that runs when partial data is received
+       from peers. You can use this for tracking large binary transfers. See
+       [Progress updates](#progress-updates) for an example.
+
+     - `(percent, peerId, metadata)`
+
+       - `percent` - A number between 0 and 1 indicating the percentage complete
+         of the transfer.
+
+       - `peerId` - The ID string of the sending peer.
+
+       - `metadata` - **(optional)** Optional metadata object supplied by the
+         sender.
 
   Example:
 
