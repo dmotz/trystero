@@ -1,16 +1,11 @@
-import {
-  joinRoom,
-  selfId,
-  getOccupants
-} from 'https://cdn.skypack.dev/trystero/firebase'
+import {joinRoom, selfId} from 'https://cdn.skypack.dev/trystero'
 
 const byId = document.getElementById.bind(document)
 const canvas = byId('canvas')
 const peerInfo = byId('peer-info')
 const noPeersCopy = peerInfo.innerText
-const config = {appId: 'trystero-94db3'}
+const config = {appId: 'trystero-demo1'}
 const cursors = {}
-const roomCap = 33
 const fruits = [
   '🍏',
   '🍎',
@@ -74,18 +69,11 @@ window.addEventListener('touchstart', e => {
   }
 })
 
-async function init(n) {
-  const ns = 'room' + n
-  const members = (await getOccupants(config, ns)).length
-
+function init(n) {
   let getMove
   let getClick
 
-  if (members === roomCap) {
-    return init(n + 1)
-  }
-
-  room = joinRoom(config, ns)
+  room = joinRoom(config, 'room' + n)
   ;[sendMove, getMove] = room.makeAction('mouseMove')
   ;[sendClick, getClick] = room.makeAction('click')
 
