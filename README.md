@@ -333,8 +333,9 @@ end-to-end encrypted. During the initial connection / discovery process, peers'
 the chosen peering strategy medium. The SDP is encrypted over the wire, but is
 visible in plaintext as it passes through the medium (a public torrent tracker
 for example). This is fine for most use cases but you can choose to hide SDPs
-from the peering medium with Trystero's encryption option. To opt in, just pass
-a `password` parameter in the app configuration object:
+from the peering medium with Trystero's encryption option. This can protect
+against a MITM peering attack if both intended peers have a shared secret. To
+opt in, just pass a `password` parameter in the app configuration object:
 
 ```javascript
 joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
