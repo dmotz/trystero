@@ -8,10 +8,23 @@ few lines**
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
-Peers can connect via [BitTorrent, Firebase, or IPFS](#strategy-comparison) –
-all using the same API.
+Peers can connect via
+[🌊 BitTorrent, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison) – all using the
+same API.
+
+Besides making peer matching automatic, Trystero offers some nice abstractions
+on top of WebRTC:
+
+- 👂📣 Rooms / broadcasting
+- 🔢📩 Automatic serialization / deserialization of data
+- 🎥🏷 Attach metadata to binary data and media streams
+- ✂️⏳ Automatic chunking and throttling of large data
+- ⏱🤝 Progress events and promises for data transfers
+- 🔐📝 Session data encryption
 
 ---
+
+## Contents
 
 - [How it works](#how-it-works)
 - [Get started](#get-started)
