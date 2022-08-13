@@ -1,4 +1,4 @@
-import {encodeBytes, decodeBytes} from './utils'
+import {encodeBytes, decodeBytes} from './utils.js'
 
 const algo = 'AES-CBC'
 
