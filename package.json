@@ -27,10 +27,10 @@
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^21.0.1",
-    "@rollup/plugin-node-resolve": "^13.0.0",
-    "rollup": "^2.47.0",
-    "terser": "^5.7.0"
+    "@rollup/plugin-commonjs": "^22.0.2",
+    "@rollup/plugin-node-resolve": "^14.0.1",
+    "rollup": "^2.79.0",
+    "terser": "^5.15.0"
   },
   "scripts": {
     "sizes": "./bundle-sizes.sh"
