@@ -1,5 +1,5 @@
 import ipfs from 'ipfs-core/dist/index.min.js'
-import room from './room'
+import room from './room.js'
 import {
   decodeBytes,
   events,
@@ -8,8 +8,8 @@ import {
   libName,
   noOp,
   selfId
-} from './utils'
-import {genKey, encrypt, decrypt} from './crypto'
+} from './utils.js'
+import {genKey, encrypt, decrypt} from './crypto.js'
 
 const occupiedRooms = {}
 const swarmPollMs = 999
@@ -156,4 +156,4 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   )
 })
 
-export {selfId} from './utils'
+export {selfId} from './utils.js'

@@ -8,7 +8,7 @@ import {
   libName,
   mkErr,
   noOp
-} from './utils'
+} from './utils.js'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12

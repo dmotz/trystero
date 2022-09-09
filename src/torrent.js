@@ -1,4 +1,4 @@
-import room from './room'
+import room from './room.js'
 import {
   encodeBytes,
   entries,
@@ -12,8 +12,8 @@ import {
   noOp,
   selfId,
   values
-} from './utils'
-import {genKey, encrypt, decrypt} from './crypto'
+} from './utils.js'
+import {genKey, encrypt, decrypt} from './crypto.js'
 
 const occupiedRooms = {}
 const sockets = {}
@@ -262,4 +262,4 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   )
 })
 
-export {selfId} from './utils'
+export {selfId} from './utils.js'

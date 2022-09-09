@@ -11,9 +11,9 @@ import {
   remove,
   set
 } from 'firebase/database'
-import room from './room'
-import {events, initGuard, initPeer, keys, libName, noOp, selfId} from './utils'
-import {genKey, encrypt, decrypt} from './crypto'
+import room from './room.js'
+import {events, initGuard, initPeer, keys, libName, noOp, selfId} from './utils.js'
+import {genKey, encrypt, decrypt} from './crypto.js'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -143,4 +143,4 @@ export const getOccupants = initGuard(
     )
 )
 
-export {selfId} from './utils'
+export {selfId} from './utils.js'
