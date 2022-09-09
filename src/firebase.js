@@ -12,7 +12,15 @@ import {
   set
 } from 'firebase/database'
 import room from './room.js'
-import {events, initGuard, initPeer, keys, libName, noOp, selfId} from './utils.js'
+import {
+  events,
+  initGuard,
+  initPeer,
+  keys,
+  libName,
+  noOp,
+  selfId
+} from './utils.js'
 import {genKey, encrypt, decrypt} from './crypto.js'
 
 const presencePath = '_'
