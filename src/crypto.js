@@ -31,8 +31,7 @@ export const encrypt = async (keyP, plaintext) => {
       await crypto.subtle.encrypt(
         {name: algo, iv},
         await keyP,
-        encodeBytes(plaintext),
-        plaintext
+        encodeBytes(plaintext)
       )
     ),
     iv: [...iv]
