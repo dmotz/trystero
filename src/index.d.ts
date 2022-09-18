@@ -89,4 +89,6 @@ declare module 'trystero' {
     config: BaseRoomConfig & TorrentRoomConfig,
     roomId: string
   ): Room
+
+  export const selfId: string
 }
