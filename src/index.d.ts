@@ -1,19 +1,7 @@
 declare module 'trystero' {
+  import {TorrentRoomConfig} from 'trystero/torrent'
+
   type Metadata = Record<string, number | string | boolean | null | undefined>
-
-  interface BitTorrentRoomConfig {
-    trackerUrls?: string[]
-    trackerRedundancy?: number
-  }
-
-  interface FirebaseRoomConfig {
-    firebaseApp?: string
-    rootPath?: string
-  }
-
-  interface IpfsRoomConfig {
-    swarmAddresses?: string
-  }
 
   export interface BaseRoomConfig {
     appId: string
@@ -97,5 +85,8 @@ declare module 'trystero' {
     ) => void
   }
 
-  export function joinRoom(config: RoomConfig, roomId: string): Room
+  export function joinRoom(
+    config: BaseRoomConfig & TorrentRoomConfig,
+    roomId: string
+  ): Room
 }
