@@ -3,19 +3,18 @@ declare module 'trystero' {
 
   type Metadata = Record<string, number | string | boolean | null | undefined>
 
+  type TargetPeers = string | string[] | null
+
   export interface BaseRoomConfig {
     appId: string
     password?: string
     rtcConfig?: RTCConfiguration
   }
 
-  export type RoomConfig = BaseRoomConfig &
-    (BitTorrentRoomConfig | FirebaseRoomConfig | IpfsRoomConfig)
-
   export interface ActionSender<T> {
     (
       data: T,
-      targetPeers?: string[],
+      targetPeers?: TargetPeers,
       metadata?: Metadata,
       progress?: (percent: number, peerId: string) => void
     ): Promise<Array<undefined>>
@@ -48,30 +47,30 @@ declare module 'trystero' {
 
     addStream: (
       stream: MediaStream,
-      peerId?: string,
+      targetPeers?: TargetPeers,
       metadata?: Metadata
     ) => Promise<void>[]
 
-    removeStream: (stream: MediaStream, peerId?: string) => void
+    removeStream: (stream: MediaStream, targetPeers?: TargetPeers) => void
 
     addTrack: (
       track: MediaStreamTrack,
       stream: MediaStream,
-      peerId?: string,
+      targetPeers?: TargetPeers,
       metadata?: Metadata
     ) => Promise<void>[]
 
     removeTrack: (
       track: MediaStreamTrack,
       stream: MediaStream,
-      peerId?: string
+      targetPeers?: TargetPeers
     ) => void
 
     replaceTrack: (
       oldTrack: MediaStreamTrack,
       newTrack: MediaStreamTrack,
       stream: MediaStream,
-      peerId?: string
+      targetPeers?: TargetPeers
     ) => Promise<void>[]
 
     onPeerJoin: (fn: (peerId: string) => void) => void
