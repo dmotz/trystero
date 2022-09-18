@@ -415,14 +415,14 @@ Returns an object with the following methods:
 
   Returns a list of peer IDs present in room (not including the local user).
 
-- ### `addStream(stream, [peerId], [metadata])`
+- ### `addStream(stream, [targetPeers], [metadata])`
 
   Broadcasts media stream to other peers.
 
   - `stream` - A `MediaStream` with audio and/or video to send to peers in the
     room.
 
-  - `peerId` - **(optional)** If specified, the stream is sent only to the
+  - `targetPeers` - **(optional)** If specified, the stream is sent only to the
     target peer ID (string) or list of peer IDs (array).
 
   - `metadata` - **(optional)** Additional metadata (any serializable type) to
@@ -431,16 +431,16 @@ Returns an object with the following methods:
     you want to broadcast a stream to all peers in the room with a metadata
     argument, pass `null` as the second argument.
 
-- ### `removeStream(stream, [peerId])`
+- ### `removeStream(stream, [targetPeers])`
 
   Stops sending previously sent media stream to other peers.
 
   - `stream` - A previously sent `MediaStream` to stop sending.
 
-  - `peerId` - **(optional)** If specified, the stream is removed only from the
-    target peer ID (string) or list of peer IDs (array).
+  - `targetPeers` - **(optional)** If specified, the stream is removed only from
+    the target peer ID (string) or list of peer IDs (array).
 
-- ### `addTrack(track, stream, [peerId], [metadata])`
+- ### `addTrack(track, stream, [targetPeers], [metadata])`
 
   Adds a new media track to a stream.
 
@@ -448,14 +448,14 @@ Returns an object with the following methods:
 
   - `stream` - The target `MediaStream` to attach the new track to.
 
-  - `peerId` - **(optional)** If specified, the track is sent only to the
+  - `targetPeers` - **(optional)** If specified, the track is sent only to the
     target peer ID (string) or list of peer IDs (array).
 
   - `metadata` - **(optional)** Additional metadata (any serializable type) to
     be sent with the track. See `metadata` notes for `addStream()` above for
     more details.
 
-- ### `removeTrack(track, stream, [peerId])`
+- ### `removeTrack(track, stream, [targetPeers])`
 
   Removes a media track from a stream.
 
@@ -463,10 +463,10 @@ Returns an object with the following methods:
 
   - `stream` - The `MediaStream` the track is attached to.
 
-  - `peerId` - **(optional)** If specified, the track is removed only from the
-    target peer ID (string) or list of peer IDs (array).
+  - `targetPeers` - **(optional)** If specified, the track is removed only from
+    the target peer ID (string) or list of peer IDs (array).
 
-- ### `replaceTrack(oldTrack, newTrack, stream, [peerId])`
+- ### `replaceTrack(oldTrack, newTrack, stream, [targetPeers])`
 
   Replaces a media track with a new one.
 
@@ -476,8 +476,8 @@ Returns an object with the following methods:
 
   - `stream` - The `MediaStream` the `oldTrack` is attached to.
 
-  - `peerId` - **(optional)** If specified, the track is replaced only for the
-    target peer ID (string) or list of peer IDs (array).
+  - `targetPeers` - **(optional)** If specified, the track is replaced only for
+    the target peer ID (string) or list of peer IDs (array).
 
 - ### `onPeerJoin(callback)`
 
