@@ -21,7 +21,7 @@ declare module 'trystero' {
   }
 
   export interface ActionReceiver<T> {
-    (receiver: (data: T, peerId?: string, metadata?: Metadata) => void): void
+    (receiver: (data: T, peerId: string, metadata?: Metadata) => void): void
   }
 
   export interface ActionProgress {
