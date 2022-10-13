@@ -12,5 +12,10 @@ declare module 'trystero/firebase' {
     roomId: string
   ): Room
 
+  export function getOccupants(
+    config: BaseRoomConfig & FirebaseRoomConfig,
+    roomId: string
+  ): Promise<string[]>
+
   export * from 'trystero'
 }
