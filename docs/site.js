@@ -82,10 +82,13 @@ function init(n) {
   room.onPeerLeave(removeCursor)
   getMove(moveCursor)
   getClick(dropFruit)
-  sendMove([
-    window.innerWidth * 0.93 * Math.random(),
-    window.innerHeight * 0.93 * Math.random()
-  ])
+
+  setTimeout(() => {
+    sendMove([
+      window.innerWidth * 0.93 * Math.random(),
+      window.innerHeight * 0.93 * Math.random()
+    ])
+  }, 3333)
 }
 
 function moveCursor([x, y], id) {
@@ -113,10 +116,12 @@ function addCursor(id, isSelf) {
 
   if (!isSelf) {
     updatePeerInfo()
-    sendMove([
-      window.innerWidth * 0.93 * Math.random(),
-      window.innerHeight * 0.93 * Math.random()
-    ])
+    setTimeout(() => {
+      sendMove([
+        window.innerWidth * 0.93 * Math.random(),
+        window.innerHeight * 0.93 * Math.random()
+      ])
+    }, 3333)
   }
 
   return el
