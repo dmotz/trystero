@@ -134,7 +134,7 @@ function updatePeerInfo() {
   peerInfo.innerHTML = count
     ? `Right now <em>${count}</em> other peer${
         count === 1 ? ' is' : 's are'
-      } connected with you. Send them some fruit.`
+      } connected with you. Click to send them some fruit.`
     : noPeersCopy
 }
 
