@@ -1,4 +1,4 @@
-# 📯 Trystero
+# 🤝 Trystero
 
 **Serverless WebRTC matchmaking for painless P2P: make any site multiplayer in a
 few lines**
