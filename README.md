@@ -19,7 +19,7 @@ on top of WebRTC:
 - 🔢📩 Automatic serialization / deserialization of data
 - 🎥🏷 Attach metadata to binary data and media streams
 - ✂️⏳ Automatic chunking and throttling of large data
-- ⏱🤝 Progress events and promises for data transfers
+- ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
 
 ---
