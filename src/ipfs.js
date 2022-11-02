@@ -41,9 +41,16 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const seenPeers = {}
   const connectedPeers = {}
   const key = config.password && genKey(config.password, ns)
+
   const connectPeer = (peer, peerId) => {
     onPeerConnect(peer, peerId)
     connectedPeers[peerId] = peer
+  }
+
+  const disconnectPeer = peerId => {
+    delete offers[peerId]
+    delete seenPeers[peerId]
+    delete connectedPeers[peerId]
   }
 
   let onPeerConnect = noOp
@@ -96,6 +103,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         })
 
         peer.once(events.connect, () => connectPeer(peer, peerId))
+        peer.once(events.close, () => disconnectPeer(peerId))
       }),
 
       node.pubsub.subscribe(selfTopic, async msg => {
@@ -130,7 +138,8 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
             })
           )
         )
-        peer.on(events.connect, () => connectPeer(peer, peerId))
+        peer.once(events.connect, () => connectPeer(peer, peerId))
+        peer.once(events.close, () => disconnectPeer(peerId))
         peer.signal(
           key ? {...offer, sdp: await decrypt(key, offer.sdp)} : offer
         )
