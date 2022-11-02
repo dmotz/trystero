@@ -1,7 +1,14 @@
 declare module 'trystero' {
   import {TorrentRoomConfig} from 'trystero/torrent'
 
-  type Metadata = Record<string, number | string | boolean | null | undefined>
+  type Metadata =
+    | null
+    | string
+    | number
+    | boolean
+    | undefined
+    | Metadata[]
+    | {[key: string]: Metadata}
 
   type TargetPeers = string | string[] | null
 
