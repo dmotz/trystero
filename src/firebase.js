@@ -50,6 +50,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const roomRef = ref(db, getPath(rootPath, ns))
   const selfRef = child(roomRef, selfId)
   const cryptoKey = config.password && genKey(config.password, ns)
+  const unsubFns = []
 
   const makePeer = (id, initiator) => {
     if (peerMap[id] && !peerMap[id].destroyed) {
@@ -99,33 +100,36 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       return
     }
 
-    onChildAdded(data.ref, async data => {
-      if (!(peerId in peerSigs)) {
-        peerSigs[peerId] = {}
-      }
+    unsubFns.push(
+      onChildAdded(data.ref, async data => {
+        if (!(peerId in peerSigs)) {
+          peerSigs[peerId] = {}
+        }
 
-      if (data.key in peerSigs[peerId]) {
-        return
-      }
+        if (data.key in peerSigs[peerId]) {
+          return
+        }
 
-      peerSigs[peerId][data.key] = true
+        peerSigs[peerId][data.key] = true
 
-      let val
+        let val
 
-      try {
-        val = JSON.parse(
-          cryptoKey ? await decrypt(cryptoKey, data.val()) : data.val()
-        )
-      } catch (e) {
-        console.error(`${libName}: received malformed SDP JSON`)
-        return
-      }
+        try {
+          val = JSON.parse(
+            cryptoKey ? await decrypt(cryptoKey, data.val()) : data.val()
+          )
+          console.log('got', val.type)
+        } catch (e) {
+          console.error(`${libName}: received malformed SDP JSON`)
+          return
+        }
 
-      const peer = makePeer(peerId, false)
+        const peer = makePeer(peerId, false)
 
-      peer.signal(val)
-      remove(data.ref)
-    })
+        peer.signal(val)
+        remove(data.ref)
+      })
+    )
   })
 
   onValue(roomRef, () => (didSyncRoom = true), {onlyOnce: true})
@@ -142,6 +146,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       off(selfRef)
       remove(selfRef)
       off(roomRef)
+      unsubFns.forEach(f => f())
       delete occupiedRooms[ns]
     }
   )
