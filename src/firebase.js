@@ -58,7 +58,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
     const peer = initPeer(initiator, true, config.rtcConfig)
 
-    peer.on(events.connect, () => {
+    peer.once(events.connect, () => {
       onPeerConnect(peer, id)
       connectedPeers[id] = true
     })
@@ -73,6 +73,12 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
       onDisconnect(signalRef).remove()
       set(signalRef, cryptoKey ? await encrypt(cryptoKey, payload) : payload)
+    })
+
+    peer.once(events.close, () => {
+      delete peerMap[id]
+      delete peerSigs[id]
+      delete connectedPeers[id]
     })
 
     peerMap[id] = peer
