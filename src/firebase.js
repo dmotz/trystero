@@ -116,7 +116,6 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         val = JSON.parse(
           cryptoKey ? await decrypt(cryptoKey, data.val()) : data.val()
         )
-        console.log('decrypted', val)
       } catch (e) {
         console.error(`${libName}: received malformed SDP JSON`)
         return
