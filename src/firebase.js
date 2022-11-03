@@ -49,7 +49,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const rootPath = config.rootPath || defaultRootPath
   const roomRef = ref(db, getPath(rootPath, ns))
   const selfRef = child(roomRef, selfId)
-  const key = config.password && genKey(config.password, ns)
+  const cryptoKey = config.password && genKey(config.password, ns)
 
   const makePeer = (id, initiator) => {
     if (peerMap[id] && !peerMap[id].destroyed) {
@@ -72,7 +72,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       const signalRef = push(ref(db, getPath(rootPath, ns, id, selfId)))
 
       onDisconnect(signalRef).remove()
-      set(signalRef, key ? await encrypt(key, payload) : payload)
+      set(signalRef, cryptoKey ? await encrypt(cryptoKey, payload) : payload)
     })
 
     peerMap[id] = peer
@@ -107,7 +107,10 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       let val
 
       try {
-        val = JSON.parse(key ? await decrypt(key, data.val()) : data.val())
+        val = JSON.parse(
+          cryptoKey ? await decrypt(cryptoKey, data.val()) : data.val()
+        )
+        console.log('decrypted', val)
       } catch (e) {
         console.error(`${libName}: received malformed SDP JSON`)
         return
