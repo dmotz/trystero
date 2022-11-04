@@ -1,2 +1,6 @@
 docs/
+dist/
 bundle-sizes.sh
+.parcel-cache
+demo.js
+index.html
