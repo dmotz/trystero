@@ -84,7 +84,9 @@ declare module 'trystero' {
 
     onPeerLeave: (fn: (peerId: string) => void) => void
 
-    onPeerStream: (fn: (stream: MediaStream, peerId: string) => void) => void
+    onPeerStream: (
+      fn: (stream: MediaStream, peerId: string, metadata: Metadata) => void
+    ) => void;
 
     onPeerTrack: (
       fn: (track: MediaStreamTrack, stream: MediaStream, peerId: string) => void
