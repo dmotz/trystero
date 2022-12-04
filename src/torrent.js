@@ -244,9 +244,14 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
   const onDisconnect = (peer, peerId, offerId) => {
     delete connectedPeers[peerId]
-    delete offerPool[offerId]
     peer.destroy()
-    offerPool = {...offerPool, ...makeOffers(1)}
+
+    const isInOfferPool = offerId in offerPool
+
+    if (isInOfferPool) {
+      delete offerPool[offerId]
+      offerPool = {...offerPool, ...makeOffers(1)}
+    }
   }
 
   let announceSecs = defaultAnnounceSecs
