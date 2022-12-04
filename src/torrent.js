@@ -126,7 +126,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         )
       )
       peer.on(events.connect, () => onConnect(peer, val.peer_id))
-      peer.on(events.close, () => onDisconnect(val.peer_id, val.offer_id))
+      peer.on(events.close, () => onDisconnect(peer, val.peer_id, val.offer_id))
       peer.signal(
         key ? {...val.offer, sdp: await decrypt(key, val.offer.sdp)} : val.offer
       )
@@ -152,7 +152,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         peer.on(events.connect, () =>
           onConnect(peer, val.peer_id, val.offer_id)
         )
-        peer.on(events.close, () => onDisconnect(val.peer_id, val.offer_id))
+        peer.on(events.close, () => onDisconnect(peer, val.peer_id, val.offer_id))
         peer.signal(
           key
             ? {...val.answer, sdp: await decrypt(key, val.answer.sdp)}
@@ -242,17 +242,11 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
   }
 
-  const onDisconnect = (peerId, offerId) => {
+  const onDisconnect = (peer, peerId, offerId) => {
     delete connectedPeers[peerId]
-    const { peer } = offerPool[offerId]
-
-    if (peer) {
-      peer.destroy()
-      delete offerPool[offerId]
-      offerPool = {...offerPool, ...makeOffers(1)}
-    } else {
-      console.error(`peer ${peerId} for offer ${offerId} not found`)
-    }
+    delete offerPool[offerId]
+    peer.destroy()
+    offerPool = {...offerPool, ...makeOffers(1)}
   }
 
   let announceSecs = defaultAnnounceSecs
