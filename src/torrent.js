@@ -55,7 +55,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         .slice(0, hashLimit)
     )
 
-  const makeOffers = (howMany) =>
+  const makeOffers = howMany =>
     fromEntries(
       new Array(howMany).fill().map(() => {
         const peer = initPeer(true, false, config.rtcConfig)
@@ -66,7 +66,6 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         ]
       })
     )
-
 
   const makeOfferPool = () => makeOffers(offerPoolSize)
 
@@ -152,7 +151,9 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         peer.on(events.connect, () =>
           onConnect(peer, val.peer_id, val.offer_id)
         )
-        peer.on(events.close, () => onDisconnect(peer, val.peer_id, val.offer_id))
+        peer.on(events.close, () =>
+          onDisconnect(peer, val.peer_id, val.offer_id)
+        )
         peer.signal(
           key
             ? {...val.answer, sdp: await decrypt(key, val.answer.sdp)}
