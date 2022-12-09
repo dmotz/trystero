@@ -55,9 +55,9 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         .slice(0, hashLimit)
     )
 
-  const makeOffers = () =>
+  const makeOffers = (howMany) =>
     fromEntries(
-      new Array(offerPoolSize).fill().map(() => {
+      new Array(howMany).fill().map(() => {
         const peer = initPeer(true, false, config.rtcConfig)
 
         return [
@@ -66,6 +66,9 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         ]
       })
     )
+
+
+  const makeOfferPool = () => makeOffers(offerPoolSize)
 
   const onSocketMessage = async (socket, e) => {
     const infoHash = await infoHashP
@@ -123,7 +126,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         )
       )
       peer.on(events.connect, () => onConnect(peer, val.peer_id))
-      peer.on(events.close, () => onDisconnect(val.peer_id))
+      peer.on(events.close, () => onDisconnect(peer, val.peer_id, val.offer_id))
       peer.signal(
         key ? {...val.offer, sdp: await decrypt(key, val.offer.sdp)} : val.offer
       )
@@ -149,7 +152,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         peer.on(events.connect, () =>
           onConnect(peer, val.peer_id, val.offer_id)
         )
-        peer.on(events.close, () => onDisconnect(val.peer_id))
+        peer.on(events.close, () => onDisconnect(peer, val.peer_id, val.offer_id))
         peer.signal(
           key
             ? {...val.answer, sdp: await decrypt(key, val.answer.sdp)}
@@ -207,7 +210,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       cleanPool()
     }
 
-    offerPool = makeOffers()
+    offerPool = makeOfferPool()
 
     trackerUrls.forEach(async url => {
       const socket = await makeSocket(url, infoHash)
@@ -239,7 +242,17 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
   }
 
-  const onDisconnect = id => delete connectedPeers[id]
+  const onDisconnect = (peer, peerId, offerId) => {
+    delete connectedPeers[peerId]
+    peer.destroy()
+
+    const isInOfferPool = offerId in offerPool
+
+    if (isInOfferPool) {
+      delete offerPool[offerId]
+      offerPool = {...offerPool, ...makeOffers(1)}
+    }
+  }
 
   let announceSecs = defaultAnnounceSecs
   let announceInterval = setInterval(announceAll, announceSecs * 1000)
