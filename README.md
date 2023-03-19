@@ -413,7 +413,10 @@ Returns an object with the following methods:
 
 - ### `getPeers()`
 
-  Returns a list of peer IDs present in room (not including the local user).
+  Returns a map of
+  [`simple-peer-light`](https://github.com/mitschabaude/simple-peer-light)
+  instances that represent the peers present in room (not including the local
+  user). The keys of this object are the respective peers' IDs.
 
 - ### `addStream(stream, [targetPeers], [metadata])`
 

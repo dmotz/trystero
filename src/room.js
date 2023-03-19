@@ -329,7 +329,7 @@ export default (onPeer, onSelfLeave) => {
       onSelfLeave()
     },
 
-    getPeers: () => keys(peerMap),
+    getPeers: () => peerMap,
 
     addStream: (stream, targets, meta) =>
       iterate(targets, async (id, peer) => {

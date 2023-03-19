@@ -1,3 +1,5 @@
+import Peer from 'simple-peer-light'
+
 declare module 'trystero' {
   import {TorrentRoomConfig} from 'trystero/torrent'
 
@@ -50,7 +52,7 @@ declare module 'trystero' {
 
     leave: () => void
 
-    getPeers: () => string[]
+    getPeers: () => Record<string, Peer>
 
     addStream: (
       stream: MediaStream,

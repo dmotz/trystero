@@ -123,7 +123,7 @@ function removeCursor(id) {
 }
 
 function updatePeerInfo() {
-  const count = room.getPeers().length
+  const count = Object.keys(room.getPeers()).length
   peerInfo.innerHTML = count
     ? `Right now <em>${count}</em> other peer${
         count === 1 ? ' is' : 's are'
