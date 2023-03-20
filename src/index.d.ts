@@ -1,5 +1,3 @@
-import Peer from 'simple-peer-light'
-
 declare module 'trystero' {
   import {TorrentRoomConfig} from 'trystero/torrent'
 
@@ -52,7 +50,9 @@ declare module 'trystero' {
 
     leave: () => void
 
-    getPeers: () => Record<string, Peer>
+    // TODO: Define types for simple-peer-light instances, which is what the
+    // `any` here represents.
+    getPeers: () => Record<string, any>
 
     addStream: (
       stream: MediaStream,
