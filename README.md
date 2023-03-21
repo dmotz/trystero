@@ -414,9 +414,9 @@ Returns an object with the following methods:
 - ### `getPeers()`
 
   Returns a map of
-  [`simple-peer-light`](https://github.com/mitschabaude/simple-peer-light)
-  instances that represent the peers present in room (not including the local
-  user). The keys of this object are the respective peers' IDs.
+  [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
+  for the peers present in room (not including the local user). The keys of
+  this object are the respective peers' IDs.
 
 - ### `addStream(stream, [targetPeers], [metadata])`
 

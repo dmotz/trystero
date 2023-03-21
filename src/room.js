@@ -4,6 +4,7 @@ import {
   encodeBytes,
   entries,
   events,
+  fromEntries,
   keys,
   libName,
   mkErr,
@@ -329,7 +330,8 @@ export default (onPeer, onSelfLeave) => {
       onSelfLeave()
     },
 
-    getPeers: () => peerMap,
+    getPeers: () =>
+      fromEntries(entries(peerMap).map(([id, peer]) => [id, peer._pc])),
 
     addStream: (stream, targets, meta) =>
       iterate(targets, async (id, peer) => {

@@ -50,9 +50,7 @@ declare module 'trystero' {
 
     leave: () => void
 
-    // TODO: Define types for simple-peer-light instances, which is what the
-    // `any` here represents.
-    getPeers: () => Record<string, any>
+    getPeers: () => Record<string, RTCPeerConnection>
 
     addStream: (
       stream: MediaStream,
