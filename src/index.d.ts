@@ -50,7 +50,7 @@ declare module 'trystero' {
 
     leave: () => void
 
-    getPeers: () => string[]
+    getPeers: () => Record<string, RTCPeerConnection>
 
     addStream: (
       stream: MediaStream,

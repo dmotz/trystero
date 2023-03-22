@@ -413,7 +413,10 @@ Returns an object with the following methods:
 
 - ### `getPeers()`
 
-  Returns a list of peer IDs present in room (not including the local user).
+  Returns a map of
+  [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
+  for the peers present in room (not including the local user). The keys of
+  this object are the respective peers' IDs.
 
 - ### `addStream(stream, [targetPeers], [metadata])`
 
