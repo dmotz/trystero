@@ -482,6 +482,25 @@ Returns an object with the following methods:
   - `targetPeers` - **(optional)** If specified, the track is replaced only for
     the target peer ID (string) or list of peer IDs (array).
 
+- ### `addTransceiver(track, stream, [sendEncodings], [codecPreferences], [targetPeers], [metadata])`
+
+  Adds a new media track to a stream with RTP sender encodings.
+
+  - `track` - A `MediaStreamTrack` to add to an existing stream.
+
+  - `stream` - The target `MediaStream` to attach the new track to.
+
+  - `sendEncodings` - **(optional)** An Array of `RTCRtpEncodingParameters`
+
+  - `codecPreferences` - **(optional)** An Array of preferred `RTCRtpCodecCapability` to use
+
+  - `targetPeers` - **(optional)** If specified, the track is sent only to the
+    target peer ID (string) or list of peer IDs (array).
+
+  - `metadata` - **(optional)** Additional metadata (any serializable type) to
+    be sent with the track. See `metadata` notes for `addStream()` above for
+    more details.
+
 - ### `onPeerJoin(callback)`
 
   Registers a callback function that will be called when a peer joins the room.

@@ -80,6 +80,15 @@ declare module 'trystero' {
       targetPeers?: TargetPeers
     ) => Promise<void>[]
 
+    addTransceiver: (
+      track: MediaStreamTrack,
+      stream: MediaStream,
+      sendEncodings?: RTCRtpCodingParameters[],
+      codecPreferences?: RTCRtpCodecCapability[],
+      targetPeers?: TargetPeers,
+      metadata?: Metadata
+    ) => Promise<void>[]
+
     onPeerJoin: (fn: (peerId: string) => void) => void
 
     onPeerLeave: (fn: (peerId: string) => void) => void

@@ -366,6 +366,19 @@ export default (onPeer, onSelfLeave) => {
         peer.replaceTrack(oldTrack, newTrack, stream)
       }),
 
+    addTransceiver: (track, stream, sendEncodings = [], codecPreferences = [], targets, meta) =>
+      iterate(targets, async (id, peer) => {
+        if (meta) {
+          await sendTrackMeta(meta, id)
+        }
+
+        const transceiver = peer.addTransceiver(track, {
+          streams: [stream],
+          sendEncodings
+        })
+        transceiver.setCodecPreferences(codecPreferences)
+      }),
+
     onPeerJoin: f => (onPeerJoin = f),
 
     onPeerLeave: f => (onPeerLeave = f),
