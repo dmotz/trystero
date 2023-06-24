@@ -25,9 +25,10 @@ const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
 const trackerAction = 'announce'
 const defaultTrackerUrls = [
+  'wss://fediverse.tv/tracker/socket',
+  'wss://tracker.files.fm:7073/announce',
   'wss://tracker.openwebtorrent.com',
   'wss://tracker.btorrent.xyz',
-  'wss://tracker.files.fm:7073/announce',
   'wss://qot.abiir.top:443/announce',
   'wss://spacetradersapi-chatbox.herokuapp.com:443/announce'
 ]
