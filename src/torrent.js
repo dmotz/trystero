@@ -278,4 +278,8 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   )
 })
 
+export const getTrackerConnections = () => {
+  return { ...sockets }
+}
+
 export {selfId} from './utils.js'

@@ -11,5 +11,7 @@ declare module 'trystero/torrent' {
     roomId: string
   ): Room
 
+  export function getTrackerConnections(): Record<string, Promise<WebSocket>>
+
   export * from 'trystero'
 }
