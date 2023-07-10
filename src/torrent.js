@@ -192,9 +192,10 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         ...socketListeners[url],
         [infoHash]: onSocketMessage
       }
-      sockets[url] = new Promise(res => {
+      sockets[url] = new Promise((res, rej) => {
         const socket = new WebSocket(url)
         socket.onopen = res.bind(null, socket)
+        socket.onerror = rej
         socket.onmessage = e =>
           values(socketListeners[url]).forEach(f => f(socket, e))
       })
