@@ -11,6 +11,7 @@ import {
   mkErr,
   noOp,
   selfId,
+  sleep,
   values
 } from './utils.js'
 import {genKey, encrypt, decrypt} from './crypto.js'
@@ -23,6 +24,7 @@ const offerPoolSize = 10
 const defaultRedundancy = 2
 const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
+const trackerRetrySecs = 5
 const trackerAction = 'announce'
 const defaultTrackerUrls = [
   'wss://fediverse.tv/tracker/socket',
@@ -198,6 +200,11 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         socket.onerror = rej
         socket.onmessage = e =>
           values(socketListeners[url]).forEach(f => f(socket, e))
+
+        socket.addEventListener('close', async () => {
+          await sleep(trackerRetrySecs * 1000)
+          makeSocket(url, infoHash, true)
+        })
       })
     } else {
       socketListeners[url][infoHash] = onSocketMessage

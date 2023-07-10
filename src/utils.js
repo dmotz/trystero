@@ -75,3 +75,8 @@ export const combineChunks = chunks => {
 
   return full
 }
+
+export const sleep = (milliseconds) =>
+  new Promise(res => {
+    setTimeout(res, milliseconds)
+  })
