@@ -17,6 +17,7 @@ import {
 import {genKey, encrypt, decrypt} from './crypto.js'
 
 const occupiedRooms = {}
+const socketPromises = {}
 const sockets = {}
 const socketListeners = {}
 const hashLimit = 20
@@ -189,13 +190,14 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     )
 
   const makeSocket = (url, infoHash, forced) => {
-    if (forced || !sockets[url]) {
+    if (forced || !socketPromises[url]) {
       socketListeners[url] = {
         ...socketListeners[url],
         [infoHash]: onSocketMessage
       }
-      sockets[url] = new Promise((res, rej) => {
+      socketPromises[url] = new Promise((res, rej) => {
         const socket = new WebSocket(url)
+        sockets[url] = socket
         socket.onopen = res.bind(null, socket)
         socket.onerror = rej
         socket.onmessage = e =>
@@ -210,7 +212,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       socketListeners[url][infoHash] = onSocketMessage
     }
 
-    return sockets[url]
+    return socketPromises[url]
   }
 
   const announceAll = async () => {
