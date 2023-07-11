@@ -195,14 +195,14 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         ...socketListeners[url],
         [infoHash]: onSocketMessage
       }
-      socketPromises[url] = new Promise((res, rej) => {
+      socketPromises[url] = new Promise(res => {
         const socket = new WebSocket(url)
         sockets[url] = socket
-        socket.onopen = res.bind(null, socket)
-        socket.onerror = rej
-        socket.onmessage = e =>
-          values(socketListeners[url]).forEach(f => f(socket, e))
 
+        socket.addEventListener('open', res.bind(null, socket))
+        socket.addEventListener('message', e =>
+          values(socketListeners[url]).forEach(f => f(socket, e))
+        )
         socket.addEventListener('close', async () => {
           await sleep(trackerRetrySecs * 1000)
           makeSocket(url, infoHash, true)
