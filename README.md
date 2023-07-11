@@ -387,8 +387,8 @@ communication channels and send events.
 
   - `trackerRedundancy` - **(optional, 🌊 BitTorrent only)** Integer specifying
     how many torrent trackers to connect to simultaneously in case some fail.
-    Defaults to 2, maximum of 3. Passing a `trackerUrls` option will cause this
-    option to be ignored as the entire list will be used.
+    Defaults to 2. Passing a `trackerUrls` option will cause this option to be
+    ignored as the entire list will be used.
 
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
     initialized Firebase app instance instead of an `appId`. Normally Trystero
