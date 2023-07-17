@@ -201,7 +201,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         sockets[url] = socket
 
         socket.addEventListener('open', () => {
-          // Reset the timeout for this tracker
+          // Reset the retry timeout for this tracker
           socketRetryTimeouts[url] = trackerRetrySecs * 1000
           res(socket)
         })
