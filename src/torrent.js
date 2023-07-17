@@ -19,13 +19,14 @@ import {genKey, encrypt, decrypt} from './crypto.js'
 const occupiedRooms = {}
 const socketPromises = {}
 const sockets = {}
+const socketRetryTimeouts = {}
 const socketListeners = {}
 const hashLimit = 20
 const offerPoolSize = 10
 const defaultRedundancy = 2
 const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
-const trackerRetrySecs = 5
+const trackerRetrySecs = 4
 const trackerAction = 'announce'
 const defaultTrackerUrls = [
   'wss://fediverse.tv/tracker/socket',
@@ -199,12 +200,23 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         const socket = new WebSocket(url)
         sockets[url] = socket
 
-        socket.addEventListener('open', res.bind(null, socket))
+        socket.addEventListener('open', () => {
+          // Reset the timeout for this tracker
+          socketRetryTimeouts[url] = trackerRetrySecs * 1000
+          res(socket)
+        })
+
         socket.addEventListener('message', e =>
           values(socketListeners[url]).forEach(f => f(socket, e))
         )
+
         socket.addEventListener('close', async () => {
-          await sleep(trackerRetrySecs * 1000)
+          socketRetryTimeouts[url] =
+            socketRetryTimeouts[url] ?? trackerRetrySecs * 1000
+
+          await sleep(socketRetryTimeouts[url])
+          socketRetryTimeouts[url] *= 2
+
           makeSocket(url, infoHash, true)
         })
       })
