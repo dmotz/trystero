@@ -647,11 +647,11 @@ Returns an object with the following methods:
 A unique ID string other peers will know the local user as globally across
 rooms.
 
-### `getTrackers`
+### `getTrackers()`
 
 **(🌊 BitTorrent only)** Returns an object of BitTorrent tracker URL keys
 mapped to their WebSocket connections. This can be useful for determining the
-state of user's connection to the trackers and handling any connection
+state of the user's connection to the trackers and handling any connection
 failures.
 
 Example:
