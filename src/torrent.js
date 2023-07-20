@@ -11,18 +11,22 @@ import {
   mkErr,
   noOp,
   selfId,
+  sleep,
   values
 } from './utils.js'
 import {genKey, encrypt, decrypt} from './crypto.js'
 
 const occupiedRooms = {}
+const socketPromises = {}
 const sockets = {}
+const socketRetryTimeouts = {}
 const socketListeners = {}
 const hashLimit = 20
 const offerPoolSize = 10
 const defaultRedundancy = 2
 const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
+const trackerRetrySecs = 4
 const trackerAction = 'announce'
 const defaultTrackerUrls = [
   'wss://fediverse.tv/tracker/socket',
@@ -187,22 +191,40 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     )
 
   const makeSocket = (url, infoHash, forced) => {
-    if (forced || !sockets[url]) {
+    if (forced || !socketPromises[url]) {
       socketListeners[url] = {
         ...socketListeners[url],
         [infoHash]: onSocketMessage
       }
-      sockets[url] = new Promise(res => {
+      socketPromises[url] = new Promise(res => {
         const socket = new WebSocket(url)
-        socket.onopen = res.bind(null, socket)
-        socket.onmessage = e =>
+        sockets[url] = socket
+
+        socket.addEventListener('open', () => {
+          // Reset the retry timeout for this tracker
+          socketRetryTimeouts[url] = trackerRetrySecs * 1000
+          res(socket)
+        })
+
+        socket.addEventListener('message', e =>
           values(socketListeners[url]).forEach(f => f(socket, e))
+        )
+
+        socket.addEventListener('close', async () => {
+          socketRetryTimeouts[url] =
+            socketRetryTimeouts[url] ?? trackerRetrySecs * 1000
+
+          await sleep(socketRetryTimeouts[url])
+          socketRetryTimeouts[url] *= 2
+
+          makeSocket(url, infoHash, true)
+        })
       })
     } else {
       socketListeners[url][infoHash] = onSocketMessage
     }
 
-    return sockets[url]
+    return socketPromises[url]
   }
 
   const announceAll = async () => {
@@ -277,5 +299,9 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
   )
 })
+
+export const getTrackers = () => {
+  return { ...sockets }
+}
 
 export {selfId} from './utils.js'

@@ -647,6 +647,24 @@ Returns an object with the following methods:
 A unique ID string other peers will know the local user as globally across
 rooms.
 
+### `getTrackers`
+
+**(🌊 BitTorrent only)** Returns an object of BitTorrent tracker URL keys
+mapped to their WebSocket connections. This can be useful for determining the
+state of user's connection to the trackers and handling any connection
+failures.
+
+Example:
+
+```javascript
+console.log(trystero.getTrackers())
+// => Object {
+//  "wss://fediverse.tv/tracker/socket": WebSocket,
+//  "wss://tracker.files.fm:7073/announce": WebSocket,
+//  "wss://tracker.openwebtorrent.com": WebSocket
+//  }
+```
+
 ### `getOccupants(config, namespace)`
 
 **(🔥 Firebase only)** Returns a promise that resolves to a list of user IDs
