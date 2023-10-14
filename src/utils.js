@@ -19,7 +19,7 @@ export const initPeer = (initiator, trickle, config) => {
 }
 
 export const genId = n =>
-  new Array(n)
+  Array(n)
     .fill()
     .map(() => charSet[Math.floor(Math.random() * charSet.length)])
     .join('')
@@ -76,7 +76,7 @@ export const combineChunks = chunks => {
   return full
 }
 
-export const sleep = (milliseconds) =>
+export const sleep = milliseconds =>
   new Promise(res => {
     setTimeout(res, milliseconds)
   })
