@@ -26,7 +26,7 @@ export const genId = n =>
 
 export const initGuard = (occupiedRooms, f) => (config, ns) => {
   if (occupiedRooms[ns]) {
-    throw mkErr(`already joined room ${ns}`)
+    return (_, _) => occupiedRooms[ns]
   }
 
   if (!config) {

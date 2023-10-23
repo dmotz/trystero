@@ -58,7 +58,11 @@ export default (onPeer, onSelfLeave) => {
     onPeerLeave(id)
   }
 
-  const makeAction = type => {
+  const getAction = type => {
+    return actions[type]
+  }
+
+  const makeAction = (type) => {
     if (!type) {
       throw mkErr('action type argument is required')
     }
@@ -78,7 +82,7 @@ export default (onPeer, onSelfLeave) => {
     const typePadded = decodeBytes(typeBytes)
 
     if (actions[typePadded]) {
-      throw mkErr(`action '${type}' already registered`)
+      return actions[typePadded]
     }
 
     let nonce = 0
@@ -309,6 +313,7 @@ export default (onPeer, onSelfLeave) => {
   getTrackMeta((meta, id) => (pendingTrackMetas[id] = meta))
 
   return {
+    getAction,
     makeAction,
 
     ping: async id => {

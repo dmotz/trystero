@@ -42,8 +42,12 @@ declare module 'trystero' {
   }
 
   export interface Room {
+    getAction: <T>(
+      namespace: string,
+    ) => [ActionSender<T>, ActionReceiver<T>, ActionProgress] | undefined
+
     makeAction: <T>(
-      namespace: string
+      namespace: string,
     ) => [ActionSender<T>, ActionReceiver<T>, ActionProgress]
 
     ping: (id: string) => Promise<number>
@@ -95,7 +99,7 @@ declare module 'trystero' {
 
   export function joinRoom(
     config: BaseRoomConfig & TorrentRoomConfig,
-    roomId: string
+    roomId: string,
   ): Room
 
   export const selfId: string
