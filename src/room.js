@@ -82,7 +82,7 @@ export default (onPeer, onSelfLeave) => {
     const typePadded = decodeBytes(typeBytes)
 
     if (actions[typePadded]) {
-      return actions[typePadded]
+      return getAction(typePadded)
     }
 
     let nonce = 0
