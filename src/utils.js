@@ -26,7 +26,7 @@ export const genId = n =>
 
 export const initGuard = (occupiedRooms, f) => (config, ns) => {
   if (occupiedRooms[ns]) {
-    return (_, _) => occupiedRooms[ns]
+    return (_, __) => occupiedRooms[ns]
   }
 
   if (!config) {
