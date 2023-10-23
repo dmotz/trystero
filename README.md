@@ -205,6 +205,57 @@ room.onPeerLeave(peerId =>
 > will be received on the other side as the same type (a number as a number,
 > a string as a string, an object as an object, binary as binary, etc.).
 
+## React Hooks
+
+The `joinRoom` and `makeAction` functions are idempotent and ready for use as React Hooks.
+
+Create a room and define actions inline to make any React component instantly multiplayer. Here is a simple example of users exchanging their favorite color.
+
+```jsx
+  import React, { useEffect } from 'react'
+
+  const FavColorComponent = () => {
+    // Create the room and an action to ask other users about their favorite color
+    const room = joinRoom({appId: 'x-mas'}, 'buddy_elf')
+    const [sendFavColor, receiveFavColor] = room.makeAction('fav_col')
+    const [sendFavColorResponse, receiveFavColorResponse] 
+      = room.makeAction('fav_col_res')
+
+    // Define a default favorite color as a state variable
+    const [myFavoriteColor, setMyFavoriteColor] = useState('red')
+    const handleChange = (e) => {
+      setMyFavoriteColor(e.target.value);
+    };
+
+    // Setup response for receiving a request for our favorite color
+    useEffect(() => {
+      receiveColor(data, peerId) => {
+        console.log(`Peer with ID ${peerId} has a favorite color! ${data}`);
+        sendColorResponse(myFavoriteColor)
+      }
+      // This useEffect hook will run everytime myFavoriteColor is updated,
+      // ensuring we always respond with our current favorite color
+    }, [myFavoriteColor])
+
+    // Setup a response for receiving a response to our request for a favorite color
+    useEffect(() => {
+      receiveColorResponse((data) => {
+        console.log(`Peer with ID ${peerId} responded with their favorite color! ${data}`);
+      })
+      // This useEffect hook will only run when the component is mounted. This 
+      // action is independent of state so we only need to set it up once.
+    }, [])
+
+    return <div>
+      <h1>What is your favorite color?</h1>
+      <input value={myFavoriteColor} onChange={handleChange}></input>
+      <button onClick={handleSend}>Send to Peers<button>
+    </div>
+  }
+
+  export default FavColorComponent
+```
+
 ## Audio and video
 
 Here's a simple example of how you could create an audio chatroom:
