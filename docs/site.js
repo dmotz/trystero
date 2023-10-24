@@ -37,16 +37,16 @@ init(49)
 document.documentElement.className = 'ready'
 addCursor(selfId, true)
 
-window.addEventListener('mousemove', ({clientX, clientY}) => {
-  mouseX = clientX / window.innerWidth
-  mouseY = clientY / window.innerHeight
+addEventListener('mousemove', ({clientX, clientY}) => {
+  mouseX = clientX / innerWidth
+  mouseY = clientY / innerHeight
   moveCursor([mouseX, mouseY], selfId)
   if (room) {
     sendMove([mouseX, mouseY])
   }
 })
 
-window.addEventListener('click', () => {
+addEventListener('click', () => {
   const payload = [randomFruit(), mouseX, mouseY]
 
   dropFruit(payload)
@@ -55,9 +55,9 @@ window.addEventListener('click', () => {
   }
 })
 
-window.addEventListener('touchstart', e => {
-  const x = e.touches[0].clientX / window.innerWidth
-  const y = e.touches[0].clientY / window.innerHeight
+addEventListener('touchstart', e => {
+  const x = e.touches[0].clientX / innerWidth
+  const y = e.touches[0].clientY / innerHeight
   const payload = [randomFruit(), x, y]
 
   dropFruit(payload)
@@ -88,8 +88,8 @@ function moveCursor([x, y], id) {
   const el = cursors[id]
 
   if (el) {
-    el.style.left = x * window.innerWidth + 'px'
-    el.style.top = y * window.innerHeight + 'px'
+    el.style.left = x * innerWidth + 'px'
+    el.style.top = y * innerHeight + 'px'
   }
 }
 
@@ -135,8 +135,8 @@ function dropFruit([fruit, x, y]) {
   const el = document.createElement('div')
   el.className = 'fruit'
   el.innerText = fruit
-  el.style.left = x * window.innerWidth + 'px'
-  el.style.top = y * window.innerHeight + 'px'
+  el.style.left = x * innerWidth + 'px'
+  el.style.top = y * innerHeight + 'px'
   canvas.appendChild(el)
   setTimeout(() => canvas.removeChild(el), 3000)
 }
