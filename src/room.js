@@ -21,6 +21,7 @@ const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
+const autoLeave = false
 
 export default (onPeer, onSelfLeave) => {
   const peerMap = {}
@@ -308,7 +309,7 @@ export default (onPeer, onSelfLeave) => {
 
   getTrackMeta((meta, id) => (pendingTrackMetas[id] = meta))
 
-  return {
+  const roomInstance = {
     makeAction,
 
     ping: async id => {
@@ -374,4 +375,15 @@ export default (onPeer, onSelfLeave) => {
 
     onPeerTrack: f => (onPeerTrack = f)
   }
+
+  // Leave room when page is closed
+  if (autoLeave) {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', () => {
+        roomInstance.leave()
+      })
+    }
+  }
+
+  return roomInstance
 }
