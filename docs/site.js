@@ -25,7 +25,7 @@ const fruits = [
   '🥥',
   '🥝'
 ]
-const randomFruit = () => fruits[Math.floor(Math.random() * fruits.length)]
+const randomFruit = () => Math.floor(Math.random() * fruits.length)
 
 let mouseX = 0
 let mouseY = 0
@@ -87,7 +87,7 @@ function init(n) {
 function moveCursor([x, y], id) {
   const el = cursors[id]
 
-  if (el) {
+  if (el && typeof x === "number" && typeof y === "number") {
     el.style.left = x * innerWidth + 'px'
     el.style.top = y * innerHeight + 'px'
   }
@@ -131,10 +131,15 @@ function updatePeerInfo() {
     : noPeersCopy
 }
 
-function dropFruit([fruit, x, y]) {
+function dropFruit([fruitIndex, x, y]) {
+  const fruit = fruits[fruitIndex]
+  if (!fruit || typeof x !== "number" || typeof y !== "number") {
+    return
+  }
+
   const el = document.createElement('div')
   el.className = 'fruit'
-  el.innerText = fruit
+  el.innerText = fruits[fruitIndex]
   el.style.left = x * innerWidth + 'px'
   el.style.top = y * innerHeight + 'px'
   canvas.appendChild(el)
