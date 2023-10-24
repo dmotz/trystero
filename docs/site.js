@@ -139,7 +139,7 @@ function dropFruit([fruitIndex, x, y]) {
 
   const el = document.createElement('div')
   el.className = 'fruit'
-  el.innerText = fruits[fruitIndex]
+  el.innerText = fruit
   el.style.left = x * innerWidth + 'px'
   el.style.top = y * innerHeight + 'px'
   canvas.appendChild(el)
