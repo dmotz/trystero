@@ -1,4 +1,4 @@
-import Peer from 'simple-peer-light'
+import Peer from 'simple-peer'
 
 const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
 
