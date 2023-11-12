@@ -37,6 +37,12 @@ const init = config => {
     return dbs[url] || (dbs[url] = getDatabase(config.firebaseApp))
   }
 
+  if(config.databaseURL) {
+    const url = config.databaseURL
+    return dbs[url] || (dbs[url] = getDatabase(initializeApp({databaseURL: url})))
+  }
+  
+  // these 2 lines dont work since depending on region, the URL will be https://APP_ID-default-rtdb{-OPTIONAL_REGION_NAME}.firebasedatabase.app
   const url = normalizeDbUrl(config.appId)
   return dbs[url] || (dbs[url] = getDatabase(initializeApp({databaseURL: url})))
 }
