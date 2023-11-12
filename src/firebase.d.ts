@@ -5,6 +5,7 @@ declare module 'trystero/firebase' {
   export interface FirebaseRoomConfig {
     firebaseApp?: FirebaseApp
     rootPath?: string
+    databaseURL?: string
   }
 
   export function joinRoom(
