@@ -35,7 +35,7 @@
     "terser": "^5.15.0"
   },
   "scripts": {
-    "sizes": "./bundle-sizes.sh"
+    "bundle": "./bundle.sh"
   },
   "keywords": [
     "webrtc",
