@@ -368,8 +368,9 @@ communication channels and send events.
 - `config` - Configuration object containing the following keys:
 
   - `appId` - **(required)** A unique string identifying your app. If using
-    Firebase this should be the database ID (also see `firebaseApp` below for
-    an alternative way of configuring the Firebase strategy).
+    Firebase, this should be the `databaseURL` from your Firebase config (also
+    see `firebaseApp` below for an alternative way of configuring the Firebase
+    strategy).
 
   - `password` - **(optional)** A string to encrypt session descriptions as they
     are passed through the peering medium. If set, session descriptions will be
@@ -724,8 +725,7 @@ If you want to use the Firebase strategy and don't have an existing project:
 
 1. Create a [Firebase](https://firebase.google.com/) project
 1. Create a new Realtime Database
-1. Copy the database ID and use it as the `appId` in your Trystero
-   config
+1. Copy the `databaseURL` and use it as the `appId` in your Trystero config
 1. [*Optional*] Configure the database with security rules to limit activity:
 
 ```json
