@@ -87,7 +87,7 @@ function init(n) {
 function moveCursor([x, y], id) {
   const el = cursors[id]
 
-  if (el && typeof x === "number" && typeof y === "number") {
+  if (el && typeof x === 'number' && typeof y === 'number') {
     el.style.left = x * innerWidth + 'px'
     el.style.top = y * innerHeight + 'px'
   }
@@ -133,7 +133,7 @@ function updatePeerInfo() {
 
 function dropFruit([fruitIndex, x, y]) {
   const fruit = fruits[fruitIndex]
-  if (!fruit || typeof x !== "number" || typeof y !== "number") {
+  if (!fruit || typeof x !== 'number' || typeof y !== 'number') {
     return
   }
 
