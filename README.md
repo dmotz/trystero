@@ -100,7 +100,7 @@ const room = joinRoom(config, 'yoyodyne')
 
 The first argument is a configuration object that requires an `appId`. This
 should be a completely unique identifier for your app (for the BitTorrent and
-IPFS strategies) or your Firebase database ID if you're using Firebase. The
+IPFS strategies) or your Firebase `databaseURL` if you're using Firebase. The
 second argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
