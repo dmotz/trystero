@@ -73,11 +73,13 @@ You can install with npm (`npm i trystero`) and import like so:
 import {joinRoom} from 'trystero'
 ```
 
-Or maybe you prefer a simple script tag?
+Or maybe you prefer a simple script tag? Download a pre-built JS file from the
+[latest release](https://github.com/dmotz/trystero/releases/latest) and import
+it locally:
 
 ```html
 <script type="module">
-  import {joinRoom} from 'https://cdn.skypack.dev/trystero'
+  import {joinRoom} from './trystero-torrent.min.js'
 </script>
 ```
 
@@ -86,9 +88,9 @@ different one just deep import like so (your bundler should handle including
 only relevant code):
 
 ```javascript
-import {joinRoom} from 'trystero/firebase'
+import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js with a local file)
 // or
-import {joinRoom} from 'trystero/ipfs'
+import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
 ```
 
 Next, join the user to a room with a namespace:
