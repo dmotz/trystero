@@ -420,7 +420,8 @@ export default function App({roomId}) {
 ### `joinRoom(config, namespace)`
 
 Adds local user to room whereby other peers in the same namespace will open
-communication channels and send events.
+communication channels and send events. Calling `joinRoom()` multiple times with
+the same namespace will return the same room instance.
 
 - `config` - Configuration object containing the following keys:
 
