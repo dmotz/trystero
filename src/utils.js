@@ -26,7 +26,7 @@ export const genId = n =>
 
 export const initGuard = (occupiedRooms, f) => (config, ns) => {
   if (occupiedRooms[ns]) {
-    throw mkErr(`already joined room ${ns}`)
+    return occupiedRooms[ns]
   }
 
   if (!config) {
@@ -41,7 +41,7 @@ export const initGuard = (occupiedRooms, f) => (config, ns) => {
     throw mkErr('namespace argument required')
   }
 
-  return f(config, ns)
+  return (occupiedRooms[ns] = f(config, ns))
 }
 
 export const libName = 'Trystero'

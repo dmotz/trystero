@@ -91,8 +91,6 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   let didSyncRoom = false
   let onPeerConnect = noOp
 
-  occupiedRooms[ns] = true
-
   set(selfRef, {[presencePath]: true})
   onDisconnect(selfRef).remove()
   onChildAdded(selfRef, data => {
