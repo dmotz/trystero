@@ -360,6 +360,61 @@ Keep in mind the password has to match for all peers in the room for them to be
 able to connect. An example use case might be a private chat room where users
 learn the password via external means.
 
+### React hooks
+
+Trystero functions are idempotent so they already work out of the box as React
+hooks.
+
+Here's a simple example component where each peer syncs their favorite
+color to everyone else:
+
+```jsx
+import {joinRoom} from 'trystero'
+import {useState} from 'react'
+
+const trysteroConfig = {appId: 'trystero-94db3.firebaseio.com'}
+
+export default function App({roomId}) {
+  const room = joinRoom(trysteroConfig, roomId)
+  const [sendColor, getColor] = room.makeAction('color')
+  const [myColor, setMyColor] = useState('#c0ffee')
+  const [peerColors, setPeerColors] = useState({})
+
+  // whenever a new peer joins, send my color to them
+  room.onPeerJoin(peer => sendColor(myColor, peer))
+
+  getColor((color, peer) =>
+    setPeerColors(peerColors => ({...peerColors, [peer]: color}))
+  )
+
+  const updateColor = e => {
+    const {value} = e.target
+
+    setMyColor(value)
+    // when updating my own color, broadcast it to all peers
+    sendColor(value)
+  }
+
+  return (
+    <>
+      <h1>Trystero + React</h1>
+
+      <h2>My color:</h2>
+      <input type="color" value={myColor} onChange={updateColor} />
+
+      <h2>Peer colors:</h2>
+      <ul>
+        {Object.entries(peerColors).map(([peerId, color]) => (
+          <li key={peerId} style={{backgroundColor: color}}>
+            {peerId}: {color}
+          </li>
+        ))}
+      </ul>
+    </>
+  )
+}
+```
+
 ## API
 
 ### `joinRoom(config, namespace)`
