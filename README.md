@@ -36,6 +36,7 @@ on top of WebRTC:
   - [Action promises](#action-promises)
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
+  - [React hooks](#react-hooks)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
 - [Firebase setup](#firebase-setup)
