@@ -59,34 +59,41 @@ export default (onPeer, onSelfLeave) => {
   }
 
   const makeAction = type => {
+    if (actions[type]) {
+      return [
+        actions[type].send,
+        actions[type].setOnComplete,
+        actions[type].setOnProgress
+      ]
+    }
+
     if (!type) {
       throw mkErr('action type argument is required')
     }
 
-    const typeEncoded = encodeBytes(type)
+    const typeBytes = encodeBytes(type)
 
-    if (typeEncoded.byteLength > typeByteLimit) {
+    if (typeBytes.byteLength > typeByteLimit) {
       throw mkErr(
-        `action type string "${type}" (${typeEncoded.byteLength}b) exceeds ` +
+        `action type string "${type}" (${typeBytes.byteLength}b) exceeds ` +
           `byte limit (${typeByteLimit}). Hint: choose a shorter name.`
       )
     }
 
-    const typeBytes = new Uint8Array(typeByteLimit)
-    typeBytes.set(typeEncoded)
-
-    const typePadded = decodeBytes(typeBytes)
-
-    if (actions[typePadded]) {
-      throw mkErr(`action '${type}' already registered`)
-    }
+    const typeBytesPadded = new Uint8Array(typeByteLimit)
+    typeBytesPadded.set(typeBytes)
 
     let nonce = 0
 
-    actions[typePadded] = {onComplete: noOp, onProgress: noOp}
+    actions[type] = {
+      onComplete: noOp,
+      onProgress: noOp,
 
-    return [
-      async (data, targets, meta, onProgress) => {
+      setOnComplete: f => (actions[type] = {...actions[type], onComplete: f}),
+
+      setOnProgress: f => (actions[type] = {...actions[type], onProgress: f}),
+
+      send: async (data, targets, meta, onProgress) => {
         if (meta && typeof meta !== 'object') {
           throw mkErr('action meta argument must be an object')
         }
@@ -125,7 +132,7 @@ export default (onPeer, onSelfLeave) => {
                 : chunkSize)
           )
 
-          chunk.set(typeBytes)
+          chunk.set(typeBytesPadded)
           chunk.set([nonce], nonceIndex)
           chunk.set(
             [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
@@ -181,18 +188,22 @@ export default (onPeer, onSelfLeave) => {
             }
           })
         )
-      },
+      }
+    }
 
-      onComplete =>
-        (actions[typePadded] = {...actions[typePadded], onComplete}),
-
-      onProgress => (actions[typePadded] = {...actions[typePadded], onProgress})
+    return [
+      actions[type].send,
+      actions[type].setOnComplete,
+      actions[type].setOnProgress
     ]
   }
 
   const handleData = (id, data) => {
     const buffer = new Uint8Array(data)
-    const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex))
+    const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex)).replaceAll(
+      '\x00',
+      ''
+    )
     const [nonce] = buffer.subarray(nonceIndex, tagIndex)
     const [tag] = buffer.subarray(tagIndex, progressIndex)
     const [progress] = buffer.subarray(progressIndex, payloadIndex)
