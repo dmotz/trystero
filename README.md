@@ -21,6 +21,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
+- ⚛️🪝 React hooks
 
 ---
 
