@@ -56,7 +56,7 @@ export const mkErr = msg => new Error(`${libName}: ${msg}`)
 
 export const encodeBytes = txt => new TextEncoder().encode(txt)
 
-export const decodeBytes = txt => new TextDecoder().decode(txt)
+export const decodeBytes = buffer => new TextDecoder().decode(buffer)
 
 export const events = fromEntries(
   ['close', 'connect', 'data', 'error', 'signal', 'stream', 'track'].map(k => [
