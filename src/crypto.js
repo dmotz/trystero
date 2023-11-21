@@ -2,11 +2,10 @@ import {encodeBytes, decodeBytes} from './utils.js'
 
 const algo = 'AES-CBC'
 
-const pack = buff =>
-  window.btoa(String.fromCharCode.apply(null, new Uint8Array(buff)))
+const pack = buff => btoa(String.fromCharCode.apply(null, new Uint8Array(buff)))
 
 const unpack = packed => {
-  const str = window.atob(packed)
+  const str = atob(packed)
 
   return new Uint8Array(str.length).map((_, i) => str.charCodeAt(i)).buffer
 }

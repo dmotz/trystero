@@ -161,6 +161,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       node.pubsub.unsubscribe(selfTopic)
       clearInterval(announceInterval)
       clearTimeout(swarmPollTimeout)
+      delete occupiedRooms[ns]
     }
   )
 })

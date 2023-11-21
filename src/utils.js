@@ -26,7 +26,7 @@ export const genId = n =>
 
 export const initGuard = (occupiedRooms, f) => (config, ns) => {
   if (occupiedRooms[ns]) {
-    throw mkErr(`already joined room ${ns}`)
+    return occupiedRooms[ns]
   }
 
   if (!config) {
@@ -41,7 +41,7 @@ export const initGuard = (occupiedRooms, f) => (config, ns) => {
     throw mkErr('namespace argument required')
   }
 
-  return f(config, ns)
+  return (occupiedRooms[ns] = f(config, ns))
 }
 
 export const libName = 'Trystero'
@@ -56,7 +56,7 @@ export const mkErr = msg => new Error(`${libName}: ${msg}`)
 
 export const encodeBytes = txt => new TextEncoder().encode(txt)
 
-export const decodeBytes = txt => new TextDecoder().decode(txt)
+export const decodeBytes = buffer => new TextDecoder().decode(buffer)
 
 export const events = fromEntries(
   ['close', 'connect', 'data', 'error', 'signal', 'stream', 'track'].map(k => [

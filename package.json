@@ -1,6 +1,6 @@
 {
   "name": "trystero",
-  "version": "0.13.0",
+  "version": "0.15.0",
   "description": "Serverless WebRTC matchmaking for painless P2P",
   "main": "src/index.js",
   "module": "src/index.js",
@@ -35,7 +35,7 @@
     "terser": "^5.15.0"
   },
   "scripts": {
-    "sizes": "./bundle-sizes.sh"
+    "bundle": "./bundle.sh"
   },
   "keywords": [
     "webrtc",
@@ -53,6 +53,7 @@
     "realtime",
     "decentralized",
     "signaling",
-    "pairing"
+    "pairing",
+    "react"
   ]
 }

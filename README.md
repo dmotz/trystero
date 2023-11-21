@@ -21,6 +21,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
+- ⚛️🪝 React hooks
 
 ---
 
@@ -36,6 +37,7 @@ on top of WebRTC:
   - [Action promises](#action-promises)
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
+  - [React hooks](#react-hooks)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
 - [Firebase setup](#firebase-setup)
@@ -73,11 +75,13 @@ You can install with npm (`npm i trystero`) and import like so:
 import {joinRoom} from 'trystero'
 ```
 
-Or maybe you prefer a simple script tag?
+Or maybe you prefer a simple script tag? Download a pre-built JS file from the
+[latest release](https://github.com/dmotz/trystero/releases/latest) and import
+it locally:
 
 ```html
 <script type="module">
-  import {joinRoom} from 'https://cdn.skypack.dev/trystero'
+  import {joinRoom} from './trystero-torrent.min.js'
 </script>
 ```
 
@@ -86,9 +90,9 @@ different one just deep import like so (your bundler should handle including
 only relevant code):
 
 ```javascript
-import {joinRoom} from 'trystero/firebase'
+import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js with a local file)
 // or
-import {joinRoom} from 'trystero/ipfs'
+import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
 ```
 
 Next, join the user to a room with a namespace:
@@ -100,7 +104,7 @@ const room = joinRoom(config, 'yoyodyne')
 
 The first argument is a configuration object that requires an `appId`. This
 should be a completely unique identifier for your app (for the BitTorrent and
-IPFS strategies) or your Firebase database ID if you're using Firebase. The
+IPFS strategies) or your Firebase `databaseURL` if you're using Firebase. The
 second argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
@@ -358,18 +362,75 @@ Keep in mind the password has to match for all peers in the room for them to be
 able to connect. An example use case might be a private chat room where users
 learn the password via external means.
 
+### React hooks
+
+Trystero functions are idempotent so they already work out of the box as React
+hooks.
+
+Here's a simple example component where each peer syncs their favorite
+color to everyone else:
+
+```jsx
+import {joinRoom} from 'trystero'
+import {useState} from 'react'
+
+const trysteroConfig = {appId: 'trystero-94db3.firebaseio.com'}
+
+export default function App({roomId}) {
+  const room = joinRoom(trysteroConfig, roomId)
+  const [sendColor, getColor] = room.makeAction('color')
+  const [myColor, setMyColor] = useState('#c0ffee')
+  const [peerColors, setPeerColors] = useState({})
+
+  // whenever a new peer joins, send my color to them
+  room.onPeerJoin(peer => sendColor(myColor, peer))
+
+  getColor((color, peer) =>
+    setPeerColors(peerColors => ({...peerColors, [peer]: color}))
+  )
+
+  const updateColor = e => {
+    const {value} = e.target
+
+    setMyColor(value)
+    // when updating my own color, broadcast it to all peers
+    sendColor(value)
+  }
+
+  return (
+    <>
+      <h1>Trystero + React</h1>
+
+      <h2>My color:</h2>
+      <input type="color" value={myColor} onChange={updateColor} />
+
+      <h2>Peer colors:</h2>
+      <ul>
+        {Object.entries(peerColors).map(([peerId, color]) => (
+          <li key={peerId} style={{backgroundColor: color}}>
+            {peerId}: {color}
+          </li>
+        ))}
+      </ul>
+    </>
+  )
+}
+```
+
 ## API
 
 ### `joinRoom(config, namespace)`
 
 Adds local user to room whereby other peers in the same namespace will open
-communication channels and send events.
+communication channels and send events. Calling `joinRoom()` multiple times with
+the same namespace will return the same room instance.
 
 - `config` - Configuration object containing the following keys:
 
   - `appId` - **(required)** A unique string identifying your app. If using
-    Firebase this should be the database ID (also see `firebaseApp` below for
-    an alternative way of configuring the Firebase strategy).
+    Firebase, this should be the `databaseURL` from your Firebase config (also
+    see `firebaseApp` below for an alternative way of configuring the Firebase
+    strategy).
 
   - `password` - **(optional)** A string to encrypt session descriptions as they
     are passed through the peering medium. If set, session descriptions will be
@@ -724,8 +785,7 @@ If you want to use the Firebase strategy and don't have an existing project:
 
 1. Create a [Firebase](https://firebase.google.com/) project
 1. Create a new Realtime Database
-1. Copy the database ID and use it as the `appId` in your Trystero
-   config
+1. Copy the `databaseURL` and use it as the `appId` in your Trystero config
 1. [*Optional*] Configure the database with security rules to limit activity:
 
 ```json
