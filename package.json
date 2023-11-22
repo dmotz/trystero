@@ -28,8 +28,11 @@
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.40.0",
     "@rollup/plugin-commonjs": "^22.0.2",
     "@rollup/plugin-node-resolve": "^14.0.1",
+    "http-server": "^14.1.1",
+    "playwright": "^1.40.0",
     "prettier": "^3.0.3",
     "rollup": "^2.79.0",
     "terser": "^5.15.0"
