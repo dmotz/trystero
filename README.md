@@ -417,6 +417,27 @@ export default function App({roomId}) {
 }
 ```
 
+Astute readers may notice the above example is simple and doesn't consider if we
+want to change the component's room ID or unmount it. For those scenarios you
+can use this simple `useRoom()` hook that unsubscribes from room events
+accordingly:
+
+```javascript
+import {joinRoom} from 'trystero'
+import {useEffect, useRef} from 'react'
+
+export const useRoom = (roomConfig, roomId) => {
+  const room = useRef(joinRoom(roomConfig, roomId))
+
+  useEffect(() => {
+    room.current = joinRoom(roomConfig, roomId)
+    return () => room.current.leave()
+  }, [roomConfig, roomId])
+
+  return room.current
+}
+```
+
 ## API
 
 ### `joinRoom(config, namespace)`
