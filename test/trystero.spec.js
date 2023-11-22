@@ -43,24 +43,16 @@ strategies.forEach(strategy => {
     expect(peer2Id).toEqual(selfId2)
 
     // getPeers()
-    const getPeerIds = () => Object.keys(window.room.getPeers())
+    const getPeerId = () => Object.keys(window.room.getPeers())[0]
 
-    const [peer1Ids, peer2Ids] = await Promise.all([
-      page.evaluate(getPeerIds),
-      page2.evaluate(getPeerIds)
-    ])
-
-    expect(peer1Ids[0]).toEqual(peer2Id)
-    expect(peer2Ids[0]).toEqual(peer1Id)
+    expect(await page.evaluate(getPeerId)).toEqual(peer2Id)
+    expect(await page2.evaluate(getPeerId)).toEqual(peer1Id)
 
     // ping()
     const ping = id => window.room.ping(id)
 
-    const ping1 = await page.evaluate(ping, peer2Id)
-    const ping2 = await page2.evaluate(ping, peer1Id)
-
-    expect(ping1).toBeLessThan(100)
-    expect(ping2).toBeLessThan(100)
+    expect(await page.evaluate(ping, peer2Id)).toBeLessThan(100)
+    expect(await page2.evaluate(ping, peer1Id)).toBeLessThan(100)
 
     // onPeerLeave()
     const peer1onLeaveId = page.evaluate(
