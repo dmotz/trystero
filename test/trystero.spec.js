@@ -105,6 +105,18 @@ strategies.forEach(strategy => {
     expect(receivedMessage1).toEqual(message2)
     expect(receivedMessage2).toEqual(message1)
 
+    if (strategy === 'firebase') {
+      // getOccupants()
+      expect(
+        (
+          await page.evaluate(
+            ([config, ns]) => window.trystero.getOccupants(config, ns),
+            roomArgs
+          )
+        ).length
+      ).toEqual(2)
+    }
+
     // onPeerLeave()
 
     const peer1onLeaveId = page.evaluate(
