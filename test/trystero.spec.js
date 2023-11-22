@@ -20,6 +20,7 @@ strategies.forEach(strategy => {
     await page2.evaluate(loadLib, scriptUrl)
 
     // selfId
+
     const getSelfId = () => window.trystero.selfId
 
     const selfId1 = await page.evaluate(getSelfId)
@@ -29,6 +30,7 @@ strategies.forEach(strategy => {
     expect(selfId1).not.toEqual(selfId2)
 
     // onPeerJoin()
+
     const joinRoom = ([config, room]) => {
       window.room = window.trystero.joinRoom(config, room)
       return new Promise(window.room.onPeerJoin)
@@ -43,18 +45,43 @@ strategies.forEach(strategy => {
     expect(peer2Id).toEqual(selfId2)
 
     // getPeers()
+
     const getPeerId = () => Object.keys(window.room.getPeers())[0]
 
     expect(await page.evaluate(getPeerId)).toEqual(peer2Id)
     expect(await page2.evaluate(getPeerId)).toEqual(peer1Id)
 
     // ping()
+
     const ping = id => window.room.ping(id)
 
     expect(await page.evaluate(ping, peer2Id)).toBeLessThan(100)
     expect(await page2.evaluate(ping, peer1Id)).toBeLessThan(100)
 
+    // makeAction()
+
+    const makeAction = message => {
+      const [sendMessage, getMessage] = window.room.makeAction('message')
+
+      return new Promise(res => {
+        getMessage(res)
+        setTimeout(() => sendMessage(message), 1000)
+      })
+    }
+
+    const message1 = Math.random()
+    const message2 = Math.random()
+
+    const [receivedMessage1, receivedMessage2] = await Promise.all([
+      page.evaluate(makeAction, message1),
+      page2.evaluate(makeAction, message2)
+    ])
+
+    expect(receivedMessage1).toEqual(message2)
+    expect(receivedMessage2).toEqual(message1)
+
     // onPeerLeave()
+
     const peer1onLeaveId = page.evaluate(
       () => new Promise(window.room.onPeerLeave)
     )
