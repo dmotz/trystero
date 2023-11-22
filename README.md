@@ -71,7 +71,7 @@ You can [compare strategies here](#strategy-comparison).
 
 You can install with npm (`npm i trystero`) and import like so:
 
-```javascript
+```js
 import {joinRoom} from 'trystero'
 ```
 
@@ -89,7 +89,7 @@ By default, the [BitTorrent strategy](#strategy-comparison) is used. To use a
 different one just deep import like so (your bundler should handle including
 only relevant code):
 
-```javascript
+```js
 import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js with a local file)
 // or
 import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
@@ -97,7 +97,7 @@ import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
 
 Next, join the user to a room with a namespace:
 
-```javascript
+```js
 const config = {appId: 'san_narciso_3d'}
 const room = joinRoom(config, 'yoyodyne')
 ```
@@ -116,19 +116,19 @@ second argument is the room name.
 
 Listen for peers joining the room:
 
-```javascript
+```js
 room.onPeerJoin(peerId => console.log(`${peerId} joined`))
 ```
 
 Listen for peers leaving the room:
 
-```javascript
+```js
 room.onPeerLeave(peerId => console.log(`${peerId} left`))
 ```
 
 Listen for peers sending their audio/video streams:
 
-```javascript
+```js
 room.onPeerStream(
   (stream, peerId) => (peerElements[peerId].video.srcObject = stream)
 )
@@ -136,7 +136,7 @@ room.onPeerStream(
 
 To unsubscribe from events, leave the room:
 
-```javascript
+```js
 room.leave()
 ```
 
@@ -144,7 +144,7 @@ room.leave()
 
 Send peers your video stream:
 
-```javascript
+```js
 room.addStream(
   await navigator.mediaDevices.getUserMedia({audio: true, video: true})
 )
@@ -152,7 +152,7 @@ room.addStream(
 
 Send and subscribe to custom P2P actions:
 
-```javascript
+```js
 const [sendDrink, getDrink] = room.makeAction('drink')
 
 // buy drink for a friend
@@ -171,7 +171,7 @@ getDrink((data, peerId) =>
 
 You can also use actions to send binary data, like images:
 
-```javascript
+```js
 const [sendPic, getPic] = room.makeAction('pic')
 
 // blobs are automatically handled, as are any form of TypedArray
@@ -186,7 +186,7 @@ getPic(
 
 Let's say we want users to be able to name themselves:
 
-```javascript
+```js
 const idsToNames = {}
 const [sendName, getName] = room.makeAction('name')
 
@@ -213,7 +213,7 @@ room.onPeerLeave(peerId =>
 
 Here's a simple example of how you could create an audio chatroom:
 
-```javascript
+```js
 // this object can store audio instances for later
 const peerAudios = {}
 
@@ -245,7 +245,7 @@ room.onPeerStream((stream, peerId) => {
 Doing the same with video is similar, just be sure to add incoming streams to
 video elements in the DOM:
 
-```javascript
+```js
 const peerVideos = {}
 const videoContainer = document.getElementById('videos')
 
@@ -275,7 +275,7 @@ annotate the raw bytes being sent with metadata about how they should be
 interpreted. Instead of manually adding metadata bytes to the buffer you can
 simply pass a metadata argument in the sender action for your binary payload:
 
-```javascript
+```js
 const [sendFile, getFile] = makeAction('file')
 
 getFile((data, peerId, metadata) =>
@@ -296,7 +296,7 @@ Action sender functions return a promise that resolves when they're done
 sending. You can optionally use this to indicate to the user when a large
 transfer is done.
 
-```javascript
+```js
 await sendFile(amplePayload)
 console.log('done sending to all peers')
 ```
@@ -308,7 +308,7 @@ continuously called as the transmission progresses. This can be used for showing
 a progress bar to the sender for large tranfers. The callback is called with a
 percentage value between 0 and 1 and the receiving peer's ID:
 
-```javascript
+```js
 sendFile(
   payload,
   // notice the peer target argument for any action sender can be a single peer
@@ -325,7 +325,7 @@ sendFile(
 
 Similarly you can listen for progress events as a receiver like this:
 
-```javascript
+```js
 const [sendFile, getFile, onFileProgress] = room.makeAction('file')
 
 onFileProgress((percent, peerId, metadata) =>
@@ -354,7 +354,7 @@ from the peering medium with Trystero's encryption option. This can protect
 against a MITM peering attack if both intended peers have a shared secret. To
 opt in, just pass a `password` parameter in the app configuration object:
 
-```javascript
+```js
 joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
 ```
 
@@ -422,19 +422,19 @@ want to change the component's room ID or unmount it. For those scenarios you
 can use this simple `useRoom()` hook that unsubscribes from room events
 accordingly:
 
-```javascript
+```js
 import {joinRoom} from 'trystero'
 import {useEffect, useRef} from 'react'
 
 export const useRoom = (roomConfig, roomId) => {
-  const room = useRef(joinRoom(roomConfig, roomId))
+  const roomRef = useRef(joinRoom(roomConfig, roomId))
 
   useEffect(() => {
-    room.current = joinRoom(roomConfig, roomId)
-    return () => room.current.leave()
+    roomRef.current = joinRoom(roomConfig, roomId)
+    return () => roomRef.current.leave()
   }, [roomConfig, roomId])
 
-  return room.current
+  return roomRef.current
 }
 ```
 
@@ -574,7 +574,7 @@ Returns an object with the following methods:
 
   Example:
 
-  ```javascript
+  ```js
   onPeerJoin(peerId => console.log(`${peerId} joined`))
   ```
 
@@ -588,7 +588,7 @@ Returns an object with the following methods:
 
   Example:
 
-  ```javascript
+  ```js
   onPeerLeave(peerId => console.log(`${peerId} left`))
   ```
 
@@ -604,7 +604,7 @@ Returns an object with the following methods:
 
   Example:
 
-  ```javascript
+  ```js
   onPeerStream((stream, peerId) =>
     console.log(`got stream from ${peerId}`, stream)
   )
@@ -622,7 +622,7 @@ Returns an object with the following methods:
 
   Example:
 
-  ```javascript
+  ```js
   onPeerTrack((track, stream, peerId) =>
     console.log(`got track from ${peerId}`, track)
   )
@@ -693,7 +693,7 @@ Returns an object with the following methods:
 
   Example:
 
-  ```javascript
+  ```js
   const [sendCursor, getCursor] = room.makeAction('cursormove')
 
   window.addEventListener('mousemove', e => sendCursor([e.clientX, e.clientY]))
@@ -714,7 +714,7 @@ Returns an object with the following methods:
 
   Example:
 
-  ```javascript
+  ```js
   // log round-trip time every 2 seconds
   room.onPeerJoin(peerId =>
     setInterval(
@@ -738,7 +738,7 @@ failures.
 
 Example:
 
-```javascript
+```js
 console.log(trystero.getTrackers())
 // => Object {
 //  "wss://fediverse.tv/tracker/socket": WebSocket,
@@ -758,7 +758,7 @@ in a room without joining it.
 
 Example:
 
-```javascript
+```js
 console.log((await trystero.getOccupants(config, 'the_scope')).length)
 // => 3
 ```
@@ -774,7 +774,7 @@ considered experimental.
 Trystero makes it trivial to switch between strategies – just change a single
 import line:
 
-```javascript
+```js
 import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
 ```
 
