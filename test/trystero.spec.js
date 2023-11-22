@@ -53,6 +53,15 @@ strategies.forEach(strategy => {
     expect(peer1Ids[0]).toEqual(peer2Id)
     expect(peer2Ids[0]).toEqual(peer1Id)
 
+    // ping()
+    const ping = id => window.room.ping(id)
+
+    const ping1 = await page.evaluate(ping, peer2Id)
+    const ping2 = await page2.evaluate(ping, peer1Id)
+
+    expect(ping1).toBeLessThan(100)
+    expect(ping2).toBeLessThan(100)
+
     // onPeerLeave()
     const peer1onLeaveId = page.evaluate(
       () => new Promise(window.room.onPeerLeave)
