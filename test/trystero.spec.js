@@ -19,6 +19,7 @@ strategies.forEach(strategy => {
     await page.evaluate(loadLib, scriptUrl)
     await page2.evaluate(loadLib, scriptUrl)
 
+    // selfId
     const getSelfId = () => window.trystero.selfId
 
     const selfId1 = await page.evaluate(getSelfId)
@@ -27,6 +28,7 @@ strategies.forEach(strategy => {
     expect(selfId1).toHaveLength(20)
     expect(selfId1).not.toEqual(selfId2)
 
+    // onPeerJoin()
     const joinRoom = ([config, room]) => {
       window.room = window.trystero.joinRoom(config, room)
       return new Promise(window.room.onPeerJoin)
@@ -40,6 +42,7 @@ strategies.forEach(strategy => {
     expect(selfId1).toEqual(peer1Id)
     expect(selfId2).toEqual(peer2Id)
 
+    // onPeerLeave()
     const peer1onLeaveId = page.evaluate(
       () => new Promise(window.room.onPeerLeave)
     )
