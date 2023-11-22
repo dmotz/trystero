@@ -38,7 +38,8 @@
     "terser": "^5.15.0"
   },
   "scripts": {
-    "bundle": "./bundle.sh"
+    "bundle": "./bundle.sh",
+    "test": "playwright test ./test/trystero.spec.js"
   },
   "keywords": [
     "webrtc",
