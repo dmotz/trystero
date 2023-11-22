@@ -151,16 +151,13 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   )
 })
 
-export const getOccupants = initGuard(
-  occupiedRooms,
-  (config, ns) =>
-    new Promise(res =>
-      onValue(
-        ref(init(config), getPath(config.rootPath || defaultRootPath, ns)),
-        data => res(keys(data.val() || {})),
-        {onlyOnce: true}
-      )
+export const getOccupants = (config, ns) =>
+  new Promise(res =>
+    onValue(
+      ref(init(config), getPath(config.rootPath || defaultRootPath, ns)),
+      data => res(keys(data.val() || {})),
+      {onlyOnce: true}
     )
-)
+  )
 
 export {selfId} from './utils.js'
