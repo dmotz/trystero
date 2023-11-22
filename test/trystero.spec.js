@@ -44,6 +44,31 @@ strategies.forEach(strategy => {
     expect(peer1Id).toEqual(selfId1)
     expect(peer2Id).toEqual(selfId2)
 
+    // onPeerStream()
+
+    const onPeerStream = () =>
+      new Promise(res => {
+        window.room.onPeerStream((_, peer) => res(peer))
+        setTimeout(
+          async () =>
+            window.room.addStream(
+              await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: true
+              })
+            ),
+          1000
+        )
+      })
+
+    const [peer2StreamId, peer1StreamId] = await Promise.all([
+      page.evaluate(onPeerStream),
+      page2.evaluate(onPeerStream)
+    ])
+
+    expect(peer1StreamId).toEqual(peer1Id)
+    expect(peer2StreamId).toEqual(peer2Id)
+
     // getPeers()
 
     const getPeerId = () => Object.keys(window.room.getPeers())[0]
