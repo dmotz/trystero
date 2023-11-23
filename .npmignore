@@ -5,3 +5,6 @@ bundle-sizes.sh
 .parcel-cache
 demo.js
 index.html
+playwright.config.js
+bundle.sh
+.prettierrc
