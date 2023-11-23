@@ -105,8 +105,30 @@ strategies.forEach(strategy => {
     expect(receivedMessage1).toEqual(message2)
     expect(receivedMessage2).toEqual(message1)
 
+    const makeBinaryAction = message => {
+      const [sendBinary, getBinary] = window.room.makeAction('binary')
+
+      return new Promise(res => {
+        getBinary(payload => res(new TextDecoder().decode(payload).slice(-20)))
+
+        setTimeout(
+          () => sendBinary(new TextEncoder().encode(message.repeat(50000))),
+          1000
+        )
+      })
+    }
+
+    const [receivedBinary1, receivedBinary2] = await Promise.all([
+      page.evaluate(makeBinaryAction, peer1Id),
+      page2.evaluate(makeBinaryAction, peer2Id)
+    ])
+
+    expect(receivedBinary1).toEqual(peer2Id)
+    expect(receivedBinary2).toEqual(peer1Id)
+
     if (strategy === 'firebase') {
       // getOccupants()
+
       expect(
         (
           await page.evaluate(
