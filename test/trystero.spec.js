@@ -106,20 +106,30 @@ strategies.forEach(strategy => {
     expect(receivedMessage2).toEqual(message1)
 
     const makeBinaryAction = ([message, metadata]) => {
-      const [sendBinary, getBinary] = window.room.makeAction('binary')
+      const [sendBinary, getBinary, onProgress] =
+        window.room.makeAction('binary')
 
-      let percent = 0
-      let callCount = 0
+      let senderPercent = 0
+      let receiverPercent = 0
+      let senderCallCount = 0
+      let receiverCallCount = 0
 
       return new Promise(res => {
         getBinary((payload, _, receivedMeta) =>
           res([
             new TextDecoder().decode(payload).slice(-20),
             receivedMeta,
-            percent,
-            callCount
+            senderPercent,
+            senderCallCount,
+            receiverPercent,
+            receiverCallCount
           ])
         )
+
+        onProgress(p => {
+          receiverPercent = p
+          receiverCallCount++
+        })
 
         setTimeout(
           () =>
@@ -128,8 +138,8 @@ strategies.forEach(strategy => {
               null,
               metadata,
               p => {
-                percent = p
-                callCount++
+                senderPercent = p
+                senderCallCount++
               }
             ),
           1000
@@ -148,10 +158,19 @@ strategies.forEach(strategy => {
     expect(payloads[1][0]).toEqual(peer1Id)
 
     payloads.forEach(payload => {
-      const [, meta, percent, callCount] = payload
+      const [
+        ,
+        meta,
+        senderPercent,
+        senderCallCount,
+        receiverPercent,
+        receiverCallCount
+      ] = payload
       expect(meta).toEqual(mockMeta)
-      expect(percent).toEqual(1)
-      expect(callCount).toEqual(63)
+      expect(senderPercent).toEqual(1)
+      expect(senderCallCount).toEqual(63)
+      expect(receiverPercent).toEqual(1)
+      expect(receiverCallCount).toEqual(63)
     })
 
     if (strategy === 'firebase') {
