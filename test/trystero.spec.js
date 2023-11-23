@@ -105,26 +105,54 @@ strategies.forEach(strategy => {
     expect(receivedMessage1).toEqual(message2)
     expect(receivedMessage2).toEqual(message1)
 
-    const makeBinaryAction = message => {
+    const makeBinaryAction = ([message, metadata]) => {
       const [sendBinary, getBinary] = window.room.makeAction('binary')
 
+      let percent = 0
+      let callCount = 0
+
       return new Promise(res => {
-        getBinary(payload => res(new TextDecoder().decode(payload).slice(-20)))
+        getBinary((payload, _, receivedMeta) =>
+          res([
+            new TextDecoder().decode(payload).slice(-20),
+            receivedMeta,
+            percent,
+            callCount
+          ])
+        )
 
         setTimeout(
-          () => sendBinary(new TextEncoder().encode(message.repeat(50000))),
+          () =>
+            sendBinary(
+              new TextEncoder().encode(message.repeat(50000)),
+              null,
+              metadata,
+              p => {
+                percent = p
+                callCount++
+              }
+            ),
           1000
         )
       })
     }
 
-    const [receivedBinary1, receivedBinary2] = await Promise.all([
-      page.evaluate(makeBinaryAction, peer1Id),
-      page2.evaluate(makeBinaryAction, peer2Id)
+    const mockMeta = {foo: 'bar', baz: 'qux'}
+
+    const payloads = await Promise.all([
+      page.evaluate(makeBinaryAction, [peer1Id, mockMeta]),
+      page2.evaluate(makeBinaryAction, [peer2Id, mockMeta])
     ])
 
-    expect(receivedBinary1).toEqual(peer2Id)
-    expect(receivedBinary2).toEqual(peer1Id)
+    expect(payloads[0][0]).toEqual(peer2Id)
+    expect(payloads[1][0]).toEqual(peer1Id)
+
+    payloads.forEach(payload => {
+      const [, meta, percent, callCount] = payload
+      expect(meta).toEqual(mockMeta)
+      expect(percent).toEqual(1)
+      expect(callCount).toEqual(63)
+    })
 
     if (strategy === 'firebase') {
       // getOccupants()
