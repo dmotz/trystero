@@ -19,7 +19,7 @@ strategies.forEach(strategy => {
     await page.evaluate(loadLib, scriptUrl)
     await page2.evaluate(loadLib, scriptUrl)
 
-    // selfId
+    // # selfId
 
     const getSelfId = () => window.trystero.selfId
 
@@ -29,7 +29,7 @@ strategies.forEach(strategy => {
     expect(selfId1).toHaveLength(20)
     expect(selfId1).not.toEqual(selfId2)
 
-    // onPeerJoin()
+    // # onPeerJoin()
 
     const joinRoom = ([config, room]) => {
       window.room = window.trystero.joinRoom(config, room)
@@ -44,7 +44,7 @@ strategies.forEach(strategy => {
     expect(peer1Id).toEqual(selfId1)
     expect(peer2Id).toEqual(selfId2)
 
-    // onPeerStream()
+    // # onPeerStream()
 
     const onPeerStream = () =>
       new Promise(res => {
@@ -69,21 +69,21 @@ strategies.forEach(strategy => {
     expect(peer1StreamId).toEqual(peer1Id)
     expect(peer2StreamId).toEqual(peer2Id)
 
-    // getPeers()
+    // # getPeers()
 
     const getPeerId = () => Object.keys(window.room.getPeers())[0]
 
     expect(await page.evaluate(getPeerId)).toEqual(peer2Id)
     expect(await page2.evaluate(getPeerId)).toEqual(peer1Id)
 
-    // ping()
+    // # ping()
 
     const ping = id => window.room.ping(id)
 
     expect(await page.evaluate(ping, peer2Id)).toBeLessThan(100)
     expect(await page2.evaluate(ping, peer1Id)).toBeLessThan(100)
 
-    // makeAction()
+    // # makeAction()
 
     const makeAction = message => {
       const [sendMessage, getMessage] = window.room.makeAction('message')
@@ -169,12 +169,12 @@ strategies.forEach(strategy => {
       expect(meta).toEqual(mockMeta)
       expect(senderPercent).toEqual(1)
       expect(senderCallCount).toEqual(63)
-      expect(receiverPercent).toEqual(1)
-      expect(receiverCallCount).toEqual(63)
+      expect(receiverPercent).toEqual(senderPercent)
+      expect(receiverCallCount).toEqual(senderCallCount)
     })
 
     if (strategy === 'firebase') {
-      // getOccupants()
+      // # getOccupants()
 
       expect(
         (
