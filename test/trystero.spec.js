@@ -9,7 +9,10 @@ strategies.forEach(strategy => {
 
     const trackerRedundancy = 3
     const testRoomConfig = {
-      appId: 'trystero-94db3.firebaseio.com',
+      appId:
+        strategy === 'firebase'
+          ? 'trystero-94db3.firebaseio.com'
+          : `trystero-test-${Math.random()}`,
       ...(strategy === 'torrent' ? {trackerRedundancy} : {})
     }
     const testRoomNs = 'testRoom'
