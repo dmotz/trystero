@@ -2,12 +2,16 @@ import {test, expect} from '@playwright/test'
 
 const strategies = ['firebase', 'torrent']
 const testUrl = 'https://localhost:8080/test'
-const testRoomConfig = {appId: 'trystero-94db3.firebaseio.com'}
-const testRoomNs = 'testRoom'
-const roomArgs = [testRoomConfig, testRoomNs]
 
 strategies.forEach(strategy => {
   test(`Trystero: ${strategy}`, async ({page, context}) => {
+    const trackerRedundancy = 3
+    const testRoomConfig = {
+      appId: 'trystero-94db3.firebaseio.com',
+      ...(strategy === 'torrent' ? {trackerRedundancy} : {})
+    }
+    const testRoomNs = 'testRoom'
+    const roomArgs = [testRoomConfig, testRoomNs]
     const scriptUrl = `../dist/trystero-${strategy}.min.js`
     const page2 = await context.newPage()
 
@@ -186,7 +190,17 @@ strategies.forEach(strategy => {
       ).toEqual(2)
     }
 
-    // onPeerLeave()
+    if (strategy === 'torrent') {
+      // # getTrackers()
+
+      expect(
+        await page.evaluate(
+          () => Object.keys(window.trystero.getTrackers()).length
+        )
+      ).toEqual(trackerRedundancy)
+    }
+
+    // # onPeerLeave()
 
     const peer1onLeaveId = page.evaluate(
       () => new Promise(window.room.onPeerLeave)
