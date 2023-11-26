@@ -1,7 +1,14 @@
-import ipfs from 'ipfs-core/dist/index.min.js'
+import {
+  createEncoder,
+  createDecoder,
+  createLightNode,
+  waitForRemotePeer,
+  Protocols
+} from '@waku/sdk'
 import room from './room.js'
 import {
   decodeBytes,
+  encodeBytes,
   events,
   initGuard,
   initPeer,
@@ -12,35 +19,37 @@ import {
 import {genKey, encrypt, decrypt} from './crypto.js'
 
 const occupiedRooms = {}
-const swarmPollMs = 999
 const announceMs = 3333
+
 const init = config =>
   nodeP ||
-  (nodeP = ipfs.create({
-    repo: libName.toLowerCase() + Math.random(),
-    EXPERIMENTAL: {
-      pubsub: true
-    },
-    config: {
-      Addresses: {
-        Swarm: config.swarmAddresses || [
-          '/dns4/wrtc-star1.par.dwebops.pub/tcp/443/wss/p2p-webrtc-star/',
-          '/dns4/wrtc-star2.sjc.dwebops.pub/tcp/443/wss/p2p-webrtc-star/',
-          '/dns4/webrtc-star.discovery.libp2p.io/tcp/443/wss/p2p-webrtc-star/'
-        ]
-      }
-    }
+  (nodeP = createLightNode({
+    defaultBootstrap: true,
+    ...(config.swarmAddresses
+      ? {
+          libp2p: {
+            peerDiscovery: [bootstrap({list: config.swarmAddresses})]
+          }
+        }
+      : {})
+  }).then(async node => {
+    await node.start()
+    await waitForRemotePeer(node, [Protocols.LightPush, Protocols.Filter])
+    return node
   }))
 
 let nodeP
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
-  const rootTopic = `${libName.toLowerCase()}:${config.appId}:${ns}`
-  const selfTopic = `${rootTopic}:${selfId}`
+  const rootTopic = `${libName.toLowerCase()}/${config.appId}/${ns}`
+  const selfTopic = `${rootTopic}/${selfId}`
   const offers = {}
   const seenPeers = {}
   const connectedPeers = {}
   const key = config.password && genKey(config.password, ns)
+  const rootEncoder = createEncoder({contentTopic: rootTopic, ephemeral: true})
+  const rootDecoder = createDecoder(rootTopic)
+  const selfDecoder = createDecoder(selfTopic)
 
   const connectPeer = (peer, peerId) => {
     onPeerConnect(peer, peerId)
@@ -53,25 +62,30 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     delete connectedPeers[peerId]
   }
 
+  const getPeerEncoder = peerId =>
+    createEncoder({
+      contentTopic: `${rootTopic}/${peerId}`,
+      ephemeral: true
+    })
+
   let onPeerConnect = noOp
+  let rootSub
+  let selfSub
   let announceInterval
-  let swarmPollTimeout
 
-  const nodeP = init(config).then(async node => {
-    const awaitPeers = async cb => {
-      const peers = await node.swarm.peers()
+  init(config).then(async node => {
+    ;[rootSub, selfSub] = await Promise.all([
+      node.filter.createSubscription(),
+      node.filter.createSubscription()
+    ])
 
-      if (!peers || !peers.length) {
-        swarmPollTimeout = setTimeout(awaitPeers, swarmPollMs, cb)
-      } else {
-        cb()
-      }
-    }
-
-    await new Promise(awaitPeers)
     await Promise.all([
-      node.pubsub.subscribe(rootTopic, msg => {
-        const peerId = msg.data
+      rootSub.subscribe([rootDecoder], msg => {
+        if (!msg.payload) {
+          return
+        }
+
+        const peerId = decodeBytes(msg.payload)
 
         if (peerId === selfId || connectedPeers[peerId] || seenPeers[peerId]) {
           return
@@ -82,15 +96,16 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         const peer = (offers[peerId] = initPeer(true, false, config.rtcConfig))
 
         peer.once(events.signal, async offer => {
-          node.pubsub.publish(
-            `${rootTopic}:${peerId}`,
-            JSON.stringify({
-              peerId: selfId,
-              offer: key
-                ? {...offer, sdp: await encrypt(key, offer.sdp)}
-                : offer
-            })
-          )
+          node.lightPush.send(getPeerEncoder(peerId), {
+            payload: encodeBytes(
+              JSON.stringify({
+                peerId: selfId,
+                offer: key
+                  ? {...offer, sdp: await encrypt(key, offer.sdp)}
+                  : offer
+              })
+            )
+          })
 
           setTimeout(() => {
             if (connectedPeers[peerId]) {
@@ -106,11 +121,11 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         peer.once(events.close, () => disconnectPeer(peerId))
       }),
 
-      node.pubsub.subscribe(selfTopic, async msg => {
+      selfSub.subscribe([selfDecoder], async msg => {
         let payload
 
         try {
-          payload = JSON.parse(decodeBytes(msg.data))
+          payload = JSON.parse(decodeBytes(msg.payload))
         } catch (e) {
           console.error(`${libName}: received malformed JSON`)
           return
@@ -128,16 +143,18 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         const peer = initPeer(false, false, config.rtcConfig)
 
         peer.once(events.signal, async answer =>
-          node.pubsub.publish(
-            `${rootTopic}:${peerId}`,
-            JSON.stringify({
-              peerId: selfId,
-              answer: key
-                ? {...answer, sdp: await encrypt(key, answer.sdp)}
-                : answer
-            })
-          )
+          node.lightPush.send(getPeerEncoder(peerId), {
+            payload: encodeBytes(
+              JSON.stringify({
+                peerId: selfId,
+                answer: key
+                  ? {...answer, sdp: await encrypt(key, answer.sdp)}
+                  : answer
+              })
+            )
+          })
         )
+
         peer.once(events.connect, () => connectPeer(peer, peerId))
         peer.once(events.close, () => disconnectPeer(peerId))
         peer.signal(
@@ -146,21 +163,21 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       })
     ])
 
-    const announce = () => node.pubsub.publish(rootTopic, selfId)
+    const announce = () =>
+      node.lightPush.send(rootEncoder, {
+        payload: encodeBytes(selfId)
+      })
+
     announceInterval = setInterval(announce, announceMs)
     announce()
-
-    return node
   })
 
   return room(
     f => (onPeerConnect = f),
-    async () => {
-      const node = await nodeP
-      node.pubsub.unsubscribe(rootTopic)
-      node.pubsub.unsubscribe(selfTopic)
+    () => {
       clearInterval(announceInterval)
-      clearTimeout(swarmPollTimeout)
+      rootSub.unsubscribe()
+      selfSub.unsubscribe()
       delete occupiedRooms[ns]
     }
   )
