@@ -1,12 +1,10 @@
 import {test, expect} from '@playwright/test'
 
-const strategies = ['firebase', 'torrent']
+const strategies = ['firebase', 'torrent', 'ipfs']
 const testUrl = 'https://localhost:8080/test'
 
 strategies.forEach(strategy => {
   test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
-    console.log({browserName})
-
     const trackerRedundancy = 3
     const testRoomConfig = {
       appId:
