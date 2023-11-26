@@ -23,8 +23,8 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@waku/sdk": "^0.0.21",
     "firebase": "^10.6.0",
-    "ipfs-core": "0.9.0",
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
