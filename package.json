@@ -25,6 +25,7 @@
   "dependencies": {
     "@waku/sdk": "^0.0.21",
     "firebase": "^10.6.0",
+    "libp2p": "^0.46.21",
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
