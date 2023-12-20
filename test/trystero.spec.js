@@ -3,6 +3,11 @@ import {test, expect} from '@playwright/test'
 const strategies = ['firebase', 'torrent', 'ipfs']
 const testUrl = 'https://localhost:8080/test'
 
+const onConsole = n => async e => {
+  const args = await Promise.all(e.args().map(a => a.jsonValue()))
+  console.log(`page ${n}:`, ...args)
+}
+
 strategies.forEach(strategy => {
   test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
     const trackerRedundancy = 3
@@ -17,6 +22,9 @@ strategies.forEach(strategy => {
     const roomArgs = [testRoomConfig, testRoomNs]
     const scriptUrl = `../dist/trystero-${strategy}.min.js`
     const page2 = await context.newPage()
+
+    page.on('console', onConsole(1))
+    page2.on('console', onConsole(2))
 
     await page.goto(testUrl)
     await page2.goto(testUrl)
