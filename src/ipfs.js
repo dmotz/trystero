@@ -16,7 +16,7 @@ import {
   noOp,
   selfId
 } from './utils.js'
-import {genKey, encrypt, decrypt} from './crypto.js'
+import {encrypt, genKey, decrypt} from './crypto.js'
 
 const occupiedRooms = {}
 const announceMs = 3333

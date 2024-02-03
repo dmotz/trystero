@@ -21,7 +21,7 @@ import {
   noOp,
   selfId
 } from './utils.js'
-import {genKey, encrypt, decrypt} from './crypto.js'
+import {encrypt, genKey, decrypt} from './crypto.js'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
