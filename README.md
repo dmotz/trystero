@@ -786,7 +786,7 @@ Trystero makes it trivial to switch between strategies – just change a single
 import line:
 
 ```js
-import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
+import {joinRoom} from 'trystero/[torrent|mqtt|firebase|ipfs]'
 ```
 
 |                   | setup¹  | reliability² | time to connect³ | bundle size⁴ | occupancy polling⁵ |
