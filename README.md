@@ -375,7 +375,7 @@ color to everyone else:
 import {joinRoom} from 'trystero'
 import {useState} from 'react'
 
-const trysteroConfig = {appId: 'trystero-94db3.firebaseio.com'}
+const trysteroConfig = {appId: 'thurn-und-taxis'}
 
 export default function App({roomId}) {
   const room = joinRoom(trysteroConfig, roomId)
