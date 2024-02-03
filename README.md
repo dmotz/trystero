@@ -9,8 +9,8 @@ Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
 Peers can connect via
-[🌊 BitTorrent, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison) – all using the
-same API.
+[🌊 BitTorrent, 📡 MQTT, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison) – all
+using the same API.
 
 Besides making peer matching automatic, Trystero offers some nice abstractions
 on top of WebRTC:
@@ -54,7 +54,7 @@ is needed to exchange peer information
 ([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
 this involves running your own matchmaking server but Trystero abstracts this
 away for you and offers multiple "serverless" strategies for connecting peers
-(currently BitTorrent, Firebase, and IPFS).
+(currently BitTorrent, MQTT, Firebase, and IPFS).
 
 The important point to remember is this:
 
@@ -90,7 +90,9 @@ different one just deep import like so (your bundler should handle including
 only relevant code):
 
 ```js
-import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js with a local file)
+import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
+// or
+import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js)
 // or
 import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
 ```
@@ -472,6 +474,14 @@ the same namespace will return the same room instance.
     Defaults to 2. Passing a `trackerUrls` option will cause this option to be
     ignored as the entire list will be used.
 
+  - `brokerUrls` - **(optional, 📡 MQTT only)** Custom list of MQTT broker URLs
+    to use. They must support WebSocket connections.
+
+  - `brokerRedundancy` - **(optional, 📡 MQTT only)** Integer specifying
+    how many MQTT brokers to connect to simultaneously in case some fail.
+    Defaults to 2. Passing a `brokerUrls` option will cause this option to be
+    ignored as the entire list will be used.
+
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
     initialized Firebase app instance instead of an `appId`. Normally Trystero
     will initialize a Firebase app based on the `appId` but this will fail if
@@ -782,6 +792,7 @@ import {joinRoom} from 'trystero/[torrent|firebase|ipfs]'
 |                   | setup¹  | reliability² | time to connect³ | bundle size⁴ | occupancy polling⁵ |
 | ----------------- | ------- | ------------ | ---------------- | ------------ | ------------------ |
 | 🌊 **BitTorrent** | none ✅ | variable     | better           | ~27K ✅      | none               |
+| 📡 **MQTT**       | none ✅ | variable     | better           | ~345K        | none               |
 | 🔥 **Firebase**   | ~5 mins | reliable ✅  | best ✅          | ~212K        | yes ✅             |
 | 🪐 **IPFS**       | none ✅ | variable     | good             | ~883K        | none               |
 
