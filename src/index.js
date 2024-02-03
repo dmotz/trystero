@@ -1,1 +1,1 @@
-export {joinRoom, selfId, getTrackers} from './torrent.js'
+export {getTrackers, joinRoom, selfId} from './torrent.js'

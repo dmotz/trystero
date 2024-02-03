@@ -1,6 +1,6 @@
 import {
-  createEncoder,
   createDecoder,
+  createEncoder,
   createLightNode,
   waitForRemotePeer,
   Protocols
@@ -16,7 +16,7 @@ import {
   noOp,
   selfId
 } from './utils.js'
-import {encrypt, genKey, decrypt} from './crypto.js'
+import {decrypt, encrypt, genKey} from './crypto.js'
 
 const occupiedRooms = {}
 const announceMs = 3333
