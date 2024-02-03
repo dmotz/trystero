@@ -23,9 +23,10 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@waku/sdk": "^0.0.21",
+    "@waku/sdk": "^0.0.22",
     "firebase": "^10.6.0",
-    "libp2p": "^0.46.21",
+    "libp2p": "^1.2.1",
+    "mqtt": "^5.3.5",
     "simple-peer-light": "^9.10.0"
   },
   "devDependencies": {
@@ -54,6 +55,7 @@
     "bittorrent",
     "webtorrent",
     "ipfs",
+    "mqtt",
     "firebase",
     "realtime",
     "decentralized",
