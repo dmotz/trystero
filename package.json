@@ -10,6 +10,7 @@
     ".": "./src/index.js",
     "./firebase": "./src/firebase.js",
     "./ipfs": "./src/ipfs.js",
+    "./mqtt": "./src/mqtt.js",
     "./torrent": "./src/torrent.js"
   },
   "author": {
