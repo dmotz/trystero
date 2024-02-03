@@ -1,6 +1,6 @@
 import {test, expect} from '@playwright/test'
 
-const strategies = ['firebase', 'torrent', 'ipfs']
+const strategies = ['firebase', 'torrent', 'ipfs', 'mqtt']
 const testUrl = 'https://localhost:8080/test'
 
 const onConsole = n => async e => {
