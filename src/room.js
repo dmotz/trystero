@@ -128,8 +128,9 @@ export default (onPeer, onSelfLeave) => {
               (isMeta
                 ? metaEncoded.byteLength
                 : isLast
-                ? buffer.byteLength - chunkSize * (chunkTotal - (meta ? 2 : 1))
-                : chunkSize)
+                  ? buffer.byteLength -
+                    chunkSize * (chunkTotal - (meta ? 2 : 1))
+                  : chunkSize)
           )
 
           chunk.set(typeBytesPadded)
