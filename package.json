@@ -34,6 +34,7 @@
     "@playwright/test": "^1.40.0",
     "@rollup/plugin-commonjs": "^25.0.7",
     "@rollup/plugin-node-resolve": "^15.2.3",
+    "eslint": "^8.56.0",
     "http-server": "^14.1.1",
     "playwright": "^1.40.0",
     "prettier": "^3.0.3",
