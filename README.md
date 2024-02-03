@@ -1,7 +1,6 @@
 # 🤝 Trystero
 
-**Serverless WebRTC matchmaking for painless P2P: make any site multiplayer in a
-few lines**
+**Build instant multiplayer webapps, no server required**
 
 👉 **[TRY THE DEMO](https://oxism.com/trystero)** 👈
 
