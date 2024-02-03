@@ -1,7 +1,6 @@
 import {devices} from '@playwright/test'
 
 export default {
-  workers: 1,
   timeout: 20000,
   use: {
     ignoreHTTPSErrors: true,
