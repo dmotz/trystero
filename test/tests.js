@@ -17,7 +17,7 @@ export default strategy =>
           : `trystero-test-${Math.random()}`,
       ...(strategy === 'torrent' ? {trackerRedundancy} : {})
     }
-    const testRoomNs = 'testRoom'
+    const testRoomNs = `testRoom-${Math.random().toString().replace('.', '')}`
     const roomArgs = [testRoomConfig, testRoomNs]
     const scriptUrl = `../dist/trystero-${strategy}.min.js`
     const page2 = await context.newPage()
