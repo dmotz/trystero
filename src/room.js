@@ -1,5 +1,4 @@
 import {
-  combineChunks,
   decodeBytes,
   encodeBytes,
   entries,
@@ -244,7 +243,14 @@ export default (onPeer, onSelfLeave) => {
       return
     }
 
-    const full = combineChunks(target.chunks)
+    const full = new Uint8Array(
+      target.chunks.reduce((a, c) => a + c.byteLength, 0)
+    )
+
+    target.chunks.reduce((a, c) => {
+      full.set(c, a)
+      return a + c.byteLength
+    }, 0)
 
     if (isBinary) {
       actions[type].onComplete(full, id, target.meta)

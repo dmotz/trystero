@@ -65,15 +65,4 @@ export const events = fromEntries(
   ])
 )
 
-export const combineChunks = chunks => {
-  const full = new Uint8Array(chunks.reduce((a, c) => a + c.byteLength, 0))
-
-  chunks.reduce((a, c) => {
-    full.set(c, a)
-    return a + c.byteLength
-  }, 0)
-
-  return full
-}
-
 export const sleep = ms => new Promise(res => setTimeout(res, ms))
