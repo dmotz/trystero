@@ -113,6 +113,10 @@ pre {
   margin-bottom: 2rem;
 }
 
+p span {
+  white-space: nowrap;
+}
+
 p a {
   color: white;
   text-underline-offset: 1px;
