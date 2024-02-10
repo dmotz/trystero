@@ -307,7 +307,7 @@ export default (onPeer, onSelfLeave) => {
     peer.__drainEarlyData(onData)
   })
 
-  getPing((_, id) => sendPong(null, id))
+  getPing((_, id) => sendPong('', id))
 
   getPong((_, id) => {
     if (pendingPongs[id]) {
@@ -335,7 +335,8 @@ export default (onPeer, onSelfLeave) => {
       }
 
       const start = Date.now()
-      sendPing(null, id)
+
+      sendPing('', id)
       await new Promise(res => (pendingPongs[id] = res))
       return Date.now() - start
     },
