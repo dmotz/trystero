@@ -117,7 +117,7 @@ export default (onPeer, onSelfLeave) => {
         const metaEncoded = meta ? encodeBytes(JSON.stringify(meta)) : null
 
         const chunkTotal =
-          Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0)
+          Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0) || 1
 
         const chunks = new Array(chunkTotal).fill().map((_, i) => {
           const isLast = i === chunkTotal - 1
