@@ -61,28 +61,32 @@ export default strategy =>
     if (browserName !== 'webkit') {
       // # onPeerStream()
 
-      const onPeerStream = () =>
+      const onPeerStream = streamMeta =>
         new Promise(res => {
-          window.room.onPeerStream((_, peer) => res(peer))
+          window.room.onPeerStream((_, peerId, meta) => res({peerId, meta}))
+
           setTimeout(
             async () =>
               window.room.addStream(
                 await navigator.mediaDevices.getUserMedia({
                   audio: true,
                   video: true
-                })
+                }),
+                null,
+                streamMeta
               ),
             1000
           )
         })
 
-      const [peer2StreamId, peer1StreamId] = await Promise.all([
-        page.evaluate(onPeerStream),
-        page2.evaluate(onPeerStream)
+      const streamMeta = {id: Math.random()}
+      const [peer2StreamInfo, peer1StreamInfo] = await Promise.all([
+        page.evaluate(onPeerStream, streamMeta),
+        page2.evaluate(onPeerStream, streamMeta)
       ])
 
-      expect(peer1StreamId).toEqual(peer1Id)
-      expect(peer2StreamId).toEqual(peer2Id)
+      expect(peer1StreamInfo).toEqual({peerId: peer1Id, meta: streamMeta})
+      expect(peer2StreamInfo).toEqual({peerId: peer2Id, meta: streamMeta})
     }
 
     // # getPeers()
