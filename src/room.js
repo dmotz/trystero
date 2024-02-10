@@ -119,40 +119,42 @@ export default (onPeer, onSelfLeave) => {
         const chunkTotal =
           Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0) || 1
 
-        const chunks = new Array(chunkTotal).fill().map((_, i) => {
-          const isLast = i === chunkTotal - 1
-          const isMeta = meta && i === 0
-          const chunk = new Uint8Array(
-            payloadIndex +
-              (isMeta
-                ? metaEncoded.byteLength
-                : isLast
-                  ? buffer.byteLength -
-                    chunkSize * (chunkTotal - (meta ? 2 : 1))
-                  : chunkSize)
-          )
+        const chunks = Array(chunkTotal)
+          .fill()
+          .map((_, i) => {
+            const isLast = i === chunkTotal - 1
+            const isMeta = meta && i === 0
+            const chunk = new Uint8Array(
+              payloadIndex +
+                (isMeta
+                  ? metaEncoded.byteLength
+                  : isLast
+                    ? buffer.byteLength -
+                      chunkSize * (chunkTotal - (meta ? 2 : 1))
+                    : chunkSize)
+            )
 
-          chunk.set(typeBytesPadded)
-          chunk.set([nonce], nonceIndex)
-          chunk.set(
-            [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
-            tagIndex
-          )
-          chunk.set(
-            [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
-            progressIndex
-          )
-          chunk.set(
-            meta
-              ? isMeta
-                ? metaEncoded
-                : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
-              : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
-            payloadIndex
-          )
+            chunk.set(typeBytesPadded)
+            chunk.set([nonce], nonceIndex)
+            chunk.set(
+              [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
+              tagIndex
+            )
+            chunk.set(
+              [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
+              progressIndex
+            )
+            chunk.set(
+              meta
+                ? isMeta
+                  ? metaEncoded
+                  : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
+                : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
+              payloadIndex
+            )
 
-          return chunk
-        })
+            return chunk
+          })
 
         nonce = (nonce + 1) & oneByteMax
 
