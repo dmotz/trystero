@@ -1,6 +1,7 @@
 docs/
 dist/
 test/
+test-results/
 bundle-sizes.sh
 .parcel-cache
 demo.js
