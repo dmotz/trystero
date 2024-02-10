@@ -1,11 +1,9 @@
-docs/
 dist/
+docs/
 test/
 test-results/
-bundle-sizes.sh
-.parcel-cache
-demo.js
-index.html
-playwright.config.js
-bundle.sh
+.eslintrc.cjs
+.gitignore
 .prettierrc
+bundle.sh
+playwright.config.js
