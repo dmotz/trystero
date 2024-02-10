@@ -75,8 +75,6 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         })
     )
 
-  const makeOfferPool = () => makeOffers(offerPoolSize)
-
   const onSocketMessage = async (socket, e) => {
     const infoHash = await infoHashP
     let val
@@ -237,7 +235,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       cleanPool()
     }
 
-    offerPool = makeOfferPool()
+    offerPool = makeOffers(offerPoolSize)
 
     trackerUrls.forEach(async url => {
       const socket = await makeSocket(url, infoHash)
