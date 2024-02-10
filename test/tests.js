@@ -125,6 +125,16 @@ export default strategy =>
     expect(receivedMessage1).toEqual(message2)
     expect(receivedMessage2).toEqual(message1)
 
+    const empty = ''
+
+    const [receivedMessage3, receivedMessage4] = await Promise.all([
+      page.evaluate(makeAction, empty),
+      page2.evaluate(makeAction, empty)
+    ])
+
+    expect(receivedMessage3).toEqual(empty)
+    expect(receivedMessage4).toEqual(empty)
+
     const makeBinaryAction = ([message, metadata]) => {
       const [sendBinary, getBinary, onProgress] =
         window.room.makeAction('binary')
