@@ -90,10 +90,12 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
       return
     }
 
-    const failure = val['failure reason']
+    const errMsg = val['failure reason']
 
-    if (failure) {
-      console.warn(`${libName}: torrent tracker failure (${failure})`)
+    if (errMsg) {
+      console.warn(
+        `${libName}: torrent tracker failure from ${socket.url} - ${errMsg}`
+      )
       return
     }
 
