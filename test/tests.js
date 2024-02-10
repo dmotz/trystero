@@ -7,6 +7,9 @@ const onConsole = (strategy, pageN) => async e => {
   console.log(`${strategy} #${pageN}:`, ...args)
 }
 
+const onError = (strategy, pageN) => err =>
+  console.log(`* error! * ${strategy} #${pageN}: ${err.message}`)
+
 export default strategy =>
   test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
     const trackerRedundancy = 3
@@ -24,6 +27,8 @@ export default strategy =>
 
     page.on('console', onConsole(strategy, 1))
     page2.on('console', onConsole(strategy, 2))
+    page.on('pageerror', onError(strategy, 1))
+    page2.on('pageerror', onError(strategy, 2))
 
     await page.goto(testUrl)
     await page2.goto(testUrl)
