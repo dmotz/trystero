@@ -31,7 +31,6 @@ const trackerAction = 'announce'
 const defaultTrackerUrls = [
   'wss://tracker.webtorrent.dev',
   'wss://tracker.files.fm:7073/announce',
-  'wss://fediverse.tv/tracker/socket',
   'wss://tracker.openwebtorrent.com',
   'wss://tracker.btorrent.xyz',
   'wss://qot.abiir.top:443/announce',
