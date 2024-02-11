@@ -43,7 +43,7 @@
   },
   "scripts": {
     "bundle": "./bundle.sh",
-    "test": "playwright test ./test/trystero.spec.js"
+    "test": "playwright test ./test"
   },
   "keywords": [
     "webrtc",
