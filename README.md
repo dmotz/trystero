@@ -37,6 +37,7 @@ on top of WebRTC:
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
+  - [Firebase setup](#firebase-setup)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
 - [Firebase setup](#firebase-setup)
@@ -438,6 +439,35 @@ export const useRoom = (roomConfig, roomId) => {
   return roomRef.current
 }
 ```
+
+### Firebase setup
+
+If you want to use the Firebase strategy and don't have an existing project:
+
+1. Create a [Firebase](https://firebase.google.com/) project
+2. Create a new Realtime Database
+3. Copy the `databaseURL` and use it as the `appId` in your Trystero config
+4. [*Optional*] Configure the database with security rules to limit activity:
+
+```json
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "__trystero__": {
+      ".read": false,
+      ".write": false,
+      "$room_id": {
+        ".read": true,
+        ".write": true
+      }
+    }
+  }
+}
+```
+
+These rules ensure room peer presence is only readable if the room namespace is
+known ahead of time.
 
 ## API
 
