@@ -5,5 +5,5 @@ test-results/
 .eslintrc.cjs
 .gitignore
 .prettierrc
-bundle.sh
 playwright.config.js
+rollup.config.js
