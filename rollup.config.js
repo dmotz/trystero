@@ -18,8 +18,20 @@ const config = {
       preventAssignment: true
     }),
     terser({
-      compress: {drop_console: ['log', 'info']},
-      format: {comments: false}
+      compress: {
+        ecma: 2015,
+        drop_console: ['log', 'info'],
+        keep_fargs: false,
+        module: true,
+        toplevel: true,
+        unsafe: true,
+        unsafe_arrows: true,
+        unsafe_methods: true,
+        unsafe_proto: true,
+        unsafe_symbols: true
+      },
+      format: {ecma: 2015, comments: false},
+      mangle: {module: true, toplevel: true}
     })
   ]
 }
