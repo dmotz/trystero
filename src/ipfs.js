@@ -25,7 +25,9 @@ const init = config =>
   nodeP ||
   (nodeP = createLightNode({
     defaultBootstrap: true,
-    ...(config.libp2pConfig ? {libp2p: config.libp2pConfig} : {})
+    ...(config.libp2pConfig
+      ? {libp2p: config.libp2pConfig}
+      : {libp2p: {hideWebSocketInfo: true}})
   }).then(async node => {
     await node.start()
     await waitForRemotePeer(node, [Protocols.LightPush, Protocols.Filter])
