@@ -55,10 +55,12 @@ export default strategy =>
       return new Promise(window.room.onPeerJoin)
     }
 
+    const start = Date.now()
     const [peer2Id, peer1Id] = await Promise.all([
       page.evaluate(joinRoom, roomArgs),
       page2.evaluate(joinRoom, roomArgs)
     ])
+    const joinTime = Date.now() - start
 
     expect(peer1Id).toEqual(selfId1)
     expect(peer2Id).toEqual(selfId2)
@@ -240,4 +242,6 @@ export default strategy =>
     await page2.evaluate(() => window.room.leave())
 
     expect(await peer1onLeaveId).toEqual(peer2Id)
+
+    console.log(`  ⏱️    ${strategy.padEnd(12, ' ')} ${joinTime}ms`)
   })
