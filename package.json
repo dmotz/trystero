@@ -34,12 +34,13 @@
     "@playwright/test": "^1.40.0",
     "@rollup/plugin-commonjs": "^25.0.7",
     "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-replace": "^5.0.5",
+    "@rollup/plugin-terser": "^0.4.4",
     "eslint": "^8.56.0",
     "http-server": "^14.1.1",
     "playwright": "^1.40.0",
     "prettier": "^3.0.3",
-    "rollup": "^4.5.2",
-    "terser": "^5.15.0"
+    "rollup": "^4.5.2"
   },
   "scripts": {
     "bundle": "./bundle.sh",
