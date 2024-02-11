@@ -43,7 +43,7 @@
     "rollup": "^4.5.2"
   },
   "scripts": {
-    "bundle": "./bundle.sh",
+    "build": "rollup -c",
     "test": "playwright test ./test"
   },
   "keywords": [
