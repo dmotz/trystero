@@ -40,7 +40,7 @@ on top of WebRTC:
   - [Firebase setup](#firebase-setup)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
-- [Firebase setup](#firebase-setup)
+  - [How to choose](#how-to-choose)
 
 ---
 
@@ -805,70 +805,39 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 ## Strategy comparison
 
-**Loose, (overly) simple advice for choosing a strategy:** Use the BitTorrent or
-IPFS strategy for experiments or when your heart yearns for fuller
-decentralization, use Firebase for "production" apps where you need full control
-and reliability. IPFS is itself in alpha so the Trystero IPFS strategy should be
-considered experimental.
+|                   | one-time setup¹ | bundle size² | time to connect³ |
+| ----------------- | --------------- | ------------ | ---------------- |
+| 🌊 **BitTorrent** | none 🏆         | 27K 🏆       | ⏱️⏱️             |
+| 📡 **MQTT**       | none 🏆         | 337K         | ⏱️⏱️             |
+| 🔥 **Firebase**   | ~5 mins         | 212K         | ⏱️ 🏆            |
+| 🪐 **IPFS**       | none 🏆         | 1MB          | ⏱️⏱️⏱️           |
 
-Trystero makes it trivial to switch between strategies – just change a single
-import line:
+**¹** All strategies except Firebase require zero setup. Firebase is a managed
+strategy which requires setting up an account.
+
+**²** Calculated via Rollup bundling + Terser compression.
+
+**³** Relative speed of peers connecting to each other when joining a room.
+Firebase is near-instantaneous while the other strategies are a bit slower to
+exchange peering info.
+
+### How to choose
+
+Trysteroʼs unique advantage is that it requires zero backend setup and uses
+decentralized infrastructure in most cases. This allows for frictionless
+experimentation and no single point of failure. One potential drawback is that
+itʼs difficult to guarantee that the public infrastructure it uses will always
+be highly available, even with the redundancy techniques Trystero uses. While
+the other strategies are decentralized, the Firebase strategy is a more managed
+approach with greater control and an SLA, which might be more appropriate for
+“production” apps.
+
+Luckily, Trystero makes it trivial to switch between strategies — just change a
+single import line and quickly experiment:
 
 ```js
 import {joinRoom} from 'trystero/[torrent|mqtt|firebase|ipfs]'
 ```
-
-|                   | setup¹  | reliability² | time to connect³ | bundle size⁴ | occupancy polling⁵ |
-| ----------------- | ------- | ------------ | ---------------- | ------------ | ------------------ |
-| 🌊 **BitTorrent** | none ✅ | variable     | better           | 27K ✅       | none               |
-| 📡 **MQTT**       | none ✅ | variable     | better           | 337K         | none               |
-| 🔥 **Firebase**   | ~5 mins | reliable ✅  | best ✅          | 212K         | yes ✅             |
-| 🪐 **IPFS**       | none ✅ | variable     | good             | 1MB          | none               |
-
-**¹** Firebase requires an account and project which take a few minutes to set
-up.
-
-**²** Firebase has a 99.95% SLA. The BitTorrent strategy uses public trackers
-which may go down/misbehave at their own whim. Trystero has a built-in
-redundancy approach that connects to multiple trackers simultaneously to avoid
-issues. IPFS relies on public gateways which are also prone to downtime.
-
-**³** Relative speed of peers connecting to each other when joining a room.
-Firebase is near-instantaneous while the other strategies are a bit slower.
-
-**⁴** Calculated via Rollup bundling + Terser compression.
-
-**⁵** The Firebase strategy supports calling `getOccupants()` on a room to see
-which/how many users are currently present without joining the room.
-
-## Firebase setup
-
-If you want to use the Firebase strategy and don't have an existing project:
-
-1. Create a [Firebase](https://firebase.google.com/) project
-1. Create a new Realtime Database
-1. Copy the `databaseURL` and use it as the `appId` in your Trystero config
-1. [*Optional*] Configure the database with security rules to limit activity:
-
-```json
-{
-  "rules": {
-    ".read": false,
-    ".write": false,
-    "__trystero__": {
-      ".read": false,
-      ".write": false,
-      "$room_id": {
-        ".read": true,
-        ".write": true
-      }
-    }
-  }
-}
-```
-
-These rules ensure room peer presence is only readable if the room namespace is
-known ahead of time.
 
 ---
 
