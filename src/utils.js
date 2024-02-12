@@ -68,4 +68,12 @@ export const events = fromEntries(
   ])
 )
 
+export const getRelays = (config, defaults, defaultN) =>
+  (config.relayUrls || defaults).slice(
+    0,
+    config.relayUrls
+      ? config.relayUrls.length
+      : config.relayRedundancy || defaultN
+  )
+
 export const sleep = ms => new Promise(res => setTimeout(res, ms))
