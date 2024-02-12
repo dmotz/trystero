@@ -1,6 +1,4 @@
 declare module 'trystero' {
-  import {TorrentRoomConfig} from 'trystero/torrent'
-
   type Metadata =
     | null
     | string
@@ -39,6 +37,11 @@ declare module 'trystero' {
         metadata?: Metadata
       ) => void
     ): void
+  }
+
+  export interface RelayConfig {
+    relayUrls?: string[]
+    relayRedundancy?: number
   }
 
   export interface Room {
@@ -94,7 +97,7 @@ declare module 'trystero' {
   }
 
   export function joinRoom(
-    config: BaseRoomConfig & TorrentRoomConfig,
+    config: BaseRoomConfig & RelayConfig,
     roomId: string
   ): Room
 

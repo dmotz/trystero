@@ -58,6 +58,9 @@ export const encodeBytes = txt => new TextEncoder().encode(txt)
 
 export const decodeBytes = buffer => new TextDecoder().decode(buffer)
 
+export const toHex = buffer =>
+  buffer.reduce((a, c) => a + c.toString(16).padStart(2, '0'), '')
+
 export const events = fromEntries(
   ['close', 'connect', 'data', 'error', 'signal', 'stream', 'track'].map(k => [
     k,
