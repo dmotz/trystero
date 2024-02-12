@@ -36,7 +36,7 @@ const config = {
   ]
 }
 
-export default ['firebase', 'ipfs', 'mqtt', 'torrent'].map(name => ({
+export default ['firebase', 'ipfs', 'mqtt', 'nostr', 'torrent'].map(name => ({
   ...config,
   input: `src/${name}.js`
 }))
