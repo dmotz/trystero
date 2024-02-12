@@ -1,0 +1,10 @@
+declare module 'trystero/nostr' {
+  import {BaseRoomConfig, RelayConfig, Room} from 'trystero'
+
+  export function joinRoom(
+    config: BaseRoomConfig & RelayConfig,
+    roomId: string
+  ): Room
+
+  export * from 'trystero'
+}
