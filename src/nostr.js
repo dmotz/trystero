@@ -4,6 +4,7 @@ import {
   events,
   encodeBytes,
   genId,
+  getRelays,
   initGuard,
   initPeer,
   libName,
@@ -48,12 +49,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const offers = {}
   const seenPeers = {}
   const connectedPeers = {}
-  const relayUrls = (config.relayUrls || defaultRelayUrls).slice(
-    0,
-    config.relayUrls
-      ? config.relayUrls.length
-      : config.relayRedundancy || defaultRedundancy
-  )
+  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
 
   const connectPeer = (peer, peerId) => {
     onPeerConnect(peer, peerId)

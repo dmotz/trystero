@@ -1,12 +1,20 @@
 import mqtt from 'mqtt'
 import room from './room.js'
-import {events, initGuard, initPeer, libName, noOp, selfId} from './utils.js'
+import {
+  events,
+  getRelays,
+  initGuard,
+  initPeer,
+  libName,
+  noOp,
+  selfId
+} from './utils.js'
 import {decrypt, encrypt, genKey} from './crypto.js'
 
 const occupiedRooms = {}
 const defaultRedundancy = 2
 
-const defaultBrokerUrls = [
+const defaultRelayUrls = [
   'wss://test.mosquitto.org:8081',
   'wss://mqtt.eclipseprojects.io/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
@@ -21,12 +29,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const offers = {}
   const seenPeers = {}
   const connectedPeers = {}
-  const brokerUrls = (config.brokerUrls || defaultBrokerUrls).slice(
-    0,
-    config.brokerUrls
-      ? config.brokerUrls.length
-      : config.brokerRedundancy || defaultRedundancy
-  )
+  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
 
   const connectPeer = (peer, peerId) => {
     onPeerConnect(peer, peerId)
@@ -42,7 +45,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   let onPeerConnect = noOp
   let clients = []
 
-  brokerUrls.forEach(url => {
+  relayUrls.forEach(url => {
     const client = mqtt.connect(url)
 
     clients.push(client)

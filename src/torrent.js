@@ -5,10 +5,10 @@ import {
   events,
   fromEntries,
   genId,
+  getRelays,
   initGuard,
   initPeer,
   libName,
-  mkErr,
   noOp,
   selfId,
   sleep,
@@ -28,7 +28,7 @@ const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
 const trackerRetrySecs = 4
 const trackerAction = 'announce'
-const defaultTrackerUrls = [
+const defaultRelayUrls = [
   'wss://tracker.webtorrent.dev',
   'wss://tracker.files.fm:7073/announce',
   'wss://tracker.openwebtorrent.com',
@@ -40,16 +40,7 @@ const defaultTrackerUrls = [
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const connectedPeers = {}
   const key = config.password && genKey(config.password, ns)
-  const trackerUrls = (config.trackerUrls || defaultTrackerUrls).slice(
-    0,
-    config.trackerUrls
-      ? config.trackerUrls.length
-      : config.trackerRedundancy || defaultRedundancy
-  )
-
-  if (!trackerUrls.length) {
-    throw mkErr('trackerUrls is empty')
-  }
+  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
 
   const infoHashP = crypto.subtle
     .digest('SHA-1', encodeBytes(`${libName}:${config.appId}:${ns}`))
@@ -238,7 +229,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
     offerPool = makeOffers(offerPoolSize)
 
-    trackerUrls.forEach(async url => {
+    relayUrls.forEach(async url => {
       const socket = await makeSocket(url, infoHash)
 
       if (socket.readyState === WebSocket.OPEN) {
@@ -293,7 +284,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     async () => {
       const infoHash = await infoHashP
 
-      trackerUrls.forEach(url => delete socketListeners[url][infoHash])
+      relayUrls.forEach(url => delete socketListeners[url][infoHash])
       delete occupiedRooms[ns]
       clearInterval(announceInterval)
       cleanPool()
