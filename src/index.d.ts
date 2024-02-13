@@ -4,9 +4,11 @@ declare module 'trystero' {
     | string
     | number
     | boolean
-    | undefined
     | Metadata[]
     | {[key: string]: Metadata}
+
+  //
+  type DataPayload = JsonValue | Blob | ArrayBuffer | ArrayBufferView
 
   type TargetPeers = string | string[] | null
 
