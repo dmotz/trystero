@@ -48,6 +48,8 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const key = config.password && genKey(config.password, ns)
   const rootTopic = `${libName.toLowerCase()}/${config.appId}/${ns}`
   const selfTopic = `${rootTopic}/${selfId}`
+  const rootSubId = genId(64)
+  const selfSubId = genId(64)
   const offers = {}
   const seenPeers = {}
   const connectedPeers = {}
@@ -74,6 +76,8 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
         ['#' + tag]: [topic]
       }
     ])
+
+  const unsubscribeFrom = subId => JSON.stringify(['CLOSE', subId])
 
   const signal = async (topic, content) => {
     const payload = {
@@ -208,7 +212,10 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     f => (onPeerConnect = f),
     () => {
       delete occupiedRooms[ns]
-      sockets.forEach(socket => socket.close())
+      values(sockets).forEach(socket => {
+        socket.send(unsubscribeFrom(rootSubId))
+        socket.send(unsubscribeFrom(selfSubId))
+      })
     }
   )
 })
