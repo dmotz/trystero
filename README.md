@@ -801,10 +801,10 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 |                   | one-time setup¹ | bundle size² | time to connect³ |
 | ----------------- | --------------- | ------------ | ---------------- |
-| 🌊 **BitTorrent** | none 🏆         | 27K 🏆       | ⏱️⏱️             |
-| 🐦 **Nostr**      | none 🏆         | 56K          | ⏱️⏱️             |
-| 📡 **MQTT**       | none 🏆         | 337K         | ⏱️⏱️             |
-| 🔥 **Firebase**   | ~5 mins         | 212K         | ⏱️ 🏆            |
+| 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
+| 🐦 **Nostr**      | none 🏆         | 54K          | ⏱️⏱️             |
+| 📡 **MQTT**       | none 🏆         | 332K         | ⏱️⏱️             |
+| 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
 | 🪐 **IPFS**       | none 🏆         | 1MB          | ⏱️⏱️⏱️           |
 
 **¹** All strategies except Firebase require zero setup. Firebase is a managed
