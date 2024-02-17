@@ -30,11 +30,9 @@ const trackerRetrySecs = 4
 const trackerAction = 'announce'
 const defaultRelayUrls = [
   'wss://tracker.webtorrent.dev',
-  'wss://tracker.files.fm:7073/announce',
   'wss://tracker.openwebtorrent.com',
-  'wss://tracker.btorrent.xyz',
-  'wss://qot.abiir.top:443/announce',
-  'wss://spacetradersapi-chatbox.herokuapp.com:443/announce'
+  'wss://tracker.files.fm:7073/announce',
+  'wss://tracker.btorrent.xyz'
 ]
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
