@@ -75,7 +75,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
             config.rtcConfig
           ))
 
-          peer.once(events.signal, async offer => {
+          peer.once(events.signal, async offer =>
             client.publish(
               `${rootTopic}/${peerId}`,
               JSON.stringify({
@@ -85,7 +85,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
                   : offer
               })
             )
-          })
+          )
 
           peer.once(events.connect, () => connectPeer(peer, peerId))
           peer.once(events.close, () => disconnectPeer(peerId))
