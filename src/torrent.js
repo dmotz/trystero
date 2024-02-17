@@ -298,6 +298,6 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   )
 })
 
-export const getTrackers = () => ({...sockets})
+export const getRelaySockets = () => ({...sockets})
 
 export {selfId} from './utils.js'
