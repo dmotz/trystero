@@ -3,6 +3,7 @@ import replace from '@rollup/plugin-replace'
 import resolve from '@rollup/plugin-node-resolve'
 import terser from '@rollup/plugin-terser'
 
+const ecma = 2019
 const config = {
   output: {
     compact: true,
@@ -19,7 +20,7 @@ const config = {
     }),
     terser({
       compress: {
-        ecma: 2015,
+        ecma,
         drop_console: ['log', 'info'],
         keep_fargs: false,
         module: true,
@@ -30,7 +31,7 @@ const config = {
         unsafe_proto: true,
         unsafe_symbols: true
       },
-      format: {ecma: 2015, comments: false},
+      format: {comments: false, ecma},
       mangle: {module: true, toplevel: true}
     })
   ]
