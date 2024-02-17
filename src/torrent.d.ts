@@ -6,7 +6,7 @@ declare module 'trystero/torrent' {
     roomId: string
   ): Room
 
-  export function getTrackers(): Record<string, WebSocket>
+  export function getRelaySockets(): Record<string, WebSocket>
 
   export * from 'trystero'
 }

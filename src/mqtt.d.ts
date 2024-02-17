@@ -6,5 +6,7 @@ declare module 'trystero/mqtt' {
     roomId: string
   ): Room
 
+  export function getRelaySockets(): Record<string, WebSocket>
+
   export * from 'trystero'
 }

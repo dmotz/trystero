@@ -6,5 +6,7 @@ declare module 'trystero/nostr' {
     roomId: string
   ): Room
 
+  export function getRelaySockets(): Record<string, WebSocket>
+
   export * from 'trystero'
 }
