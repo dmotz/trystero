@@ -9,6 +9,7 @@ import {
   initGuard,
   initPeer,
   libName,
+  mkErr,
   noOp,
   selfId,
   sleep,
@@ -36,6 +37,13 @@ const defaultRelayUrls = [
 ]
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
+  if (config.trackerUrls || config.trackerRedundancy) {
+    throw mkErr(
+      'trackerUrls and trackerRedundancy params have been replaced ' +
+        'by relayUrls and relayRedundancy'
+    )
+  }
+
   const connectedPeers = {}
   const key = config.password && genKey(config.password, ns)
   const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
