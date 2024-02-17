@@ -1,14 +1,13 @@
 declare module 'trystero' {
-  import {TorrentRoomConfig} from 'trystero/torrent'
-
-  type Metadata =
+  type JsonValue =
     | null
     | string
     | number
     | boolean
-    | undefined
-    | Metadata[]
-    | {[key: string]: Metadata}
+    | JsonValue[]
+    | {[key: string]: JsonValue}
+
+  type DataPayload = JsonValue | Blob | ArrayBuffer | ArrayBufferView
 
   type TargetPeers = string | string[] | null
 
@@ -22,13 +21,13 @@ declare module 'trystero' {
     (
       data: T,
       targetPeers?: TargetPeers,
-      metadata?: Metadata,
+      metadata?: JsonValue,
       progress?: (percent: number, peerId: string) => void
     ): Promise<Array<undefined>>
   }
 
   export interface ActionReceiver<T> {
-    (receiver: (data: T, peerId: string, metadata?: Metadata) => void): void
+    (receiver: (data: T, peerId: string, metadata?: JsonValue) => void): void
   }
 
   export interface ActionProgress {
@@ -36,13 +35,18 @@ declare module 'trystero' {
       progressHandler: (
         percent: number,
         peerId: string,
-        metadata?: Metadata
+        metadata?: JsonValue
       ) => void
     ): void
   }
 
+  export interface RelayConfig {
+    relayUrls?: string[]
+    relayRedundancy?: number
+  }
+
   export interface Room {
-    makeAction: <T>(
+    makeAction: <T extends DataPayload>(
       namespace: string
     ) => [ActionSender<T>, ActionReceiver<T>, ActionProgress]
 
@@ -55,7 +59,7 @@ declare module 'trystero' {
     addStream: (
       stream: MediaStream,
       targetPeers?: TargetPeers,
-      metadata?: Metadata
+      metadata?: JsonValue
     ) => Promise<void>[]
 
     removeStream: (stream: MediaStream, targetPeers?: TargetPeers) => void
@@ -64,7 +68,7 @@ declare module 'trystero' {
       track: MediaStreamTrack,
       stream: MediaStream,
       targetPeers?: TargetPeers,
-      metadata?: Metadata
+      metadata?: JsonValue
     ) => Promise<void>[]
 
     removeTrack: (
@@ -85,7 +89,7 @@ declare module 'trystero' {
     onPeerLeave: (fn: (peerId: string) => void) => void
 
     onPeerStream: (
-      fn: (stream: MediaStream, peerId: string, metadata: Metadata) => void
+      fn: (stream: MediaStream, peerId: string, metadata: JsonValue) => void
     ) => void
 
     onPeerTrack: (
@@ -94,7 +98,7 @@ declare module 'trystero' {
   }
 
   export function joinRoom(
-    config: BaseRoomConfig & TorrentRoomConfig,
+    config: BaseRoomConfig & RelayConfig,
     roomId: string
   ): Room
 

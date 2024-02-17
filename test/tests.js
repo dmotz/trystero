@@ -2,23 +2,24 @@ import {test, expect} from '@playwright/test'
 
 const testUrl = 'https://localhost:8080/test'
 
-const onConsole = (strategy, pageN) => async e => {
-  const args = await Promise.all(e.args().map(a => a.jsonValue()))
-  console.log(`${strategy} #${pageN}:`, ...args)
-}
+const onConsole = (strategy, pageN) => async e =>
+  console.log(`${strategy} #${pageN}:`, e)
 
 const onError = (strategy, pageN) => err =>
-  console.log(`* error! * ${strategy} #${pageN}: ${err.message}`)
+  console.log(`❌ error! ${strategy} #${pageN}:`, err)
 
 export default strategy =>
   test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
-    const trackerRedundancy = 3
+    const isRelayStrategy =
+      strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
+
+    const relayRedundancy = 3
     const testRoomConfig = {
       appId:
         strategy === 'firebase'
           ? 'trystero-94db3.firebaseio.com'
           : `trystero-test-${Math.random()}`,
-      ...(strategy === 'torrent' ? {trackerRedundancy} : {})
+      ...(isRelayStrategy ? {relayRedundancy} : {})
     }
     const testRoomNs = `testRoom-${Math.random().toString().replace('.', '')}`
     const roomArgs = [testRoomConfig, testRoomNs]
@@ -223,14 +224,14 @@ export default strategy =>
       ).toEqual(2)
     }
 
-    if (strategy === 'torrent') {
-      // # getTrackers()
+    if (isRelayStrategy) {
+      // # getRelaySockets()
 
       expect(
         await page.evaluate(
-          () => Object.keys(window.trystero.getTrackers()).length
+          () => Object.keys(window.trystero.getRelaySockets()).length
         )
-      ).toEqual(trackerRedundancy)
+      ).toEqual(relayRedundancy)
     }
 
     // # onPeerLeave()

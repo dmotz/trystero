@@ -1,15 +1,12 @@
 declare module 'trystero/mqtt' {
-  import {BaseRoomConfig, Room} from 'trystero'
-
-  export interface MqttRoomConfig {
-    brokerUrls?: string[]
-    brokerRedundancy?: number
-  }
+  import {BaseRoomConfig, RelayConfig, Room} from 'trystero'
 
   export function joinRoom(
-    config: BaseRoomConfig & MqttRoomConfig,
+    config: BaseRoomConfig & RelayConfig,
     roomId: string
   ): Room
+
+  export function getRelaySockets(): Record<string, WebSocket>
 
   export * from 'trystero'
 }

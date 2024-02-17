@@ -70,10 +70,10 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   let announceInterval
 
   init(config).then(async node => {
-    ;[rootSub, selfSub] = await Promise.all([
+    !([rootSub, selfSub] = await Promise.all([
       node.filter.createSubscription(),
       node.filter.createSubscription()
-    ])
+    ]))
 
     await Promise.all([
       rootSub.subscribe([rootDecoder], msg => {

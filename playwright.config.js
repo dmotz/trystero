@@ -33,7 +33,8 @@ export default {
     }
   ],
   webServer: {
-    command: 'http-server -S -C ./test/certs/cert.pem -K ./test/certs/key.pem',
+    command:
+      'serve -p 8080 --ssl-cert ./test/certs/cert.pem --ssl-key ./test/certs/key.pem',
     url: 'https://localhost:8080/test',
     ignoreHTTPSErrors: true
   }

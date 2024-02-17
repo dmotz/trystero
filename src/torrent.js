@@ -5,6 +5,7 @@ import {
   events,
   fromEntries,
   genId,
+  getRelays,
   initGuard,
   initPeer,
   libName,
@@ -23,33 +24,28 @@ const socketRetryTimeouts = {}
 const socketListeners = {}
 const hashLimit = 20
 const offerPoolSize = 10
-const defaultRedundancy = 2
+const defaultRedundancy = 3
 const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
 const trackerRetrySecs = 4
 const trackerAction = 'announce'
-const defaultTrackerUrls = [
+const defaultRelayUrls = [
   'wss://tracker.webtorrent.dev',
-  'wss://tracker.files.fm:7073/announce',
   'wss://tracker.openwebtorrent.com',
-  'wss://tracker.btorrent.xyz',
-  'wss://qot.abiir.top:443/announce',
-  'wss://spacetradersapi-chatbox.herokuapp.com:443/announce'
+  'wss://tracker.files.fm:7073/announce',
+  'wss://tracker.btorrent.xyz'
 ]
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
+  if (config.trackerUrls || config.trackerRedundancy) {
+    throw mkErr(
+      'trackerUrls/trackerRedundancy have been replaced by relayUrls/relayRedundancy'
+    )
+  }
+
   const connectedPeers = {}
   const key = config.password && genKey(config.password, ns)
-  const trackerUrls = (config.trackerUrls || defaultTrackerUrls).slice(
-    0,
-    config.trackerUrls
-      ? config.trackerUrls.length
-      : config.trackerRedundancy || defaultRedundancy
-  )
-
-  if (!trackerUrls.length) {
-    throw mkErr('trackerUrls is empty')
-  }
+  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
 
   const infoHashP = crypto.subtle
     .digest('SHA-1', encodeBytes(`${libName}:${config.appId}:${ns}`))
@@ -238,7 +234,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
 
     offerPool = makeOffers(offerPoolSize)
 
-    trackerUrls.forEach(async url => {
+    relayUrls.forEach(async url => {
       const socket = await makeSocket(url, infoHash)
 
       if (socket.readyState === WebSocket.OPEN) {
@@ -293,7 +289,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     async () => {
       const infoHash = await infoHashP
 
-      trackerUrls.forEach(url => delete socketListeners[url][infoHash])
+      relayUrls.forEach(url => delete socketListeners[url][infoHash])
       delete occupiedRooms[ns]
       clearInterval(announceInterval)
       cleanPool()
@@ -301,6 +297,6 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   )
 })
 
-export const getTrackers = () => ({...sockets})
+export const getRelaySockets = () => ({...sockets})
 
 export {selfId} from './utils.js'

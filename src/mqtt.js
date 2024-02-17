@@ -1,12 +1,21 @@
 import mqtt from 'mqtt'
 import room from './room.js'
-import {events, initGuard, initPeer, libName, noOp, selfId} from './utils.js'
+import {
+  events,
+  getRelays,
+  initGuard,
+  initPeer,
+  libName,
+  noOp,
+  selfId
+} from './utils.js'
 import {decrypt, encrypt, genKey} from './crypto.js'
 
 const occupiedRooms = {}
 const defaultRedundancy = 2
+const sockets = {}
 
-const defaultBrokerUrls = [
+const defaultRelayUrls = [
   'wss://test.mosquitto.org:8081',
   'wss://mqtt.eclipseprojects.io/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
@@ -21,12 +30,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   const offers = {}
   const seenPeers = {}
   const connectedPeers = {}
-  const brokerUrls = (config.brokerUrls || defaultBrokerUrls).slice(
-    0,
-    config.brokerUrls
-      ? config.brokerUrls.length
-      : config.brokerRedundancy || defaultRedundancy
-  )
+  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
 
   const connectPeer = (peer, peerId) => {
     onPeerConnect(peer, peerId)
@@ -42,9 +46,10 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   let onPeerConnect = noOp
   let clients = []
 
-  brokerUrls.forEach(url => {
+  relayUrls.forEach(url => {
     const client = mqtt.connect(url)
 
+    sockets[url] = client.stream.socket
     clients.push(client)
 
     client.on('connect', () => {
@@ -72,7 +77,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
             config.rtcConfig
           ))
 
-          peer.once(events.signal, async offer => {
+          peer.once(events.signal, async offer =>
             client.publish(
               `${rootTopic}/${peerId}`,
               JSON.stringify({
@@ -82,7 +87,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
                   : offer
               })
             )
-          })
+          )
 
           peer.once(events.connect, () => connectPeer(peer, peerId))
           peer.once(events.close, () => disconnectPeer(peerId))
@@ -132,5 +137,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
   )
 })
+
+export const getRelaySockets = () => ({...sockets})
 
 export {selfId} from './utils.js'

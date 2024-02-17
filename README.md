@@ -8,8 +8,8 @@ Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
 Peers can connect via
-[🌊 BitTorrent, 📡 MQTT, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison) – all
-using the same API.
+[🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison)
+– all using the same API.
 
 Besides making peer matching automatic, Trystero offers some nice abstractions
 on top of WebRTC:
@@ -54,7 +54,7 @@ is needed to exchange peer information
 ([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
 this involves running your own matchmaking server but Trystero abstracts this
 away for you and offers multiple "serverless" strategies for connecting peers
-(currently BitTorrent, MQTT, Firebase, and IPFS).
+(currently BitTorrent, Nostr, MQTT, Firebase, and IPFS).
 
 The important point to remember is this:
 
@@ -90,7 +90,9 @@ different one just deep import like so (your bundler should handle including
 only relevant code):
 
 ```js
-import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
+import {joinRoom} from 'trystero/nostr' // (trystero-nostr.min.js with a local file)
+// or
+import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js)
 // or
 import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js)
 // or
@@ -105,9 +107,8 @@ const room = joinRoom(config, 'yoyodyne')
 ```
 
 The first argument is a configuration object that requires an `appId`. This
-should be a completely unique identifier for your app (for the BitTorrent and
-IPFS strategies) or your Firebase `databaseURL` if you're using Firebase. The
-second argument is the room name.
+should be a completely unique identifier for your app (or in the case of
+Firebase, your `databaseURL`). The second argument is the room name.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
 > a time so it's recommended to design your app such that users are divided into
@@ -495,20 +496,14 @@ the same namespace will return the same room instance.
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
 
-  - `trackerUrls` - **(optional, 🌊 BitTorrent only)** Custom list of torrent
-    tracker URLs to use. They must support WebSocket connections.
+  - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
+    list of URLs for the strategy to use to bootstrap P2P connections. These
+    would be BitTorrent trackers, Nostr relays, and MQTT brokers, respectively.
+    They must support secure WebSocket connections.
 
-  - `trackerRedundancy` - **(optional, 🌊 BitTorrent only)** Integer specifying
-    how many torrent trackers to connect to simultaneously in case some fail.
-    Defaults to 2. Passing a `trackerUrls` option will cause this option to be
-    ignored as the entire list will be used.
-
-  - `brokerUrls` - **(optional, 📡 MQTT only)** Custom list of MQTT broker URLs
-    to use. They must support WebSocket connections.
-
-  - `brokerRedundancy` - **(optional, 📡 MQTT only)** Integer specifying
-    how many MQTT brokers to connect to simultaneously in case some fail.
-    Defaults to 2. Passing a `brokerUrls` option will cause this option to be
+  - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
+    Integer specifying how many torrent trackers to connect to simultaneously in
+    case some fail. Passing a `relayUrls` option will cause this option to be
     ignored as the entire list will be used.
 
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
@@ -769,20 +764,19 @@ Returns an object with the following methods:
 A unique ID string other peers will know the local user as globally across
 rooms.
 
-### `getTrackers()`
+### `getRelaySockets()`
 
-**(🌊 BitTorrent only)** Returns an object of BitTorrent tracker URL keys
+**(🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Returns an object of relay URL keys
 mapped to their WebSocket connections. This can be useful for determining the
-state of the user's connection to the trackers and handling any connection
+state of the user's connection to the relays and handling any connection
 failures.
 
 Example:
 
 ```js
-console.log(trystero.getTrackers())
+console.log(trystero.getRelaySockets())
 // => Object {
-//  "wss://fediverse.tv/tracker/socket": WebSocket,
-//  "wss://tracker.files.fm:7073/announce": WebSocket,
+//  "wss://tracker.webtorrent.dev": WebSocket,
 //  "wss://tracker.openwebtorrent.com": WebSocket
 //  }
 ```
@@ -808,6 +802,7 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 |                   | one-time setup¹ | bundle size² | time to connect³ |
 | ----------------- | --------------- | ------------ | ---------------- |
 | 🌊 **BitTorrent** | none 🏆         | 27K 🏆       | ⏱️⏱️             |
+| 🐦 **Nostr**      | none 🏆         | 56K          | ⏱️⏱️             |
 | 📡 **MQTT**       | none 🏆         | 337K         | ⏱️⏱️             |
 | 🔥 **Firebase**   | ~5 mins         | 212K         | ⏱️ 🏆            |
 | 🪐 **IPFS**       | none 🏆         | 1MB          | ⏱️⏱️⏱️           |
@@ -836,7 +831,7 @@ Luckily, Trystero makes it trivial to switch between strategies — just change 
 single import line and quickly experiment:
 
 ```js
-import {joinRoom} from 'trystero/[torrent|mqtt|firebase|ipfs]'
+import {joinRoom} from 'trystero/[torrent|nostr|mqtt|firebase|ipfs]'
 ```
 
 ---
