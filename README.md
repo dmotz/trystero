@@ -496,20 +496,14 @@ the same namespace will return the same room instance.
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
 
-  - `trackerUrls` - **(optional, 🌊 BitTorrent only)** Custom list of torrent
-    tracker URLs to use. They must support WebSocket connections.
+  - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
+    list of URLs for the strategy to use to bootstrap P2P connections. These
+    would be BitTorrent trackers, Nostr relays, and MQTT brokers, respectively.
+    They must support secure WebSocket connections.
 
-  - `trackerRedundancy` - **(optional, 🌊 BitTorrent only)** Integer specifying
-    how many torrent trackers to connect to simultaneously in case some fail.
-    Defaults to 2. Passing a `trackerUrls` option will cause this option to be
-    ignored as the entire list will be used.
-
-  - `brokerUrls` - **(optional, 📡 MQTT only)** Custom list of MQTT broker URLs
-    to use. They must support WebSocket connections.
-
-  - `brokerRedundancy` - **(optional, 📡 MQTT only)** Integer specifying
-    how many MQTT brokers to connect to simultaneously in case some fail.
-    Defaults to 2. Passing a `brokerUrls` option will cause this option to be
+  - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
+    Integer specifying how many torrent trackers to connect to simultaneously in
+    case some fail. Passing a `relayUrls` option will cause this option to be
     ignored as the entire list will be used.
 
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
