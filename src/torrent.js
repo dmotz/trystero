@@ -39,8 +39,7 @@ const defaultRelayUrls = [
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   if (config.trackerUrls || config.trackerRedundancy) {
     throw mkErr(
-      'trackerUrls and trackerRedundancy params have been replaced ' +
-        'by relayUrls and relayRedundancy'
+      'trackerUrls/trackerRedundancy have been replaced by relayUrls/relayRedundancy'
     )
   }
 
