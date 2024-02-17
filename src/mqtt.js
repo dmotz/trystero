@@ -13,6 +13,7 @@ import {decrypt, encrypt, genKey} from './crypto.js'
 
 const occupiedRooms = {}
 const defaultRedundancy = 2
+const sockets = {}
 
 const defaultRelayUrls = [
   'wss://test.mosquitto.org:8081',
@@ -48,6 +49,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   relayUrls.forEach(url => {
     const client = mqtt.connect(url)
 
+    sockets[url] = client.stream.socket
     clients.push(client)
 
     client.on('connect', () => {
@@ -135,5 +137,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
   )
 })
+
+export const getRelaySockets = () => ({...sockets})
 
 export {selfId} from './utils.js'
