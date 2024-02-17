@@ -10,7 +10,8 @@ import {
   libName,
   noOp,
   selfId,
-  toHex
+  toHex,
+  values
 } from './utils.js'
 import {decrypt, encrypt, genKey} from './crypto.js'
 
@@ -20,6 +21,7 @@ const kind = 29333
 const tag = 'x'
 const privateKey = toHex(crypto.getRandomValues(new Uint8Array(32)))
 const publicKey = toHex(schnorr.getPublicKey(privateKey))
+const sockets = {}
 
 const now = () => Math.floor(Date.now() / 1000)
 
@@ -111,14 +113,11 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   }
 
   let onPeerConnect = noOp
-  let sockets = []
 
   relayUrls.forEach(url => {
-    const rootSubId = genId(64)
-    const selfSubId = genId(64)
     const socket = new WebSocket(url)
 
-    sockets.push(socket)
+    sockets[url] = socket
 
     socket.addEventListener('open', async () => {
       socket.send(subscribeTo(rootSubId, rootTopic))
@@ -213,5 +212,7 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
     }
   )
 })
+
+export const getRelaySockets = () => ({...sockets})
 
 export {selfId} from './utils.js'
