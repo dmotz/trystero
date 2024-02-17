@@ -39,7 +39,7 @@ const defaultRelayUrls = [
   'wss://nostrasia.casa',
   'wss://relay.nostr.bg',
   'wss://relay.nostrr.de',
-  'wss://relay.nostrss.re '
+  'wss://relay.nostrss.re'
 ]
 
 export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
