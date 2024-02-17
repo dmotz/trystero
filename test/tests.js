@@ -2,13 +2,11 @@ import {test, expect} from '@playwright/test'
 
 const testUrl = 'https://localhost:8080/test'
 
-const onConsole = (strategy, pageN) => async e => {
-  const args = await Promise.all(e.args().map(a => a.jsonValue()))
-  console.log(`${strategy} #${pageN}:`, ...args)
-}
+const onConsole = (strategy, pageN) => async e =>
+  console.log(`${strategy} #${pageN}:`, e)
 
 const onError = (strategy, pageN) => err =>
-  console.log(`* error! * ${strategy} #${pageN}: ${err.message}`)
+  console.log(`❌ error! ${strategy} #${pageN}:`, err)
 
 export default strategy =>
   test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
