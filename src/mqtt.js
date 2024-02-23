@@ -1,19 +1,6 @@
 import mqtt from 'mqtt'
-import room from './room.js'
-import {
-  events,
-  getRelays,
-  initGuard,
-  initPeer,
-  libName,
-  noOp,
-  selfId
-} from './utils.js'
-import {decrypt, encrypt, genKey} from './crypto.js'
-
-const occupiedRooms = {}
-const defaultRedundancy = 2
-const sockets = {}
+import strategy from './strategy'
+import {getRelays, selfId, toJson} from './utils'
 
 const defaultRelayUrls = [
   'wss://test.mosquitto.org:8081',
@@ -23,119 +10,46 @@ const defaultRelayUrls = [
   'wss://public.mqtthq.com:8084/mqtt'
 ]
 
-export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
-  const key = config.password && genKey(config.password, ns)
-  const rootTopic = `${libName.toLowerCase()}/${config.appId}/${ns}`
-  const selfTopic = `${rootTopic}/${selfId}`
-  const offers = {}
-  const seenPeers = {}
-  const connectedPeers = {}
-  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
+const sockets = {}
+const defaultRedundancy = 5
+const msgHandlers = {}
 
-  const connectPeer = (peer, peerId) => {
-    onPeerConnect(peer, peerId)
-    connectedPeers[peerId] = peer
-  }
+export const joinRoom = strategy({
+  init: config =>
+    getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
+      const client = mqtt.connect(url)
 
-  const disconnectPeer = peerId => {
-    delete offers[peerId]
-    delete seenPeers[peerId]
-    delete connectedPeers[peerId]
-  }
+      sockets[url] = client.stream.socket
+      msgHandlers[url] = {}
 
-  let onPeerConnect = noOp
-  let clients = []
-
-  relayUrls.forEach(url => {
-    const client = mqtt.connect(url)
-
-    sockets[url] = client.stream.socket
-    clients.push(client)
-
-    client.on('connect', () => {
-      client.subscribe(rootTopic)
-      client.subscribe(selfTopic)
-      client.publish(rootTopic, selfId)
-    })
-
-    client.on('message', async (topic, message) => {
-      const msg = message.toString()
-
-      if (topic === rootTopic) {
-        const peerId = msg
-
-        if (
-          peerId !== selfId &&
-          !connectedPeers[peerId] &&
-          !seenPeers[peerId]
-        ) {
-          seenPeers[peerId] = true
-
-          const peer = (offers[peerId] = initPeer(
-            true,
-            false,
-            config.rtcConfig
-          ))
-
-          peer.once(events.signal, async offer =>
-            client.publish(
-              `${rootTopic}/${peerId}`,
-              JSON.stringify({
-                peerId: selfId,
-                offer: key
-                  ? {...offer, sdp: await encrypt(key, offer.sdp)}
-                  : offer
-              })
-            )
-          )
-
-          peer.once(events.connect, () => connectPeer(peer, peerId))
-          peer.once(events.close, () => disconnectPeer(peerId))
+      client.on('message', (topic, buffer) => {
+        if (msgHandlers[url][topic]) {
+          msgHandlers[url][topic](topic, buffer.toString())
         }
-      } else if (topic === selfTopic) {
-        const {peerId, offer, answer} = JSON.parse(msg)
+      })
 
-        if (offers[peerId] && answer) {
-          offers[peerId].signal(
-            key ? {...answer, sdp: await decrypt(key, answer.sdp)} : answer
-          )
-          return
-        }
+      return new Promise(res => client.on('connect', () => res(client)))
+    }),
 
-        if (!offer) {
-          return
-        }
+  subscribe: (client, rootTopic, selfTopic, onMessage) => {
+    const url = client.options.href
 
-        const peer = initPeer(false, false, config.rtcConfig)
+    msgHandlers[url][rootTopic] = msgHandlers[url][selfTopic] = (topic, data) =>
+      onMessage(topic, data, (peerTopic, signal) =>
+        client.publish(peerTopic, signal)
+      )
 
-        peer.once(events.signal, async answer =>
-          client.publish(
-            `${rootTopic}/${peerId}`,
-            JSON.stringify({
-              peerId: selfId,
-              answer: key
-                ? {...answer, sdp: await encrypt(key, answer.sdp)}
-                : answer
-            })
-          )
-        )
+    client.subscribe(rootTopic)
+    client.subscribe(selfTopic)
+    client.publish(rootTopic, toJson({peerId: selfId}))
 
-        peer.once(events.connect, () => connectPeer(peer, peerId))
-        peer.once(events.close, () => disconnectPeer(peerId))
-        peer.signal(
-          key ? {...offer, sdp: await decrypt(key, offer.sdp)} : offer
-        )
-      }
-    })
-  })
-
-  return room(
-    f => (onPeerConnect = f),
-    () => {
-      delete occupiedRooms[ns]
-      clients.forEach(client => client.end())
+    return () => {
+      client.unsubscribe(rootTopic)
+      client.unsubscribe(selfTopic)
+      delete msgHandlers[url][rootTopic]
+      delete msgHandlers[url][selfTopic]
     }
-  )
+  }
 })
 
 export const getRelaySockets = () => ({...sockets})
