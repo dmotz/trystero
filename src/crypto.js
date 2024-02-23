@@ -1,6 +1,7 @@
 import {decodeBytes, encodeBytes} from './utils.js'
 
 const algo = 'AES-CBC'
+const strToSha1 = {}
 
 const pack = buff => btoa(String.fromCharCode.apply(null, new Uint8Array(buff)))
 
@@ -8,6 +9,22 @@ const unpack = packed => {
   const str = atob(packed)
 
   return new Uint8Array(str.length).map((_, i) => str.charCodeAt(i)).buffer
+}
+
+export const sha1 = async str => {
+  if (strToSha1[str]) {
+    return strToSha1[str]
+  }
+
+  const hash = Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-1', encodeBytes(str)))
+  )
+    .map(b => b.toString(36))
+    .join('')
+
+  strToSha1[str] = hash
+
+  return hash
 }
 
 export const genKey = async (secret, ns) =>
