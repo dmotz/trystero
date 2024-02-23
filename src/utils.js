@@ -49,6 +49,8 @@ export const libName = 'Trystero'
 
 export const selfId = genId(20)
 
+export const isBrowser = typeof window !== 'undefined'
+
 export const {keys, values, entries, fromEntries} = Object
 
 export const noOp = () => {}
