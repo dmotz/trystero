@@ -1,6 +1,8 @@
 import Peer from 'simple-peer-light'
 
 const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
 
 export const initPeer = (initiator, trickle, config) => {
   const peer = new Peer({initiator, trickle, config})
@@ -54,9 +56,9 @@ export const noOp = () => {}
 
 export const mkErr = msg => new Error(`${libName}: ${msg}`)
 
-export const encodeBytes = txt => new TextEncoder().encode(txt)
+export const encodeBytes = txt => encoder.encode(txt)
 
-export const decodeBytes = buffer => new TextDecoder().decode(buffer)
+export const decodeBytes = buffer => decoder.decode(buffer)
 
 export const toHex = buffer =>
   buffer.reduce((a, c) => a + c.toString(16).padStart(2, '0'), '')
