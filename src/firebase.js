@@ -11,25 +11,16 @@ import {
   remove,
   set
 } from 'firebase/database'
-import room from './room.js'
-import {
-  events,
-  initGuard,
-  initPeer,
-  keys,
-  libName,
-  noOp,
-  selfId
-} from './utils.js'
-import {decrypt, encrypt, genKey} from './crypto.js'
+import strategy from './strategy'
+import {libName, selfId} from './utils.js'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
-const occupiedRooms = {}
 const dbs = {}
+
 const getPath = (...xs) => xs.join('/')
 
-const init = config => {
+const initDb = config => {
   if (config.firebaseApp) {
     const url = config.firebaseApp.options.databaseURL
     return dbs[url] || (dbs[url] = getDatabase(config.firebaseApp))
@@ -43,121 +34,70 @@ const init = config => {
   )
 }
 
-export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
-  const db = init(config)
-  const peerMap = {}
-  const peerSigs = {}
-  const connectedPeers = {}
-  const rootPath = config.rootPath || defaultRootPath
-  const roomRef = ref(db, getPath(rootPath, ns))
-  const selfRef = child(roomRef, selfId)
-  const cryptoKey = config.password && genKey(config.password, ns)
-  const unsubFns = []
+export const joinRoom = strategy({
+  init: config => ref(initDb(config), config.rootPath || defaultRootPath),
 
-  const makePeer = (id, initiator) => {
-    if (peerMap[id] && !peerMap[id].destroyed) {
-      return peerMap[id]
-    }
+  subscribe: (rootRef, roomTopic, selfTopic, onMessage) => {
+    const roomRef = child(rootRef, roomTopic)
+    const selfRef = child(roomRef, selfTopic)
+    const peerSigs = {}
+    const unsubFns = []
 
-    const peer = initPeer(initiator, true, config.rtcConfig)
-
-    peer.once(events.connect, () => {
-      onPeerConnect(peer, id)
-      connectedPeers[id] = true
-    })
-
-    peer.on(events.signal, async sdp => {
-      if (connectedPeers[id]) {
-        return
-      }
-
-      const payload = JSON.stringify(sdp)
-      const signalRef = push(ref(db, getPath(rootPath, ns, id, selfId)))
+    const handleMessage = (peerTopic, signal) => {
+      const signalRef = push(child(roomRef, getPath(peerTopic, selfId)))
 
       onDisconnect(signalRef).remove()
-      set(signalRef, cryptoKey ? await encrypt(cryptoKey, payload) : payload)
-    })
-
-    peer.once(events.close, () => {
-      delete peerMap[id]
-      delete peerSigs[id]
-      delete connectedPeers[id]
-    })
-
-    peerMap[id] = peer
-    return peer
-  }
-
-  let didSyncRoom = false
-  let onPeerConnect = noOp
-
-  set(selfRef, {[presencePath]: true})
-  onDisconnect(selfRef).remove()
-  onChildAdded(selfRef, data => {
-    const peerId = data.key
-
-    if (peerId === presencePath || connectedPeers[peerId]) {
-      return
+      set(signalRef, signal)
     }
 
+    let didSyncRoom = false
+
+    set(selfRef, {[presencePath]: {peerId: selfId}})
+    onDisconnect(selfRef).remove()
     unsubFns.push(
-      onChildAdded(data.ref, async data => {
-        if (!(peerId in peerSigs)) {
-          peerSigs[peerId] = {}
-        }
+      onValue(roomRef, () => (didSyncRoom = true), {onlyOnce: true}),
 
-        if (data.key in peerSigs[peerId]) {
+      onChildAdded(roomRef, data => {
+        if (!didSyncRoom) {
           return
         }
 
-        peerSigs[peerId][data.key] = true
+        onMessage(roomTopic, data.val()[presencePath], handleMessage)
+      }),
 
-        let val
+      onChildAdded(selfRef, data => {
+        const peerId = data.key
 
-        try {
-          val = JSON.parse(
-            cryptoKey ? await decrypt(cryptoKey, data.val()) : data.val()
-          )
-        } catch (e) {
-          console.error(`${libName}: received malformed SDP JSON`)
+        if (peerId === presencePath) {
           return
         }
 
-        const peer = makePeer(peerId, false)
+        unsubFns.push(
+          onChildAdded(data.ref, data => {
+            if (!(peerId in peerSigs)) {
+              peerSigs[peerId] = {}
+            }
 
-        peer.signal(val)
-        remove(data.ref)
+            if (data.key in peerSigs[peerId]) {
+              return
+            }
+
+            peerSigs[peerId][data.key] = true
+
+            onMessage(selfTopic, data.val(), handleMessage)
+            remove(data.ref)
+          })
+        )
       })
     )
-  })
 
-  onValue(roomRef, () => (didSyncRoom = true), {onlyOnce: true})
-  onChildAdded(roomRef, ({key}) => {
-    if (!didSyncRoom || key === selfId) {
-      return
-    }
-    makePeer(key, true)
-  })
-
-  return room(
-    f => (onPeerConnect = f),
-    () => {
+    return () => {
+      off(roomRef)
       off(selfRef)
       remove(selfRef)
-      off(roomRef)
       unsubFns.forEach(f => f())
-      delete occupiedRooms[ns]
     }
-  )
+  }
 })
-
-export const getOccupants = (config, ns) =>
-  new Promise(res =>
-    onValue(
-      ref(init(config), getPath(config.rootPath || defaultRootPath, ns)),
-      data => res(keys(data.val() || {})),
-      {onlyOnce: true}
-    )
-  )
 
 export {selfId} from './utils.js'
