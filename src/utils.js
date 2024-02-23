@@ -20,11 +20,10 @@ export const initPeer = (initiator, trickle, config) => {
   return peer
 }
 
+export const alloc = (n, f) => Array(n).fill().map(f)
+
 export const genId = n =>
-  Array(n)
-    .fill()
-    .map(() => charSet[Math.floor(Math.random() * charSet.length)])
-    .join('')
+  alloc(n, () => charSet[Math.floor(Math.random() * charSet.length)]).join('')
 
 export const initGuard = (occupiedRooms, f) => (config, ns) => {
   if (occupiedRooms[ns]) {
