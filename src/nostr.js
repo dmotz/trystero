@@ -1,29 +1,15 @@
 import {schnorr} from '@noble/curves/secp256k1'
-import room from './room.js'
+import strategy from './strategy'
 import {
-  events,
   encodeBytes,
   genId,
   getRelays,
-  initGuard,
-  initPeer,
+  isBrowser,
   libName,
-  noOp,
   selfId,
   toHex,
-  values
-} from './utils.js'
-import {decrypt, encrypt, genKey} from './crypto.js'
-
-const occupiedRooms = {}
-const defaultRedundancy = 4
-const kind = 29333
-const tag = 'x'
-const privateKey = toHex(crypto.getRandomValues(new Uint8Array(32)))
-const publicKey = toHex(schnorr.getPublicKey(privateKey))
-const sockets = {}
-
-const now = () => Math.floor(Date.now() / 1000)
+  toJson
+} from './utils'
 
 const defaultRelayUrls = [
   'wss://relay.nostr.net',
@@ -44,180 +30,123 @@ const defaultRelayUrls = [
   'wss://relay.nostrss.re'
 ]
 
-export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
-  const key = config.password && genKey(config.password, ns)
-  const rootTopic = `${libName.toLowerCase()}/${config.appId}/${ns}`
-  const selfTopic = `${rootTopic}/${selfId}`
-  const rootSubId = genId(64)
-  const selfSubId = genId(64)
-  const offers = {}
-  const seenPeers = {}
-  const connectedPeers = {}
-  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
+const sockets = {}
+const defaultRedundancy = 1
+const kind = 29333
+const tag = 'x'
+const eventMsgType = 'EVENT'
+const privateKey =
+  isBrowser && toHex(crypto.getRandomValues(new Uint8Array(32)))
+const publicKey = isBrowser && toHex(schnorr.getPublicKey(privateKey))
+const subIdToTopic = {}
+const msgHandlers = {}
 
-  const connectPeer = (peer, peerId) => {
-    onPeerConnect(peer, peerId)
-    connectedPeers[peerId] = peer
+const now = () => Math.floor(Date.now() / 1000)
+
+const createEvent = async (topic, content) => {
+  const payload = {
+    kind,
+    content,
+    pubkey: publicKey,
+    created_at: now(),
+    tags: [[tag, topic]]
   }
 
-  const disconnectPeer = peerId => {
-    delete offers[peerId]
-    delete seenPeers[peerId]
-    delete connectedPeers[peerId]
-  }
-
-  const subscribeTo = (subId, topic) =>
-    JSON.stringify([
-      'REQ',
-      subId,
-      {
-        kinds: [kind],
-        since: now(),
-        ['#' + tag]: [topic]
-      }
-    ])
-
-  const unsubscribeFrom = subId => JSON.stringify(['CLOSE', subId])
-
-  const signal = async (topic, content) => {
-    const payload = {
-      kind,
-      content: JSON.stringify(content),
-      pubkey: publicKey,
-      created_at: now(),
-      tags: [[tag, topic]]
-    }
-
-    const id = toHex(
-      new Uint8Array(
-        await crypto.subtle.digest(
-          'SHA-256',
-          encodeBytes(
-            JSON.stringify([
-              0,
-              payload.pubkey,
-              payload.created_at,
-              payload.kind,
-              payload.tags,
-              payload.content
-            ])
-          )
+  const id = toHex(
+    new Uint8Array(
+      await crypto.subtle.digest(
+        'SHA-256',
+        encodeBytes(
+          toJson([
+            0,
+            payload.pubkey,
+            payload.created_at,
+            payload.kind,
+            payload.tags,
+            payload.content
+          ])
         )
       )
     )
-
-    return JSON.stringify([
-      'EVENT',
-      {
-        ...payload,
-        id,
-        sig: toHex(await schnorr.sign(id, privateKey))
-      }
-    ])
-  }
-
-  let onPeerConnect = noOp
-
-  relayUrls.forEach(url => {
-    const socket = new WebSocket(url)
-
-    sockets[url] = socket
-
-    socket.addEventListener('open', async () => {
-      socket.send(subscribeTo(rootSubId, rootTopic))
-      socket.send(subscribeTo(selfSubId, selfTopic))
-      socket.send(await signal(rootTopic, selfId))
-    })
-
-    socket.addEventListener('message', async e => {
-      const [msgType, subId, payload, relayMsg] = JSON.parse(e.data)
-
-      if (msgType !== 'EVENT') {
-        if (msgType === 'OK' && !payload) {
-          console.warn(
-            `${libName}: relay failure from ${socket.url} - ${relayMsg}`
-          )
-        }
-
-        return
-      }
-
-      const content = JSON.parse(payload.content)
-
-      if (subId === rootSubId) {
-        const peerId = content
-
-        if (
-          peerId !== selfId &&
-          !connectedPeers[peerId] &&
-          !seenPeers[peerId]
-        ) {
-          seenPeers[peerId] = true
-
-          const peer = (offers[peerId] = initPeer(
-            true,
-            false,
-            config.rtcConfig
-          ))
-
-          peer.once(events.signal, async offer => {
-            socket.send(
-              await signal(`${rootTopic}/${peerId}`, {
-                peerId: selfId,
-                offer: key
-                  ? {...offer, sdp: await encrypt(key, offer.sdp)}
-                  : offer
-              })
-            )
-          })
-
-          peer.once(events.connect, () => connectPeer(peer, peerId))
-          peer.once(events.close, () => disconnectPeer(peerId))
-        }
-      } else if (subId === selfSubId) {
-        const {peerId, offer, answer} = content
-
-        if (offers[peerId] && answer) {
-          offers[peerId].signal(
-            key ? {...answer, sdp: await decrypt(key, answer.sdp)} : answer
-          )
-          return
-        }
-
-        if (!offer) {
-          return
-        }
-
-        const peer = initPeer(false, false, config.rtcConfig)
-
-        peer.once(events.signal, async answer =>
-          socket.send(
-            await signal(`${rootTopic}/${peerId}`, {
-              peerId: selfId,
-              answer: key
-                ? {...answer, sdp: await encrypt(key, answer.sdp)}
-                : answer
-            })
-          )
-        )
-
-        peer.once(events.connect, () => connectPeer(peer, peerId))
-        peer.once(events.close, () => disconnectPeer(peerId))
-        peer.signal(offer)
-      }
-    })
-  })
-
-  return room(
-    f => (onPeerConnect = f),
-    () => {
-      delete occupiedRooms[ns]
-      values(sockets).forEach(socket => {
-        socket.send(unsubscribeFrom(rootSubId))
-        socket.send(unsubscribeFrom(selfSubId))
-      })
-    }
   )
+
+  return toJson([
+    eventMsgType,
+    {
+      ...payload,
+      id,
+      sig: toHex(await schnorr.sign(id, privateKey))
+    }
+  ])
+}
+
+const subscribe = (subId, topic) => {
+  subIdToTopic[subId] = topic
+  return toJson([
+    'REQ',
+    subId,
+    {
+      kinds: [kind],
+      since: now(),
+      ['#' + tag]: [topic]
+    }
+  ])
+}
+
+const unsubscribe = subId => {
+  delete subIdToTopic[subId]
+  return toJson(['CLOSE', subId])
+}
+
+export const joinRoom = strategy({
+  init: config =>
+    getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
+      const client = new WebSocket(url)
+
+      sockets[url] = client
+
+      client.onmessage = e => {
+        const [msgType, subId, payload, relayMsg] = JSON.parse(e.data)
+
+        if (msgType !== eventMsgType) {
+          const prefix = `${libName}: relay failure from ${client.url} - `
+
+          if (msgType === 'NOTICE') {
+            console.warn(prefix + subId)
+          } else if (msgType === 'OK' && !payload) {
+            console.warn(prefix + relayMsg)
+          }
+          return
+        }
+
+        if (msgHandlers[subId]) {
+          msgHandlers[subId](subIdToTopic[subId], payload.content)
+        }
+      }
+
+      return new Promise(res => (client.onopen = () => res(client)))
+    }),
+
+  subscribe: async (client, rootTopic, selfTopic, onMessage) => {
+    const rootSubId = genId(64)
+    const selfSubId = genId(64)
+
+    msgHandlers[rootSubId] = msgHandlers[selfSubId] = (topic, data) =>
+      onMessage(topic, data, async (peerTopic, signal) =>
+        client.send(await createEvent(peerTopic, signal))
+      )
+
+    client.send(subscribe(rootSubId, rootTopic))
+    client.send(subscribe(selfSubId, selfTopic))
+    client.send(await createEvent(rootTopic, toJson({peerId: selfId})))
+
+    return () => {
+      client.send(unsubscribe(rootSubId))
+      client.send(unsubscribe(selfSubId))
+      delete msgHandlers[rootSubId]
+      delete msgHandlers[selfSubId]
+    }
+  }
 })
 
 export const getRelaySockets = () => ({...sockets})
