@@ -9,10 +9,11 @@ import {
   libName,
   makeSocket,
   selfId,
+  socketGetter,
   toJson
 } from './utils'
 
-const sockets = {}
+const clients = {}
 const topicToInfoHash = {}
 const infoHashToTopic = {}
 const announceIntervals = {}
@@ -110,7 +111,7 @@ export const joinRoom = strategy({
 
       const {url} = client
 
-      sockets[url] = client
+      clients[url] = client
       msgHandlers[url] = {}
 
       return client.ready
@@ -177,6 +178,6 @@ export const joinRoom = strategy({
   }
 })
 
-export const getRelaySockets = () => ({...sockets})
+export const getRelaySockets = socketGetter(clients)
 
 export {selfId} from './utils.js'
