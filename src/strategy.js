@@ -14,11 +14,6 @@ import {
 
 const topicPath = (...parts) => parts.join('@')
 
-const makeOffer = rtcConfig => {
-  const peer = initPeer(true, false, rtcConfig)
-  return [peer, new Promise(res => peer.once(events.signal, res))]
-}
-
 const globalPeers = {}
 
 export default ({init, subscribe}) => {
@@ -29,13 +24,17 @@ export default ({init, subscribe}) => {
   let offerPool
 
   return (config, ns) => {
-    const rtcConfig = config.rtcConfig
     const pendingOffers = {}
     const connectedPeers = {}
     const seenPeers = {}
     const rootTopicPlaintext = topicPath(libName, config.appId, ns)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
+
+    const makeOffer = () => {
+      const peer = initPeer(true, false, config.rtcConfig)
+      return [peer, new Promise(res => peer.once(events.signal, res))]
+    }
 
     const connectPeer = (peer, peerId) => {
       onPeerConnect(peer, peerId)
@@ -51,7 +50,7 @@ export default ({init, subscribe}) => {
 
     const getOffers = n => {
       const offers = offerPool.splice(0, n)
-      offerPool.push(...alloc(n, () => makeOffer(rtcConfig)))
+      offerPool.push(...alloc(n, makeOffer))
       return offers
     }
 
@@ -93,7 +92,7 @@ export default ({init, subscribe}) => {
       }
 
       if (offer) {
-        const peer = initPeer(false, false, rtcConfig)
+        const peer = initPeer(false, false, config.rtcConfig)
 
         handlePeerEvents(peer, peerId)
         peer.once(events.signal, async answer =>
