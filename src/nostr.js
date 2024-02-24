@@ -35,8 +35,7 @@ const defaultRedundancy = 1
 const kind = 29333
 const tag = 'x'
 const eventMsgType = 'EVENT'
-const privateKey =
-  isBrowser && toHex(crypto.getRandomValues(new Uint8Array(32)))
+const privateKey = isBrowser && schnorr.utils.randomPrivateKey()
 const publicKey = isBrowser && toHex(schnorr.getPublicKey(privateKey))
 const subIdToTopic = {}
 const msgHandlers = {}
