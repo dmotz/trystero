@@ -25,26 +25,6 @@ export const alloc = (n, f) => Array(n).fill().map(f)
 export const genId = n =>
   alloc(n, () => charSet[Math.floor(Math.random() * charSet.length)]).join('')
 
-export const initGuard = (occupiedRooms, f) => (config, ns) => {
-  if (occupiedRooms[ns]) {
-    return occupiedRooms[ns]
-  }
-
-  if (!config) {
-    throw mkErr('requires a config map as the first argument')
-  }
-
-  if (!config.appId && !config.firebaseApp) {
-    throw mkErr('config map is missing appId field')
-  }
-
-  if (!ns) {
-    throw mkErr('namespace argument required')
-  }
-
-  return (occupiedRooms[ns] = f(config, ns))
-}
-
 export const libName = 'Trystero'
 
 export const selfId = genId(20)
