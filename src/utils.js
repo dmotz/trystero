@@ -116,3 +116,6 @@ export const makeSocket = (url, onMessage) => {
 
   return client
 }
+
+export const socketGetter = clientMap => () =>
+  fromEntries(entries(clientMap).map(([url, client]) => [url, client.socket]))
