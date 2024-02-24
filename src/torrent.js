@@ -24,7 +24,7 @@ const hashLimit = 20
 const offerPoolSize = 10
 const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
-const defaultRedundancy = 1
+const defaultRedundancy = 3
 const defaultRelayUrls = [
   'wss://tracker.webtorrent.dev',
   'wss://tracker.openwebtorrent.com',
