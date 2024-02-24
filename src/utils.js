@@ -51,6 +51,8 @@ export const events = fromEntries(
   ])
 )
 
+export const topicPath = (...parts) => parts.join('@')
+
 export const getRelays = (config, defaults, defaultN) =>
   (config.relayUrls || defaults).slice(
     0,

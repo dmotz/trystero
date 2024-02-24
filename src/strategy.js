@@ -9,10 +9,9 @@ import {
   mkErr,
   noOp,
   selfId,
-  toJson
+  toJson,
+  topicPath
 } from './utils.js'
-
-const topicPath = (...parts) => parts.join('@')
 
 const globalPeers = {}
 
