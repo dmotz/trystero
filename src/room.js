@@ -1,4 +1,5 @@
 import {
+  alloc,
   decodeBytes,
   encodeBytes,
   entries,
@@ -119,42 +120,40 @@ export default (onPeer, onSelfLeave) => {
         const chunkTotal =
           Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0) || 1
 
-        const chunks = Array(chunkTotal)
-          .fill()
-          .map((_, i) => {
-            const isLast = i === chunkTotal - 1
-            const isMeta = meta && i === 0
-            const chunk = new Uint8Array(
-              payloadIndex +
-                (isMeta
-                  ? metaEncoded.byteLength
-                  : isLast
-                    ? buffer.byteLength -
-                      chunkSize * (chunkTotal - (meta ? 2 : 1))
-                    : chunkSize)
-            )
+        const chunks = alloc(chunkTotal, (_, i) => {
+          const isLast = i === chunkTotal - 1
+          const isMeta = meta && i === 0
+          const chunk = new Uint8Array(
+            payloadIndex +
+              (isMeta
+                ? metaEncoded.byteLength
+                : isLast
+                  ? buffer.byteLength -
+                    chunkSize * (chunkTotal - (meta ? 2 : 1))
+                  : chunkSize)
+          )
 
-            chunk.set(typeBytesPadded)
-            chunk.set([nonce], nonceIndex)
-            chunk.set(
-              [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
-              tagIndex
-            )
-            chunk.set(
-              [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
-              progressIndex
-            )
-            chunk.set(
-              meta
-                ? isMeta
-                  ? metaEncoded
-                  : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
-                : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
-              payloadIndex
-            )
+          chunk.set(typeBytesPadded)
+          chunk.set([nonce], nonceIndex)
+          chunk.set(
+            [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
+            tagIndex
+          )
+          chunk.set(
+            [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
+            progressIndex
+          )
+          chunk.set(
+            meta
+              ? isMeta
+                ? metaEncoded
+                : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
+              : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
+            payloadIndex
+          )
 
-            return chunk
-          })
+          return chunk
+        })
 
         nonce = (nonce + 1) & oneByteMax
 
@@ -219,19 +218,10 @@ export default (onPeer, onSelfLeave) => {
       throw mkErr(`received message with unregistered type (${type})`)
     }
 
-    if (!pendingTransmissions[id]) {
-      pendingTransmissions[id] = {}
-    }
+    pendingTransmissions[id] ||= {}
+    pendingTransmissions[id][type] ||= {}
 
-    if (!pendingTransmissions[id][type]) {
-      pendingTransmissions[id][type] = {}
-    }
-
-    let target = pendingTransmissions[id][type][nonce]
-
-    if (!target) {
-      target = pendingTransmissions[id][type][nonce] = {chunks: []}
-    }
+    const target = (pendingTransmissions[id][type][nonce] ||= {chunks: []})
 
     if (isMeta) {
       target.meta = JSON.parse(decodeBytes(payload))

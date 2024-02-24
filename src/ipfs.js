@@ -41,9 +41,7 @@ export const joinRoom = strategy({
               contentTopic: peerTopic,
               ephemeral: true
             }),
-            {
-              payload: encodeBytes(signal)
-            }
+            {payload: encodeBytes(signal)}
           )
         )
       }
