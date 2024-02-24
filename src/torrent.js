@@ -7,6 +7,7 @@ import {
   fromJson,
   getRelays,
   libName,
+  makeSocket,
   selfId,
   toJson
 } from './utils'
@@ -63,13 +64,7 @@ const warn = (url, msg, didFail) =>
 export const joinRoom = strategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
-      const client = new WebSocket(rawUrl)
-      const {url} = client
-
-      sockets[url] = client
-      msgHandlers[url] = {}
-
-      client.onmessage = e => {
+      const client = makeSocket(rawUrl, e => {
         const data = fromJson(e.data)
         const errMsg = data['failure reason']
         const warnMsg = data['warning message']
@@ -111,9 +106,14 @@ export const joinRoom = strategy({
             msgHandlers[url][topic](data)
           }
         }
-      }
+      })
 
-      return new Promise(res => (client.onopen = () => res(client)))
+      const {url} = client
+
+      sockets[url] = client
+      msgHandlers[url] = {}
+
+      return client.ready
     }),
 
   subscribe: (client, rootTopic, _, onMessage, getOffers) => {
