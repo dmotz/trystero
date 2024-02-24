@@ -101,7 +101,13 @@ export const makeSocket = (url, onMessage) => {
     socket.onmessage = onMessage
     client.socket = socket
     client.url = socket.url
-    client.ready = new Promise(res => (socket.onopen = () => res(client)))
+    client.ready = new Promise(
+      res =>
+        (socket.onopen = () => {
+          res(client)
+          socketRetryTimeouts[url] = socketRetryMs
+        })
+    )
     client.send = data => {
       if (socket.readyState === 1) {
         socket.send(data)
