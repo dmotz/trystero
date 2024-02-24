@@ -83,8 +83,8 @@ export const toJson = JSON.stringify
 
 export const fromJson = JSON.parse
 
-const socketRetryMs = 3333
-const socketRetryTimeouts = {}
+const defaultRetryMs = 3333
+const socketRetryPeriods = {}
 
 export const makeSocket = (url, onMessage) => {
   const client = {}
@@ -93,9 +93,9 @@ export const makeSocket = (url, onMessage) => {
     const socket = new WebSocket(url)
 
     socket.onclose = () => {
-      socketRetryTimeouts[url] ??= socketRetryMs
-      setTimeout(init, socketRetryTimeouts[url])
-      socketRetryTimeouts[url] *= 2
+      socketRetryPeriods[url] ??= defaultRetryMs
+      setTimeout(init, socketRetryPeriods[url])
+      socketRetryPeriods[url] *= 2
     }
 
     socket.onmessage = onMessage
@@ -105,7 +105,7 @@ export const makeSocket = (url, onMessage) => {
       res =>
         (socket.onopen = () => {
           res(client)
-          socketRetryTimeouts[url] = socketRetryMs
+          socketRetryPeriods[url] = defaultRetryMs
         })
     )
     client.send = data => {
