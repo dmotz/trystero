@@ -11,8 +11,9 @@ import {
   remove,
   set
 } from 'firebase/database'
+import {sha1} from './crypto.js'
 import strategy from './strategy'
-import {libName, selfId} from './utils.js'
+import {keys, libName, selfId, topicPath} from './utils.js'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -99,5 +100,20 @@ export const joinRoom = strategy({
     }
   }
 })
+
+export const getOccupants = (config, ns) =>
+  sha1(topicPath(libName, config.appId, ns)).then(
+    roomTopic =>
+      new Promise(res =>
+        onValue(
+          ref(
+            initDb(config),
+            `${config.rootPath || defaultRootPath}/${roomTopic}`
+          ),
+          data => res(keys(data.val() || {})),
+          {onlyOnce: true}
+        )
+      )
+  )
 
 export {selfId} from './utils.js'
