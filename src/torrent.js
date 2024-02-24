@@ -1,34 +1,30 @@
-import room from './room.js'
+import {sha1} from './crypto'
+import strategy from './strategy'
 import {
-  encodeBytes,
   entries,
-  events,
-  fromEntries,
   genId,
+  fromEntries,
+  fromJson,
   getRelays,
-  initGuard,
-  initPeer,
   libName,
-  mkErr,
-  noOp,
   selfId,
-  sleep,
-  values
-} from './utils.js'
-import {decrypt, encrypt, genKey} from './crypto.js'
+  toJson
+} from './utils'
 
-const occupiedRooms = {}
-const socketPromises = {}
 const sockets = {}
-const socketRetryTimeouts = {}
-const socketListeners = {}
+const topicToInfoHash = {}
+const infoHashToTopic = {}
+const announceIntervals = {}
+const announceFns = {}
+const trackerAnnounceSecs = {}
+const handledOffers = {}
+const msgHandlers = {}
+const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 10
-const defaultRedundancy = 3
 const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
-const trackerRetrySecs = 4
-const trackerAction = 'announce'
+const defaultRedundancy = 1
 const defaultRelayUrls = [
   'wss://tracker.webtorrent.dev',
   'wss://tracker.openwebtorrent.com',
@@ -36,265 +32,149 @@ const defaultRelayUrls = [
   'wss://tracker.btorrent.xyz'
 ]
 
-export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
-  if (config.trackerUrls || config.trackerRedundancy) {
-    throw mkErr(
-      'trackerUrls/trackerRedundancy have been replaced by relayUrls/relayRedundancy'
-    )
+const getInfoHash = async topic => {
+  if (topicToInfoHash[topic]) {
+    return topicToInfoHash[topic]
   }
 
-  const connectedPeers = {}
-  const key = config.password && genKey(config.password, ns)
-  const relayUrls = getRelays(config, defaultRelayUrls, defaultRedundancy)
+  const hash = (await sha1(topic)).slice(0, hashLimit)
 
-  const infoHashP = crypto.subtle
-    .digest('SHA-1', encodeBytes(`${libName}:${config.appId}:${ns}`))
-    .then(buffer =>
-      Array.from(new Uint8Array(buffer))
-        .map(b => b.toString(36))
-        .join('')
-        .slice(0, hashLimit)
-    )
+  topicToInfoHash[topic] = hash
+  infoHashToTopic[hash] = topic
 
-  const makeOffers = howMany =>
-    fromEntries(
-      Array(howMany)
-        .fill()
-        .map(() => {
-          const peer = initPeer(true, false, config.rtcConfig)
+  return hash
+}
 
-          return [
-            genId(hashLimit),
-            {peer, offerP: new Promise(res => peer.once(events.signal, res))}
-          ]
-        })
-    )
+const send = async (client, topic, payload) =>
+  client.send(
+    toJson({
+      action: trackerAction,
+      info_hash: await getInfoHash(topic),
+      peer_id: selfId,
+      ...payload
+    })
+  )
 
-  const onSocketMessage = async (socket, e) => {
-    const infoHash = await infoHashP
-    let val
+const warn = (url, msg, didFail) =>
+  console.warn(
+    `${libName}: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
+  )
 
-    try {
-      val = JSON.parse(e.data)
-    } catch (e) {
-      console.error(`${libName}: received malformed SDP JSON`)
-      return
-    }
+export const joinRoom = strategy({
+  init: config =>
+    getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
+      const client = new WebSocket(rawUrl)
+      const {url} = client
 
-    if (val.info_hash !== infoHash || (val.peer_id && val.peer_id === selfId)) {
-      return
-    }
+      sockets[url] = client
+      msgHandlers[url] = {}
 
-    const errMsg = val['failure reason']
+      client.onmessage = e => {
+        const data = fromJson(e.data)
+        const errMsg = data['failure reason']
+        const warnMsg = data['warning message']
+        const {interval} = data
+        const topic = infoHashToTopic[data.info_hash]
 
-    if (errMsg) {
-      console.warn(
-        `${libName}: torrent tracker failure from ${socket.url} - ${errMsg}`
-      )
-      return
-    }
-
-    if (
-      val.interval &&
-      val.interval > announceSecs &&
-      val.interval <= maxAnnounceSecs
-    ) {
-      clearInterval(announceInterval)
-      announceSecs = val.interval
-      announceInterval = setInterval(announceAll, announceSecs * 1000)
-    }
-
-    if (val.offer && val.offer_id) {
-      if (connectedPeers[val.peer_id] || handledOffers[val.offer_id]) {
-        return
-      }
-
-      handledOffers[val.offer_id] = true
-
-      const peer = initPeer(false, false, config.rtcConfig)
-
-      peer.once(events.signal, async answer =>
-        socket.send(
-          JSON.stringify({
-            answer: key
-              ? {...answer, sdp: await encrypt(key, answer.sdp)}
-              : answer,
-            action: trackerAction,
-            info_hash: infoHash,
-            peer_id: selfId,
-            to_peer_id: val.peer_id,
-            offer_id: val.offer_id
-          })
-        )
-      )
-      peer.on(events.connect, () => onConnect(peer, val.peer_id))
-      peer.on(events.close, () => onDisconnect(peer, val.peer_id, val.offer_id))
-      peer.signal(
-        key ? {...val.offer, sdp: await decrypt(key, val.offer.sdp)} : val.offer
-      )
-
-      return
-    }
-
-    if (val.answer) {
-      if (connectedPeers[val.peer_id] || handledOffers[val.offer_id]) {
-        return
-      }
-
-      const offer = offerPool[val.offer_id]
-
-      if (offer) {
-        const {peer} = offer
-
-        if (peer.destroyed) {
+        if (errMsg) {
+          warn(url, errMsg, true)
           return
         }
 
-        handledOffers[val.offer_id] = true
-        peer.on(events.connect, () =>
-          onConnect(peer, val.peer_id, val.offer_id)
-        )
-        peer.on(events.close, () =>
-          onDisconnect(peer, val.peer_id, val.offer_id)
-        )
-        peer.signal(
-          key
-            ? {...val.answer, sdp: await decrypt(key, val.answer.sdp)}
-            : val.answer
-        )
-      }
-    }
-  }
+        if (warnMsg) {
+          warn(url, warnMsg)
+        }
 
-  const announce = async (socket, infoHash) =>
-    socket.send(
-      JSON.stringify({
-        action: trackerAction,
-        info_hash: infoHash,
+        if (
+          interval &&
+          interval > trackerAnnounceSecs[url] &&
+          announceFns[url][topic]
+        ) {
+          const int = Math.min(interval, maxAnnounceSecs)
+
+          clearInterval(announceIntervals[url][topic])
+          trackerAnnounceSecs[url] = int
+          announceIntervals[url][topic] = setInterval(
+            announceFns[url][topic],
+            int * 1000
+          )
+        }
+
+        if (handledOffers[data.offer_id]) {
+          return
+        }
+
+        if (data.offer || data.answer) {
+          handledOffers[data.offer_id] = true
+
+          if (msgHandlers[url][topic]) {
+            msgHandlers[url][topic](data)
+          }
+        }
+      }
+
+      return new Promise(res => (client.onopen = () => res(client)))
+    }),
+
+  subscribe: (client, rootTopic, _, onMessage, getOffers) => {
+    const {url} = client
+
+    const announce = async () => {
+      const offers = fromEntries(
+        await Promise.all(
+          getOffers(offerPoolSize).map(async ([peer, offer]) => [
+            genId(hashLimit),
+            {peer, offer: await offer}
+          ])
+        )
+      )
+
+      msgHandlers[client.url][rootTopic] = data => {
+        if (data.offer) {
+          onMessage(
+            rootTopic,
+            {offer: data.offer, peerId: data.peer_id},
+            (_, signal) =>
+              send(client, rootTopic, {
+                answer: {type: 'answer', sdp: signal},
+                offer_id: data.offer_id,
+                to_peer_id: data.peer_id
+              })
+          )
+        } else if (data.answer) {
+          const offer = offers[data.offer_id]
+
+          if (offer) {
+            onMessage(rootTopic, {
+              answer: fromJson(data.answer.sdp).answer,
+              peerId: data.peer_id,
+              peer: offer.peer
+            })
+          }
+        }
+      }
+
+      send(client, rootTopic, {
         numwant: offerPoolSize,
-        peer_id: selfId,
-        offers: await Promise.all(
-          entries(offerPool).map(async ([id, {offerP}]) => {
-            const offer = await offerP
-
-            return {
-              offer_id: id,
-              offer: key
-                ? {...offer, sdp: await encrypt(key, offer.sdp)}
-                : offer
-            }
-          })
-        )
+        offers: entries(offers).map(([id, {offer}]) => ({offer_id: id, offer}))
       })
+    }
+
+    announceFns[url] ||= {}
+    announceFns[url][rootTopic] = announce
+    announceIntervals[url] ||= {}
+    announceIntervals[url][rootTopic] = setInterval(
+      announce,
+      (trackerAnnounceSecs[url] || defaultAnnounceSecs) * 1000
     )
+    announce()
 
-  const makeSocket = (url, infoHash, forced) => {
-    if (forced || !socketPromises[url]) {
-      socketListeners[url] = {
-        ...socketListeners[url],
-        [infoHash]: onSocketMessage
-      }
-      socketPromises[url] = new Promise(res => {
-        const socket = new WebSocket(url)
-        sockets[url] = socket
-
-        socket.addEventListener('open', () => {
-          // Reset the retry timeout for this tracker
-          socketRetryTimeouts[url] = trackerRetrySecs * 1000
-          res(socket)
-        })
-
-        socket.addEventListener('message', e =>
-          values(socketListeners[url]).forEach(f => f(socket, e))
-        )
-
-        socket.addEventListener('close', async () => {
-          socketRetryTimeouts[url] =
-            socketRetryTimeouts[url] ?? trackerRetrySecs * 1000
-
-          await sleep(socketRetryTimeouts[url])
-          socketRetryTimeouts[url] *= 2
-
-          makeSocket(url, infoHash, true)
-        })
-      })
-    } else {
-      socketListeners[url][infoHash] = onSocketMessage
-    }
-
-    return socketPromises[url]
-  }
-
-  const announceAll = async () => {
-    const infoHash = await infoHashP
-
-    if (offerPool) {
-      cleanPool()
-    }
-
-    offerPool = makeOffers(offerPoolSize)
-
-    relayUrls.forEach(async url => {
-      const socket = await makeSocket(url, infoHash)
-
-      if (socket.readyState === WebSocket.OPEN) {
-        announce(socket, infoHash)
-      } else if (socket.readyState !== WebSocket.CONNECTING) {
-        announce(await makeSocket(url, infoHash, true), infoHash)
-      }
-    })
-  }
-
-  const cleanPool = () => {
-    entries(offerPool).forEach(([id, {peer}]) => {
-      if (!handledOffers[id] && !connectedPeers[id]) {
-        peer.destroy()
-      }
-    })
-
-    handledOffers = {}
-  }
-
-  const onConnect = (peer, id, offerId) => {
-    onPeerConnect(peer, id)
-    connectedPeers[id] = true
-
-    if (offerId) {
-      connectedPeers[offerId] = true
+    return () => {
+      clearInterval(announceIntervals[url][rootTopic])
+      delete msgHandlers[url][rootTopic]
+      delete announceFns[url][rootTopic]
     }
   }
-
-  const onDisconnect = (peer, peerId, offerId) => {
-    delete connectedPeers[peerId]
-    peer.destroy()
-
-    const isInOfferPool = offerId in offerPool
-
-    if (isInOfferPool) {
-      delete offerPool[offerId]
-      offerPool = {...offerPool, ...makeOffers(1)}
-    }
-  }
-
-  let announceSecs = defaultAnnounceSecs
-  let announceInterval = setInterval(announceAll, announceSecs * 1000)
-  let onPeerConnect = noOp
-  let handledOffers = {}
-  let offerPool
-
-  announceAll()
-
-  return room(
-    f => (onPeerConnect = f),
-    async () => {
-      const infoHash = await infoHashP
-
-      relayUrls.forEach(url => delete socketListeners[url][infoHash])
-      delete occupiedRooms[ns]
-      clearInterval(announceInterval)
-      cleanPool()
-    }
-  )
 })
 
 export const getRelaySockets = () => ({...sockets})
