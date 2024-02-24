@@ -33,7 +33,7 @@ const defaultRelayUrls = [
 ]
 
 const clients = {}
-const defaultRedundancy = 1
+const defaultRedundancy = 5
 const kind = 29333
 const tag = 'x'
 const eventMsgType = 'EVENT'
@@ -123,7 +123,7 @@ export const joinRoom = strategy({
 
       clients[url] = client
 
-      return new Promise(res => (client.onopen = () => res(client)))
+      return client.ready
     }),
 
   subscribe: async (client, rootTopic, selfTopic, onMessage) => {
