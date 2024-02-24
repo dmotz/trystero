@@ -79,8 +79,6 @@ export const getRelays = (config, defaults, defaultN) =>
       : config.relayRedundancy || defaultN
   )
 
-export const sleep = ms => new Promise(res => setTimeout(res, ms))
-
 export const toJson = JSON.stringify
 
 export const fromJson = JSON.parse
@@ -94,11 +92,10 @@ export const makeSocket = (url, onMessage) => {
   const init = () => {
     const socket = new WebSocket(url)
 
-    socket.onclose = async () => {
-      socketRetryTimeouts[url] = socketRetryTimeouts[url] ?? socketRetryMs
-      await sleep(socketRetryTimeouts[url])
+    socket.onclose = () => {
+      socketRetryTimeouts[url] ??= socketRetryMs
+      setTimeout(init, socketRetryTimeouts[url])
       socketRetryTimeouts[url] *= 2
-      init()
     }
 
     socket.onmessage = onMessage
