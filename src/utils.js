@@ -84,3 +84,35 @@ export const sleep = ms => new Promise(res => setTimeout(res, ms))
 export const toJson = JSON.stringify
 
 export const fromJson = JSON.parse
+
+const socketRetryMs = 3333
+const socketRetryTimeouts = {}
+
+export const makeSocket = (url, onMessage) => {
+  const client = {}
+
+  const init = () => {
+    const socket = new WebSocket(url)
+
+    socket.onclose = async () => {
+      socketRetryTimeouts[url] = socketRetryTimeouts[url] ?? socketRetryMs
+      await sleep(socketRetryTimeouts[url])
+      socketRetryTimeouts[url] *= 2
+      init()
+    }
+
+    socket.onmessage = onMessage
+    client.socket = socket
+    client.url = socket.url
+    client.ready = new Promise(res => (socket.onopen = () => res(client)))
+    client.send = data => {
+      if (socket.readyState === 1) {
+        socket.send(data)
+      }
+    }
+  }
+
+  init()
+
+  return client
+}
