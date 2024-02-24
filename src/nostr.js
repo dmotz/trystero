@@ -6,7 +6,9 @@ import {
   getRelays,
   isBrowser,
   libName,
+  makeSocket,
   selfId,
+  socketGetter,
   toHex,
   toJson
 } from './utils'
@@ -30,7 +32,7 @@ const defaultRelayUrls = [
   'wss://relay.nostrss.re'
 ]
 
-const sockets = {}
+const clients = {}
 const defaultRedundancy = 1
 const kind = 29333
 const tag = 'x'
@@ -100,11 +102,7 @@ const unsubscribe = subId => {
 export const joinRoom = strategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
-      const client = new WebSocket(url)
-
-      sockets[url] = client
-
-      client.onmessage = e => {
+      const client = makeSocket(url, e => {
         const [msgType, subId, payload, relayMsg] = JSON.parse(e.data)
 
         if (msgType !== eventMsgType) {
@@ -121,7 +119,9 @@ export const joinRoom = strategy({
         if (msgHandlers[subId]) {
           msgHandlers[subId](subIdToTopic[subId], payload.content)
         }
-      }
+      })
+
+      clients[url] = client
 
       return new Promise(res => (client.onopen = () => res(client)))
     }),
@@ -148,6 +148,6 @@ export const joinRoom = strategy({
   }
 })
 
-export const getRelaySockets = () => ({...sockets})
+export const getRelaySockets = socketGetter(clients)
 
 export {selfId} from './utils.js'
