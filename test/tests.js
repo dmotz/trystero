@@ -2,7 +2,7 @@ import {test, expect} from '@playwright/test'
 
 const testUrl = 'https://localhost:8080/test'
 
-const onConsole = (strategy, pageN) => async e =>
+const onConsole = (strategy, pageN) => e =>
   console.log(`${strategy} #${pageN}:`, e)
 
 const onError = (strategy, pageN) => err =>
@@ -65,6 +65,16 @@ export default strategy =>
 
     expect(peer1Id).toEqual(selfId1)
     expect(peer2Id).toEqual(selfId2)
+
+    // # Idempotent joinRoom()
+
+    const isRoomIdentical = await page.evaluate(
+      ([config, room]) =>
+        window.trystero.joinRoom(config, room) === window.room,
+      roomArgs
+    )
+
+    expect(isRoomIdentical).toBe(true)
 
     if (browserName !== 'webkit') {
       // # onPeerStream()
