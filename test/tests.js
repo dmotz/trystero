@@ -244,11 +244,11 @@ export default strategy =>
       ).toEqual(relayRedundancy)
 
       expect(
-        await page.evaluate(() => {
-          const [k, v] = Object.entries(window.trystero.getRelaySockets())[0]
-
-          return typeof k === 'string' && v instanceof WebSocket
-        })
+        await page.evaluate(() =>
+          Object.entries(window.trystero.getRelaySockets()).every(
+            ([k, v]) => typeof k === 'string' && v instanceof WebSocket
+          )
+        )
       ).toBe(true)
     }
 
