@@ -242,6 +242,14 @@ export default strategy =>
           () => Object.keys(window.trystero.getRelaySockets()).length
         )
       ).toEqual(relayRedundancy)
+
+      expect(
+        await page.evaluate(() => {
+          const [k, v] = Object.entries(window.trystero.getRelaySockets())[0]
+
+          return typeof k === 'string' && v instanceof WebSocket
+        })
+      ).toBe(true)
     }
 
     // # onPeerLeave()
