@@ -35,9 +35,7 @@ export const joinRoom = strategy({
     const url = client.options.href
 
     msgHandlers[url][rootTopic] = msgHandlers[url][selfTopic] = (topic, data) =>
-      onMessage(topic, data, (peerTopic, signal) =>
-        client.publish(peerTopic, signal)
-      )
+      onMessage(topic, data, client.publish.bind(client))
 
     client.subscribe(rootTopic)
     client.subscribe(selfTopic)
