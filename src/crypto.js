@@ -39,27 +39,31 @@ export const genKey = async (secret, ns) =>
     ['encrypt', 'decrypt']
   )
 
+const joinChar = '$'
+const ivJoinChar = ','
+
 export const encrypt = async (keyP, plaintext) => {
   const iv = crypto.getRandomValues(new Uint8Array(16))
 
-  return JSON.stringify({
-    c: pack(
+  return (
+    iv.join(ivJoinChar) +
+    joinChar +
+    pack(
       await crypto.subtle.encrypt(
         {name: algo, iv},
         await keyP,
         encodeBytes(plaintext)
       )
-    ),
-    iv: [...iv]
-  })
+    )
+  )
 }
 
 export const decrypt = async (keyP, raw) => {
-  const {c, iv} = JSON.parse(raw)
+  const [iv, c] = raw.split(joinChar)
 
   return decodeBytes(
     await crypto.subtle.decrypt(
-      {name: algo, iv: new Uint8Array(iv)},
+      {name: algo, iv: new Uint8Array(iv.split(ivJoinChar))},
       await keyP,
       unpack(c)
     )
