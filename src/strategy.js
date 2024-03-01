@@ -1,4 +1,4 @@
-import {sha1} from './crypto.js'
+import {decrypt, encrypt, genKey, sha1} from './crypto.js'
 import room from './room.js'
 import {
   alloc,
@@ -13,7 +13,7 @@ import {
   topicPath
 } from './utils.js'
 
-const globalPeers = {}
+const poolSize = 20
 
 export default ({init, subscribe}) => {
   const occupiedRooms = {}
@@ -25,26 +25,50 @@ export default ({init, subscribe}) => {
   return (config, ns) => {
     const pendingOffers = {}
     const connectedPeers = {}
-    const seenPeers = {}
     const rootTopicPlaintext = topicPath(libName, config.appId, ns)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
+    const key = config.password && genKey(config.password, ns)
+
+    const withCrypto = f => async signal =>
+      key ? {...signal, sdp: await f(key, signal.sdp)} : signal
+
+    const toPlain = withCrypto(decrypt)
+    const toCipher = withCrypto(encrypt)
 
     const makeOffer = () => {
       const peer = initPeer(true, false, config.rtcConfig)
-      return [peer, new Promise(res => peer.once(events.signal, res))]
+
+      return [
+        peer,
+        new Promise(res =>
+          peer.once(events.signal, sdp => toCipher(sdp).then(res))
+        )
+      ]
     }
 
-    const connectPeer = (peer, peerId) => {
+    const connectPeer = (peer, peerId, clientId) => {
+      if (connectedPeers[peerId]) {
+        if (connectedPeers[peerId] !== peer) {
+          peer.destroy()
+        }
+        return
+      }
+
+      connectedPeers[peerId] = peer
       onPeerConnect(peer, peerId)
-      connectedPeers[peerId] = globalPeers[peerId] = peer
+      pendingOffers[peerId]?.forEach((p, i) => {
+        if (i !== clientId) {
+          p.destroy()
+        }
+      })
+      delete pendingOffers[peerId]
     }
 
-    const disconnectPeer = peerId => {
-      delete pendingOffers[peerId]
-      delete seenPeers[peerId]
-      delete connectedPeers[peerId]
-      delete globalPeers[peerId]
+    const disconnectPeer = (peer, peerId) => {
+      if (connectedPeers[peerId] === peer) {
+        delete connectedPeers[peerId]
+      }
     }
 
     const getOffers = n => {
@@ -53,12 +77,12 @@ export default ({init, subscribe}) => {
       return offers
     }
 
-    const handlePeerEvents = (peer, peerId) => {
-      peer.once(events.connect, () => connectPeer(peer, peerId))
-      peer.once(events.close, () => disconnectPeer(peerId))
+    const handlePeerEvents = (peer, peerId, clientId) => {
+      peer.once(events.connect, () => connectPeer(peer, peerId, clientId))
+      peer.once(events.close, () => disconnectPeer(peer, peerId))
     }
 
-    const handleMessage = async (topic, msg, signalPeer) => {
+    const handleMessage = clientId => async (topic, msg, signalPeer) => {
       const [rootTopic, selfTopic] = await Promise.all([rootTopicP, selfTopicP])
 
       if (topic !== rootTopic && topic !== selfTopic) {
@@ -68,53 +92,54 @@ export default ({init, subscribe}) => {
       const {peerId, offer, answer, peer} =
         typeof msg === 'string' ? fromJson(msg) : msg
 
+      if (peerId === selfId || connectedPeers[peerId]) {
+        return
+      }
+
       if (peerId && !offer && !answer) {
-        if (peerId === selfId || seenPeers[peerId] || connectedPeers[peerId]) {
+        const [[peer, offerP]] = getOffers(1)
+        const [topic, offer] = await Promise.all([
+          sha1(topicPath(rootTopicPlaintext, peerId)),
+          offerP
+        ])
+
+        pendingOffers[peerId] ||= []
+        pendingOffers[peerId][clientId] = peer
+
+        handlePeerEvents(peer, peerId, clientId)
+        signalPeer(topic, toJson({peerId: selfId, offer}))
+      } else if (offer) {
+        const peer = initPeer(false, false, config.rtcConfig)
+        const answerP = new Promise(res => peer.once(events.signal, res))
+        const plainOffer = await toPlain(offer)
+
+        if (peer.destroyed) {
           return
         }
 
-        const [[peer, offerP]] = getOffers(1)
+        handlePeerEvents(peer, peerId, clientId)
+        peer.signal(plainOffer)
 
-        seenPeers[peerId] = true
-        pendingOffers[peerId] = peer
+        const [topic, answer] = await Promise.all([
+          sha1(topicPath(rootTopicPlaintext, peerId)),
+          answerP
+        ])
 
-        handlePeerEvents(peer, peerId)
         signalPeer(
-          await sha1(topicPath(rootTopicPlaintext, peerId)),
-          toJson({
-            peerId: selfId,
-            offer: await offerP
-          })
+          topic,
+          toJson({peerId: selfId, answer: await toCipher(answer)})
         )
+      } else if (answer) {
+        const sdp = await toPlain(answer)
 
-        return
-      }
-
-      if (offer) {
-        const peer = initPeer(false, false, config.rtcConfig)
-
-        handlePeerEvents(peer, peerId)
-        peer.once(events.signal, async answer =>
-          signalPeer(
-            await sha1(topicPath(rootTopicPlaintext, peerId)),
-            toJson({
-              peerId: selfId,
-              answer
-            })
-          )
-        )
-
-        peer.signal(offer)
-
-        return
-      }
-
-      if (answer) {
         if (peer) {
-          handlePeerEvents(peer, peerId)
-          peer.signal(answer)
-        } else if (pendingOffers[peerId]) {
-          pendingOffers[peerId].signal(answer)
+          handlePeerEvents(peer, peerId, clientId)
+          peer.signal(sdp)
+        } else {
+          const peer = pendingOffers[peerId]?.[clientId]
+          if (peer && !peer.destroyed) {
+            peer.signal(sdp)
+          }
         }
       }
     }
@@ -137,17 +162,17 @@ export default ({init, subscribe}) => {
 
     if (!didInit) {
       const initRes = init(config, handleMessage)
-      offerPool = alloc(20, () => makeOffer(config.rtcConfig))
+      offerPool = alloc(poolSize, () => makeOffer(config.rtcConfig))
       initPromises = Array.isArray(initRes) ? initRes : [initRes]
       didInit = true
     }
 
-    const unsubFns = initPromises.map(async clientP =>
+    const unsubFns = initPromises.map(async (clientP, i) =>
       subscribe(
         await clientP,
         await rootTopicP,
         await selfTopicP,
-        handleMessage,
+        handleMessage(i),
         getOffers
       )
     )
