@@ -65,8 +65,8 @@ const warn = (url, msg, didFail) =>
 export const joinRoom = strategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
-      const client = makeSocket(rawUrl, e => {
-        const data = fromJson(e.data)
+      const client = makeSocket(rawUrl, rawData => {
+        const data = fromJson(rawData)
         const errMsg = data['failure reason']
         const warnMsg = data['warning message']
         const {interval} = data

@@ -83,7 +83,7 @@ export const makeSocket = (url, onMessage) => {
       socketRetryPeriods[url] *= 2
     }
 
-    socket.onmessage = onMessage
+    socket.onmessage = e => onMessage(e.data)
     client.socket = socket
     client.url = socket.url
     client.ready = new Promise(

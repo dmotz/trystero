@@ -102,8 +102,8 @@ const unsubscribe = subId => {
 export const joinRoom = strategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
-      const client = makeSocket(url, e => {
-        const [msgType, subId, payload, relayMsg] = JSON.parse(e.data)
+      const client = makeSocket(url, data => {
+        const [msgType, subId, payload, relayMsg] = JSON.parse(data)
 
         if (msgType !== eventMsgType) {
           const prefix = `${libName}: relay failure from ${client.url} - `
