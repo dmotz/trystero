@@ -5,10 +5,12 @@ import {
   entries,
   events,
   fromEntries,
+  fromJson,
   keys,
   libName,
   mkErr,
-  noOp
+  noOp,
+  toJson
 } from './utils.js'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
@@ -113,9 +115,9 @@ export default (onPeer, onSelfLeave) => {
 
         const buffer = isBinary
           ? new Uint8Array(isBlob ? await data.arrayBuffer() : data)
-          : encodeBytes(isJson ? JSON.stringify(data) : data)
+          : encodeBytes(isJson ? toJson(data) : data)
 
-        const metaEncoded = meta ? encodeBytes(JSON.stringify(meta)) : null
+        const metaEncoded = meta ? encodeBytes(toJson(meta)) : null
 
         const chunkTotal =
           Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0) || 1
@@ -224,7 +226,7 @@ export default (onPeer, onSelfLeave) => {
     const target = (pendingTransmissions[id][type][nonce] ||= {chunks: []})
 
     if (isMeta) {
-      target.meta = JSON.parse(decodeBytes(payload))
+      target.meta = fromJson(decodeBytes(payload))
     } else {
       target.chunks.push(payload)
     }
@@ -248,7 +250,7 @@ export default (onPeer, onSelfLeave) => {
       actions[type].onComplete(full, id, target.meta)
     } else {
       const text = decodeBytes(full)
-      actions[type].onComplete(isJson ? JSON.parse(text) : text, id)
+      actions[type].onComplete(isJson ? fromJson(text) : text, id)
     }
 
     delete pendingTransmissions[id][type][nonce]
