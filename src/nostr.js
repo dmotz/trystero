@@ -2,6 +2,7 @@ import {schnorr} from '@noble/curves/secp256k1'
 import strategy from './strategy'
 import {
   encodeBytes,
+  fromJson,
   genId,
   getRelays,
   isBrowser,
@@ -103,7 +104,7 @@ export const joinRoom = strategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
       const client = makeSocket(url, data => {
-        const [msgType, subId, payload, relayMsg] = JSON.parse(data)
+        const [msgType, subId, payload, relayMsg] = fromJson(data)
 
         if (msgType !== eventMsgType) {
           const prefix = `${libName}: relay failure from ${client.url} - `
