@@ -1,9 +1,5 @@
 import Peer from 'simple-peer-light'
 
-const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
-
 export const initPeer = (initiator, trickle, config) => {
   const peer = new Peer({initiator, trickle, config})
   const onData = data => peer.__earlyDataBuffer.push(data)
@@ -22,6 +18,8 @@ export const initPeer = (initiator, trickle, config) => {
 
 export const alloc = (n, f) => Array(n).fill().map(f)
 
+const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
+
 export const genId = n =>
   alloc(n, () => charSet[Math.floor(Math.random() * charSet.length)]).join('')
 
@@ -29,13 +27,18 @@ export const libName = 'Trystero'
 
 export const selfId = genId(20)
 
+export const all = Promise.all.bind(Promise)
+
 export const isBrowser = typeof window !== 'undefined'
 
-export const {keys, values, entries, fromEntries} = Object
+export const {entries, fromEntries, keys, values} = Object
 
 export const noOp = () => {}
 
 export const mkErr = msg => new Error(`${libName}: ${msg}`)
+
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
 
 export const encodeBytes = txt => encoder.encode(txt)
 
