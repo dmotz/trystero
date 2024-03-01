@@ -162,7 +162,7 @@ export default ({init, subscribe}) => {
 
     if (!didInit) {
       const initRes = init(config, handleMessage)
-      offerPool = alloc(poolSize, () => makeOffer(config.rtcConfig))
+      offerPool = alloc(poolSize, makeOffer)
       initPromises = Array.isArray(initRes) ? initRes : [initRes]
       didInit = true
     }
