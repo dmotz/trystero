@@ -41,7 +41,7 @@ export const joinRoom = strategy({
   subscribe: (rootRef, roomTopic, selfTopic, onMessage) => {
     const roomRef = child(rootRef, roomTopic)
     const selfRef = child(roomRef, selfTopic)
-    const peerSigs = {}
+    const peerSignals = {}
     const unsubFns = []
 
     const handleMessage = (peerTopic, signal) => {
@@ -75,15 +75,15 @@ export const joinRoom = strategy({
 
         unsubFns.push(
           onChildAdded(data.ref, data => {
-            if (!(peerId in peerSigs)) {
-              peerSigs[peerId] = {}
+            if (!(peerId in peerSignals)) {
+              peerSignals[peerId] = {}
             }
 
-            if (data.key in peerSigs[peerId]) {
+            if (data.key in peerSignals[peerId]) {
               return
             }
 
-            peerSigs[peerId][data.key] = true
+            peerSignals[peerId][data.key] = true
 
             onMessage(selfTopic, data.val(), handleMessage)
             remove(data.ref)
