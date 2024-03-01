@@ -137,7 +137,7 @@ export const joinRoom = strategy({
             {offer: data.offer, peerId: data.peer_id},
             (_, signal) =>
               send(client, rootTopic, {
-                answer: {type: 'answer', sdp: signal},
+                answer: {type: 'answer', sdp: fromJson(signal).answer},
                 offer_id: data.offer_id,
                 to_peer_id: data.peer_id
               })
@@ -147,7 +147,7 @@ export const joinRoom = strategy({
 
           if (offer) {
             onMessage(rootTopic, {
-              answer: fromJson(data.answer.sdp).answer,
+              answer: data.answer.sdp,
               peerId: data.peer_id,
               peer: offer.peer
             })
