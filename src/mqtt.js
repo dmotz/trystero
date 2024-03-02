@@ -1,6 +1,6 @@
 import mqtt from 'mqtt'
-import strategy from './strategy'
-import {getRelays, selfId, toJson} from './utils'
+import strategy from './strategy.js'
+import {getRelays, selfId, toJson} from './utils.js'
 
 const defaultRelayUrls = [
   'wss://test.mosquitto.org:8081',

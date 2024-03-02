@@ -12,7 +12,7 @@ import {
   set
 } from 'firebase/database'
 import {sha1} from './crypto.js'
-import strategy from './strategy'
+import strategy from './strategy.js'
 import {keys, libName, selfId, topicPath} from './utils.js'
 
 const presencePath = '_'

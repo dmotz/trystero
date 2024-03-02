@@ -5,8 +5,8 @@ import {
   waitForRemotePeer,
   Protocols
 } from '@waku/sdk'
-import strategy from './strategy'
-import {decodeBytes, encodeBytes, selfId, toJson} from './utils'
+import strategy from './strategy.js'
+import {decodeBytes, encodeBytes, selfId, toJson} from './utils.js'
 
 export const joinRoom = strategy({
   init: config =>

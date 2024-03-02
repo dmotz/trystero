@@ -1,5 +1,5 @@
 import {sha1} from './crypto'
-import strategy from './strategy'
+import strategy from './strategy.js'
 import {
   entries,
   genId,
@@ -11,7 +11,7 @@ import {
   selfId,
   socketGetter,
   toJson
-} from './utils'
+} from './utils.js'
 
 const clients = {}
 const topicToInfoHash = {}

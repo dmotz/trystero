@@ -1,5 +1,5 @@
 import {schnorr} from '@noble/curves/secp256k1'
-import strategy from './strategy'
+import strategy from './strategy.js'
 import {
   encodeBytes,
   fromJson,
@@ -12,7 +12,7 @@ import {
   socketGetter,
   toHex,
   toJson
-} from './utils'
+} from './utils.js'
 
 const defaultRelayUrls = [
   'wss://relay.nostr.net',
