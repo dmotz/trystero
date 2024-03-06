@@ -1,4 +1,4 @@
-declare module 'trystero/torrent' {
+declare module 'trystero/nostr' {
   import {BaseRoomConfig, RelayConfig, Room} from 'trystero'
 
   export function joinRoom(

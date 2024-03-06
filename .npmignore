@@ -1,6 +1,9 @@
-docs/
 dist/
-bundle-sizes.sh
-.parcel-cache
-demo.js
-index.html
+docs/
+test/
+test-results/
+.eslintrc.cjs
+.gitignore
+.prettierrc
+playwright.config.js
+rollup.config.js

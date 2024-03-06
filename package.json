@@ -1,6 +1,6 @@
 {
   "name": "trystero",
-  "version": "0.15.0",
+  "version": "0.18.0",
   "description": "Serverless WebRTC matchmaking for painless P2P",
   "main": "src/index.js",
   "module": "src/index.js",
@@ -10,6 +10,8 @@
     ".": "./src/index.js",
     "./firebase": "./src/firebase.js",
     "./ipfs": "./src/ipfs.js",
+    "./mqtt": "./src/mqtt.js",
+    "./nostr": "./src/nostr.js",
     "./torrent": "./src/torrent.js"
   },
   "author": {
@@ -23,19 +25,29 @@
   },
   "license": "MIT",
   "dependencies": {
-    "firebase": "^9.6.5",
     "ipfs-core": "0.9.0",
     "simple-peer": "^9.11.1"
+    "@noble/curves": "^1.3.0",
+    "@waku/sdk": "^0.0.22",
+    "firebase": "^10.6.0",
+    "libp2p": "^1.2.1",
+    "mqtt": "^5.3.5",
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^22.0.2",
-    "@rollup/plugin-node-resolve": "^14.0.1",
+    "@playwright/test": "^1.40.0",
+    "@rollup/plugin-commonjs": "^25.0.7",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-replace": "^5.0.5",
+    "@rollup/plugin-terser": "^0.4.4",
+    "eslint": "^8.56.0",
+    "playwright": "^1.40.0",
     "prettier": "^3.0.3",
-    "rollup": "^2.79.0",
-    "terser": "^5.15.0"
+    "rollup": "^4.5.2",
+    "serve": "^14.2.1"
   },
   "scripts": {
-    "bundle": "./bundle.sh"
+    "build": "rollup -c",
+    "test": "playwright test ./test"
   },
   "keywords": [
     "webrtc",
@@ -49,6 +61,8 @@
     "bittorrent",
     "webtorrent",
     "ipfs",
+    "mqtt",
+    "nostr",
     "firebase",
     "realtime",
     "decentralized",

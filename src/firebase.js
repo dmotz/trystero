@@ -21,7 +21,7 @@ import {
   noOp,
   selfId
 } from './utils.js'
-import {genKey, encrypt, decrypt} from './crypto.js'
+import {decrypt, encrypt, genKey} from './crypto.js'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -151,16 +151,13 @@ export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
   )
 })
 
-export const getOccupants = initGuard(
-  occupiedRooms,
-  (config, ns) =>
-    new Promise(res =>
-      onValue(
-        ref(init(config), getPath(config.rootPath || defaultRootPath, ns)),
-        data => res(keys(data.val() || {})),
-        {onlyOnce: true}
-      )
+export const getOccupants = (config, ns) =>
+  new Promise(res =>
+    onValue(
+      ref(init(config), getPath(config.rootPath || defaultRootPath, ns)),
+      data => res(keys(data.val() || {})),
+      {onlyOnce: true}
     )
-)
+  )
 
 export {selfId} from './utils.js'
