@@ -51,20 +51,30 @@ export default strategy =>
 
     // # onPeerJoin()
 
-    const joinRoom = ([config, room]) => {
+    const eagerPayload = 33
+
+    const joinRoom = ([config, room, payload]) => {
       window.room = window.trystero.joinRoom(config, room)
-      return new Promise(window.room.onPeerJoin)
+
+      const [sendEager, getEager] = window.room.makeAction('eager')
+
+      return new Promise(res => {
+        getEager((...args) => res(args))
+        window.room.onPeerJoin(peerId => sendEager(payload, peerId))
+      })
     }
 
+    const args = roomArgs.concat(eagerPayload)
     const start = Date.now()
-    const [peer2Id, peer1Id] = await Promise.all([
-      page.evaluate(joinRoom, roomArgs),
-      page2.evaluate(joinRoom, roomArgs)
+    const [peer2Data, peer1Data] = await Promise.all([
+      page.evaluate(joinRoom, args),
+      page2.evaluate(joinRoom, args)
     ])
     const joinTime = Date.now() - start
+    const [peer2Id, peer1Id] = [peer2Data[1], peer1Data[1]]
 
-    expect(peer1Id).toEqual(selfId1)
-    expect(peer2Id).toEqual(selfId2)
+    expect(peer1Data).toEqual([eagerPayload, selfId1])
+    expect(peer2Data).toEqual([eagerPayload, selfId2])
 
     // # Idempotent joinRoom()
 
