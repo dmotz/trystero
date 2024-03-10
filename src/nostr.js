@@ -14,7 +14,7 @@ import {
   toJson
 } from './utils.js'
 
-const defaultRelayUrls = [
+export const defaultRelayUrls = [
   'wss://relay.nostr.net',
   'wss://relay.blackbyte.nl',
   'wss://relay.piazza.today',

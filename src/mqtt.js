@@ -2,7 +2,7 @@ import mqtt from 'mqtt'
 import strategy from './strategy.js'
 import {getRelays, selfId, toJson} from './utils.js'
 
-const defaultRelayUrls = [
+export const defaultRelayUrls = [
   'wss://test.mosquitto.org:8081',
   'wss://mqtt.eclipseprojects.io/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
