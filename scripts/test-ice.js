@@ -5,7 +5,7 @@ import {defaultIceServers} from '../src/peer.js'
   await Promise.all(
     defaultIceServers.map(({urls}) =>
       stun
-        .request(urls.replace('stun:', ''))
+        .request(urls.replace(/^stun:/, ''))
         .then(() => '✅ ' + urls)
         .catch(() => '❌ ' + urls)
     )
