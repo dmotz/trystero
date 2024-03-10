@@ -13,8 +13,7 @@ const testRelay = url => {
     ws.on('open', () => {
       clearTimeout(timeout)
       res()
-    })
-    ws.on('error', () => {
+    }).on('error', () => {
       clearTimeout(timeout)
       rej()
     })
