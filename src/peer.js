@@ -1,3 +1,5 @@
+import {alloc} from './utils.js'
+
 export default (isOfferer, rtcConfig, eventHandlers) => {
   const con = new RTCPeerConnection({
     iceServers: defaultIceServers,
@@ -149,10 +151,7 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
 }
 
 const iceTimeoutMs = 4333
-const defaultIceServers = [
-  {urls: 'stun:stun.l.google.com:19302'},
-  {urls: 'stun:stun1.l.google.com:19302'},
-  {urls: 'stun:stun2.l.google.com:19302'},
-  {urls: 'stun:stun3.l.google.com:19302'},
-  {urls: 'stun:stun4.l.google.com:19302'}
+
+export const defaultIceServers = [
+  ...alloc(5, (_, i) => ({urls: `stun:stun${i || ''}.l.google.com:19302`}))
 ]
