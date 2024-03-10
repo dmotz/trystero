@@ -29,8 +29,7 @@
     "@waku/sdk": "^0.0.23",
     "firebase": "^10.8.1",
     "libp2p": "^1.2.4",
-    "mqtt": "^5.3.6",
-    "simple-peer-light": "^9.10.0"
+    "mqtt": "^5.3.6"
   },
   "devDependencies": {
     "@playwright/test": "^1.42.0",
