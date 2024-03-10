@@ -3,7 +3,6 @@ import {
   decodeBytes,
   encodeBytes,
   entries,
-  events,
   fromEntries,
   fromJson,
   keys,
@@ -161,7 +160,7 @@ export default (onPeer, onSelfLeave) => {
 
         return Promise.all(
           iterate(targets, async (id, peer) => {
-            const chan = peer._channel
+            const chan = peer.channel
             let chunkN = 0
 
             while (chunkN < chunkTotal) {
@@ -182,7 +181,7 @@ export default (onPeer, onSelfLeave) => {
                 break
               }
 
-              peer.send(chunk)
+              peer.sendData(chunk)
               chunkN++
 
               if (onProgress) {
@@ -276,29 +275,20 @@ export default (onPeer, onSelfLeave) => {
 
     peerMap[id] = peer
 
-    peer.on(events.signal, sdp => sendSignal(sdp, id))
-    peer.on(events.close, () => exitPeer(id))
-    peer.on(events.data, onData)
-
-    peer.on(events.stream, stream => {
-      onPeerStream(stream, id, pendingStreamMetas[id])
-      delete pendingStreamMetas[id]
-    })
-
-    peer.on(events.track, (track, stream) => {
-      onPeerTrack(track, stream, id, pendingTrackMetas[id])
-      delete pendingTrackMetas[id]
-    })
-
-    peer.on(events.error, e => {
-      if (e.code === 'ERR_DATA_CHANNEL') {
-        return
-      }
-      console.error(e)
+    peer.setHandlers({
+      onData,
+      onStream: stream => {
+        onPeerStream(stream, id, pendingStreamMetas[id])
+        delete pendingStreamMetas[id]
+      },
+      onTrack: (track, stream) => {
+        onPeerTrack(track, stream, id, pendingTrackMetas[id])
+        delete pendingTrackMetas[id]
+      },
+      onSignal: sdp => sendSignal(sdp, id)
     })
 
     onPeerJoin(id)
-    peer.__drainEarlyData(onData)
   })
 
   getPing((_, id) => sendPong('', id))
@@ -312,7 +302,7 @@ export default (onPeer, onSelfLeave) => {
 
   getSignal((sdp, id) => {
     if (peerMap[id]) {
-      peerMap[id].signal(sdp)
+      peerMap[id].addSignal(sdp)
     }
   })
 
@@ -337,14 +327,14 @@ export default (onPeer, onSelfLeave) => {
 
     leave: () => {
       entries(peerMap).forEach(([id, peer]) => {
-        peer.destroy()
+        peer.kill()
         delete peerMap[id]
       })
       onSelfLeave()
     },
 
     getPeers: () =>
-      fromEntries(entries(peerMap).map(([id, peer]) => [id, peer._pc])),
+      fromEntries(entries(peerMap).map(([id, peer]) => [id, peer.connection])),
 
     addStream: (stream, targets, meta) =>
       iterate(targets, async (id, peer) => {
