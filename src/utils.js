@@ -29,13 +29,6 @@ export const decodeBytes = buffer => decoder.decode(buffer)
 export const toHex = buffer =>
   buffer.reduce((a, c) => a + c.toString(16).padStart(2, '0'), '')
 
-export const events = fromEntries(
-  ['close', 'connect', 'data', 'error', 'signal', 'stream', 'track'].map(k => [
-    k,
-    k
-  ])
-)
-
 export const topicPath = (...parts) => parts.join('@')
 
 export const getRelays = (config, defaults, defaultN) =>
