@@ -42,7 +42,8 @@
     "playwright": "^1.42.0",
     "prettier": "^3.2.5",
     "rollup": "^4.12.0",
-    "serve": "^14.2.1"
+    "serve": "^14.2.1",
+    "stun": "^2.1.0"
   },
   "scripts": {
     "build": "rollup -c",
