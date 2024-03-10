@@ -1,10 +1,9 @@
 import {decrypt, encrypt, genKey, sha1} from './crypto.js'
+import initPeer from './peer.js'
 import room from './room.js'
 import {
   alloc,
-  events,
   fromJson,
-  initPeer,
   libName,
   mkErr,
   noOp,
@@ -31,26 +30,20 @@ export default ({init, subscribe}) => {
     const key = config.password && genKey(config.password, ns)
 
     const withCrypto = f => async signal =>
-      key ? {...signal, sdp: await f(key, signal.sdp)} : signal
+      key ? {type: signal.type, sdp: await f(key, signal.sdp)} : signal
 
     const toPlain = withCrypto(decrypt)
     const toCipher = withCrypto(encrypt)
 
     const makeOffer = () => {
-      const peer = initPeer(true, false, config.rtcConfig)
-
-      return [
-        peer,
-        new Promise(res =>
-          peer.once(events.signal, sdp => toCipher(sdp).then(res))
-        )
-      ]
+      const peer = initPeer(true, config.rtcConfig)
+      return [peer, peer.offerPromise.then(toCipher)]
     }
 
     const connectPeer = (peer, peerId, clientId) => {
       if (connectedPeers[peerId]) {
         if (connectedPeers[peerId] !== peer) {
-          peer.destroy()
+          peer.kill()
         }
         return
       }
@@ -59,7 +52,7 @@ export default ({init, subscribe}) => {
       onPeerConnect(peer, peerId)
       pendingOffers[peerId]?.forEach((p, i) => {
         if (i !== clientId) {
-          p.destroy()
+          p.kill()
         }
       })
       delete pendingOffers[peerId]
@@ -75,11 +68,6 @@ export default ({init, subscribe}) => {
       const offers = offerPool.splice(0, n)
       offerPool.push(...alloc(n, makeOffer))
       return offers
-    }
-
-    const handlePeerEvents = (peer, peerId, clientId) => {
-      peer.once(events.connect, () => connectPeer(peer, peerId, clientId))
-      peer.once(events.close, () => disconnectPeer(peer, peerId))
     }
 
     const handleMessage = clientId => async (topic, msg, signalPeer) => {
@@ -106,23 +94,27 @@ export default ({init, subscribe}) => {
         pendingOffers[peerId] ||= []
         pendingOffers[peerId][clientId] = peer
 
-        handlePeerEvents(peer, peerId, clientId)
+        peer.setHandlers({
+          onConnect: () => connectPeer(peer, peerId, clientId),
+          onClose: () => disconnectPeer(peer, peerId)
+        })
+
         signalPeer(topic, toJson({peerId: selfId, offer}))
       } else if (offer) {
-        const peer = initPeer(false, false, config.rtcConfig)
-        const answerP = new Promise(res => peer.once(events.signal, res))
+        const peer = initPeer(false, config.rtcConfig, {
+          onConnect: () => connectPeer(peer, peerId, clientId),
+          onClose: () => disconnectPeer(peer, peerId)
+        })
+
         const plainOffer = await toPlain(offer)
 
-        if (peer.destroyed) {
+        if (peer.isDead) {
           return
         }
 
-        handlePeerEvents(peer, peerId, clientId)
-        peer.signal(plainOffer)
-
         const [topic, answer] = await Promise.all([
           sha1(topicPath(rootTopicPlaintext, peerId)),
-          answerP
+          peer.addSignal(plainOffer)
         ])
 
         signalPeer(
@@ -133,12 +125,17 @@ export default ({init, subscribe}) => {
         const sdp = await toPlain(answer)
 
         if (peer) {
-          handlePeerEvents(peer, peerId, clientId)
-          peer.signal(sdp)
+          peer.setHandlers({
+            onConnect: () => connectPeer(peer, peerId, clientId),
+            onClose: () => disconnectPeer(peer, peerId)
+          })
+
+          peer.addSignal(sdp)
         } else {
           const peer = pendingOffers[peerId]?.[clientId]
-          if (peer && !peer.destroyed) {
-            peer.signal(sdp)
+
+          if (peer && !peer.isDead) {
+            peer.addSignal(sdp)
           }
         }
       }
