@@ -14,25 +14,6 @@ import {
   toJson
 } from './utils.js'
 
-export const defaultRelayUrls = [
-  'wss://relay.nostr.net',
-  'wss://relay.blackbyte.nl',
-  'wss://relay.piazza.today',
-  'wss://relay.exit.pub',
-  'wss://relay.nostr.band',
-  'wss://relay.damus.io',
-  'wss://nostr.mom',
-  'wss://relay.snort.social',
-  'wss://nostr.lu.ke',
-  'wss://relay.plebstr.com',
-  'wss://nostr.sathoarder.com',
-  'wss://nsrelay.assilvestrar.club',
-  'wss://nostrasia.casa',
-  'wss://relay.nostr.bg',
-  'wss://relay.nostrr.de',
-  'wss://relay.nostrss.re'
-]
-
 const clients = {}
 const defaultRedundancy = 5
 const kind = 29333
@@ -152,3 +133,22 @@ export const joinRoom = strategy({
 export const getRelaySockets = socketGetter(clients)
 
 export {selfId} from './utils.js'
+
+export const defaultRelayUrls = [
+  'relay.nostr.net',
+  'relay.blackbyte.nl',
+  'relay.piazza.today',
+  'relay.exit.pub',
+  'relay.nostr.band',
+  'relay.damus.io',
+  'nostr.mom',
+  'relay.snort.social',
+  'nostr.lu.ke',
+  'relay.plebstr.com',
+  'nostr.sathoarder.com',
+  'nsrelay.assilvestrar.club',
+  'nostrasia.casa',
+  'relay.nostr.bg',
+  'relay.nostrr.de',
+  'relay.nostrss.re'
+].map(url => 'wss://' + url)

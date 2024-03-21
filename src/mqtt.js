@@ -2,14 +2,6 @@ import mqtt from 'mqtt'
 import strategy from './strategy.js'
 import {getRelays, selfId, toJson} from './utils.js'
 
-export const defaultRelayUrls = [
-  'wss://test.mosquitto.org:8081',
-  'wss://mqtt.eclipseprojects.io/mqtt',
-  'wss://broker.emqx.io:8084/mqtt',
-  'wss://broker.hivemq.com:8884/mqtt',
-  'wss://public.mqtthq.com:8084/mqtt'
-]
-
 const sockets = {}
 const defaultRedundancy = 5
 const msgHandlers = {}
@@ -53,3 +45,11 @@ export const joinRoom = strategy({
 export const getRelaySockets = () => ({...sockets})
 
 export {selfId} from './utils.js'
+
+export const defaultRelayUrls = [
+  'test.mosquitto.org:8081',
+  'mqtt.eclipseprojects.io/mqtt',
+  'broker.emqx.io:8084/mqtt',
+  'broker.hivemq.com:8884/mqtt',
+  'public.mqtthq.com:8084/mqtt'
+].map(url => 'wss://' + url)

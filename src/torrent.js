@@ -28,13 +28,6 @@ const defaultAnnounceSecs = 33
 const maxAnnounceSecs = 120
 const defaultRedundancy = 3
 
-export const defaultRelayUrls = [
-  'wss://tracker.webtorrent.dev',
-  'wss://tracker.openwebtorrent.com',
-  'wss://tracker.files.fm:7073/announce',
-  'wss://tracker.btorrent.xyz'
-]
-
 const getInfoHash = async topic => {
   if (topicToInfoHash[topic]) {
     return topicToInfoHash[topic]
@@ -183,3 +176,10 @@ export const joinRoom = strategy({
 export const getRelaySockets = socketGetter(clients)
 
 export {selfId} from './utils.js'
+
+export const defaultRelayUrls = [
+  'tracker.webtorrent.dev',
+  'tracker.openwebtorrent.com',
+  'tracker.files.fm:7073/announce',
+  'tracker.btorrent.xyz'
+].map(url => 'wss://' + url)
