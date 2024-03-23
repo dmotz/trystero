@@ -294,10 +294,8 @@ export default (onPeer, onSelfLeave) => {
   getPing((_, id) => sendPong('', id))
 
   getPong((_, id) => {
-    if (pendingPongs[id]) {
-      pendingPongs[id]()
-      delete pendingPongs[id]
-    }
+    pendingPongs[id]?.()
+    delete pendingPongs[id]
   })
 
   getSignal((sdp, id) => {

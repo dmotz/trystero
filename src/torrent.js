@@ -96,10 +96,7 @@ export const joinRoom = strategy({
 
         if (data.offer || data.answer) {
           handledOffers[data.offer_id] = true
-
-          if (msgHandlers[url][topic]) {
-            msgHandlers[url][topic](data)
-          }
+          msgHandlers[url][topic]?.(data)
         }
       })
 
