@@ -75,9 +75,7 @@ export const joinRoom = strategy({
 
         unsubFns.push(
           onChildAdded(data.ref, data => {
-            if (!(peerId in peerSignals)) {
-              peerSignals[peerId] = {}
-            }
+            peerSignals[peerId] ||= {}
 
             if (data.key in peerSignals[peerId]) {
               return

@@ -183,10 +183,7 @@ export default (onPeer, onSelfLeave) => {
 
               peer.sendData(chunk)
               chunkN++
-
-              if (onProgress) {
-                onProgress(chunk[progressIndex] / oneByteMax, id, meta)
-              }
+              onProgress?.(chunk[progressIndex] / oneByteMax, id, meta)
             }
           })
         )
@@ -298,11 +295,7 @@ export default (onPeer, onSelfLeave) => {
     delete pendingPongs[id]
   })
 
-  getSignal((sdp, id) => {
-    if (peerMap[id]) {
-      peerMap[id].addSignal(sdp)
-    }
-  })
+  getSignal((sdp, id) => peerMap[id]?.addSignal(sdp))
 
   getStreamMeta((meta, id) => (pendingStreamMetas[id] = meta))
 

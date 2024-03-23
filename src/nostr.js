@@ -98,9 +98,7 @@ export const joinRoom = strategy({
           return
         }
 
-        if (msgHandlers[subId]) {
-          msgHandlers[subId](subIdToTopic[subId], payload.content)
-        }
+        msgHandlers[subId]?.(subIdToTopic[subId], payload.content)
       })
 
       clients[url] = client
