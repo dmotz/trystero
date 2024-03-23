@@ -48,7 +48,9 @@
   },
   "scripts": {
     "build": "rollup -c",
-    "test": "playwright test ./test"
+    "test": "playwright test ./test",
+    "test-ice": "node scripts/test-ice.js",
+    "test-relays": "node scripts/test-relays.js"
   },
   "keywords": [
     "webrtc",
