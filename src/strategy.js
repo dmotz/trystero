@@ -29,11 +29,11 @@ export default ({init, subscribe}) => {
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
     const key = config.password && genKey(config.password, ns)
 
-    const withCrypto = f => async signal =>
+    const withKey = f => async signal =>
       key ? {type: signal.type, sdp: await f(key, signal.sdp)} : signal
 
-    const toPlain = withCrypto(decrypt)
-    const toCipher = withCrypto(encrypt)
+    const toPlain = withKey(decrypt)
+    const toCipher = withKey(encrypt)
 
     const makeOffer = () => {
       const peer = initPeer(true, config.rtcConfig)
