@@ -85,14 +85,14 @@ it locally:
 </script>
 ```
 
-By default, the [BitTorrent strategy](#strategy-comparison) is used. To use a
+By default, the [Nostr strategy](#strategy-comparison) is used. To use a
 different one just deep import like so (your bundler should handle including
 only relevant code):
 
 ```js
-import {joinRoom} from 'trystero/nostr' // (trystero-nostr.min.js with a local file)
+import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
 // or
-import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js)
+import {joinRoom} from 'trystero/torrent' // (trystero-torrent.min.js)
 // or
 import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js)
 // or
@@ -801,9 +801,9 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 |                   | one-time setup¹ | bundle size² | time to connect³ |
 | ----------------- | --------------- | ------------ | ---------------- |
-| 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
 | 🐦 **Nostr**      | none 🏆         | 54K          | ⏱️⏱️             |
 | 📡 **MQTT**       | none 🏆         | 332K         | ⏱️⏱️             |
+| 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
 | 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
 | 🪐 **IPFS**       | none 🏆         | 1MB          | ⏱️⏱️⏱️           |
 
