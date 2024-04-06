@@ -93,18 +93,14 @@ export default strategy =>
         new Promise(res => {
           window.room.onPeerStream((_, peerId, meta) => res({peerId, meta}))
 
-          setTimeout(
-            async () =>
-              window.room.addStream(
-                await navigator.mediaDevices.getUserMedia({
-                  audio: true,
-                  video: true
-                }),
-                null,
-                streamMeta
-              ),
-            1000
-          )
+          setTimeout(async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+              video: true
+            })
+            window.room.addStream(stream, null, streamMeta)
+            window.mediaStream = stream
+          }, 1000)
         })
 
       const streamMeta = {id: Math.random()}
@@ -115,6 +111,27 @@ export default strategy =>
 
       expect(peer1StreamInfo).toEqual({peerId: peer1Id, meta: streamMeta})
       expect(peer2StreamInfo).toEqual({peerId: peer2Id, meta: streamMeta})
+
+      // # onPeerTrackEnd()
+
+      const peer1onTrackId = page.evaluate(
+        () =>
+          new Promise(res =>
+            window.room.onPeerTrackEnd((track, stream, id) =>
+              res([
+                track instanceof MediaStreamTrack,
+                stream instanceof MediaStream,
+                id
+              ])
+            )
+          )
+      )
+
+      // # removeStream()
+
+      await page2.evaluate(() => window.room.removeStream(window.mediaStream))
+
+      expect(await peer1onTrackId).toEqual([true, true, peer2Id])
     }
 
     // # getPeers()
