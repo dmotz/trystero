@@ -282,7 +282,9 @@ export default (onPeer, onSelfLeave) => {
         onPeerTrack(track, stream, id, pendingTrackMetas[id])
         delete pendingTrackMetas[id]
       },
-      onSignal: sdp => sendSignal(sdp, id)
+      onSignal: sdp => sendSignal(sdp, id),
+      onClose: () => exitPeer(id),
+      onTrackEnd: (track, stream) => onPeerTrackEnd(track, stream, id)
     })
 
     onPeerJoin(id)
@@ -366,6 +368,8 @@ export default (onPeer, onSelfLeave) => {
 
     onPeerStream: f => (onPeerStream = f),
 
-    onPeerTrack: f => (onPeerTrack = f)
+    onPeerTrack: f => (onPeerTrack = f),
+
+    onPeerTrackEnd: f => (onPeerTrackEnd = f)
   }
 }

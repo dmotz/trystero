@@ -66,10 +66,15 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
     }
   }
 
-  const addTrack = (track, stream) => con.addTrack(track, stream)
-
   const addStream = stream =>
     stream.getTracks().forEach(track => addTrack(track, stream))
+
+  const removeStream = stream => stream.getTracks().forEach(removeTrack)
+
+  const addTrack = (track, stream) => con.addTrack(track, stream)
+
+  const removeTrack = track =>
+    con.removeTrack(con.getSenders().find(sender => sender.track === track))
 
   const kill = () => {
     con.close()
@@ -94,7 +99,9 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
     setHandlers,
     addSignal,
     addStream,
+    removeStream,
     addTrack,
+    removeTrack,
     sendData,
     kill
   }
@@ -135,7 +142,11 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
     }
   }
 
-  con.ontrack = e => e.streams.forEach(handlers.onStream)
+  con.ontrack = e =>
+    e.streams.forEach(stream => {
+      stream.onremovetrack = e => handlers.onTrackEnd(e.track, stream)
+      handlers.onStream(stream)
+    })
 
   if (isOfferer) {
     setDataEvents(con.createDataChannel('d'))
