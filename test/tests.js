@@ -1,12 +1,17 @@
 import {test, expect} from '@playwright/test'
+import chalk from 'chalk'
 
 const testUrl = 'https://localhost:8080/test'
 
 const onConsole = (strategy, pageN) => e =>
-  console.log(`${strategy} #${pageN}:`, e)
+  console.log(`${colorize[pageN - 1](strategy)} #${pageN}:`, e)
 
 const onError = (strategy, pageN) => err =>
   console.log(`❌ error! ${strategy} #${pageN}:`, err)
+
+const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
+  k => chalk[k]
+)
 
 export default strategy =>
   test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
