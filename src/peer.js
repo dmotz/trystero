@@ -112,9 +112,7 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
   }
 
   con.oniceconnectionstatechange = () => {
-    const {iceConnectionState} = con
-
-    if (iceConnectionState === 'closed' || iceConnectionState === 'failed') {
+    if (['closed', 'disconnected', 'failed'].includes(con.iceConnectionState)) {
       handlers.onClose()
     }
   }
