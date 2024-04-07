@@ -116,27 +116,6 @@ export default strategy =>
 
       expect(peer1StreamInfo).toEqual({peerId: peer1Id, meta: streamMeta})
       expect(peer2StreamInfo).toEqual({peerId: peer2Id, meta: streamMeta})
-
-      // # onPeerTrackEnd()
-
-      const peer1onTrackId = page.evaluate(
-        () =>
-          new Promise(res =>
-            window.room.onPeerTrackEnd((track, stream, id) =>
-              res([
-                track instanceof MediaStreamTrack,
-                stream instanceof MediaStream,
-                id
-              ])
-            )
-          )
-      )
-
-      // # removeStream()
-
-      await page2.evaluate(() => window.room.removeStream(window.mediaStream))
-
-      expect(await peer1onTrackId).toEqual([true, true, peer2Id])
     }
 
     // # getPeers()

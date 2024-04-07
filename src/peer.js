@@ -142,11 +142,7 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
     }
   }
 
-  con.ontrack = e =>
-    e.streams.forEach(stream => {
-      stream.onremovetrack = e => handlers.onTrackEnd(e.track, stream)
-      handlers.onStream(stream)
-    })
+  con.ontrack = e => e.streams.forEach(stream => handlers.onStream(stream))
 
   if (isOfferer) {
     setDataEvents(con.createDataChannel('d'))
