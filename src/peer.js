@@ -147,9 +147,7 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
   if (isOfferer) {
     setDataEvents(con.createDataChannel('d'))
   } else {
-    con.ondatachannel = e => {
-      setDataEvents(e.channel)
-    }
+    con.ondatachannel = e => setDataEvents(e.channel)
   }
 
   return client
