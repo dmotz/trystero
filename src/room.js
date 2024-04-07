@@ -283,8 +283,7 @@ export default (onPeer, onSelfLeave) => {
         delete pendingTrackMetas[id]
       },
       onSignal: sdp => sendSignal(sdp, id),
-      onClose: () => exitPeer(id),
-      onTrackEnd: (track, stream) => onPeerTrackEnd(track, stream, id)
+      onClose: () => exitPeer(id)
     })
 
     onPeerJoin(id)
