@@ -158,7 +158,7 @@ export default ({init, subscribe}) => {
     }
 
     if (!didInit) {
-      const initRes = init(config, handleMessage)
+      const initRes = init(config)
       offerPool = alloc(poolSize, makeOffer)
       initPromises = Array.isArray(initRes) ? initRes : [initRes]
       didInit = true
