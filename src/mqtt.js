@@ -45,9 +45,9 @@ export const getRelaySockets = () => ({...sockets})
 export {selfId} from './utils.js'
 
 export const defaultRelayUrls = [
-  'test.mosquitto.org:8081',
   'mqtt.eclipseprojects.io/mqtt',
-  'broker.emqx.io:8084/mqtt',
   'broker.hivemq.com:8884/mqtt',
-  'public.mqtthq.com:8084/mqtt'
+  'public.mqtthq.com:8084/mqtt',
+  'test.mosquitto.org:8081',
+  'broker.emqx.io:8084/mqtt'
 ].map(url => 'wss://' + url)
