@@ -113,12 +113,10 @@ export const joinRoom = strategy({
 
     const announce = async () => {
       const offers = fromEntries(
-        await Promise.all(
-          getOffers(offerPoolSize).map(async ([peer, offer]) => [
-            genId(hashLimit),
-            {peer, offer: await offer}
-          ])
-        )
+        (await getOffers(offerPoolSize)).map(peerAndOffer => [
+          genId(hashLimit),
+          peerAndOffer
+        ])
       )
 
       msgHandlers[client.url][rootTopic] = data => {
