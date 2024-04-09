@@ -35,10 +35,7 @@ export default ({init, subscribe}) => {
     const toPlain = withKey(decrypt)
     const toCipher = withKey(encrypt)
 
-    const makeOffer = () => {
-      const peer = initPeer(true, config.rtcConfig)
-      return [peer, peer.offerPromise.then(toCipher)]
-    }
+    const makeOffer = () => initPeer(true, config.rtcConfig)
 
     const connectPeer = (peer, peerId, clientId) => {
       if (connectedPeers[peerId]) {
@@ -65,9 +62,14 @@ export default ({init, subscribe}) => {
     }
 
     const getOffers = n => {
-      const offers = offerPool.splice(0, n)
+      const offers = offerPool
+        .splice(0, n)
+        .map(peer =>
+          peer.offerPromise.then(toCipher).then(offer => ({peer, offer}))
+        )
+
       offerPool.push(...alloc(n, makeOffer))
-      return offers
+      return Promise.all(offers)
     }
 
     const handleMessage = clientId => async (topic, msg, signalPeer) => {
@@ -85,10 +87,9 @@ export default ({init, subscribe}) => {
       }
 
       if (peerId && !offer && !answer) {
-        const [[peer, offerP]] = getOffers(1)
-        const [topic, offer] = await Promise.all([
-          sha1(topicPath(rootTopicPlaintext, peerId)),
-          offerP
+        const [[{peer, offer}], topic] = await Promise.all([
+          getOffers(1),
+          sha1(topicPath(rootTopicPlaintext, peerId))
         ])
 
         pendingOffers[peerId] ||= []
