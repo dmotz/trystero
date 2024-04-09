@@ -128,6 +128,10 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
   con.onnegotiationneeded = async () => {
     const offer = await con.createOffer()
 
+    if (con.signalingState !== 'stable') {
+      return
+    }
+
     try {
       await con.setLocalDescription(offer)
     } catch (e) {
