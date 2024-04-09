@@ -7,6 +7,7 @@ export default (isOfferer, rtcConfig, eventHandlers) => {
   })
 
   const setDataEvents = chan => {
+    chan.binaryType = 'arraybuffer'
     chan.onmessage = e => {
       if (client.isDead) {
         return
