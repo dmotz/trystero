@@ -22,6 +22,8 @@ on top of WebRTC:
 - 🔐📝 Session data encryption
 - ⚛️🪝 React hooks
 
+You can see what people are building with Trystero [here](https://github.com/jeremyckahn/awesome-trystero).
+
 ---
 
 ## Contents
