@@ -147,6 +147,5 @@ export const defaultRelayUrls = [
   'nsrelay.assilvestrar.club',
   'nostrasia.casa',
   'relay.nostr.bg',
-  'relay.nostrr.de',
   'relay.nostrss.re'
 ].map(url => 'wss://' + url)
