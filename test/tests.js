@@ -185,37 +185,38 @@ export default strategy =>
             let senderCallCount = 0
             let receiverCallCount = 0
 
-            return new Promise(res => {
-              getBinary((payload, _, receivedMeta) =>
-                res([
-                  new TextDecoder().decode(payload).slice(-20),
-                  receivedMeta,
-                  senderPercent,
-                  senderCallCount,
-                  receiverPercent,
-                  receiverCallCount
-                ])
-              )
-
-              onProgress(p => {
-                receiverPercent = p
-                receiverCallCount++
-              })
-
-              setTimeout(
-                () =>
-                  sendBinary(
-                    new TextEncoder().encode(message.repeat(50000)),
-                    null,
-                    metadata,
-                    p => {
-                      senderPercent = p
-                      senderCallCount++
-                    }
-                  ),
-                1000
-              )
+            onProgress(p => {
+              receiverPercent = p
+              receiverCallCount++
             })
+
+            return Promise.all([
+              new Promise(res =>
+                getBinary((payload, _, receivedMeta) =>
+                  res([
+                    new TextDecoder().decode(payload).slice(-message.length),
+                    receivedMeta
+                  ])
+                )
+              ),
+
+              sendBinary(
+                new TextEncoder().encode(message.repeat(50000)),
+                null,
+                metadata,
+                p => {
+                  senderPercent = p
+                  senderCallCount++
+                }
+              )
+            ]).then(([[payload, meta]]) => [
+              payload,
+              meta,
+              senderPercent,
+              senderCallCount,
+              receiverPercent,
+              receiverCallCount
+            ])
           }
 
           const mockMeta = {foo: 'bar', baz: 'qux'}
