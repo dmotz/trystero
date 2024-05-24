@@ -23,6 +23,7 @@ export default (strategy, config) =>
 
     const roomConfig = {
       appId: `trystero-test-${Math.random()}`,
+      password: '03d1p@M@@s' + Math.random(),
       ...(isRelayStrategy ? {relayRedundancy} : {}),
       ...config
     }
