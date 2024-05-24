@@ -32,6 +32,7 @@
     "mqtt": "^5.5.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.3.0",
     "@playwright/test": "^1.42.0",
     "@rollup/plugin-commonjs": "^25.0.7",
     "@rollup/plugin-node-resolve": "^15.2.3",
@@ -39,6 +40,7 @@
     "@rollup/plugin-terser": "^0.4.4",
     "chalk": "^5.3.0",
     "eslint": "^9.0.0",
+    "globals": "^15.3.0",
     "playwright": "^1.42.0",
     "prettier": "^3.2.5",
     "rollup": "^4.13.0",
