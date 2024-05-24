@@ -16,17 +16,15 @@ const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
 const concurrentRooms = 3
 const relayRedundancy = 4
 
-export default strategy =>
+export default (strategy, config) =>
   test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
     const isRelayStrategy =
       strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
 
     const roomConfig = {
-      appId:
-        strategy === 'firebase'
-          ? 'trystero-94db3.firebaseio.com'
-          : `trystero-test-${Math.random()}`,
-      ...(isRelayStrategy ? {relayRedundancy} : {})
+      appId: `trystero-test-${Math.random()}`,
+      ...(isRelayStrategy ? {relayRedundancy} : {}),
+      ...config
     }
 
     const scriptUrl = `../dist/trystero-${strategy}.min.js`
