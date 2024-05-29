@@ -1,4 +1,4 @@
-# 🤝 Trystero
+# ✨🤝✨ Trystero
 
 **Build instant multiplayer webapps, no server required**
 
