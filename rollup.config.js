@@ -7,9 +7,8 @@ const ecma = 2019
 const config = {
   output: {
     compact: true,
-    dir: 'dist',
-    entryFileNames: 'trystero-[name].min.js',
-    format: 'es'
+    format: 'es',
+    inlineDynamicImports: true
   },
   plugins: [
     resolve({browser: true}),
@@ -37,7 +36,13 @@ const config = {
   ]
 }
 
-export default ['firebase', 'ipfs', 'mqtt', 'nostr', 'torrent'].map(name => ({
-  ...config,
-  input: `src/${name}.js`
-}))
+export default ['firebase', 'ipfs', 'mqtt', 'nostr', 'supabase', 'torrent'].map(
+  name => ({
+    ...config,
+    input: `src/${name}.js`,
+    output: {
+      ...config.output,
+      file: `dist/trystero-${name}.min.js`
+    }
+  })
+)
