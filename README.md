@@ -495,7 +495,9 @@ the same namespace will return the same room instance.
 
 - `config` - Configuration object containing the following keys:
 
-  - `appId` - **(required)** A unique string identifying your app. If using
+  - `appId` - **(required)** A unique string identifying your app. When using
+    Supabase, this should be set to your project URL (see
+    [Supabase setup instructions](#supabase-setup)). If using
     Firebase, this should be the `databaseURL` from your Firebase config (also
     see `firebaseApp` below for an alternative way of configuring the Firebase
     strategy).
@@ -520,6 +522,9 @@ the same namespace will return the same room instance.
     Integer specifying how many torrent trackers to connect to simultaneously in
     case some fail. Passing a `relayUrls` option will cause this option to be
     ignored as the entire list will be used.
+
+  - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
+    `anon public` API key.
 
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
     initialized Firebase app instance instead of an `appId`. Normally Trystero
