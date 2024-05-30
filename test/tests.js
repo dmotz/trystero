@@ -2,6 +2,7 @@ import {test, expect} from '@playwright/test'
 import chalk from 'chalk'
 
 const testUrl = 'https://localhost:8080/test'
+const proxy = process.env.PROXY
 
 const onConsole = (strategy, pageN) => e =>
   console.log(
@@ -20,7 +21,13 @@ const concurrentRooms = 3
 const relayRedundancy = 4
 
 export default (strategy, config) =>
-  test(`Trystero: ${strategy}`, async ({page, context, browserName}) => {
+  test(`Trystero: ${strategy}`, async ({page, browser, browserName}) => {
+    console.log(`${emojis[strategy]} ${strategy}`)
+
+    if (proxy) {
+      console.log('using proxy:', proxy)
+    }
+
     const isRelayStrategy =
       strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
 
@@ -32,6 +39,9 @@ export default (strategy, config) =>
     }
 
     const scriptUrl = `../dist/trystero-${strategy}.min.js`
+    const context = await browser.newContext(
+      proxy ? {proxy: {server: 'http://' + proxy, bypass: 'localhost'}} : {}
+    )
     const page2 = await context.newPage()
 
     page.on('console', onConsole(strategy, 1))
