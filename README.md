@@ -39,6 +39,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
+  - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
@@ -56,7 +57,7 @@ is needed to exchange peer information
 ([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
 this involves running your own matchmaking server but Trystero abstracts this
 away for you and offers multiple "serverless" strategies for connecting peers
-(currently BitTorrent, Nostr, MQTT, Firebase, and IPFS).
+(currently BitTorrent, Nostr, MQTT, Supabase, Firebase, and IPFS).
 
 The important point to remember is this:
 
@@ -95,6 +96,8 @@ only relevant code):
 import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
 // or
 import {joinRoom} from 'trystero/torrent' // (trystero-torrent.min.js)
+// or
+import {joinRoom} from 'trystero/supabase' // (trystero-supabase.min.js)
 // or
 import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js)
 // or
@@ -442,6 +445,16 @@ export const useRoom = (roomConfig, roomId) => {
   return roomRef.current
 }
 ```
+
+### Supabase setup
+
+To use the Supabase strategy:
+
+1. Create a [Supabase](https://supabase.com) project or use an existing one
+2. On the dashboard, go to Project Settings -> API
+3. Copy the Project URL and set that as the `appId` in the Trystero config,
+   copy the `anon public` API key and set it as `supabaseKey` in the Trystero
+   config
 
 ### Firebase setup
 
@@ -806,6 +819,7 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 | 🐦 **Nostr**      | none 🏆         | 54K          | ⏱️⏱️             |
 | 📡 **MQTT**       | none 🏆         | 332K         | ⏱️⏱️             |
 | 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
+| ⚡️ **Supabase**  | ~5 mins         | 150K         | ⏱️ 🏆            |
 | 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
 | 🪐 **IPFS**       | none 🏆         | 1MB          | ⏱️⏱️⏱️           |
 
@@ -833,7 +847,7 @@ Luckily, Trystero makes it trivial to switch between strategies — just change 
 single import line and quickly experiment:
 
 ```js
-import {joinRoom} from 'trystero/[torrent|nostr|mqtt|firebase|ipfs]'
+import {joinRoom} from 'trystero/[torrent|nostr|mqtt|supabase|firebase|ipfs]'
 ```
 
 ---
