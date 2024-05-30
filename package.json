@@ -31,7 +31,7 @@
     "@waku/sdk": "^0.0.25",
     "firebase": "^10.9.0",
     "libp2p": "^1.3.0",
-    "mqtt": "^5.5.0"
+    "mqtt": "^5.7.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.3.0",
