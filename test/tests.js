@@ -4,10 +4,13 @@ import chalk from 'chalk'
 const testUrl = 'https://localhost:8080/test'
 
 const onConsole = (strategy, pageN) => e =>
-  console.log(`${colorize[pageN - 1](strategy)} #${pageN}:`, e)
+  console.log(
+    `${emojis[strategy]} ${colorize[pageN - 1](strategy)} ${pageN}:`,
+    e
+  )
 
 const onError = (strategy, pageN) => err =>
-  console.log(`❌ error! ${strategy} #${pageN}:`, err)
+  console.log(`❌ error! ${emojis[strategy]} ${strategy} ${pageN}:`, err)
 
 const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
   k => chalk[k]
@@ -290,3 +293,12 @@ export default (strategy, config) =>
         })
     )
   })
+
+const emojis = {
+  nostr: '🐦',
+  mqtt: '📡',
+  torrent: '🌊',
+  supabase: '⚡️',
+  firebase: '🔥',
+  ipfs: '🪐'
+}
