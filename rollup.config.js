@@ -11,7 +11,7 @@ const config = {
     inlineDynamicImports: true
   },
   plugins: [
-    resolve({browser: true}),
+    resolve({browser: true, preferBuiltins: false}),
     commonJs(),
     replace({
       'process.env.NODE_ENV': JSON.stringify('production'),
