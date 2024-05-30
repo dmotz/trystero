@@ -463,7 +463,11 @@ If you want to use the Firebase strategy and don't have an existing project:
 1. Create a [Firebase](https://firebase.google.com/) project
 2. Create a new Realtime Database
 3. Copy the `databaseURL` and use it as the `appId` in your Trystero config
-4. [*Optional*] Configure the database with security rules to limit activity:
+
+<details>
+  <summary>
+  [*Optional*] Configure the database with security rules to limit activity:
+  </summary>
 
 ```json
 {
@@ -484,6 +488,8 @@ If you want to use the Firebase strategy and don't have an existing project:
 
 These rules ensure room peer presence is only readable if the room namespace is
 known ahead of time.
+
+</details>
 
 ## API
 
