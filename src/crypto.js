@@ -1,6 +1,6 @@
 import {decodeBytes, encodeBytes} from './utils.js'
 
-const algo = 'AES-CBC'
+const algo = 'AES-GCM'
 const strToSha1 = {}
 
 const pack = buff => btoa(String.fromCharCode.apply(null, new Uint8Array(buff)))
