@@ -27,12 +27,12 @@ export const sha1 = async str => {
   return hash
 }
 
-export const genKey = async (secret, ns) =>
+export const genKey = async (secret, appId, ns) =>
   crypto.subtle.importKey(
     'raw',
     await crypto.subtle.digest(
       {name: 'SHA-256'},
-      encodeBytes(`${secret}:${ns}`)
+      encodeBytes(`${secret}:${appId}:${ns}`)
     ),
     {name: algo},
     false,
