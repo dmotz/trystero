@@ -3,8 +3,8 @@ docs/
 scripts/
 test/
 test-results/
-.eslintrc.cjs
 .gitignore
 .prettierrc
+eslint.config.js
 playwright.config.js
 rollup.config.js
