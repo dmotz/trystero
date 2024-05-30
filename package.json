@@ -54,6 +54,7 @@
   "scripts": {
     "build": "rollup -c",
     "test": "playwright test ./test",
+    "test-proxy": "PROXY=$(node ./scripts/find-proxy.js) npm run test",
     "test-ice": "node scripts/test-ice.js",
     "test-relays": "node scripts/test-relays.js"
   },
