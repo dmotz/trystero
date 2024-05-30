@@ -12,6 +12,7 @@
     "./ipfs": "./src/ipfs.js",
     "./mqtt": "./src/mqtt.js",
     "./nostr": "./src/nostr.js",
+    "./supabase": "./src/supabase.js",
     "./torrent": "./src/torrent.js"
   },
   "author": {
