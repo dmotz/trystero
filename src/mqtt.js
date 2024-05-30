@@ -5,27 +5,31 @@ import {getRelays, selfId, toJson} from './utils.js'
 const sockets = {}
 const defaultRedundancy = 5
 const msgHandlers = {}
+const getClientId = ({options}) => options.host + options.path
 
 export const joinRoom = strategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
       const client = mqtt.connect(url)
+      const clientId = getClientId(client)
 
-      sockets[url] = client.stream.socket
-      msgHandlers[url] = {}
+      sockets[clientId] = client.stream.socket
+      msgHandlers[clientId] = {}
 
       client.on('message', (topic, buffer) =>
-        msgHandlers[url][topic]?.(topic, buffer.toString())
+        msgHandlers[clientId][topic]?.(topic, buffer.toString())
       )
 
       return new Promise(res => client.on('connect', () => res(client)))
     }),
 
   subscribe: (client, rootTopic, selfTopic, onMessage) => {
-    const url = client.options.href
+    const clientId = getClientId(client)
 
-    msgHandlers[url][rootTopic] = msgHandlers[url][selfTopic] = (topic, data) =>
-      onMessage(topic, data, client.publish.bind(client))
+    msgHandlers[clientId][rootTopic] = msgHandlers[clientId][selfTopic] = (
+      topic,
+      data
+    ) => onMessage(topic, data, client.publish.bind(client))
 
     client.subscribe(rootTopic)
     client.subscribe(selfTopic)
@@ -34,8 +38,8 @@ export const joinRoom = strategy({
     return () => {
       client.unsubscribe(rootTopic)
       client.unsubscribe(selfTopic)
-      delete msgHandlers[url][rootTopic]
-      delete msgHandlers[url][selfTopic]
+      delete msgHandlers[clientId][rootTopic]
+      delete msgHandlers[clientId][selfTopic]
     }
   }
 })
