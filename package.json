@@ -43,6 +43,7 @@
     "globals": "^15.3.0",
     "playwright": "^1.42.0",
     "prettier": "^3.2.5",
+    "proxy-check": "^1.0.8",
     "rollup": "^4.13.0",
     "serve": "^14.2.1",
     "stun": "^2.1.0",
