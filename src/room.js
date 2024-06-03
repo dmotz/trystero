@@ -257,6 +257,7 @@ export default (onPeer, onSelfLeave) => {
   const [sendSignal, getSignal] = makeAction('__516n4L__')
   const [sendStreamMeta, getStreamMeta] = makeAction('__57r34m__')
   const [sendTrackMeta, getTrackMeta] = makeAction('__7r4ck__')
+  const [sendLeave, getLeave] = makeAction('__l34v3__')
 
   let onPeerJoin = noOp
   let onPeerLeave = noOp
@@ -302,6 +303,8 @@ export default (onPeer, onSelfLeave) => {
 
   getTrackMeta((meta, id) => (pendingTrackMetas[id] = meta))
 
+  getLeave((_, id) => exitPeer(id))
+
   return {
     makeAction,
 
@@ -317,7 +320,9 @@ export default (onPeer, onSelfLeave) => {
       return Date.now() - start
     },
 
-    leave: () => {
+    leave: async () => {
+      await sendLeave('')
+      await new Promise(res => setTimeout(res, 99))
       entries(peerMap).forEach(([id, peer]) => {
         peer.kill()
         delete peerMap[id]
