@@ -242,14 +242,14 @@ export default (onPeer, onSelfLeave) => {
       return a + c.byteLength
     }, 0)
 
+    delete pendingTransmissions[id][type][nonce]
+
     if (isBinary) {
       actions[type].onComplete(full, id, target.meta)
     } else {
       const text = decodeBytes(full)
       actions[type].onComplete(isJson ? fromJson(text) : text, id)
     }
-
-    delete pendingTransmissions[id][type][nonce]
   }
 
   const [sendPing, getPing] = makeAction('__91n6__')
