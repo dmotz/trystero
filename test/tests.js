@@ -212,14 +212,16 @@ export default (strategy, config) =>
                 )
               ),
 
-              sendBinary(
-                new TextEncoder().encode(message.repeat(50000)),
-                null,
-                metadata,
-                p => {
-                  senderPercent = p
-                  senderCallCount++
-                }
+              new Promise(res => setTimeout(res, 1000)).then(() =>
+                sendBinary(
+                  new TextEncoder().encode(message.repeat(50000)),
+                  null,
+                  metadata,
+                  p => {
+                    senderPercent = p
+                    senderCallCount++
+                  }
+                )
               )
             ]).then(([[payload, meta]]) => [
               payload,
