@@ -31,7 +31,7 @@ export default ({init, subscribe}) => {
     const rootTopicPlaintext = topicPath(libName, config.appId, ns)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
-    const key = config.password && genKey(config.password, ns)
+    const key = config.password && genKey(config.password, config.appId, ns)
 
     const withKey = f => async signal =>
       key ? {type: signal.type, sdp: await f(key, signal.sdp)} : signal
