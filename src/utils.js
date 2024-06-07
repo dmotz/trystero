@@ -13,7 +13,7 @@ export const all = Promise.all.bind(Promise)
 
 export const isBrowser = typeof window !== 'undefined'
 
-export const {entries, fromEntries, keys, values} = Object
+export const {entries, fromEntries, keys} = Object
 
 export const noOp = () => {}
 
