@@ -22,16 +22,18 @@ export default ({init, subscribe}) => {
   let offerPool
 
   return (config, ns) => {
-    if (occupiedRooms[ns]) {
-      return occupiedRooms[ns]
+    const {appId} = config
+
+    if (occupiedRooms[appId]?.[ns]) {
+      return occupiedRooms[appId][ns]
     }
 
     const pendingOffers = {}
     const connectedPeers = {}
-    const rootTopicPlaintext = topicPath(libName, config.appId, ns)
+    const rootTopicPlaintext = topicPath(libName, appId, ns)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
-    const key = config.password && genKey(config.password, config.appId, ns)
+    const key = config.password && genKey(config.password, appId, ns)
 
     const withKey = f => async signal =>
       key ? {type: signal.type, sdp: await f(key, signal.sdp)} : signal
@@ -150,7 +152,7 @@ export default ({init, subscribe}) => {
       throw mkErr('requires a config map as the first argument')
     }
 
-    if (!config.appId && !config.firebaseApp) {
+    if (!appId && !config.firebaseApp) {
       throw mkErr('config map is missing appId field')
     }
 
@@ -177,7 +179,9 @@ export default ({init, subscribe}) => {
 
     let onPeerConnect = noOp
 
-    return (occupiedRooms[ns] = room(
+    occupiedRooms[appId] ||= {}
+
+    return (occupiedRooms[appId][ns] = room(
       f => (onPeerConnect = f),
       () => {
         delete occupiedRooms[ns]
