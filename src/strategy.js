@@ -22,6 +22,10 @@ export default ({init, subscribe}) => {
   let offerPool
 
   return (config, ns) => {
+    if (occupiedRooms[ns]) {
+      return occupiedRooms[ns]
+    }
+
     const pendingOffers = {}
     const connectedPeers = {}
     const rootTopicPlaintext = topicPath(libName, config.appId, ns)
@@ -140,10 +144,6 @@ export default ({init, subscribe}) => {
           }
         }
       }
-    }
-
-    if (occupiedRooms[ns]) {
-      return occupiedRooms[ns]
     }
 
     if (!config) {
