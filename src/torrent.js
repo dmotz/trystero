@@ -35,6 +35,7 @@ const getInfoHash = async topic => {
 
   const hash = (await sha1(topic)).slice(0, hashLimit)
 
+  // eslint-disable-next-line require-atomic-updates
   topicToInfoHash[topic] = hash
   infoHashToTopic[hash] = topic
 

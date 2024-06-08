@@ -22,6 +22,7 @@ export const sha1 = async str => {
     .map(b => b.toString(36))
     .join('')
 
+  // eslint-disable-next-line require-atomic-updates
   strToSha1[str] = hash
 
   return hash
