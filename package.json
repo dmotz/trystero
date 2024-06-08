@@ -36,7 +36,7 @@
   "devDependencies": {
     "@eslint/js": "^9.3.0",
     "@playwright/test": "^1.42.0",
-    "@rollup/plugin-commonjs": "^25.0.7",
+    "@rollup/plugin-commonjs": "^26.0.1",
     "@rollup/plugin-node-resolve": "^15.2.3",
     "@rollup/plugin-replace": "^5.0.5",
     "@rollup/plugin-terser": "^0.4.4",
