@@ -68,14 +68,15 @@ export default ({init, subscribe}) => {
     }
 
     const getOffers = n => {
-      const offers = offerPool
-        .splice(0, n)
-        .map(peer =>
-          peer.offerPromise.then(toCipher).then(offer => ({peer, offer}))
-        )
-
       offerPool.push(...alloc(n, makeOffer))
-      return Promise.all(offers)
+
+      return Promise.all(
+        offerPool
+          .splice(0, n)
+          .map(peer =>
+            peer.offerPromise.then(toCipher).then(offer => ({peer, offer}))
+          )
+      )
     }
 
     const handleMessage = clientId => async (topic, msg, signalPeer) => {
