@@ -99,11 +99,13 @@ export default (onPeer, onSelfLeave) => {
           throw mkErr('action meta argument must be an object')
         }
 
-        if (data === undefined) {
+        const dataType = typeof data
+
+        if (dataType === 'undefined') {
           throw mkErr('action data cannot be undefined')
         }
 
-        const isJson = typeof data !== 'string'
+        const isJson = dataType !== 'string'
         const isBlob = data instanceof Blob
         const isBinary =
           isBlob || data instanceof ArrayBuffer || data instanceof TypedArray
