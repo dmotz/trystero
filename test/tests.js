@@ -25,7 +25,7 @@ export default (strategy, config) =>
     console.log(`${emojis[strategy]} ${strategy}`)
 
     if (proxy) {
-      console.log('using proxy:', proxy)
+      console.log(`\n👺 using proxy: ${proxy}\n`)
     }
 
     const isRelayStrategy =
