@@ -301,6 +301,18 @@ export default (strategy, config) =>
 
           expect(await peer1onLeaveId).toEqual(peer2Id)
 
+          // # Rejoin
+
+          expect(
+            await page2.evaluate(
+              ([ns, config]) => {
+                window[ns] = window.trystero.joinRoom(config, ns)
+                return new Promise(res => window[ns].onPeerJoin(res))
+              },
+              [roomNs, roomConfig]
+            )
+          ).toBe(selfId1)
+
           console.log(`  ⏱️    ${strategy.padEnd(12, ' ')} ${joinTime}ms`)
         })
     )
