@@ -13,8 +13,9 @@ import {
 } from './utils.js'
 
 const poolSize = 20
+const announceIntervalMs = 5333
 
-export default ({init, subscribe}) => {
+export default ({init, subscribe, announce}) => {
   const occupiedRooms = {}
 
   let didInit = false
@@ -53,9 +54,10 @@ export default ({init, subscribe}) => {
 
       connectedPeers[peerId] = peer
       onPeerConnect(peer, peerId)
-      pendingOffers[peerId]?.forEach((p, i) => {
+
+      pendingOffers[peerId]?.forEach((peer, i) => {
         if (i !== clientId) {
-          p.kill()
+          peer.kill()
         }
       })
       delete pendingOffers[peerId]
@@ -94,6 +96,10 @@ export default ({init, subscribe}) => {
       }
 
       if (peerId && !offer && !answer) {
+        if (pendingOffers[peerId]?.[clientId]) {
+          return
+        }
+
         const [[{peer, offer}], topic] = await Promise.all([
           getOffers(1),
           sha1(topicPath(rootTopicPlaintext, peerId))
@@ -103,18 +109,32 @@ export default ({init, subscribe}) => {
         pendingOffers[peerId][clientId] = peer
 
         peer.setHandlers({
-          onConnect: () => connectPeer(peer, peerId, clientId),
-          onClose: () => disconnectPeer(peer, peerId)
+          connect: () => connectPeer(peer, peerId, clientId),
+          disconnect: () => disconnectPeer(peer, peerId)
         })
 
         signalPeer(topic, toJson({peerId: selfId, offer}))
       } else if (offer) {
-        const peer = initPeer(false, config.rtcConfig, {
-          onConnect: () => connectPeer(peer, peerId, clientId),
-          onClose: () => disconnectPeer(peer, peerId)
+        const myOffer = pendingOffers[peerId]?.[clientId]
+
+        if (myOffer && selfId > peerId) {
+          return
+        }
+
+        const peer = initPeer(false, config.rtcConfig)
+        peer.setHandlers({
+          connect: () => connectPeer(peer, peerId, clientId),
+          disconnect: () => disconnectPeer(peer, peerId)
         })
 
-        const plainOffer = await toPlain(offer)
+        let plainOffer
+
+        try {
+          plainOffer = await toPlain(offer)
+        } catch (_) {
+          config.onError?.('incorrect password!')
+          return
+        }
 
         if (peer.isDead) {
           return
@@ -122,7 +142,7 @@ export default ({init, subscribe}) => {
 
         const [topic, answer] = await Promise.all([
           sha1(topicPath(rootTopicPlaintext, peerId)),
-          peer.addSignal(plainOffer)
+          peer.signal(plainOffer)
         ])
 
         signalPeer(
@@ -134,16 +154,16 @@ export default ({init, subscribe}) => {
 
         if (peer) {
           peer.setHandlers({
-            onConnect: () => connectPeer(peer, peerId, clientId),
-            onClose: () => disconnectPeer(peer, peerId)
+            connect: () => connectPeer(peer, peerId, clientId),
+            disconnect: () => disconnectPeer(peer, peerId)
           })
 
-          peer.addSignal(sdp)
+          peer.signal(sdp)
         } else {
           const peer = pendingOffers[peerId]?.[clientId]
 
           if (peer && !peer.isDead) {
-            peer.addSignal(sdp)
+            peer.signal(sdp)
           }
         }
       }
@@ -178,14 +198,32 @@ export default ({init, subscribe}) => {
       )
     )
 
+    const announceIntervalP = (async () => {
+      const [clients, rootTopic, selfTopic] = await Promise.all([
+        Promise.all(initPromises),
+        rootTopicP,
+        selfTopicP,
+        Promise.all(unsubFns)
+      ])
+
+      const announceAll = () =>
+        clients.forEach(client => announce(client, rootTopic, selfTopic))
+
+      announceAll()
+
+      return setInterval(announceAll, announceIntervalMs)
+    })()
+
     let onPeerConnect = noOp
 
     occupiedRooms[appId] ||= {}
 
     return (occupiedRooms[appId][ns] = room(
       f => (onPeerConnect = f),
+      id => delete connectedPeers[id],
       () => {
-        delete occupiedRooms[ns]
+        delete occupiedRooms[appId][ns]
+        announceIntervalP.then(clearInterval)
         unsubFns.forEach(async f => (await f)())
       }
     ))
