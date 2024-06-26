@@ -26,10 +26,7 @@ export const joinRoom = strategy({
       node.filter.createSubscription(),
       node.filter.createSubscription()
     ])
-    const rootEncoder = createEncoder({
-      contentTopic: rootTopic,
-      ephemeral: true
-    })
+
     const rootDecoder = createDecoder(rootTopic)
     const selfDecoder = createDecoder(selfTopic)
 
@@ -49,15 +46,18 @@ export const joinRoom = strategy({
 
     rootSub.subscribe([rootDecoder], handleMsg(rootTopic))
     selfSub.subscribe([selfDecoder], handleMsg(selfTopic))
-    node.lightPush.send(rootEncoder, {
-      payload: encodeBytes(toJson({peerId: selfId}))
-    })
 
     return () => {
       rootSub.unsubscribe()
       selfSub.unsubscribe()
     }
-  }
+  },
+
+  announce: (node, rootTopic) =>
+    node.lightPush.send(
+      createEncoder({contentTopic: rootTopic, ephemeral: true}),
+      {payload: encodeBytes(toJson({peerId: selfId}))}
+    )
 })
 
 export {selfId} from './utils.js'
