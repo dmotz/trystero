@@ -23,13 +23,19 @@ const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
 
-export default (onPeer, onSelfLeave) => {
+export default (onPeer, onPeerLeave, onSelfLeave) => {
   const peerMap = {}
   const actions = {}
   const pendingTransmissions = {}
   const pendingPongs = {}
   const pendingStreamMetas = {}
   const pendingTrackMetas = {}
+  const listeners = {
+    onPeerJoin: noOp,
+    onPeerLeave: noOp,
+    onPeerStream: noOp,
+    onPeerTrack: noOp
+  }
 
   const iterate = (targets, f) =>
     (targets
@@ -56,6 +62,7 @@ export default (onPeer, onSelfLeave) => {
     delete peerMap[id]
     delete pendingTransmissions[id]
     delete pendingPongs[id]
+    listeners.onPeerLeave(id)
     onPeerLeave(id)
   }
 
@@ -264,35 +271,29 @@ export default (onPeer, onSelfLeave) => {
   const [sendTrackMeta, getTrackMeta] = makeAction('__7r4ck__')
   const [sendLeave, getLeave] = makeAction('__l34v3__')
 
-  let onPeerJoin = noOp
-  let onPeerLeave = noOp
-  let onPeerStream = noOp
-  let onPeerTrack = noOp
-
   onPeer((peer, id) => {
     if (peerMap[id]) {
       return
     }
 
-    const onData = handleData.bind(null, id)
-
     peerMap[id] = peer
 
     peer.setHandlers({
-      onData,
-      onStream: stream => {
-        onPeerStream(stream, id, pendingStreamMetas[id])
+      data: d => handleData(id, d),
+      stream: stream => {
+        listeners.onPeerStream(stream, id, pendingStreamMetas[id])
         delete pendingStreamMetas[id]
       },
-      onTrack: (track, stream) => {
-        onPeerTrack(track, stream, id, pendingTrackMetas[id])
+      track: (track, stream) => {
+        listeners.onPeerTrack(track, stream, id, pendingTrackMetas[id])
         delete pendingTrackMetas[id]
       },
-      onSignal: sdp => sendSignal(sdp, id),
-      onClose: () => exitPeer(id)
+      signal: sdp => sendSignal(sdp, id),
+      disconnect: () => exitPeer(id)
     })
 
-    onPeerJoin(id)
+    listeners.onPeerJoin(id)
+    peer.drainEarlyData?.(d => handleData(id, d))
   })
 
   getPing((_, id) => sendPong('', id))
@@ -302,7 +303,7 @@ export default (onPeer, onSelfLeave) => {
     delete pendingPongs[id]
   })
 
-  getSignal((sdp, id) => peerMap[id]?.addSignal(sdp))
+  getSignal((sdp, id) => peerMap[id]?.signal(sdp))
 
   getStreamMeta((meta, id) => (pendingStreamMetas[id] = meta))
 
@@ -371,12 +372,12 @@ export default (onPeer, onSelfLeave) => {
         peer.replaceTrack(oldTrack, newTrack, stream)
       }),
 
-    onPeerJoin: f => (onPeerJoin = f),
+    onPeerJoin: f => (listeners.onPeerJoin = f),
 
-    onPeerLeave: f => (onPeerLeave = f),
+    onPeerLeave: f => (listeners.onPeerLeave = f),
 
-    onPeerStream: f => (onPeerStream = f),
+    onPeerStream: f => (listeners.onPeerStream = f),
 
-    onPeerTrack: f => (onPeerTrack = f)
+    onPeerTrack: f => (listeners.onPeerTrack = f)
   }
 }
