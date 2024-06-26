@@ -33,7 +33,6 @@ export const joinRoom = strategy({
 
     client.subscribe(rootTopic)
     client.subscribe(selfTopic)
-    client.publish(rootTopic, toJson({peerId: selfId}))
 
     return () => {
       client.unsubscribe(rootTopic)
@@ -41,7 +40,10 @@ export const joinRoom = strategy({
       delete msgHandlers[clientId][rootTopic]
       delete msgHandlers[clientId][selfTopic]
     }
-  }
+  },
+
+  announce: (client, rootTopic) =>
+    client.publish(rootTopic, toJson({peerId: selfId}))
 })
 
 export const getRelaySockets = () => ({...sockets})
