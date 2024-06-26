@@ -166,7 +166,9 @@ export const joinRoom = strategy({
       delete msgHandlers[url][rootTopic]
       delete announceFns[url][rootTopic]
     }
-  }
+  },
+
+  announce: () => {}
 })
 
 export const getRelaySockets = socketGetter(clients)
