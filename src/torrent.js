@@ -176,8 +176,8 @@ export const getRelaySockets = socketGetter(clients)
 export {selfId} from './utils.js'
 
 export const defaultRelayUrls = [
-  'tracker.webtorrent.dev',
   'tracker.openwebtorrent.com',
   'tracker.files.fm:7073/announce',
+  'tracker.webtorrent.dev',
   'tracker.btorrent.xyz'
 ].map(url => 'wss://' + url)
