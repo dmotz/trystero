@@ -106,7 +106,7 @@ export const joinRoom = strategy({
       return client.ready
     }),
 
-  subscribe: async (client, rootTopic, selfTopic, onMessage) => {
+  subscribe: (client, rootTopic, selfTopic, onMessage) => {
     const rootSubId = genId(64)
     const selfSubId = genId(64)
 
@@ -117,7 +117,6 @@ export const joinRoom = strategy({
 
     client.send(subscribe(rootSubId, rootTopic))
     client.send(subscribe(selfSubId, selfTopic))
-    client.send(await createEvent(rootTopic, toJson({peerId: selfId})))
 
     return () => {
       client.send(unsubscribe(rootSubId))
@@ -125,7 +124,10 @@ export const joinRoom = strategy({
       delete msgHandlers[rootSubId]
       delete msgHandlers[selfSubId]
     }
-  }
+  },
+
+  announce: async (client, rootTopic) =>
+    client.send(await createEvent(rootTopic, toJson({peerId: selfId})))
 })
 
 export const getRelaySockets = socketGetter(clients)
