@@ -215,7 +215,10 @@ export default (onPeer, onSelfLeave) => {
     const isJson = !!(tag & (1 << 3))
 
     if (!actions[type]) {
-      throw mkErr(`received message with unregistered type (${type})`)
+      console.warn(
+        `${libName}: received message with unregistered type (${type})`
+      )
+      return
     }
 
     pendingTransmissions[id] ||= {}
