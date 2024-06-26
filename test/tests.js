@@ -82,9 +82,16 @@ export default (strategy, config) =>
 
             const [sendEager, getEager] = window[ns].makeAction('eager')
 
+            let didSend = false
+
             return new Promise(res => {
               getEager((...args) => res(args))
-              window[ns].onPeerJoin(peerId => sendEager(payload, peerId))
+              window[ns].onPeerJoin(peerId => {
+                if (!didSend) {
+                  sendEager(payload, peerId)
+                  didSend = true
+                }
+              })
             })
           }
 
