@@ -38,8 +38,8 @@ const initDb = config => {
 export const joinRoom = strategy({
   init: config => ref(initDb(config), config.rootPath || defaultRootPath),
 
-  subscribe: (rootRef, roomTopic, selfTopic, onMessage) => {
-    const roomRef = child(rootRef, roomTopic)
+  subscribe: (rootRef, rootTopic, selfTopic, onMessage) => {
+    const roomRef = child(rootRef, rootTopic)
     const selfRef = child(roomRef, selfTopic)
     const peerSignals = {}
     const unsubFns = []
@@ -53,8 +53,6 @@ export const joinRoom = strategy({
 
     let didSyncRoom = false
 
-    set(selfRef, {[presencePath]: {peerId: selfId}})
-    onDisconnect(selfRef).remove()
     unsubFns.push(
       onValue(roomRef, () => (didSyncRoom = true), {onlyOnce: true}),
 
@@ -63,7 +61,7 @@ export const joinRoom = strategy({
           return
         }
 
-        onMessage(roomTopic, data.val()[presencePath], handleMessage)
+        onMessage(rootTopic, data.val()[presencePath], handleMessage)
       }),
 
       onChildAdded(selfRef, data => {
@@ -96,17 +94,25 @@ export const joinRoom = strategy({
       remove(selfRef)
       unsubFns.forEach(f => f())
     }
+  },
+
+  announce: (rootRef, rootTopic, selfTopic) => {
+    const roomRef = child(rootRef, rootTopic)
+    const selfRef = child(roomRef, selfTopic)
+
+    set(selfRef, {[presencePath]: {peerId: selfId}})
+    onDisconnect(selfRef).remove()
   }
 })
 
 export const getOccupants = (config, ns) =>
   sha1(topicPath(libName, config.appId, ns)).then(
-    roomTopic =>
+    rootTopic =>
       new Promise(res =>
         onValue(
           ref(
             initDb(config),
-            `${config.rootPath || defaultRootPath}/${roomTopic}`
+            `${config.rootPath || defaultRootPath}/${rootTopic}`
           ),
           data => res(keys(data.val() || {})),
           {onlyOnce: true}
