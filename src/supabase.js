@@ -8,53 +8,69 @@ const events = {
   sdp: 'sdp'
 }
 
-const whenReady = f => status => status === 'SUBSCRIBED' && f()
-
 export const joinRoom = strategy({
   init: config => createClient(config.appId, config.supabaseKey),
 
   subscribe: (client, rootTopic, selfTopic, onMessage) => {
-    const rootChan = client.channel(rootTopic)
-    const selfChan = client.channel(selfTopic)
-    const allChans = [rootChan, selfChan]
+    const allChans = []
+    const subscribe = (topic, cb) => {
+      const chan = client.channel(topic)
 
-    const handleMessage = (peerTopic, signal) => {
-      const chan = client.channel(peerTopic)
+      chan.subscribe(async status => {
+        if (status === 'SUBSCRIBED') {
+          if (didUnsub) {
+            client.removeChannel(chan)
+            return
+          }
 
-      allChans.push(chan)
-      chan.subscribe(
-        whenReady(() =>
-          chan.send({
-            type: events.broadcast,
-            event: events.sdp,
-            payload: signal
-          })
-        )
-      )
+          allChans.push(chan)
+          return cb(chan)
+        }
+
+        if (status === 'CLOSED') {
+          return
+        }
+
+        await client.removeChannel(chan)
+        setTimeout(() => subscribe(topic, cb), 999)
+      })
     }
 
-    rootChan
-      .on(events.broadcast, {event: events.join}, ({payload}) =>
-        onMessage(rootTopic, payload, handleMessage)
-      )
-      .subscribe(
-        whenReady(() =>
-          rootChan.send({
-            type: events.broadcast,
-            event: events.join,
-            payload: {peerId: selfId}
-          })
-        )
+    const handleMessage = (peerTopic, signal) =>
+      subscribe(peerTopic, chan =>
+        chan.send({
+          type: events.broadcast,
+          event: events.sdp,
+          payload: signal
+        })
       )
 
-    selfChan
-      .on(events.broadcast, {event: events.sdp}, ({payload}) =>
+    subscribe(selfTopic, chan =>
+      chan.on(events.broadcast, {event: events.sdp}, ({payload}) =>
         onMessage(selfTopic, payload, handleMessage)
       )
-      .subscribe()
+    )
 
-    return () => allChans.forEach(chan => chan.untrack())
-  }
+    subscribe(rootTopic, chan =>
+      chan.on(events.broadcast, {event: events.join}, ({payload}) =>
+        onMessage(rootTopic, payload, handleMessage)
+      )
+    )
+
+    let didUnsub = false
+
+    return () => {
+      allChans.forEach(chan => client.removeChannel(chan))
+      didUnsub = true
+    }
+  },
+
+  announce: (client, rootTopic) =>
+    client.channel(rootTopic).send({
+      type: events.broadcast,
+      event: events.join,
+      payload: {peerId: selfId}
+    })
 })
 
 export {selfId} from './utils.js'
