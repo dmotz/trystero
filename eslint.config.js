@@ -15,7 +15,11 @@ export default [
       'no-delete-var': 'error',
       'no-duplicate-imports': 'error',
       'no-else-return': 'error',
+      'no-extra-bind': 'error',
       'no-extra-boolean-cast': 'error',
+      'no-extra-label': 'error',
+      'no-global-assign': 'error',
+      'no-invalid-this': 'error',
       'no-labels': 'error',
       'no-lonely-if': 'error',
       'no-multi-str': 'error',
@@ -45,8 +49,8 @@ export default [
       'prefer-regex-literals': 'error',
       'prefer-rest-params': 'error',
       'prefer-spread': 'error',
-      'require-await': 'error',
-      'require-atomic-updates': 'error'
+      'require-atomic-updates': 'error',
+      'require-await': 'error'
     }
   }
 ]
