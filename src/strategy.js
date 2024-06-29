@@ -120,9 +120,10 @@ export default ({init, subscribe, announce}) => {
 
         pendingOffers[peerId] ||= []
         pendingOffers[peerId][clientId] = peer
+
         setTimeout(
           () => prunePendingOffer(peerId, clientId),
-          announceIntervalMs / 2
+          announceIntervals[clientId] * 0.9
         )
 
         peer.setHandlers({
@@ -205,6 +206,9 @@ export default ({init, subscribe, announce}) => {
       didInit = true
     }
 
+    const announceIntervals = initPromises.map(() => announceIntervalMs)
+    const announceTimeouts = []
+
     const unsubFns = initPromises.map(async (clientP, i) =>
       subscribe(
         await clientP,
@@ -215,21 +219,25 @@ export default ({init, subscribe, announce}) => {
       )
     )
 
-    const announceIntervalP = (async () => {
-      const [clients, rootTopic, selfTopic] = await Promise.all([
-        Promise.all(initPromises),
-        rootTopicP,
-        selfTopicP,
-        Promise.all(unsubFns)
-      ])
+    Promise.all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
+      const queueAnnounce = async (client, i) => {
+        const ms = await announce(client, rootTopic, selfTopic)
 
-      const announceAll = () =>
-        clients.forEach(client => announce(client, rootTopic, selfTopic))
+        if (typeof ms === 'number') {
+          announceIntervals[i] = ms
+        }
 
-      announceAll()
+        announceTimeouts[i] = setTimeout(
+          () => queueAnnounce(client, i),
+          announceIntervals[i]
+        )
+      }
 
-      return setInterval(announceAll, announceIntervalMs)
-    })()
+      unsubFns.forEach(async (didSub, i) => {
+        await didSub
+        queueAnnounce(await initPromises[i], i)
+      })
+    })
 
     let onPeerConnect = noOp
 
@@ -240,7 +248,7 @@ export default ({init, subscribe, announce}) => {
       id => delete connectedPeers[id],
       () => {
         delete occupiedRooms[appId][ns]
-        announceIntervalP.then(clearInterval)
+        announceTimeouts.forEach(clearTimeout)
         unsubFns.forEach(async f => (await f)())
       }
     ))
