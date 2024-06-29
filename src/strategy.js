@@ -151,7 +151,12 @@ export default ({init, subscribe, announce}) => {
         try {
           plainOffer = await toPlain(offer)
         } catch (_) {
-          config.onError?.('incorrect password!')
+          onJoinError?.({
+            error: `incorrect password (${config.password})`,
+            appId,
+            peerId,
+            roomId
+          })
           return
         }
 
