@@ -128,7 +128,7 @@ export const joinRoom = strategy({
             (_, signal) =>
               send(client, rootTopic, {
                 // certain trackers will reject if answer contains extra fields
-                answer: {type: 'answer', sdp: fromJson(signal).answer},
+                answer: fromJson(signal).answer,
                 offer_id: data.offer_id,
                 to_peer_id: data.peer_id
               })
@@ -138,7 +138,7 @@ export const joinRoom = strategy({
 
           if (offer) {
             onMessage(rootTopic, {
-              answer: data.answer.sdp,
+              answer: data.answer,
               peerId: data.peer_id,
               peer: offer.peer
             })
