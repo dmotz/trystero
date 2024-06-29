@@ -77,16 +77,16 @@ export default (strategy, config) =>
 
           const eagerPayload = 33
 
-          const joinRoom = ([ns, config, payload]) => {
-            window[ns] = window.trystero.joinRoom(config, ns)
+          const joinRoom = ([roomId, config, payload]) => {
+            window[roomId] = window.trystero.joinRoom(config, roomId)
 
-            const [sendEager, getEager] = window[ns].makeAction('eager')
+            const [sendEager, getEager] = window[roomId].makeAction('eager')
 
             let didSend = false
 
             return new Promise(res => {
               getEager((...args) => res(args))
-              window[ns].onPeerJoin(peerId => {
+              window[roomId].onPeerJoin(peerId => {
                 if (!didSend) {
                   sendEager(payload, peerId)
                   didSend = true
@@ -110,8 +110,8 @@ export default (strategy, config) =>
           // # Idempotent joinRoom()
 
           const isRoomIdentical = await page.evaluate(
-            ([ns, config]) =>
-              window.trystero.joinRoom(config, ns) === window[ns],
+            ([roomId, config]) =>
+              window.trystero.joinRoom(config, roomId) === window[roomId],
             [roomNs, roomConfig]
           )
 
@@ -120,9 +120,9 @@ export default (strategy, config) =>
           if (browserName !== 'webkit') {
             // # onPeerStream()
 
-            const onPeerStream = ([ns, streamMeta]) =>
+            const onPeerStream = ([roomId, streamMeta]) =>
               new Promise(res => {
-                window[ns].onPeerStream((_, peerId, meta) =>
+                window[roomId].onPeerStream((_, peerId, meta) =>
                   res({peerId, meta})
                 )
 
@@ -131,7 +131,7 @@ export default (strategy, config) =>
                     audio: true,
                     video: true
                   })
-                  window[ns].addStream(stream, null, streamMeta)
+                  window[roomId].addStream(stream, null, streamMeta)
                   window.mediaStream = stream
                 }, 1000)
               })
@@ -149,14 +149,14 @@ export default (strategy, config) =>
 
           // # getPeers()
 
-          const getPeerId = ns => Object.keys(window[ns].getPeers())[0]
+          const getPeerId = roomId => Object.keys(window[roomId].getPeers())[0]
 
           expect(await page.evaluate(getPeerId, roomNs)).toEqual(peer2Id)
           expect(await page2.evaluate(getPeerId, roomNs)).toEqual(peer1Id)
 
           // # ping()
 
-          const ping = ([ns, id]) => window[ns].ping(id)
+          const ping = ([roomId, id]) => window[roomId].ping(id)
 
           expect(await page.evaluate(ping, [roomNs, peer2Id])).toBeLessThan(100)
           expect(await page2.evaluate(ping, [roomNs, peer1Id])).toBeLessThan(
@@ -165,8 +165,9 @@ export default (strategy, config) =>
 
           // # makeAction()
 
-          const makeAction = ([ns, message]) => {
-            const [sendMessage, getMessage] = window[ns].makeAction('message')
+          const makeAction = ([roomId, message]) => {
+            const [sendMessage, getMessage] =
+              window[roomId].makeAction('message')
 
             return new Promise(res => {
               getMessage(res)
@@ -195,9 +196,9 @@ export default (strategy, config) =>
           expect(receivedMessage3).toEqual(empty)
           expect(receivedMessage4).toEqual(empty)
 
-          const makeBinaryAction = ([ns, message, metadata]) => {
+          const makeBinaryAction = ([roomId, message, metadata]) => {
             const [sendBinary, getBinary, onProgress] =
-              window[ns].makeAction('binary')
+              window[roomId].makeAction('binary')
 
             let senderPercent = 0
             let receiverPercent = 0
@@ -272,7 +273,8 @@ export default (strategy, config) =>
             expect(
               (
                 await page.evaluate(
-                  ([ns, config]) => window.trystero.getOccupants(config, ns),
+                  ([roomId, config]) =>
+                    window.trystero.getOccupants(config, roomId),
                   [roomNs, roomConfig]
                 )
               ).length
@@ -300,11 +302,11 @@ export default (strategy, config) =>
           // # onPeerLeave()
 
           const peer1onLeaveId = page.evaluate(
-            ns => new Promise(window[ns].onPeerLeave),
+            roomId => new Promise(window[roomId].onPeerLeave),
             roomNs
           )
 
-          await page2.evaluate(ns => window[ns].leave(), roomNs)
+          await page2.evaluate(roomId => window[roomId].leave(), roomNs)
 
           expect(await peer1onLeaveId).toEqual(peer2Id)
 
@@ -312,9 +314,9 @@ export default (strategy, config) =>
 
           expect(
             await page2.evaluate(
-              ([ns, config]) => {
-                window[ns] = window.trystero.joinRoom(config, ns)
-                return new Promise(res => window[ns].onPeerJoin(res))
+              ([roomId, config]) => {
+                window[roomId] = window.trystero.joinRoom(config, roomId)
+                return new Promise(res => window[roomId].onPeerJoin(res))
               },
               [roomNs, roomConfig]
             )
