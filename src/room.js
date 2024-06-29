@@ -1,4 +1,5 @@
 import {
+  all,
   alloc,
   decodeBytes,
   encodeBytes,
@@ -167,7 +168,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
 
         nonce = (nonce + 1) & oneByteMax
 
-        return Promise.all(
+        return all(
           iterate(targets, async (id, peer) => {
             const chan = peer.channel
             let chunkN = 0

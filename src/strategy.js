@@ -2,6 +2,7 @@ import {decrypt, encrypt, genKey, sha1} from './crypto.js'
 import initPeer from './peer.js'
 import room from './room.js'
 import {
+  all,
   alloc,
   fromJson,
   libName,
@@ -85,7 +86,7 @@ export default ({init, subscribe, announce}) => {
     const getOffers = n => {
       offerPool.push(...alloc(n, makeOffer))
 
-      return Promise.all(
+      return all(
         offerPool
           .splice(0, n)
           .map(peer =>
@@ -95,7 +96,7 @@ export default ({init, subscribe, announce}) => {
     }
 
     const handleMessage = clientId => async (topic, msg, signalPeer) => {
-      const [rootTopic, selfTopic] = await Promise.all([rootTopicP, selfTopicP])
+      const [rootTopic, selfTopic] = await all([rootTopicP, selfTopicP])
 
       if (topic !== rootTopic && topic !== selfTopic) {
         return
@@ -113,7 +114,7 @@ export default ({init, subscribe, announce}) => {
           return
         }
 
-        const [[{peer, offer}], topic] = await Promise.all([
+        const [[{peer, offer}], topic] = await all([
           getOffers(1),
           sha1(topicPath(rootTopicPlaintext, peerId))
         ])
@@ -158,7 +159,7 @@ export default ({init, subscribe, announce}) => {
           return
         }
 
-        const [topic, answer] = await Promise.all([
+        const [topic, answer] = await all([
           sha1(topicPath(rootTopicPlaintext, peerId)),
           peer.signal(plainOffer)
         ])
@@ -219,7 +220,7 @@ export default ({init, subscribe, announce}) => {
       )
     )
 
-    Promise.all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
+    all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
       const queueAnnounce = async (client, i) => {
         const ms = await announce(client, rootTopic, selfTopic)
 

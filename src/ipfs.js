@@ -6,7 +6,7 @@ import {
   Protocols
 } from '@waku/sdk'
 import strategy from './strategy.js'
-import {decodeBytes, encodeBytes, selfId, toJson} from './utils.js'
+import {all, decodeBytes, encodeBytes, selfId, toJson} from './utils.js'
 
 export const joinRoom = strategy({
   init: config =>
@@ -22,7 +22,7 @@ export const joinRoom = strategy({
     }),
 
   subscribe: async (node, rootTopic, selfTopic, onMessage) => {
-    const [rootSub, selfSub] = await Promise.all([
+    const [rootSub, selfSub] = await all([
       node.filter.createSubscription(),
       node.filter.createSubscription()
     ])
