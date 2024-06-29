@@ -111,8 +111,8 @@ export const joinRoom = strategy({
   }
 })
 
-export const getOccupants = (config, ns) =>
-  sha1(topicPath(libName, config.appId, ns)).then(
+export const getOccupants = (config, roomId) =>
+  sha1(topicPath(libName, config.appId, roomId)).then(
     rootTopic =>
       new Promise(res =>
         onValue(
