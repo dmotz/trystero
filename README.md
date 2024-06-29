@@ -110,7 +110,7 @@ import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js)
 import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
 ```
 
-Next, join the user to a room with a namespace:
+Next, join the user to a room with an ID:
 
 ```js
 const config = {appId: 'san_narciso_3d'}
@@ -118,13 +118,16 @@ const room = joinRoom(config, 'yoyodyne')
 ```
 
 The first argument is a configuration object that requires an `appId`. This
-should be a completely unique identifier for your app (or in the case of
-Firebase, your `databaseURL`). The second argument is the room name.
+should be a completely unique identifier for your app¹. The second argument
+is the room ID.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
 > a time so it's recommended to design your app such that users are divided into
 > groups (or rooms, or namespaces, or channels... whatever you'd like to call
 > them).
+
+¹ When using Firebase, `appId` should be your `databaseURL` and when using
+Supabase, it should be your project URL.
 
 ## Listen for events
 
@@ -500,7 +503,7 @@ known ahead of time.
 
 ## API
 
-### `joinRoom(config, namespace)`
+### `joinRoom(config, roomId)`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events. Calling `joinRoom()` multiple times with
@@ -553,7 +556,7 @@ the same namespace will return the same room instance.
     [`Libp2pOptions`](https://libp2p.github.io/js-libp2p/types/libp2p.index.Libp2pOptions.html)
     where you can specify a list of static peers for bootstrapping.
 
-- `namespace` - A string to namespace peers and events within a room.
+- `roomId` - A string to namespace peers and events within a room.
 
 Returns an object with the following methods:
 
@@ -696,11 +699,11 @@ Returns an object with the following methods:
   )
   ```
 
-- ### `makeAction(namespace)`
+- ### `makeAction(actionId)`
 
   Listen for and send custom data actions.
 
-  - `namespace` - A string to register this action consistently among all peers.
+  - `actionId` - A string to register this action consistently among all peers.
 
   Returns an array of three functions:
 
@@ -814,14 +817,14 @@ console.log(trystero.getRelaySockets())
 //  }
 ```
 
-### `getOccupants(config, namespace)`
+### `getOccupants(config, roomId)`
 
 **(🔥 Firebase only)** Returns a promise that resolves to a list of user IDs
 present in the given namespace. This is useful for checking how many users are
 in a room without joining it.
 
 - `config` - A configuration object
-- `namespace` - A namespace string that you'd pass to `joinRoom()`.
+- `roomId` - A namespace string that you'd pass to `joinRoom()`.
 
 Example:
 
