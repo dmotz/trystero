@@ -390,9 +390,10 @@ export default function App({roomId}) {
   const [myColor, setMyColor] = useState('#c0ffee')
   const [peerColors, setPeerColors] = useState({})
 
-  // whenever a new peer joins, send my color to them
+  // whenever new peers join the room, send my color to them:
   room.onPeerJoin(peer => sendColor(myColor, peer))
 
+  // listen for peers sending their colors and update the state accordingly:
   getColor((color, peer) =>
     setPeerColors(peerColors => ({...peerColors, [peer]: color}))
   )
@@ -400,9 +401,9 @@ export default function App({roomId}) {
   const updateColor = e => {
     const {value} = e.target
 
-    setMyColor(value)
-    // when updating my own color, broadcast it to all peers
+    // when updating my own color, broadcast it to all peers:
     sendColor(value)
+    setMyColor(value)
   }
 
   return (
