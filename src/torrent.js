@@ -18,14 +18,14 @@ const topicToInfoHash = {}
 const infoHashToTopic = {}
 const announceIntervals = {}
 const announceFns = {}
-const trackerAnnounceSecs = {}
+const trackerAnnounceMs = {}
 const handledOffers = {}
 const msgHandlers = {}
 const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 10
-const defaultAnnounceSecs = 33
-const maxAnnounceSecs = 120
+const defaultAnnounceMs = 33_000
+const maxAnnounceMs = 120_000
 const defaultRedundancy = 3
 
 const getInfoHash = async topic => {
@@ -78,16 +78,16 @@ export const joinRoom = strategy({
 
         if (
           interval &&
-          interval > trackerAnnounceSecs[url] &&
+          interval * 1000 > trackerAnnounceMs[url] &&
           announceFns[url][topic]
         ) {
-          const int = Math.min(interval, maxAnnounceSecs)
+          const int = Math.min(interval * 1000, maxAnnounceMs)
 
           clearInterval(announceIntervals[url][topic])
-          trackerAnnounceSecs[url] = int
+          trackerAnnounceMs[url] = int
           announceIntervals[url][topic] = setInterval(
             announceFns[url][topic],
-            int * 1000
+            int
           )
         }
 
@@ -152,12 +152,13 @@ export const joinRoom = strategy({
       })
     }
 
+    trackerAnnounceMs[url] = defaultAnnounceMs
     announceFns[url] ||= {}
     announceFns[url][rootTopic] = announce
     announceIntervals[url] ||= {}
     announceIntervals[url][rootTopic] = setInterval(
       announce,
-      (trackerAnnounceSecs[url] || defaultAnnounceSecs) * 1000
+      trackerAnnounceMs[url]
     )
     announce()
 
