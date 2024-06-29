@@ -23,19 +23,19 @@ export default ({init, subscribe, announce}) => {
   let initPromises
   let offerPool
 
-  return (config, ns) => {
+  return (config, roomId, onJoinError) => {
     const {appId} = config
 
-    if (occupiedRooms[appId]?.[ns]) {
-      return occupiedRooms[appId][ns]
+    if (occupiedRooms[appId]?.[roomId]) {
+      return occupiedRooms[appId][roomId]
     }
 
     const pendingOffers = {}
     const connectedPeers = {}
-    const rootTopicPlaintext = topicPath(libName, appId, ns)
+    const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
-    const key = config.password && genKey(config.password, appId, ns)
+    const key = config.password && genKey(config.password, appId, roomId)
 
     const withKey = f => async signal =>
       key ? {type: signal.type, sdp: await f(key, signal.sdp)} : signal
@@ -196,8 +196,8 @@ export default ({init, subscribe, announce}) => {
       throw mkErr('config map is missing appId field')
     }
 
-    if (!ns) {
-      throw mkErr('namespace argument required')
+    if (!roomId) {
+      throw mkErr('roomId argument required')
     }
 
     if (!didInit) {
@@ -244,11 +244,11 @@ export default ({init, subscribe, announce}) => {
 
     occupiedRooms[appId] ||= {}
 
-    return (occupiedRooms[appId][ns] = room(
+    return (occupiedRooms[appId][roomId] = room(
       f => (onPeerConnect = f),
       id => delete connectedPeers[id],
       () => {
-        delete occupiedRooms[appId][ns]
+        delete occupiedRooms[appId][roomId]
         announceTimeouts.forEach(clearTimeout)
         unsubFns.forEach(async f => (await f)())
       }
