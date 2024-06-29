@@ -7,6 +7,12 @@
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
+The net is full of open, decentralized communication channels: torrent trackers,
+IoT device brokers, boutique file protocols, and niche social networks.
+
+Trystero piggybacks on these networks to automatically establish secure,
+private, p2p connections between your app's users with no effort on your part.
+
 Peers can connect via
 [🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison)
 – all using the same API.
