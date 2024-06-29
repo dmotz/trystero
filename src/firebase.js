@@ -61,7 +61,12 @@ export const joinRoom = strategy({
           return
         }
 
-        onMessage(rootTopic, data.val()[presencePath], handleMessage)
+        const val = data.val()
+        const owner = val[presencePath]
+
+        if (owner) {
+          onMessage(rootTopic, owner, handleMessage)
+        }
       }),
 
       onChildAdded(selfRef, data => {
