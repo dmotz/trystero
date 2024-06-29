@@ -851,12 +851,12 @@ decentralized infrastructure in most cases. This allows for frictionless
 experimentation and no single point of failure. One potential drawback is that
 itʼs difficult to guarantee that the public infrastructure it uses will always
 be highly available, even with the redundancy techniques Trystero uses. While
-the other strategies are decentralized, the Firebase strategy is a more managed
-approach with greater control and an SLA, which might be more appropriate for
-“production” apps.
+the other strategies are decentralized, the Supabase and Firebase strategies are
+a more managed approach with greater control and an SLA, which might be more
+appropriate for “production” apps.
 
-Luckily, Trystero makes it trivial to switch between strategies — just change a
-single import line and quickly experiment:
+Trystero makes it trivial to switch between strategies — just change a single
+import line and quickly experiment:
 
 ```js
 import {joinRoom} from 'trystero/[torrent|nostr|mqtt|supabase|firebase|ipfs]'
