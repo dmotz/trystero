@@ -169,7 +169,7 @@ export const joinRoom = strategy({
     }
   },
 
-  announce: () => {}
+  announce: client => trackerAnnounceMs[client.url]
 })
 
 export const getRelaySockets = socketGetter(clients)
