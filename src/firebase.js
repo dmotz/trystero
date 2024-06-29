@@ -96,10 +96,11 @@ export const joinRoom = strategy({
     }
   },
 
-  announce: (rootRef, rootTopic, selfTopic) => {
+  announce: async (rootRef, rootTopic, selfTopic) => {
     const roomRef = child(rootRef, rootTopic)
     const selfRef = child(roomRef, selfTopic)
 
+    await remove(selfRef)
     set(selfRef, {[presencePath]: {peerId: selfId}})
     onDisconnect(selfRef).remove()
   }
