@@ -322,6 +322,35 @@ export default (strategy, config) =>
             )
           ).toBe(selfId1)
 
+          // # Incorrect password
+
+          const nextRoomNs = roomNs + '2'
+
+          await page.evaluate(
+            ([roomId, config]) => window.trystero.joinRoom(config, roomId),
+            [nextRoomNs, roomConfig]
+          )
+
+          await new Promise(res => setTimeout(res, 2000))
+
+          const joinError = await page2.evaluate(
+            ([roomId, config]) =>
+              new Promise(
+                res =>
+                  (window[roomId] = window.trystero.joinRoom(
+                    config,
+                    roomId,
+                    res
+                  ))
+              ),
+            [nextRoomNs, {...roomConfig, password: 'waste'}]
+          )
+
+          expect(joinError.error).toMatch(/^incorrect password/)
+          expect(joinError.appId).toEqual(roomConfig.appId)
+          expect(joinError.roomId).toEqual(nextRoomNs)
+          expect(joinError.peerId).toEqual(selfId1)
+
           console.log(`  ⏱️    ${strategy.padEnd(12, ' ')} ${joinTime}ms`)
         })
     )
