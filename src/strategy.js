@@ -69,6 +69,19 @@ export default ({init, subscribe, announce}) => {
       }
     }
 
+    const prunePendingOffer = (peerId, clientId) => {
+      if (connectedPeers[peerId]) {
+        return
+      }
+
+      const offer = pendingOffers[peerId]?.[clientId]
+
+      if (offer) {
+        delete pendingOffers[peerId][clientId]
+        offer.kill()
+      }
+    }
+
     const getOffers = n => {
       offerPool.push(...alloc(n, makeOffer))
 
@@ -107,6 +120,10 @@ export default ({init, subscribe, announce}) => {
 
         pendingOffers[peerId] ||= []
         pendingOffers[peerId][clientId] = peer
+        setTimeout(
+          () => prunePendingOffer(peerId, clientId),
+          announceIntervalMs / 2
+        )
 
         peer.setHandlers({
           connect: () => connectPeer(peer, peerId, clientId),
