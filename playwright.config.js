@@ -1,7 +1,7 @@
 import {devices} from '@playwright/test'
 
 export default {
-  timeout: 53333,
+  timeout: 53_333,
   use: {
     ignoreHTTPSErrors: true,
     headless: true,
