@@ -17,6 +17,8 @@ const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
   k => chalk[k]
 )
 
+const sleep = ms => new Promise(res => setTimeout(res, ms))
+
 const concurrentRooms = 3
 const relayRedundancy = 4
 
