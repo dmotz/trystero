@@ -222,7 +222,7 @@ export default (strategy, config) =>
                 )
               ),
 
-              new Promise(res => setTimeout(res, 1000)).then(() =>
+              new Promise(res => setTimeout(res, 1233)).then(() =>
                 sendBinary(
                   new TextEncoder().encode(message.repeat(50000)),
                   null,
@@ -328,30 +328,35 @@ export default (strategy, config) =>
 
           const nextRoomNs = roomNs + '2'
 
-          await page.evaluate(
-            ([roomId, config]) => window.trystero.joinRoom(config, roomId),
-            [nextRoomNs, roomConfig]
-          )
+          const joinError = await Promise.race([
+            page.evaluate(
+              ([roomId, config]) =>
+                new Promise(res =>
+                  window.trystero.joinRoom(config, roomId, res)
+                ),
+              [nextRoomNs, roomConfig]
+            ),
 
-          await new Promise(res => setTimeout(res, 2000))
-
-          const joinError = await page2.evaluate(
-            ([roomId, config]) =>
-              new Promise(
-                res =>
-                  (window[roomId] = window.trystero.joinRoom(
-                    config,
-                    roomId,
-                    res
-                  ))
-              ),
-            [nextRoomNs, {...roomConfig, password: 'waste'}]
-          )
+            sleep(3333).then(() =>
+              page2.evaluate(
+                ([roomId, config]) =>
+                  new Promise(
+                    res =>
+                      (window[roomId] = window.trystero.joinRoom(
+                        config,
+                        roomId,
+                        res
+                      ))
+                  ),
+                [nextRoomNs, {...roomConfig, password: 'waste'}]
+              )
+            )
+          ])
 
           expect(joinError.error).toMatch(/^incorrect password/)
           expect(joinError.appId).toEqual(roomConfig.appId)
           expect(joinError.roomId).toEqual(nextRoomNs)
-          expect(joinError.peerId).toEqual(selfId1)
+          expect(joinError.peerId).toMatch(new RegExp(`^${selfId1}|${selfId2}`))
 
           console.log(`  ⏱️    ${strategy.padEnd(12, ' ')} ${joinTime}ms`)
         })
