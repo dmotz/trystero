@@ -24,8 +24,8 @@ const msgHandlers = {}
 const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 10
-const defaultAnnounceMs = 33_000
-const maxAnnounceMs = 120_000
+const defaultAnnounceMs = 33_333
+const maxAnnounceMs = 120_333
 const defaultRedundancy = 3
 
 const getInfoHash = async topic => {
