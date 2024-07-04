@@ -54,6 +54,6 @@ export const defaultRelayUrls = [
   'mqtt.eclipseprojects.io/mqtt',
   'broker.hivemq.com:8884/mqtt',
   'public.mqtthq.com:8084/mqtt',
-  'test.mosquitto.org:8081',
+  'test.mosquitto.org:8081/mqtt',
   'broker.emqx.io:8084/mqtt'
 ].map(url => 'wss://' + url)
