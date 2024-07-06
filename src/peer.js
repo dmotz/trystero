@@ -1,165 +1,71 @@
+import Peer from '@thaunknown/simple-peer'
 import {alloc} from './utils.js'
 
-export default (isOfferer, rtcConfig, eventHandlers) => {
-  const con = new RTCPeerConnection({
-    iceServers: defaultIceServers,
-    ...rtcConfig
-  })
+const dataEvent = 'data'
+const signalEvent = 'signal'
 
-  const setDataEvents = chan => {
-    chan.binaryType = 'arraybuffer'
-    chan.onmessage = e => {
-      if (client.isDead) {
-        return
-      }
-      handlers.onData(e.data)
-    }
+export default (initiator, config) => {
+  const peer = new Peer({...config, initiator, trickle: false})
+  const onData = d => earlyDataBuffer.push(d)
 
-    chan.onopen = () => {
-      isConnected = true
-      handlers.onConnect()
-      dataQueue.forEach(sendData)
-    }
+  let earlyDataBuffer = []
 
-    client.channel = chan
-  }
+  peer.on(dataEvent, onData)
 
-  const addSignal = async signal => {
-    if (!signal) {
-      return
-    }
+  return {
+    id: peer._id,
 
-    if (signal.candidate) {
-      try {
-        con.addIceCandidate(new RTCIceCandidate(signal))
-      } catch (e) {
-        console.error(e)
-      }
-    } else if (signal.type === 'offer') {
-      try {
-        await con.setRemoteDescription(new RTCSessionDescription(signal))
-        const answer = await con.createAnswer()
+    created: Date.now(),
 
-        await con.setLocalDescription(answer)
+    connection: peer._pc,
 
-        return con.localDescription
-      } catch (e) {
-        console.error(e)
-      }
-    } else if (signal.type === 'answer') {
-      try {
-        con.setRemoteDescription(new RTCSessionDescription(signal))
-      } catch (e) {
-        console.error(e)
-      }
-    }
-  }
+    get channel() {
+      return peer._channel
+    },
 
-  const sendData = async data => {
-    if (client.channel.readyState !== 'open') {
-      await new Promise(res => (client.channel.onopen = res))
-    }
+    get isDead() {
+      return peer.destroyed
+    },
 
-    try {
-      client.channel.send(data)
-    } catch (e) {
-      console.error(e)
+    signal: sdp =>
+      new Promise(res => {
+        if (!initiator) {
+          peer.on(signalEvent, res)
+        }
+        peer.signal(sdp)
+      }),
+
+    sendData: data => peer.send(data),
+
+    destroy: () => peer.destroy(),
+
+    setHandlers: handlers =>
+      Object.entries(handlers).forEach(([event, fn]) => peer.on(event, fn)),
+
+    offerPromise: initiator
+      ? new Promise(res => peer.on(signalEvent, res))
+      : Promise.resolve(),
+
+    addStream: stream => peer.addStream(stream),
+
+    removeStream: stream => peer.removeStream(stream),
+
+    addTrack: (track, stream) => peer.addTrack(track, stream),
+
+    removeTrack: (track, stream) => peer.removeTrack(track, stream),
+
+    replaceTrack: (oldTrack, newTrack, stream) =>
+      peer.replaceTrack(oldTrack, newTrack, stream),
+
+    drainEarlyData: f => {
+      peer.off(dataEvent, onData)
+      earlyDataBuffer.forEach(f)
+      earlyDataBuffer = null
     }
   }
-
-  const addStream = stream =>
-    stream.getTracks().forEach(track => addTrack(track, stream))
-
-  const removeStream = stream => stream.getTracks().forEach(removeTrack)
-
-  const addTrack = (track, stream) => con.addTrack(track, stream)
-
-  const removeTrack = track =>
-    con.removeTrack(con.getSenders().find(sender => sender.track === track))
-
-  const kill = () => {
-    con.close()
-    dataQueue = []
-    client.isDead = true
-  }
-
-  const setHandlers = newHandlers => (handlers = {...handlers, ...newHandlers})
-
-  let isConnected = false
-  let handlers = eventHandlers
-  let dataQueue = []
-  let iceTimeout
-  let offerResolver
-  let iceResolver
-
-  const client = {
-    _id: Math.random().toString(36),
-    isDead: false,
-    connection: con,
-    offerPromise: new Promise(res => (offerResolver = res)),
-    setHandlers,
-    addSignal,
-    addStream,
-    removeStream,
-    addTrack,
-    removeTrack,
-    sendData,
-    kill
-  }
-
-  const iceCompleteP = new Promise(res => (iceResolver = res))
-
-  con.onicecandidate = e => {
-    clearTimeout(iceTimeout)
-
-    if (!e.candidate) {
-      iceResolver()
-    } else {
-      iceTimeout = setTimeout(iceResolver, iceTimeoutMs)
-    }
-  }
-
-  con.oniceconnectionstatechange = () => {
-    if (['closed', 'disconnected', 'failed'].includes(con.iceConnectionState)) {
-      handlers.onClose()
-    }
-  }
-
-  con.onnegotiationneeded = async () => {
-    const offer = await con.createOffer()
-
-    if (con.signalingState !== 'stable') {
-      return
-    }
-
-    try {
-      await con.setLocalDescription(offer)
-    } catch (e) {
-      console.error(e)
-    }
-
-    await iceCompleteP
-
-    if (isConnected) {
-      handlers.onSignal(con.localDescription)
-    } else {
-      offerResolver(con.localDescription)
-    }
-  }
-
-  con.ontrack = e => e.streams.forEach(stream => handlers.onStream(stream))
-
-  if (isOfferer) {
-    setDataEvents(con.createDataChannel('d'))
-  } else {
-    con.ondatachannel = e => setDataEvents(e.channel)
-  }
-
-  return client
 }
 
-const iceTimeoutMs = 4333
-
 export const defaultIceServers = [
-  ...alloc(5, (_, i) => ({urls: `stun:stun${i || ''}.l.google.com:19302`}))
+  ...alloc(5, (_, i) => ({urls: `stun:stun${i || ''}.l.google.com:19302`})),
+  'stun:global.stun.twilio.com:3478'
 ]

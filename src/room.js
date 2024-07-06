@@ -170,20 +170,20 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
 
         return all(
           iterate(targets, async (id, peer) => {
-            const chan = peer.channel
+            const {channel} = peer
             let chunkN = 0
 
             while (chunkN < chunkTotal) {
               const chunk = chunks[chunkN]
 
-              if (chan.bufferedAmount > chan.bufferedAmountLowThreshold) {
+              if (channel.bufferedAmount > channel.bufferedAmountLowThreshold) {
                 await new Promise(res => {
                   const next = () => {
-                    chan.removeEventListener(buffLowEvent, next)
+                    channel.removeEventListener(buffLowEvent, next)
                     res()
                   }
 
-                  chan.addEventListener(buffLowEvent, next)
+                  channel.addEventListener(buffLowEvent, next)
                 })
               }
 
@@ -290,7 +290,8 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
         delete pendingTrackMetas[id]
       },
       signal: sdp => sendSignal(sdp, id),
-      disconnect: () => exitPeer(id)
+      close: () => exitPeer(id),
+      error: () => exitPeer(id)
     })
 
     listeners.onPeerJoin(id)
@@ -331,7 +332,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
       await sendLeave('')
       await new Promise(res => setTimeout(res, 99))
       entries(peerMap).forEach(([id, peer]) => {
-        peer.kill()
+        peer.destroy()
         delete peerMap[id]
       })
       onSelfLeave()

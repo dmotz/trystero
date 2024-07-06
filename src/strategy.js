@@ -189,7 +189,7 @@ export default ({init, subscribe, announce}) => {
         if (peer) {
           peer.setHandlers({
             connect: () => connectPeer(peer, peerId, clientId),
-            disconnect: () => disconnectPeer(peer, peerId)
+            close: () => disconnectPeer(peer, peerId)
           })
 
           peer.signal(plainAnswer)
