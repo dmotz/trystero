@@ -2,10 +2,10 @@ import stun from 'stun'
 import {defaultIceServers} from '../src/peer.js'
 
 Promise.all(
-  defaultIceServers.map(({urls}) =>
+  defaultIceServers.map(url =>
     stun
-      .request(urls.replace(/^stun:/, ''))
-      .then(() => '✅ ' + urls)
-      .catch(() => '❌ ' + urls)
+      .request(url.replace(/^stun:/, ''))
+      .then(() => '✅ ' + url)
+      .catch(() => '❌ ' + url)
   )
 ).then(res => res.forEach(x => console.log(x)))
