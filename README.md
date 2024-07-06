@@ -503,7 +503,7 @@ known ahead of time.
 
 ## API
 
-### `joinRoom(config, roomId)`
+### `joinRoom(config, roomId, [onError])`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events. Calling `joinRoom()` multiple times with
@@ -557,6 +557,11 @@ the same namespace will return the same room instance.
     where you can specify a list of static peers for bootstrapping.
 
 - `roomId` - A string to namespace peers and events within a room.
+
+- `onError(details)` - **(optional)** A callback function that will be called if
+  the room cannot be joined due to an incorrect password. `details` is an
+  object containing `appId`, `roomId`, `peerId`, and `error` decribing the
+  error.
 
 Returns an object with the following methods:
 
