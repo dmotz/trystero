@@ -23,6 +23,7 @@ const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
+const internalNs = ns => '@_' + ns
 
 export default (onPeer, onPeerLeave, onSelfLeave) => {
   const peerMap = {}
@@ -265,12 +266,12 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
     }
   }
 
-  const [sendPing, getPing] = makeAction('__91n6__')
-  const [sendPong, getPong] = makeAction('__90n6__')
-  const [sendSignal, getSignal] = makeAction('__516n4L__')
-  const [sendStreamMeta, getStreamMeta] = makeAction('__57r34m__')
-  const [sendTrackMeta, getTrackMeta] = makeAction('__7r4ck__')
-  const [sendLeave, getLeave] = makeAction('__l34v3__')
+  const [sendPing, getPing] = makeAction(internalNs('ping'))
+  const [sendPong, getPong] = makeAction(internalNs('pong'))
+  const [sendSignal, getSignal] = makeAction(internalNs('signal'))
+  const [sendStreamMeta, getStreamMeta] = makeAction(internalNs('stream'))
+  const [sendTrackMeta, getTrackMeta] = makeAction(internalNs('track'))
+  const [sendLeave, getLeave] = makeAction(internalNs('leave'))
 
   onPeer((peer, id) => {
     if (peerMap[id]) {
