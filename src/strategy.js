@@ -48,7 +48,7 @@ export default ({init, subscribe, announce}) => {
     const connectPeer = (peer, peerId, clientId) => {
       if (connectedPeers[peerId]) {
         if (connectedPeers[peerId] !== peer) {
-          peer.kill()
+          peer.destroy()
         }
         return
       }
@@ -58,7 +58,7 @@ export default ({init, subscribe, announce}) => {
 
       pendingOffers[peerId]?.forEach((peer, i) => {
         if (i !== clientId) {
-          peer.kill()
+          peer.destroy()
         }
       })
       delete pendingOffers[peerId]
@@ -79,7 +79,7 @@ export default ({init, subscribe, announce}) => {
 
       if (offer) {
         delete pendingOffers[peerId][clientId]
-        offer.kill()
+        offer.destroy()
       }
     }
 
@@ -94,6 +94,14 @@ export default ({init, subscribe, announce}) => {
           )
       )
     }
+
+    const handleJoinError = (peerId, sdpType) =>
+      onJoinError?.({
+        error: `incorrect password (${config.password}) when decrypting ${sdpType}`,
+        appId,
+        peerId,
+        roomId
+      })
 
     const handleMessage = clientId => async (topic, msg, signalPeer) => {
       const [rootTopic, selfTopic] = await all([rootTopicP, selfTopicP])
@@ -129,7 +137,7 @@ export default ({init, subscribe, announce}) => {
 
         peer.setHandlers({
           connect: () => connectPeer(peer, peerId, clientId),
-          disconnect: () => disconnectPeer(peer, peerId)
+          close: () => disconnectPeer(peer, peerId)
         })
 
         signalPeer(topic, toJson({peerId: selfId, offer}))
@@ -143,7 +151,7 @@ export default ({init, subscribe, announce}) => {
         const peer = initPeer(false, config.rtcConfig)
         peer.setHandlers({
           connect: () => connectPeer(peer, peerId, clientId),
-          disconnect: () => disconnectPeer(peer, peerId)
+          close: () => disconnectPeer(peer, peerId)
         })
 
         let plainOffer
@@ -151,12 +159,7 @@ export default ({init, subscribe, announce}) => {
         try {
           plainOffer = await toPlain(offer)
         } catch (_) {
-          onJoinError?.({
-            error: `incorrect password (${config.password})`,
-            appId,
-            peerId,
-            roomId
-          })
+          handleJoinError(peerId, 'offer')
           return
         }
 
@@ -174,7 +177,14 @@ export default ({init, subscribe, announce}) => {
           toJson({peerId: selfId, answer: await toCipher(answer)})
         )
       } else if (answer) {
-        const sdp = await toPlain(answer)
+        let plainAnswer
+
+        try {
+          plainAnswer = await toPlain(answer)
+        } catch (e) {
+          handleJoinError(peerId, 'answer')
+          return
+        }
 
         if (peer) {
           peer.setHandlers({
@@ -182,12 +192,12 @@ export default ({init, subscribe, announce}) => {
             disconnect: () => disconnectPeer(peer, peerId)
           })
 
-          peer.signal(sdp)
+          peer.signal(plainAnswer)
         } else {
           const peer = pendingOffers[peerId]?.[clientId]
 
           if (peer && !peer.isDead) {
-            peer.signal(sdp)
+            peer.signal(plainAnswer)
           }
         }
       }
