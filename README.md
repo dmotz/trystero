@@ -847,7 +847,7 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 | 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
 | ⚡️ **Supabase**  | ~5 mins         | 150K         | ⏱️ 🏆            |
 | 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
-| 🪐 **IPFS**       | none 🏆         | 1MB          | ⏱️⏱️⏱️           |
+| 🪐 **IPFS**       | none 🏆         | 945K         | ⏱️⏱️             |
 
 **¹** All strategies except Firebase require zero setup. Firebase is a managed
 strategy which requires setting up an account.
