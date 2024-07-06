@@ -5,7 +5,12 @@ const dataEvent = 'data'
 const signalEvent = 'signal'
 
 export default (initiator, config) => {
-  const peer = new Peer({...config, initiator, trickle: false})
+  const peer = new Peer({
+    ...{iceServers: [{urls: defaultIceServers}]},
+    ...config,
+    initiator,
+    trickle: false
+  })
   const onData = d => earlyDataBuffer.push(d)
 
   let earlyDataBuffer = []
@@ -66,6 +71,6 @@ export default (initiator, config) => {
 }
 
 export const defaultIceServers = [
-  ...alloc(5, (_, i) => ({urls: `stun:stun${i || ''}.l.google.com:19302`})),
+  ...alloc(5, (_, i) => `stun:stun${i || ''}.l.google.com:19302`),
   'stun:global.stun.twilio.com:3478'
 ]
