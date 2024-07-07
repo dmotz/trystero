@@ -14,7 +14,8 @@ import {
 } from './utils.js'
 
 const poolSize = 20
-const announceIntervalMs = 5333
+const announceIntervalMs = 5_333
+const offerTtl = 57_333
 
 export default ({init, subscribe, announce}) => {
   const occupiedRooms = {}
@@ -22,6 +23,7 @@ export default ({init, subscribe, announce}) => {
   let didInit = false
   let initPromises
   let offerPool
+  let offerCleanupTimer
 
   return (config, roomId, onJoinError) => {
     const {appId} = config
@@ -220,6 +222,19 @@ export default ({init, subscribe, announce}) => {
       offerPool = alloc(poolSize, makeOffer)
       initPromises = Array.isArray(initRes) ? initRes : [initRes]
       didInit = true
+      offerCleanupTimer = setInterval(
+        () =>
+          (offerPool = offerPool.filter(peer => {
+            const shouldLive = Date.now() - peer.created < offerTtl
+
+            if (!shouldLive) {
+              peer.destroy()
+            }
+
+            return shouldLive
+          })),
+        offerTtl * 1.1
+      )
     }
 
     const announceIntervals = initPromises.map(() => announceIntervalMs)
@@ -266,6 +281,7 @@ export default ({init, subscribe, announce}) => {
         delete occupiedRooms[appId][roomId]
         announceTimeouts.forEach(clearTimeout)
         unsubFns.forEach(async f => (await f)())
+        clearInterval(offerCleanupTimer)
       }
     ))
   }
