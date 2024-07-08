@@ -53,7 +53,7 @@ export const joinRoom = strategy({
       return node
     }),
 
-  subscribe: (node, rootTopic, selfTopic, onMessage) => {
+  subscribe: async (node, rootTopic, selfTopic, onMessage) => {
     const handleMsg = topic => msg => {
       if (msg.payload) {
         onMessage(topic, decodeBytes(msg.payload), (peerTopic, signal) =>
@@ -61,12 +61,17 @@ export const joinRoom = strategy({
         )
       }
     }
-    const rootDecoder = createDecoder(contentTopic(rootTopic), pubsubTopic)
-    const selfDecoder = createDecoder(contentTopic(selfTopic), pubsubTopic)
-    const unsubRoot = node.filter.subscribe(rootDecoder, handleMsg(rootTopic))
-    const unsubSelf = node.filter.subscribe(selfDecoder, handleMsg(selfTopic))
 
-    return () => all([unsubRoot, unsubSelf]).then(fs => fs.forEach(f => f()))
+    const unsubFns = await all(
+      [rootTopic, selfTopic].map(topic =>
+        node.filter.subscribe(
+          createDecoder(contentTopic(topic), pubsubTopic),
+          handleMsg(topic)
+        )
+      )
+    )
+
+    return () => unsubFns.forEach(f => f())
   },
 
   announce: (node, rootTopic) =>
