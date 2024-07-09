@@ -1,6 +1,6 @@
 {
   "name": "trystero",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Serverless WebRTC matchmaking for painless P2P",
   "main": "src/index.js",
   "module": "src/index.js",
@@ -12,6 +12,7 @@
     "./ipfs": "./src/ipfs.js",
     "./mqtt": "./src/mqtt.js",
     "./nostr": "./src/nostr.js",
+    "./supabase": "./src/supabase.js",
     "./torrent": "./src/torrent.js"
   },
   "author": {
@@ -25,28 +26,39 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@noble/curves": "^1.3.0",
-    "@waku/sdk": "^0.0.22",
-    "firebase": "^10.6.0",
-    "libp2p": "^1.2.1",
-    "mqtt": "^5.3.5",
-    "simple-peer-light": "^9.10.0"
+    "@noble/curves": "^1.4.0",
+    "@supabase/supabase-js": "^2.43.4",
+    "@thaunknown/simple-peer": "^10.0.7",
+    "@waku/discovery": "^0.0.2",
+    "@waku/sdk": "^0.0.25",
+    "firebase": "^10.9.0",
+    "libp2p": "^1.3.0",
+    "mqtt": "^5.7.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.40.0",
-    "@rollup/plugin-commonjs": "^25.0.7",
+    "@eslint/js": "^9.3.0",
+    "@playwright/test": "^1.42.0",
+    "@rollup/plugin-commonjs": "^26.0.1",
     "@rollup/plugin-node-resolve": "^15.2.3",
     "@rollup/plugin-replace": "^5.0.5",
     "@rollup/plugin-terser": "^0.4.4",
-    "eslint": "^8.56.0",
-    "playwright": "^1.40.0",
-    "prettier": "^3.0.3",
-    "rollup": "^4.5.2",
-    "serve": "^14.2.1"
+    "chalk": "^5.3.0",
+    "eslint": "^9.0.0",
+    "globals": "^15.3.0",
+    "playwright": "^1.42.0",
+    "prettier": "^3.2.5",
+    "proxy-check": "^1.0.8",
+    "rollup": "^4.13.0",
+    "serve": "^14.2.1",
+    "stun": "^2.1.0",
+    "ws": "^8.16.0"
   },
   "scripts": {
     "build": "rollup -c",
-    "test": "playwright test ./test"
+    "test": "playwright test ./test",
+    "test-proxy": "PROXY=$(node ./scripts/find-proxy.js) npm run test",
+    "test-ice": "node scripts/test-ice.js",
+    "test-relays": "node scripts/test-relays.js"
   },
   "keywords": [
     "webrtc",

@@ -23,7 +23,7 @@ declare module 'trystero' {
       targetPeers?: TargetPeers,
       metadata?: JsonValue,
       progress?: (percent: number, peerId: string) => void
-    ): Promise<Array<undefined>>
+    ): Promise<void[]>
   }
 
   export interface ActionReceiver<T> {
@@ -52,7 +52,7 @@ declare module 'trystero' {
 
     ping: (id: string) => Promise<number>
 
-    leave: () => void
+    leave: () => Promise<void>
 
     getPeers: () => Record<string, RTCPeerConnection>
 

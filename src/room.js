@@ -1,13 +1,16 @@
 import {
+  all,
+  alloc,
   decodeBytes,
   encodeBytes,
   entries,
-  events,
   fromEntries,
+  fromJson,
   keys,
   libName,
   mkErr,
-  noOp
+  noOp,
+  toJson
 } from './utils.js'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
@@ -20,14 +23,21 @@ const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
+const internalNs = ns => '@_' + ns
 
-export default (onPeer, onSelfLeave) => {
+export default (onPeer, onPeerLeave, onSelfLeave) => {
   const peerMap = {}
   const actions = {}
   const pendingTransmissions = {}
   const pendingPongs = {}
   const pendingStreamMetas = {}
   const pendingTrackMetas = {}
+  const listeners = {
+    onPeerJoin: noOp,
+    onPeerLeave: noOp,
+    onPeerStream: noOp,
+    onPeerTrack: noOp
+  }
 
   const iterate = (targets, f) =>
     (targets
@@ -54,6 +64,7 @@ export default (onPeer, onSelfLeave) => {
     delete peerMap[id]
     delete pendingTransmissions[id]
     delete pendingPongs[id]
+    listeners.onPeerLeave(id)
     onPeerLeave(id)
   }
 
@@ -97,11 +108,13 @@ export default (onPeer, onSelfLeave) => {
           throw mkErr('action meta argument must be an object')
         }
 
-        if (data === undefined) {
+        const dataType = typeof data
+
+        if (dataType === 'undefined') {
           throw mkErr('action data cannot be undefined')
         }
 
-        const isJson = typeof data !== 'string'
+        const isJson = dataType !== 'string'
         const isBlob = data instanceof Blob
         const isBinary =
           isBlob || data instanceof ArrayBuffer || data instanceof TypedArray
@@ -112,68 +125,66 @@ export default (onPeer, onSelfLeave) => {
 
         const buffer = isBinary
           ? new Uint8Array(isBlob ? await data.arrayBuffer() : data)
-          : encodeBytes(isJson ? JSON.stringify(data) : data)
+          : encodeBytes(isJson ? toJson(data) : data)
 
-        const metaEncoded = meta ? encodeBytes(JSON.stringify(meta)) : null
+        const metaEncoded = meta ? encodeBytes(toJson(meta)) : null
 
         const chunkTotal =
           Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0) || 1
 
-        const chunks = Array(chunkTotal)
-          .fill()
-          .map((_, i) => {
-            const isLast = i === chunkTotal - 1
-            const isMeta = meta && i === 0
-            const chunk = new Uint8Array(
-              payloadIndex +
-                (isMeta
-                  ? metaEncoded.byteLength
-                  : isLast
-                    ? buffer.byteLength -
-                      chunkSize * (chunkTotal - (meta ? 2 : 1))
-                    : chunkSize)
-            )
+        const chunks = alloc(chunkTotal, (_, i) => {
+          const isLast = i === chunkTotal - 1
+          const isMeta = meta && i === 0
+          const chunk = new Uint8Array(
+            payloadIndex +
+              (isMeta
+                ? metaEncoded.byteLength
+                : isLast
+                  ? buffer.byteLength -
+                    chunkSize * (chunkTotal - (meta ? 2 : 1))
+                  : chunkSize)
+          )
 
-            chunk.set(typeBytesPadded)
-            chunk.set([nonce], nonceIndex)
-            chunk.set(
-              [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
-              tagIndex
-            )
-            chunk.set(
-              [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
-              progressIndex
-            )
-            chunk.set(
-              meta
-                ? isMeta
-                  ? metaEncoded
-                  : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
-                : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
-              payloadIndex
-            )
+          chunk.set(typeBytesPadded)
+          chunk.set([nonce], nonceIndex)
+          chunk.set(
+            [isLast | (isMeta << 1) | (isBinary << 2) | (isJson << 3)],
+            tagIndex
+          )
+          chunk.set(
+            [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
+            progressIndex
+          )
+          chunk.set(
+            meta
+              ? isMeta
+                ? metaEncoded
+                : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
+              : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
+            payloadIndex
+          )
 
-            return chunk
-          })
+          return chunk
+        })
 
         nonce = (nonce + 1) & oneByteMax
 
-        return Promise.all(
+        return all(
           iterate(targets, async (id, peer) => {
-            const chan = peer._channel
+            const {channel} = peer
             let chunkN = 0
 
             while (chunkN < chunkTotal) {
               const chunk = chunks[chunkN]
 
-              if (chan.bufferedAmount > chan.bufferedAmountLowThreshold) {
+              if (channel.bufferedAmount > channel.bufferedAmountLowThreshold) {
                 await new Promise(res => {
                   const next = () => {
-                    chan.removeEventListener(buffLowEvent, next)
+                    channel.removeEventListener(buffLowEvent, next)
                     res()
                   }
 
-                  chan.addEventListener(buffLowEvent, next)
+                  channel.addEventListener(buffLowEvent, next)
                 })
               }
 
@@ -181,12 +192,9 @@ export default (onPeer, onSelfLeave) => {
                 break
               }
 
-              peer.send(chunk)
+              peer.sendData(chunk)
               chunkN++
-
-              if (onProgress) {
-                onProgress(chunk[progressIndex] / oneByteMax, id, meta)
-              }
+              onProgress?.(chunk[progressIndex] / oneByteMax, id, meta)
             }
           })
         )
@@ -216,25 +224,19 @@ export default (onPeer, onSelfLeave) => {
     const isJson = !!(tag & (1 << 3))
 
     if (!actions[type]) {
-      throw mkErr(`received message with unregistered type (${type})`)
+      console.warn(
+        `${libName}: received message with unregistered type (${type})`
+      )
+      return
     }
 
-    if (!pendingTransmissions[id]) {
-      pendingTransmissions[id] = {}
-    }
+    pendingTransmissions[id] ||= {}
+    pendingTransmissions[id][type] ||= {}
 
-    if (!pendingTransmissions[id][type]) {
-      pendingTransmissions[id][type] = {}
-    }
-
-    let target = pendingTransmissions[id][type][nonce]
-
-    if (!target) {
-      target = pendingTransmissions[id][type][nonce] = {chunks: []}
-    }
+    const target = (pendingTransmissions[id][type][nonce] ||= {chunks: []})
 
     if (isMeta) {
-      target.meta = JSON.parse(decodeBytes(payload))
+      target.meta = fromJson(decodeBytes(payload))
     } else {
       target.chunks.push(payload)
     }
@@ -254,79 +256,63 @@ export default (onPeer, onSelfLeave) => {
       return a + c.byteLength
     }, 0)
 
+    delete pendingTransmissions[id][type][nonce]
+
     if (isBinary) {
       actions[type].onComplete(full, id, target.meta)
     } else {
       const text = decodeBytes(full)
-      actions[type].onComplete(isJson ? JSON.parse(text) : text, id)
+      actions[type].onComplete(isJson ? fromJson(text) : text, id)
     }
-
-    delete pendingTransmissions[id][type][nonce]
   }
 
-  const [sendPing, getPing] = makeAction('__91n6__')
-  const [sendPong, getPong] = makeAction('__90n6__')
-  const [sendSignal, getSignal] = makeAction('__516n4L__')
-  const [sendStreamMeta, getStreamMeta] = makeAction('__57r34m__')
-  const [sendTrackMeta, getTrackMeta] = makeAction('__7r4ck__')
-
-  let onPeerJoin = noOp
-  let onPeerLeave = noOp
-  let onPeerStream = noOp
-  let onPeerTrack = noOp
+  const [sendPing, getPing] = makeAction(internalNs('ping'))
+  const [sendPong, getPong] = makeAction(internalNs('pong'))
+  const [sendSignal, getSignal] = makeAction(internalNs('signal'))
+  const [sendStreamMeta, getStreamMeta] = makeAction(internalNs('stream'))
+  const [sendTrackMeta, getTrackMeta] = makeAction(internalNs('track'))
+  const [sendLeave, getLeave] = makeAction(internalNs('leave'))
 
   onPeer((peer, id) => {
     if (peerMap[id]) {
       return
     }
 
-    const onData = handleData.bind(null, id)
-
     peerMap[id] = peer
 
-    peer.on(events.signal, sdp => sendSignal(sdp, id))
-    peer.on(events.close, () => exitPeer(id))
-    peer.on(events.data, onData)
-
-    peer.on(events.stream, stream => {
-      onPeerStream(stream, id, pendingStreamMetas[id])
-      delete pendingStreamMetas[id]
+    peer.setHandlers({
+      data: d => handleData(id, d),
+      stream: stream => {
+        listeners.onPeerStream(stream, id, pendingStreamMetas[id])
+        delete pendingStreamMetas[id]
+      },
+      track: (track, stream) => {
+        listeners.onPeerTrack(track, stream, id, pendingTrackMetas[id])
+        delete pendingTrackMetas[id]
+      },
+      signal: sdp => sendSignal(sdp, id),
+      close: () => exitPeer(id),
+      error: () => exitPeer(id)
     })
 
-    peer.on(events.track, (track, stream) => {
-      onPeerTrack(track, stream, id, pendingTrackMetas[id])
-      delete pendingTrackMetas[id]
-    })
-
-    peer.on(events.error, e => {
-      if (e.code === 'ERR_DATA_CHANNEL') {
-        return
-      }
-      console.error(e)
-    })
-
-    onPeerJoin(id)
-    peer.__drainEarlyData(onData)
+    listeners.onPeerJoin(id)
+    peer.drainEarlyData?.(d => handleData(id, d))
   })
 
   getPing((_, id) => sendPong('', id))
 
   getPong((_, id) => {
-    if (pendingPongs[id]) {
-      pendingPongs[id]()
-      delete pendingPongs[id]
-    }
+    pendingPongs[id]?.()
+    delete pendingPongs[id]
   })
 
-  getSignal((sdp, id) => {
-    if (peerMap[id]) {
-      peerMap[id].signal(sdp)
-    }
-  })
+  getSignal((sdp, id) => peerMap[id]?.signal(sdp))
 
   getStreamMeta((meta, id) => (pendingStreamMetas[id] = meta))
 
   getTrackMeta((meta, id) => (pendingTrackMetas[id] = meta))
+
+  getLeave((_, id) => exitPeer(id))
 
   return {
     makeAction,
@@ -343,7 +329,9 @@ export default (onPeer, onSelfLeave) => {
       return Date.now() - start
     },
 
-    leave: () => {
+    leave: async () => {
+      await sendLeave('')
+      await new Promise(res => setTimeout(res, 99))
       entries(peerMap).forEach(([id, peer]) => {
         peer.destroy()
         delete peerMap[id]
@@ -352,7 +340,7 @@ export default (onPeer, onSelfLeave) => {
     },
 
     getPeers: () =>
-      fromEntries(entries(peerMap).map(([id, peer]) => [id, peer._pc])),
+      fromEntries(entries(peerMap).map(([id, peer]) => [id, peer.connection])),
 
     addStream: (stream, targets, meta) =>
       iterate(targets, async (id, peer) => {
@@ -387,12 +375,12 @@ export default (onPeer, onSelfLeave) => {
         peer.replaceTrack(oldTrack, newTrack, stream)
       }),
 
-    onPeerJoin: f => (onPeerJoin = f),
+    onPeerJoin: f => (listeners.onPeerJoin = f),
 
-    onPeerLeave: f => (onPeerLeave = f),
+    onPeerLeave: f => (listeners.onPeerLeave = f),
 
-    onPeerStream: f => (onPeerStream = f),
+    onPeerStream: f => (listeners.onPeerStream = f),
 
-    onPeerTrack: f => (onPeerTrack = f)
+    onPeerTrack: f => (listeners.onPeerTrack = f)
   }
 }

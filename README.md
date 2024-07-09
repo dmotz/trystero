@@ -1,4 +1,4 @@
-# 🤝 Trystero
+# ✨🤝✨ Trystero
 
 **Build instant multiplayer webapps, no server required**
 
@@ -7,8 +7,14 @@
 Trystero manages a clandestine courier network that lets your application's
 users talk directly with one another, encrypted and without a server middleman.
 
+The net is full of open, decentralized communication channels: torrent trackers,
+IoT device brokers, boutique file protocols, and niche social networks.
+
+Trystero piggybacks on these networks to automatically establish secure,
+private, p2p connections between your app's users with no effort on your part.
+
 Peers can connect via
-[🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison)
+[🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison)
 – all using the same API.
 
 Besides making peer matching automatic, Trystero offers some nice abstractions
@@ -39,6 +45,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
+  - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
 - [Strategy comparison](#strategy-comparison)
@@ -56,7 +63,7 @@ is needed to exchange peer information
 ([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
 this involves running your own matchmaking server but Trystero abstracts this
 away for you and offers multiple "serverless" strategies for connecting peers
-(currently BitTorrent, Nostr, MQTT, Firebase, and IPFS).
+(currently BitTorrent, Nostr, MQTT, Supabase, Firebase, and IPFS).
 
 The important point to remember is this:
 
@@ -87,21 +94,23 @@ it locally:
 </script>
 ```
 
-By default, the [BitTorrent strategy](#strategy-comparison) is used. To use a
+By default, the [Nostr strategy](#strategy-comparison) is used. To use a
 different one just deep import like so (your bundler should handle including
 only relevant code):
 
 ```js
-import {joinRoom} from 'trystero/nostr' // (trystero-nostr.min.js with a local file)
+import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
 // or
-import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js)
+import {joinRoom} from 'trystero/torrent' // (trystero-torrent.min.js)
+// or
+import {joinRoom} from 'trystero/supabase' // (trystero-supabase.min.js)
 // or
 import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js)
 // or
 import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
 ```
 
-Next, join the user to a room with a namespace:
+Next, join the user to a room with an ID:
 
 ```js
 const config = {appId: 'san_narciso_3d'}
@@ -109,13 +118,16 @@ const room = joinRoom(config, 'yoyodyne')
 ```
 
 The first argument is a configuration object that requires an `appId`. This
-should be a completely unique identifier for your app (or in the case of
-Firebase, your `databaseURL`). The second argument is the room name.
+should be a completely unique identifier for your app¹. The second argument
+is the room ID.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
 > a time so it's recommended to design your app such that users are divided into
 > groups (or rooms, or namespaces, or channels... whatever you'd like to call
 > them).
+
+¹ When using Firebase, `appId` should be your `databaseURL` and when using
+Supabase, it should be your project URL.
 
 ## Listen for events
 
@@ -387,9 +399,10 @@ export default function App({roomId}) {
   const [myColor, setMyColor] = useState('#c0ffee')
   const [peerColors, setPeerColors] = useState({})
 
-  // whenever a new peer joins, send my color to them
+  // whenever new peers join the room, send my color to them:
   room.onPeerJoin(peer => sendColor(myColor, peer))
 
+  // listen for peers sending their colors and update the state accordingly:
   getColor((color, peer) =>
     setPeerColors(peerColors => ({...peerColors, [peer]: color}))
   )
@@ -397,9 +410,9 @@ export default function App({roomId}) {
   const updateColor = e => {
     const {value} = e.target
 
-    setMyColor(value)
-    // when updating my own color, broadcast it to all peers
+    // when updating my own color, broadcast it to all peers:
     sendColor(value)
+    setMyColor(value)
   }
 
   return (
@@ -443,6 +456,16 @@ export const useRoom = (roomConfig, roomId) => {
 }
 ```
 
+### Supabase setup
+
+To use the Supabase strategy:
+
+1. Create a [Supabase](https://supabase.com) project or use an existing one
+2. On the dashboard, go to Project Settings -> API
+3. Copy the Project URL and set that as the `appId` in the Trystero config,
+   copy the `anon public` API key and set it as `supabaseKey` in the Trystero
+   config
+
 ### Firebase setup
 
 If you want to use the Firebase strategy and don't have an existing project:
@@ -450,7 +473,11 @@ If you want to use the Firebase strategy and don't have an existing project:
 1. Create a [Firebase](https://firebase.google.com/) project
 2. Create a new Realtime Database
 3. Copy the `databaseURL` and use it as the `appId` in your Trystero config
-4. [*Optional*] Configure the database with security rules to limit activity:
+
+<details>
+  <summary>
+  [*Optional*] Configure the database with security rules to limit activity:
+  </summary>
 
 ```json
 {
@@ -472,9 +499,11 @@ If you want to use the Firebase strategy and don't have an existing project:
 These rules ensure room peer presence is only readable if the room namespace is
 known ahead of time.
 
+</details>
+
 ## API
 
-### `joinRoom(config, namespace)`
+### `joinRoom(config, roomId, [onError])`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events. Calling `joinRoom()` multiple times with
@@ -482,7 +511,9 @@ the same namespace will return the same room instance.
 
 - `config` - Configuration object containing the following keys:
 
-  - `appId` - **(required)** A unique string identifying your app. If using
+  - `appId` - **(required)** A unique string identifying your app. When using
+    Supabase, this should be set to your project URL (see
+    [Supabase setup instructions](#supabase-setup)). If using
     Firebase, this should be the `databaseURL` from your Firebase config (also
     see `firebaseApp` below for an alternative way of configuring the Firebase
     strategy).
@@ -508,6 +539,9 @@ the same namespace will return the same room instance.
     case some fail. Passing a `relayUrls` option will cause this option to be
     ignored as the entire list will be used.
 
+  - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
+    `anon public` API key.
+
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
     initialized Firebase app instance instead of an `appId`. Normally Trystero
     will initialize a Firebase app based on the `appId` but this will fail if
@@ -522,7 +556,12 @@ the same namespace will return the same room instance.
     [`Libp2pOptions`](https://libp2p.github.io/js-libp2p/types/libp2p.index.Libp2pOptions.html)
     where you can specify a list of static peers for bootstrapping.
 
-- `namespace` - A string to namespace peers and events within a room.
+- `roomId` - A string to namespace peers and events within a room.
+
+- `onError(details)` - **(optional)** A callback function that will be called if
+  the room cannot be joined due to an incorrect password. `details` is an
+  object containing `appId`, `roomId`, `peerId`, and `error` decribing the
+  error.
 
 Returns an object with the following methods:
 
@@ -665,11 +704,11 @@ Returns an object with the following methods:
   )
   ```
 
-- ### `makeAction(namespace)`
+- ### `makeAction(actionId)`
 
   Listen for and send custom data actions.
 
-  - `namespace` - A string to register this action consistently among all peers.
+  - `actionId` - A string to register this action consistently among all peers.
 
   Returns an array of three functions:
 
@@ -783,14 +822,14 @@ console.log(trystero.getRelaySockets())
 //  }
 ```
 
-### `getOccupants(config, namespace)`
+### `getOccupants(config, roomId)`
 
 **(🔥 Firebase only)** Returns a promise that resolves to a list of user IDs
 present in the given namespace. This is useful for checking how many users are
 in a room without joining it.
 
 - `config` - A configuration object
-- `namespace` - A namespace string that you'd pass to `joinRoom()`.
+- `roomId` - A namespace string that you'd pass to `joinRoom()`.
 
 Example:
 
@@ -803,11 +842,12 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 |                   | one-time setup¹ | bundle size² | time to connect³ |
 | ----------------- | --------------- | ------------ | ---------------- |
-| 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
 | 🐦 **Nostr**      | none 🏆         | 54K          | ⏱️⏱️             |
 | 📡 **MQTT**       | none 🏆         | 332K         | ⏱️⏱️             |
+| 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
+| ⚡️ **Supabase**  | ~5 mins         | 150K         | ⏱️ 🏆            |
 | 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
-| 🪐 **IPFS**       | none 🏆         | 1MB          | ⏱️⏱️⏱️           |
+| 🪐 **IPFS**       | none 🏆         | 945K         | ⏱️⏱️             |
 
 **¹** All strategies except Firebase require zero setup. Firebase is a managed
 strategy which requires setting up an account.
@@ -825,15 +865,15 @@ decentralized infrastructure in most cases. This allows for frictionless
 experimentation and no single point of failure. One potential drawback is that
 itʼs difficult to guarantee that the public infrastructure it uses will always
 be highly available, even with the redundancy techniques Trystero uses. While
-the other strategies are decentralized, the Firebase strategy is a more managed
-approach with greater control and an SLA, which might be more appropriate for
-“production” apps.
+the other strategies are decentralized, the Supabase and Firebase strategies are
+a more managed approach with greater control and an SLA, which might be more
+appropriate for “production” apps.
 
-Luckily, Trystero makes it trivial to switch between strategies — just change a
-single import line and quickly experiment:
+Trystero makes it trivial to switch between strategies — just change a single
+import line and quickly experiment:
 
 ```js
-import {joinRoom} from 'trystero/[torrent|nostr|mqtt|firebase|ipfs]'
+import {joinRoom} from 'trystero/[torrent|nostr|mqtt|supabase|firebase|ipfs]'
 ```
 
 ---

@@ -5,178 +5,77 @@ import {
   waitForRemotePeer,
   Protocols
 } from '@waku/sdk'
-import room from './room.js'
+import {wakuPeerExchangeDiscovery} from '@waku/discovery'
+import strategy from './strategy.js'
 import {
+  all,
   decodeBytes,
   encodeBytes,
-  events,
-  initGuard,
-  initPeer,
   libName,
-  noOp,
-  selfId
+  selfId,
+  toJson
 } from './utils.js'
-import {decrypt, encrypt, genKey} from './crypto.js'
 
-const occupiedRooms = {}
-const announceMs = 3333
+const pubsubTopic = '/waku/2/default-waku/proto'
 
-const init = config =>
-  nodeP ||
-  (nodeP = createLightNode({
-    defaultBootstrap: true,
-    ...(config.libp2pConfig
-      ? {libp2p: config.libp2pConfig}
-      : {libp2p: {hideWebSocketInfo: true}})
-  }).then(async node => {
-    await node.start()
-    await waitForRemotePeer(node, [Protocols.LightPush, Protocols.Filter])
-    return node
-  }))
+const contentTopic = topic => `/${libName}/0/${topic}/json`
 
-let nodeP
-
-export const joinRoom = initGuard(occupiedRooms, (config, ns) => {
-  const rootTopic = `${libName.toLowerCase()}/${config.appId}/${ns}`
-  const selfTopic = `${rootTopic}/${selfId}`
-  const offers = {}
-  const seenPeers = {}
-  const connectedPeers = {}
-  const key = config.password && genKey(config.password, ns)
-  const rootEncoder = createEncoder({contentTopic: rootTopic, ephemeral: true})
-  const rootDecoder = createDecoder(rootTopic)
-  const selfDecoder = createDecoder(selfTopic)
-
-  const connectPeer = (peer, peerId) => {
-    onPeerConnect(peer, peerId)
-    connectedPeers[peerId] = peer
-  }
-
-  const disconnectPeer = peerId => {
-    delete offers[peerId]
-    delete seenPeers[peerId]
-    delete connectedPeers[peerId]
-  }
-
-  const getPeerEncoder = peerId =>
+const sendMessage = (node, topic, payload) =>
+  node.lightPush.send(
     createEncoder({
-      contentTopic: `${rootTopic}/${peerId}`,
+      pubsubTopic,
+      contentTopic: contentTopic(topic),
       ephemeral: true
-    })
-
-  let onPeerConnect = noOp
-  let rootSub
-  let selfSub
-  let announceInterval
-
-  init(config).then(async node => {
-    !([rootSub, selfSub] = await Promise.all([
-      node.filter.createSubscription(),
-      node.filter.createSubscription()
-    ]))
-
-    await Promise.all([
-      rootSub.subscribe([rootDecoder], msg => {
-        if (!msg.payload) {
-          return
-        }
-
-        const peerId = decodeBytes(msg.payload)
-
-        if (peerId === selfId || connectedPeers[peerId] || seenPeers[peerId]) {
-          return
-        }
-
-        seenPeers[peerId] = true
-
-        const peer = (offers[peerId] = initPeer(true, false, config.rtcConfig))
-
-        peer.once(events.signal, async offer => {
-          node.lightPush.send(getPeerEncoder(peerId), {
-            payload: encodeBytes(
-              JSON.stringify({
-                peerId: selfId,
-                offer: key
-                  ? {...offer, sdp: await encrypt(key, offer.sdp)}
-                  : offer
-              })
-            )
-          })
-
-          setTimeout(() => {
-            if (connectedPeers[peerId]) {
-              return
-            }
-
-            delete seenPeers[peerId]
-            peer.destroy()
-          }, announceMs * 2)
-        })
-
-        peer.once(events.connect, () => connectPeer(peer, peerId))
-        peer.once(events.close, () => disconnectPeer(peerId))
-      }),
-
-      selfSub.subscribe([selfDecoder], async msg => {
-        let payload
-
-        try {
-          payload = JSON.parse(decodeBytes(msg.payload))
-        } catch (e) {
-          console.error(`${libName}: received malformed JSON`)
-          return
-        }
-
-        const {peerId, offer, answer} = payload
-
-        if (offers[peerId] && answer) {
-          offers[peerId].signal(
-            key ? {...answer, sdp: await decrypt(key, answer.sdp)} : answer
-          )
-          return
-        }
-
-        const peer = initPeer(false, false, config.rtcConfig)
-
-        peer.once(events.signal, async answer =>
-          node.lightPush.send(getPeerEncoder(peerId), {
-            payload: encodeBytes(
-              JSON.stringify({
-                peerId: selfId,
-                answer: key
-                  ? {...answer, sdp: await encrypt(key, answer.sdp)}
-                  : answer
-              })
-            )
-          })
-        )
-
-        peer.once(events.connect, () => connectPeer(peer, peerId))
-        peer.once(events.close, () => disconnectPeer(peerId))
-        peer.signal(
-          key ? {...offer, sdp: await decrypt(key, offer.sdp)} : offer
-        )
-      })
-    ])
-
-    const announce = () =>
-      node.lightPush.send(rootEncoder, {
-        payload: encodeBytes(selfId)
-      })
-
-    announceInterval = setInterval(announce, announceMs)
-    announce()
-  })
-
-  return room(
-    f => (onPeerConnect = f),
-    () => {
-      clearInterval(announceInterval)
-      rootSub.unsubscribe()
-      selfSub.unsubscribe()
-      delete occupiedRooms[ns]
-    }
+    }),
+    {payload: encodeBytes(payload)}
   )
+
+export const joinRoom = strategy({
+  init: config =>
+    createLightNode({
+      defaultBootstrap: false,
+      pubsubTopics: [pubsubTopic],
+      bootstrapPeers: [
+        '/dns4/waku.myrandomdemos.online/tcp/8000/wss/p2p/16Uiu2HAmKfC2QUvMVyBsVjuEzdo1hVhRddZxo69YkBuXYvuZ83sc',
+        '/dns4/node-01.do-ams3.wakuv2.prod.status.im/tcp/8000/wss/p2p/16Uiu2HAmL5okWopX7NqZWBUKVqW8iUxCEmd5GMHLVPwCgzYzQv3e',
+        '/dns4/node-01.gc-us-central1-a.wakuv2.prod.statusim.net/tcp/8000/wss/p2p/16Uiu2HAmVkKntsECaYfefR1V2yCR79CegLATuTPE6B9TxgxBiiiA',
+        '/dns4/node-01.ac-cn-hongkong-c.wakuv2.prod.status.im/tcp/8000/wss/p2p/16Uiu2HAm4v86W3bmT1BiH6oSPzcsSr24iDQpSN5Qa992BCjjwgrD',
+        '/dns4/node-01.do-ams3.wakuv2.test.status.im/tcp/8000/wss/p2p/16Uiu2HAmPLe7Mzm8TsYUubgCAW1aJoeFScxrLj8ppHFivPo97bUZ'
+      ],
+      libp2p: {
+        peerDiscovery: [wakuPeerExchangeDiscovery([pubsubTopic])],
+        hideWebSocketInfo: true,
+        ...config.libp2pConfig
+      }
+    }).then(async node => {
+      await node.start()
+      await waitForRemotePeer(node, [Protocols.LightPush, Protocols.Filter])
+      return node
+    }),
+
+  subscribe: async (node, rootTopic, selfTopic, onMessage) => {
+    const handleMsg = topic => msg => {
+      if (msg.payload) {
+        onMessage(topic, decodeBytes(msg.payload), (peerTopic, signal) =>
+          sendMessage(node, peerTopic, signal)
+        )
+      }
+    }
+
+    const unsubFns = await all(
+      [rootTopic, selfTopic].map(topic =>
+        node.filter.subscribe(
+          createDecoder(contentTopic(topic), pubsubTopic),
+          handleMsg(topic)
+        )
+      )
+    )
+
+    return () => unsubFns.forEach(f => f())
+  },
+
+  announce: (node, rootTopic) =>
+    sendMessage(node, rootTopic, toJson({peerId: selfId}))
 })
 
 export {selfId} from './utils.js'
