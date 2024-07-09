@@ -233,7 +233,7 @@ export default ({init, subscribe, announce}) => {
 
             return shouldLive
           })),
-        offerTtl * 1.1
+        offerTtl * 1.03
       )
     }
 
