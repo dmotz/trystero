@@ -1,7 +1,4 @@
-import {
-  joinRoom,
-  selfId
-} from 'https://cdn.skypack.dev/pin/trystero@v0.18.0-r4w3880OHw2o0euVPNYJ/mode=imports,min/optimized/trystero/nostr.js'
+import {joinRoom, selfId} from 'https://esm.run/trystero'
 
 const byId = document.getElementById.bind(document)
 const canvas = byId('canvas')
