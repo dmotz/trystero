@@ -136,18 +136,21 @@ export {selfId} from './utils.js'
 
 export const defaultRelayUrls = [
   'relay.nostr.net',
-  'relay.blackbyte.nl',
+  'relay.snort.social',
   'relay.piazza.today',
   'relay.exit.pub',
-  'relay.nostr.band',
-  'relay.damus.io',
-  'nostr.mom',
-  'relay.snort.social',
   'nostr.lu.ke',
-  'relay.plebstr.com',
+  'nostr.mom',
+  'relay.urbanzap.space',
+  'nostr.data.haus',
   'nostr.sathoarder.com',
-  'nsrelay.assilvestrar.club',
-  'nostrasia.casa',
+  'relay.nostromo.social',
   'relay.nostr.bg',
-  'relay.nostrss.re'
+  'nostr.stakey.net',
+  'nostr.vulpem.com',
+  'a.nos.lol',
+  'eu.purplerelay.com',
+  'nostr2.sanhauf.com',
+  'relay.rebelbase.site',
+  'e.nos.lol'
 ].map(url => 'wss://' + url)
