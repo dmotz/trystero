@@ -4,14 +4,14 @@ import chalk from 'chalk'
 const testUrl = 'https://localhost:8080/test'
 const proxy = process.env.PROXY
 
-const onConsole = (strategy, pageN) => e =>
-  console.log(
-    `${emojis[strategy]} ${colorize[pageN - 1](strategy)} ${pageN}:`,
-    e
-  )
+const logPrefix = (strategy, browser, pageN) =>
+  `${emojis[strategy]} ${colorize[pageN - 1](strategy)} ${shortBrowsers[browser]}${pageN}:`
 
-const onError = (strategy, pageN) => err =>
-  console.log(`❌ error! ${emojis[strategy]} ${strategy} ${pageN}:`, err)
+const onConsole = (strategy, browser, pageN) => msg =>
+  console.log(logPrefix(strategy, browser, pageN), msg)
+
+const onError = (strategy, browser, pageN) => err =>
+  console.log('❌', logPrefix(strategy, browser, pageN), err)
 
 const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
   k => chalk[k]
@@ -46,10 +46,10 @@ export default (strategy, config) =>
     )
     const page2 = await context.newPage()
 
-    page.on('console', onConsole(strategy, 1))
-    page2.on('console', onConsole(strategy, 2))
-    page.on('pageerror', onError(strategy, 1))
-    page2.on('pageerror', onError(strategy, 2))
+    page.on('console', onConsole(strategy, browserName, 1))
+    page2.on('console', onConsole(strategy, browserName, 2))
+    page.on('pageerror', onError(strategy, browserName, 1))
+    page2.on('pageerror', onError(strategy, browserName, 2))
 
     await page.goto(testUrl)
     await page2.goto(testUrl)
@@ -370,4 +370,10 @@ const emojis = {
   supabase: '⚡️',
   firebase: '🔥',
   ipfs: '🪐'
+}
+
+const shortBrowsers = {
+  chromium: 'CH',
+  webkit: 'WK',
+  firefox: 'FF'
 }
