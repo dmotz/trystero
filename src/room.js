@@ -28,6 +28,7 @@ const internalNs = ns => '@_' + ns
 export default (onPeer, onPeerLeave, onSelfLeave) => {
   const peerMap = {}
   const actions = {}
+  const actionCache = new WeakMap();
   const pendingTransmissions = {}
   const pendingPongs = {}
   const pendingStreamMetas = {}
@@ -70,11 +71,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
 
   const makeAction = type => {
     if (actions[type]) {
-      return [
-        actions[type].send,
-        actions[type].setOnComplete,
-        actions[type].setOnProgress
-      ]
+      return actionCache.get(type);
     }
 
     if (!type) {
@@ -201,11 +198,14 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
       }
     }
 
-    return [
-      actions[type].send,
-      actions[type].setOnComplete,
-      actions[type].setOnProgress
-    ]
+    if (!actionCache.has(type)) {
+      actionCache.set(type, [
+        actions[type].send,
+        actions[type].setOnComplete,
+        actions[type].setOnProgress,
+      ]);
+    }
+    return actionCache.get(type);
   }
 
   const handleData = (id, data) => {
