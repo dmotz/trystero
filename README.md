@@ -1,6 +1,6 @@
 # ✨🤝✨ Trystero
 
-**Build instant multiplayer webapps, no server required**
+**Build instant multiplayer web apps, no server required**
 
 👉 **[TRY THE DEMO](https://oxism.com/trystero)** 👈
 
@@ -364,20 +364,21 @@ metadata to differentiate between them, e.g. by sending a unique ID.
 Once peers are connected to each other all of their communications are
 end-to-end encrypted. During the initial connection / discovery process, peers'
 [SDPs](https://en.wikipedia.org/wiki/Session_Description_Protocol) are sent via
-the chosen peering strategy medium. The SDP is encrypted over the wire, but is
-visible in plaintext as it passes through the medium (a public torrent tracker
-for example). This is fine for most use cases but you can choose to hide SDPs
-from the peering medium with Trystero's encryption option. This can protect
-against a MITM peering attack if both intended peers have a shared secret. To
-opt in, just pass a `password` parameter in the app configuration object:
+the chosen peering strategy medium. By default the SDP is encrypted using a key
+derived from your app ID and room name to prevent plaintext session data from
+appearing in logs. This is fine for most use cases, however a relay strategy
+operator can reverse engineer the key using the room name and the app name. A
+more secure option is to pass a `password` parameter in the app configuration
+object which will be used to derive the encryption key:
 
 ```js
 joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
 ```
 
-Keep in mind the password has to match for all peers in the room for them to be
-able to connect. An example use case might be a private chat room where users
-learn the password via external means.
+This is a shared secret that must be known ahead of time and the password must
+match for all peers in the room for them to be able to connect. An example use
+case might be a private chat room where users learn the password via external
+means.
 
 ### React hooks
 
@@ -518,12 +519,11 @@ the same namespace will return the same room instance.
     see `firebaseApp` below for an alternative way of configuring the Firebase
     strategy).
 
-  - `password` - **(optional)** A string to encrypt session descriptions as they
-    are passed through the peering medium. If set, session descriptions will be
-    encrypted using AES-CBC. The password must match between any peers in the
-    namespace for them to connect. Your site must be served over HTTPS for the
-    crypto module to be used. See [encryption](#encryption) for more
-    details.
+  - `password` - **(optional)** A string to encrypt session descriptions via
+    AES-GCM as they are passed through the peering medium. If not set, session
+    descriptions will be encrypted with a key derived from the app ID and room
+    name. A custom password must match between any peers in the room for them to
+    connect. See [encryption](#encryption) for more details.
 
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)

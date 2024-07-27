@@ -151,6 +151,5 @@ export const defaultRelayUrls = [
   'a.nos.lol',
   'eu.purplerelay.com',
   'nostr2.sanhauf.com',
-  'relay.rebelbase.site',
   'e.nos.lol'
 ].map(url => 'wss://' + url)

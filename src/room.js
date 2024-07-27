@@ -6,6 +6,7 @@ import {
   entries,
   fromEntries,
   fromJson,
+  isBrowser,
   keys,
   libName,
   mkErr,
@@ -28,6 +29,7 @@ const internalNs = ns => '@_' + ns
 export default (onPeer, onPeerLeave, onSelfLeave) => {
   const peerMap = {}
   const actions = {}
+  const actionsCache = {}
   const pendingTransmissions = {}
   const pendingPongs = {}
   const pendingStreamMetas = {}
@@ -70,11 +72,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
 
   const makeAction = type => {
     if (actions[type]) {
-      return [
-        actions[type].send,
-        actions[type].setOnComplete,
-        actions[type].setOnProgress
-      ]
+      return actionsCache[type]
     }
 
     if (!type) {
@@ -201,11 +199,11 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
       }
     }
 
-    return [
+    return (actionsCache[type] ||= [
       actions[type].send,
       actions[type].setOnComplete,
       actions[type].setOnProgress
-    ]
+    ])
   }
 
   const handleData = (id, data) => {
@@ -266,6 +264,16 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
     }
   }
 
+  const leave = async () => {
+    await sendLeave('')
+    await new Promise(res => setTimeout(res, 99))
+    entries(peerMap).forEach(([id, peer]) => {
+      peer.destroy()
+      delete peerMap[id]
+    })
+    onSelfLeave()
+  }
+
   const [sendPing, getPing] = makeAction(internalNs('ping'))
   const [sendPong, getPong] = makeAction(internalNs('pong'))
   const [sendSignal, getSignal] = makeAction(internalNs('signal'))
@@ -314,8 +322,14 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
 
   getLeave((_, id) => exitPeer(id))
 
+  if (isBrowser) {
+    addEventListener('beforeunload', leave)
+  }
+
   return {
     makeAction,
+
+    leave,
 
     ping: async id => {
       if (!id) {
@@ -327,16 +341,6 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
       sendPing('', id)
       await new Promise(res => (pendingPongs[id] = res))
       return Date.now() - start
-    },
-
-    leave: async () => {
-      await sendLeave('')
-      await new Promise(res => setTimeout(res, 99))
-      entries(peerMap).forEach(([id, peer]) => {
-        peer.destroy()
-        delete peerMap[id]
-      })
-      onSelfLeave()
     },
 
     getPeers: () =>

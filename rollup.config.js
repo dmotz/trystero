@@ -4,6 +4,8 @@ import resolve from '@rollup/plugin-node-resolve'
 import terser from '@rollup/plugin-terser'
 
 const ecma = 2019
+const nodeEnv = '"production"'
+
 const config = {
   output: {
     compact: true,
@@ -14,7 +16,8 @@ const config = {
     resolve({browser: true, preferBuiltins: false}),
     commonJs(),
     replace({
-      'process.env.NODE_ENV': JSON.stringify('production'),
+      'process.env.NODE_ENV': nodeEnv,
+      'process?.env?.NODE_ENV': nodeEnv,
       preventAssignment: true
     }),
     terser({

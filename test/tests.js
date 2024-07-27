@@ -198,6 +198,15 @@ export default (strategy, config) =>
           expect(receivedMessage3).toEqual(empty)
           expect(receivedMessage4).toEqual(empty)
 
+          expect(
+            await page.evaluate(
+              ([roomId, actionName]) =>
+                window[roomId].makeAction(actionName) ===
+                window[roomId].makeAction(actionName + ''),
+              [roomNs, 'mucho']
+            )
+          ).toBe(true)
+
           const makeBinaryAction = ([roomId, message, metadata]) => {
             const [sendBinary, getBinary, onProgress] =
               window[roomId].makeAction('binary')
