@@ -37,10 +37,12 @@ export default ({init, subscribe, announce}) => {
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
-    const key = config.password && genKey(config.password, appId, roomId)
+    const key = genKey(config.password || '', appId, roomId)
 
-    const withKey = f => async signal =>
-      key ? {type: signal.type, sdp: await f(key, signal.sdp)} : signal
+    const withKey = f => async signal => ({
+      type: signal.type,
+      sdp: await f(key, signal.sdp)
+    })
 
     const toPlain = withKey(decrypt)
     const toCipher = withKey(encrypt)
