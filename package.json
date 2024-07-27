@@ -29,8 +29,8 @@
     "@noble/curves": "^1.4.0",
     "@supabase/supabase-js": "^2.43.4",
     "@thaunknown/simple-peer": "^10.0.7",
-    "@waku/discovery": "^0.0.2",
-    "@waku/sdk": "^0.0.25",
+    "@waku/discovery": "^0.0.3",
+    "@waku/sdk": "^0.0.26",
     "firebase": "^10.9.0",
     "libp2p": "^1.3.0",
     "mqtt": "^5.7.0"
@@ -79,6 +79,7 @@
     "decentralized",
     "signaling",
     "pairing",
-    "react"
+    "react",
+    "supabase"
   ]
 }
