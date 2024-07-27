@@ -365,11 +365,11 @@ Once peers are connected to each other all of their communications are
 end-to-end encrypted. During the initial connection / discovery process, peers'
 [SDPs](https://en.wikipedia.org/wiki/Session_Description_Protocol) are sent via
 the chosen peering strategy medium. By default the SDP is encrypted using a key
-derived from your app ID and room name to prevent plaintext session data from
+derived from your app ID and room ID to prevent plaintext session data from
 appearing in logs. This is fine for most use cases, however a relay strategy
-operator can reverse engineer the key using the room name and the app name. A
-more secure option is to pass a `password` parameter in the app configuration
-object which will be used to derive the encryption key:
+operator can reverse engineer the key using the room and app IDs. A more secure
+option is to pass a `password` parameter in the app configuration object which
+will be used to derive the encryption key:
 
 ```js
 joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
