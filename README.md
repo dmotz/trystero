@@ -157,6 +157,14 @@ To unsubscribe from events, leave the room:
 room.leave()
 ```
 
+You can access the local user's peer ID by importing `selfId` like so:
+
+```js
+import {selfId} from 'trystero'
+
+console.log(`my peer ID is ${selfId}`)
+```
+
 ## Broadcast events
 
 Send peers your video stream:
