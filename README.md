@@ -863,8 +863,8 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 | 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
 | 🪐 **IPFS**       | none 🏆         | 945K         | ⏱️⏱️             |
 
-**¹** All strategies except Firebase require zero setup. Firebase is a managed
-strategy which requires setting up an account.
+**¹** All strategies except Supabase and Firebase require zero setup. Supabase
+and Firebase are managed strategies which require setting up an account.
 
 **²** Calculated via Rollup bundling + Terser compression.
 
