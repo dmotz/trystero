@@ -16,9 +16,11 @@ export const joinRoom = strategy({
       sockets[clientId] = client.stream.socket
       msgHandlers[clientId] = {}
 
-      client.on('message', (topic, buffer) =>
-        msgHandlers[clientId][topic]?.(topic, buffer.toString())
-      )
+      client
+        .on('message', (topic, buffer) =>
+          msgHandlers[clientId][topic]?.(topic, buffer.toString())
+        )
+        .on('error', err => console.error(err))
 
       return new Promise(res => client.on('connect', () => res(client)))
     }),
