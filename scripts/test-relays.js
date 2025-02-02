@@ -1,10 +1,11 @@
 import WebSocket from 'ws'
 import {schnorr} from '@noble/curves/secp256k1'
 import chalk from 'chalk'
+import mqtt from 'mqtt'
 import {encodeBytes, toHex, toJson} from '../src/utils.js'
-import {defaultRelayUrls as mqtt} from '../src/mqtt.js'
-import {defaultRelayUrls as nostr} from '../src/nostr.js'
-import {defaultRelayUrls as torrent} from '../src/torrent.js'
+import {defaultRelayUrls as mqttRelays} from '../src/mqtt.js'
+import {defaultRelayUrls as nostrRelays} from '../src/nostr.js'
+import {defaultRelayUrls as torrentRelays} from '../src/torrent.js'
 
 const privateKey = schnorr.utils.randomPrivateKey()
 const nostrEvent = await (async () => {
@@ -41,12 +42,24 @@ const nostrEvent = await (async () => {
 })()
 
 const testRelay = (url, strategy) => {
-  const ws = new WebSocket(url)
   const start = Date.now()
-
   const output = (url, err) =>
     `${!err ? '✅' : '❌'} ${(Date.now() - start).toString().padStart(4)}ms ` +
     `${url.replace(/^wss:\/\//, '')}${err ? ` - (${chalk.red(err)})` : ''}`
+
+  if (strategy === 'mqtt') {
+    const client = mqtt.connect(url)
+
+    return new Promise((res, rej) => {
+      client.on('connect', res)
+      client.on('error', rej)
+    })
+      .then(() => output(url))
+      .catch(e => output(url, e))
+      .finally(() => client.end())
+  }
+
+  const ws = new WebSocket(url)
 
   return new Promise((res, rej) => {
     const timeout = setTimeout(() => rej('timeout'), 5000)
@@ -89,7 +102,13 @@ const testRelays = ([strategy, relays]) =>
     results
   ])
 
-Promise.all(Object.entries({nostr, mqtt, torrent}).map(testRelays)).then(res =>
+Promise.all(
+  Object.entries({
+    nostr: nostrRelays,
+    mqtt: mqttRelays,
+    torrent: torrentRelays
+  }).map(testRelays)
+).then(res =>
   res.forEach(([strategy, list]) => {
     console.log(strategy.toUpperCase() + ':')
     console.log(list.join('\n'), '\n')
