@@ -162,7 +162,7 @@ export default ({init, subscribe, announce}) => {
 
         try {
           plainOffer = await toPlain(offer)
-        } catch (_) {
+        } catch {
           handleJoinError(peerId, 'offer')
           return
         }
