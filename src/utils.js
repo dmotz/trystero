@@ -43,6 +43,9 @@ export const toJson = JSON.stringify
 
 export const fromJson = JSON.parse
 
+export const strToNum = (str, limit = Number.MAX_SAFE_INTEGER) =>
+  str.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % limit
+
 const defaultRetryMs = 3333
 const socketRetryPeriods = {}
 
