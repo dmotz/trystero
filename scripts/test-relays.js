@@ -5,9 +5,12 @@ import mqtt from 'mqtt'
 import {encodeBytes, toHex, toJson} from '../src/utils.js'
 import {defaultRelayUrls as mqttRelays} from '../src/mqtt.js'
 import {defaultRelayUrls as nostrRelays} from '../src/nostr.js'
+
 import {defaultRelayUrls as torrentRelays} from '../src/torrent.js'
 
+const timeLimit = 5000
 const privateKey = schnorr.utils.randomPrivateKey()
+
 const nostrEvent = await (async () => {
   const payload = {
     kind: 29333,
@@ -62,7 +65,7 @@ const testRelay = (url, strategy) => {
   const ws = new WebSocket(url)
 
   return new Promise((res, rej) => {
-    const timeout = setTimeout(() => rej('timeout'), 5000)
+    const timeout = setTimeout(() => rej('timeout'), timeLimit)
 
     ws.on('open', () => {
       if (strategy === 'nostr') {
@@ -77,7 +80,7 @@ const testRelay = (url, strategy) => {
                 rej(errMsg)
               }
             }
-          } catch (e) {
+          } catch {
             rej('failed to parse nostr response')
           }
         })
