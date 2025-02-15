@@ -16,19 +16,25 @@ import {
 
 const clients = {}
 const defaultRedundancy = 5
-const kind = 29333
 const tag = 'x'
 const eventMsgType = 'EVENT'
 const privateKey = isBrowser && schnorr.utils.randomPrivateKey()
 const publicKey = isBrowser && toHex(schnorr.getPublicKey(privateKey))
 const subIdToTopic = {}
 const msgHandlers = {}
+const kindCache = {}
 
 const now = () => Math.floor(Date.now() / 1000)
 
+const topicToKind = topic =>
+  kindCache[topic] ||
+  (kindCache[topic] =
+    (topic.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % 10_000) +
+    20_000)
+
 const createEvent = async (topic, content) => {
   const payload = {
-    kind,
+    kind: topicToKind(topic),
     content,
     pubkey: publicKey,
     created_at: now(),
@@ -69,7 +75,7 @@ const subscribe = (subId, topic) => {
     'REQ',
     subId,
     {
-      kinds: [kind],
+      kinds: [topicToKind(topic)],
       since: now(),
       ['#' + tag]: [topic]
     }
