@@ -2,7 +2,6 @@ import {
   createDecoder,
   createEncoder,
   createLightNode,
-  waitForRemotePeer,
   Protocols
 } from '@waku/sdk'
 import {wakuPeerExchangeDiscovery} from '@waku/discovery'
@@ -49,7 +48,7 @@ export const joinRoom = strategy({
       }
     }).then(async node => {
       await node.start()
-      await waitForRemotePeer(node, [Protocols.LightPush, Protocols.Filter])
+      await node.waitForPeers([Protocols.LightPush, Protocols.Filter])
       return node
     }),
 
