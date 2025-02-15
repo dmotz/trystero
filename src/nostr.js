@@ -139,7 +139,6 @@ export const getRelaySockets = socketGetter(clients)
 export {selfId} from './utils.js'
 
 export const defaultRelayUrls = [
-  'e.nos.lol',
   'eu.purplerelay.com',
   'ftp.halifax.rwth-aachen.de/nostr',
   'henhouse.social/relay',
@@ -165,7 +164,6 @@ export const defaultRelayUrls = [
   'relay.nostromo.social',
   'relay.snort.social',
   'relay.verified-nostr.com',
-  'relay.xeble.me',
   'strfry.openhoofd.nl',
   'yabu.me/v2'
 ].map(url => 'wss://' + url)
