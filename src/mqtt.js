@@ -3,7 +3,7 @@ import strategy from './strategy.js'
 import {getRelays, selfId, toJson} from './utils.js'
 
 const sockets = {}
-const defaultRedundancy = 5
+const defaultRedundancy = 4
 const msgHandlers = {}
 const getClientId = ({options}) => options.host + options.path
 
