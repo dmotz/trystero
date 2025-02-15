@@ -141,7 +141,6 @@ export {selfId} from './utils.js'
 export const defaultRelayUrls = [
   'eu.purplerelay.com',
   'ftp.halifax.rwth-aachen.de/nostr',
-  'henhouse.social/relay',
   'longhorn.bgp.rodeo',
   'multiplexer.huszonegy.world',
   'nfdb.noswhere.com',
@@ -158,7 +157,6 @@ export const defaultRelayUrls = [
   'nostr.vulpem.com',
   'nostr2.sanhauf.com',
   'nostrelay.circum.space',
-  'nostrelay.memory-art.xyz',
   'relay.fountain.fm',
   'relay.nostraddress.com',
   'relay.nostromo.social',
