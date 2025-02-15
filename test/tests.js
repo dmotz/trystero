@@ -24,7 +24,9 @@ const relayRedundancy = 4
 
 export default (strategy, config) =>
   test(`Trystero: ${strategy}`, async ({page, browser, browserName}) => {
-    console.log(`${emojis[strategy]} ${strategy}`)
+    console.log(
+      `  🐎   ${shortBrowsers[browserName]}: ${emojis[strategy]} ${strategy}`
+    )
 
     if (proxy) {
       console.log(`\n👺 using proxy: ${proxy}\n`)
@@ -372,7 +374,13 @@ export default (strategy, config) =>
             )
           }
 
-          console.log(`  ⏱️    ${strategy.padEnd(12, ' ')} ${joinTime}ms`)
+          console.log(
+            '  ⏱️   ',
+            `${shortBrowsers[browserName]}:`,
+            emojis[strategy],
+            strategy.padEnd(12, ' '),
+            `${joinTime}ms`
+          )
         })
     )
   })
@@ -387,7 +395,7 @@ const emojis = {
 }
 
 const shortBrowsers = {
-  chromium: 'CH',
-  webkit: 'WK',
-  firefox: 'FF'
+  chromium: chalk.green('CH'),
+  webkit: chalk.blue('WK'),
+  firefox: chalk.yellow('FF')
 }
