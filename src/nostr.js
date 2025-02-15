@@ -27,7 +27,7 @@ const kindCache = {}
 const now = () => Math.floor(Date.now() / 1000)
 
 const topicToKind = topic =>
-  kindCache[topic] ||
+  kindCache[topic] ??
   (kindCache[topic] =
     (topic.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % 10_000) +
     20_000)
