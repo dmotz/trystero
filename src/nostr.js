@@ -10,6 +10,7 @@ import {
   makeSocket,
   selfId,
   socketGetter,
+  strToNum,
   toHex,
   toJson
 } from './utils.js'
@@ -27,10 +28,7 @@ const kindCache = {}
 const now = () => Math.floor(Date.now() / 1000)
 
 const topicToKind = topic =>
-  kindCache[topic] ??
-  (kindCache[topic] =
-    (topic.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % 10_000) +
-    20_000)
+  kindCache[topic] ?? (kindCache[topic] = strToNum(topic, 10_000) + 20_000)
 
 const createEvent = async (topic, content) => {
   const payload = {
@@ -89,7 +87,7 @@ const unsubscribe = subId => {
 
 export const joinRoom = strategy({
   init: config =>
-    getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
+    getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
       const client = makeSocket(url, data => {
         const [msgType, subId, payload, relayMsg] = fromJson(data)
 
