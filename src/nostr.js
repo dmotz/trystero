@@ -28,7 +28,7 @@ const kindCache = {}
 const now = () => Math.floor(Date.now() / 1000)
 
 const topicToKind = topic =>
-  kindCache[topic] ?? (kindCache[topic] = strToNum(topic, 10_000) + 20_000)
+  (kindCache[topic] ??= strToNum(topic, 10_000) + 20_000)
 
 const createEvent = async (topic, content) => {
   const payload = {
