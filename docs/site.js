@@ -1,4 +1,4 @@
-import {joinRoom, selfId} from 'https://esm.run/trystero@0.20.0'
+import {joinRoom, selfId} from 'https://esm.run/trystero@0.20.1'
 
 const byId = document.getElementById.bind(document)
 const canvas = byId('canvas')
