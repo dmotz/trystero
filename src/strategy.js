@@ -47,7 +47,7 @@ export default ({init, subscribe, announce}) => {
     const toPlain = withKey(decrypt)
     const toCipher = withKey(encrypt)
 
-    const makeOffer = () => initPeer(true, config.rtcConfig)
+    const makeOffer = () => initPeer(true, config)
 
     const connectPeer = (peer, peerId, clientId) => {
       if (connectedPeers[peerId]) {
@@ -144,15 +144,18 @@ export default ({init, subscribe, announce}) => {
           close: () => disconnectPeer(peer, peerId)
         })
 
+        console.log(clientId, 'sending offer', peerId, offer)
         signalPeer(topic, toJson({peerId: selfId, offer}))
       } else if (offer) {
+        console.log(clientId, 'received offer', peerId, offer)
         const myOffer = pendingOffers[peerId]?.[clientId]
 
         if (myOffer && selfId > peerId) {
+          console.log('skipping offer since i have one', {peerId, clientId})
           return
         }
 
-        const peer = initPeer(false, config.rtcConfig)
+        const peer = initPeer(false, config)
         peer.setHandlers({
           connect: () => connectPeer(peer, peerId, clientId),
           close: () => disconnectPeer(peer, peerId)
