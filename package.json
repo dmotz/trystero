@@ -28,7 +28,6 @@
   "dependencies": {
     "@noble/curves": "^1.8.1",
     "@supabase/supabase-js": "^2.48.1",
-    "@thaunknown/simple-peer": "^10.0.11",
     "@waku/discovery": "^0.0.6",
     "@waku/sdk": "^0.0.29",
     "firebase": "^11.3.1",
