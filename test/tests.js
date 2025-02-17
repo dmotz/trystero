@@ -185,10 +185,9 @@ export default (strategy, config) =>
                 }, 999)
               })
 
-            const args2 = [roomNs, streamMeta]
             const [peer2TrackInfo, peer1TrackInfo] = await Promise.all([
-              page.evaluate(onPeerTrack, args2),
-              page2.evaluate(onPeerTrack, args2)
+              page.evaluate(onPeerTrack, args),
+              page2.evaluate(onPeerTrack, args)
             ])
 
             const trackType = 'MediaStreamTrack'
