@@ -136,8 +136,7 @@ export default (strategy, config) =>
                     video: true
                   })
                   window[roomId].addStream(stream, null, streamMeta)
-                  window.mediaStream = stream
-                }, 1000)
+                }, 999)
               })
 
             const streamMeta = {id: Math.random()}
@@ -157,6 +156,54 @@ export default (strategy, config) =>
               peerId: peer2Id,
               meta: streamMeta,
               streamType
+            })
+
+            // # onPeerTrack()
+
+            const onPeerTrack = ([roomId, streamMeta]) =>
+              new Promise(res => {
+                window[roomId].onPeerTrack((track, stream, peerId, meta) =>
+                  res({
+                    peerId,
+                    meta,
+                    streamType: stream.constructor.name,
+                    trackType: track.constructor.name
+                  })
+                )
+
+                setTimeout(async () => {
+                  const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: true
+                  })
+                  window[roomId].addTrack(
+                    stream.getTracks()[0],
+                    stream,
+                    null,
+                    streamMeta
+                  )
+                }, 999)
+              })
+
+            const args2 = [roomNs, streamMeta]
+            const [peer2TrackInfo, peer1TrackInfo] = await Promise.all([
+              page.evaluate(onPeerTrack, args2),
+              page2.evaluate(onPeerTrack, args2)
+            ])
+
+            const trackType = 'MediaStreamTrack'
+
+            expect(peer1TrackInfo).toEqual({
+              peerId: peer1Id,
+              meta: streamMeta,
+              streamType,
+              trackType
+            })
+            expect(peer2TrackInfo).toEqual({
+              peerId: peer2Id,
+              meta: streamMeta,
+              streamType,
+              trackType
             })
           }
 
