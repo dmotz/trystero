@@ -126,8 +126,8 @@ export default (strategy, config) =>
 
             const onPeerStream = ([roomId, streamMeta]) =>
               new Promise(res => {
-                window[roomId].onPeerStream((_, peerId, meta) =>
-                  res({peerId, meta})
+                window[roomId].onPeerStream((stream, peerId, meta) =>
+                  res({peerId, meta, streamType: stream.constructor.name})
                 )
 
                 setTimeout(async () => {
@@ -146,9 +146,18 @@ export default (strategy, config) =>
               page.evaluate(onPeerStream, args),
               page2.evaluate(onPeerStream, args)
             ])
+            const streamType = 'MediaStream'
 
-            expect(peer1StreamInfo).toEqual({peerId: peer1Id, meta: streamMeta})
-            expect(peer2StreamInfo).toEqual({peerId: peer2Id, meta: streamMeta})
+            expect(peer1StreamInfo).toEqual({
+              peerId: peer1Id,
+              meta: streamMeta,
+              streamType
+            })
+            expect(peer2StreamInfo).toEqual({
+              peerId: peer2Id,
+              meta: streamMeta,
+              streamType
+            })
           }
 
           // # getPeers()
