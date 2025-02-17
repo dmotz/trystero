@@ -144,14 +144,11 @@ export default ({init, subscribe, announce}) => {
           close: () => disconnectPeer(peer, peerId)
         })
 
-        console.log(clientId, 'sending offer', peerId, offer)
         signalPeer(topic, toJson({peerId: selfId, offer}))
       } else if (offer) {
-        console.log(clientId, 'received offer', peerId, offer)
         const myOffer = pendingOffers[peerId]?.[clientId]
 
         if (myOffer && selfId > peerId) {
-          console.log('skipping offer since i have one', {peerId, clientId})
           return
         }
 
