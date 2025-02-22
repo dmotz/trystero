@@ -54,8 +54,9 @@
   },
   "scripts": {
     "build": "rollup -c",
+    "get-bundle-sizes": "node scripts/get-bundle-sizes.js",
     "test": "playwright test ./test",
-    "test-proxy": "PROXY=$(node ./scripts/find-proxy.js) npm run test",
+    "test-proxy": "PROXY=$(node scripts/find-proxy.js) npm run test",
     "test-ice": "node scripts/test-ice.js",
     "test-relays": "node scripts/test-relays.js"
   },
