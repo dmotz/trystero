@@ -1,10 +1,12 @@
+import {alloc} from './utils.js'
+
 const iceTimeout = 5000
 const iceStateEvent = 'icegatheringstatechange'
 
-export default (initiator, config) => {
-  const pc = new RTCPeerConnection({
-    ...{iceServers: [{urls: defaultIceServers}]},
-    ...config.rtcConfig
+export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
+  const pc = new (rtcPolyfill || RTCPeerConnection)({
+    iceServers: defaultIceServers.concat(turnConfig || []),
+    ...rtcConfig
   })
 
   const handlers = {}
@@ -188,8 +190,6 @@ export default (initiator, config) => {
 }
 
 export const defaultIceServers = [
-  ...Array(3)
-    .fill()
-    .map((_, i) => `stun:stun${i || ''}.l.google.com:19302`),
+  ...alloc(3, (_, i) => `stun:stun${i || ''}.l.google.com:19302`),
   'stun:global.stun.twilio.com:3478'
-]
+].map(url => ({urls: url}))
