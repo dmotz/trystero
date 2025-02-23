@@ -89,8 +89,6 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   }
 
   return {
-    id: crypto.randomUUID(),
-
     created: Date.now(),
 
     connection: pc,
