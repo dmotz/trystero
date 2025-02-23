@@ -594,8 +594,8 @@ the same namespace will return the same room instance.
     for all peer connections.
 
   - `turnConfig` - **(optional)** Specifies a custom list of TURN servers to use
-    (see Connection Issue section). Each item in the list should correspond to
-    an
+    (see [Connection issues](#connection-issues) section). Each item in the list
+    should correspond to an
     [ICE server config object](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection#iceservers).
     When passing a TURN config like this, Trystero's default STUN servers will
     also be used. To override this and use both custom STUN and TURN servers,
