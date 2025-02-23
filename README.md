@@ -45,7 +45,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
-  - [Connection issues / TURN](#connection-issues--turn-servers)
+  - [Connection issues / TURN](#connection-issues)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
@@ -472,7 +472,7 @@ export const useRoom = (roomConfig, roomId) => {
 }
 ```
 
-### Connection issues / TURN servers
+### Connection issues
 
 WebRTC is powerful but some networks simply don't allow direct P2P connections
 using it. If you find that certain user pairings aren't working in Trystero,
