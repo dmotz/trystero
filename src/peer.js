@@ -2,6 +2,7 @@ import {alloc} from './utils.js'
 
 const iceTimeout = 5000
 const iceStateEvent = 'icegatheringstatechange'
+const filterTrickle = sdp => sdp.replace(/a=ice-options:trickle\s\n/g, '')
 
 export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   const pc = new (rtcPolyfill || RTCPeerConnection)({
@@ -41,7 +42,7 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
 
     return {
       type: pc.localDescription.type,
-      sdp: pc.localDescription.sdp
+      sdp: filterTrickle(pc.localDescription.sdp)
     }
   }
 
@@ -64,7 +65,7 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
       makingOffer = true
       await pc.setLocalDescription()
       const offer = await waitForIceGathering(pc)
-      handlers.signal?.({type: offer.type, sdp: offer.sdp})
+      handlers.signal?.({type: offer.type, sdp: filterTrickle(offer.sdp)})
     } catch (err) {
       handlers.error?.(err)
     } finally {
@@ -129,8 +130,8 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
           await pc.setRemoteDescription(sdp)
           await pc.setLocalDescription()
           const answer = await waitForIceGathering(pc)
-          handlers.signal?.({type: answer.type, sdp: answer.sdp})
-          return {type: answer.type, sdp: answer.sdp}
+          handlers.signal?.({type: answer.type, sdp: filterTrickle(answer.sdp)})
+          return {type: answer.type, sdp: filterTrickle(answer.sdp)}
         } else if (sdp.type === 'answer') {
           await pc.setRemoteDescription(sdp)
         }
