@@ -903,23 +903,19 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 ## Strategy comparison
 
-|                   | one-time setup¹ | bundle size² | time to connect³ |
-| ----------------- | --------------- | ------------ | ---------------- |
-| 🐦 **Nostr**      | none 🏆         | 54K          | ⏱️⏱️             |
-| 📡 **MQTT**       | none 🏆         | 332K         | ⏱️⏱️             |
-| 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
-| ⚡️ **Supabase**  | ~5 mins         | 150K         | ⏱️ 🏆            |
-| 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
-| 🪐 **IPFS**       | none 🏆         | 945K         | ⏱️⏱️             |
+|                   | one-time setup¹ | bundle size² |
+| ----------------- | --------------- | ------------ |
+| 🐦 **Nostr**      | none 🏆         | 16K          |
+| 📡 **MQTT**       | none 🏆         | 75K          |
+| 🌊 **BitTorrent** | none 🏆         | 5K 🏆        |
+| ⚡️ **Supabase**  | ~5 mins         | 27K          |
+| 🔥 **Firebase**   | ~5 mins         | 43K          |
+| 🪐 **IPFS**       | none 🏆         | 143K         |
 
 **¹** All strategies except Supabase and Firebase require zero setup. Supabase
 and Firebase are managed strategies which require setting up an account.
 
-**²** Calculated via Rollup bundling + Terser compression.
-
-**³** Relative speed of peers connecting to each other when joining a room.
-Firebase is near-instantaneous while the other strategies are a bit slower to
-exchange peering info.
+**²** Calculated via Terser minification + Brotli compression.
 
 ### How to choose
 
