@@ -80,10 +80,8 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   }
 
   pc.ontrack = e => {
-    handlers.track?.(e)
-    e.streams.forEach(stream => {
-      handlers.stream?.(stream)
-    })
+    handlers.track?.(e.track, e.streams[0])
+    handlers.stream?.(e.streams[0])
   }
 
   pc.onremovestream = event => {
