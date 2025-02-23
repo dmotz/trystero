@@ -579,6 +579,16 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
+  - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
+    list of URLs for the strategy to use to bootstrap P2P connections. These
+    would be BitTorrent trackers, Nostr relays, and MQTT brokers, respectively.
+    They must support secure WebSocket connections.
+
+  - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
+    Integer specifying how many torrent trackers to connect to simultaneously in
+    case some fail. Passing a `relayUrls` option will cause this option to be
+    ignored as the entire list will be used.
+
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
@@ -592,15 +602,10 @@ the same namespace will return the same room instance.
     instead pass the config via the above `rtcConfig.iceServers` option as a
     list of both STUN/TURN servers — this won't inherit Trystero's defaults.
 
-  - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
-    list of URLs for the strategy to use to bootstrap P2P connections. These
-    would be BitTorrent trackers, Nostr relays, and MQTT brokers, respectively.
-    They must support secure WebSocket connections.
-
-  - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
-    Integer specifying how many torrent trackers to connect to simultaneously in
-    case some fail. Passing a `relayUrls` option will cause this option to be
-    ignored as the entire list will be used.
+  - `rtcPolyfill` - **(optional)** Use this to pass a custom
+    [RTCPeerConnection](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection)-compatible
+    constructor. This is useful for running outside of a browser, such as in
+    Node (still experimental).
 
   - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
     `anon public` API key.
