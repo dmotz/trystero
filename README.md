@@ -603,7 +603,7 @@ the same namespace will return the same room instance.
     list of both STUN/TURN servers — this won't inherit Trystero's defaults.
 
   - `rtcPolyfill` - **(optional)** Use this to pass a custom
-    [RTCPeerConnection](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection)-compatible
+    [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection)-compatible
     constructor. This is useful for running outside of a browser, such as in
     Node (still experimental).
 
