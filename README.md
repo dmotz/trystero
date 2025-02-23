@@ -471,6 +471,45 @@ export const useRoom = (roomConfig, roomId) => {
 }
 ```
 
+### Connection issues / TURN servers
+
+WebRTC is powerful but some networks simply don't allow direct P2P connections
+using it. If you find that certain user pairings aren't working in Trystero,
+you're likely encountering an issue at the network provider level. To solve this
+you can configure a TURN server which will act as a proxy layer for peers
+that aren't able to connect directly to one another.
+
+1. If you can, confirm that the issue is specific to particular network
+   conditions (e.g. user with ISP A cannot connect to a user with ISP B). If
+   other user pairings are working (like those between two browsers on the same
+   machine), this likely confirms that Trystero is working correctly.
+2. Sign up for a TURN service or host your own. There are various hosted TURN
+   services you can find online (like
+   [Open Relay](https://www.metered.ca/stun-turn) or
+   [Cloudflare](https://developers.cloudflare.com/calls/turn/)), some with free
+   tiers. You can also host an open source TURN server like
+   [coturn](https://github.com/coturn/coturn),
+   [Pion TURN](https://github.com/pion/turn),
+   [Violet](https://github.com/paullouisageneau/violet), or
+   [eturnal](https://github.com/processone/eturnal).
+3. Once you have a TURN server, configure Trystero with it like this:
+   ```js
+   const room = joinRoom(
+     {
+       // ...your app config
+       turnConfig: [
+         {
+           // single string or list of strings of urls to access TURN server
+           urls: ['turn:your-turn-server.ok:1979'],
+           username: 'username',
+           credential: 'password'
+         }
+       ]
+     },
+     'roomId'
+   )
+   ```
+
 ### Supabase setup
 
 To use the Supabase strategy:
