@@ -125,10 +125,17 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
           }
           await pc.setRemoteDescription(sdp)
           await pc.setLocalDescription()
+
           const answer = await waitForIceGathering(pc)
-          handlers.signal?.({type: answer.type, sdp: filterTrickle(answer.sdp)})
-          return {type: answer.type, sdp: filterTrickle(answer.sdp)}
-        } else if (sdp.type === 'answer') {
+          const answerSdp = filterTrickle(answer.sdp)
+
+          handlers.signal?.({type: answer.type, sdp: answerSdp})
+          return {type: answer.type, sdp: answerSdp}
+        } else if (
+          sdp.type === 'answer' &&
+          (pc.signalingState === 'have-local-offer' ||
+            pc.signalingState === 'have-remote-offer')
+        ) {
           await pc.setRemoteDescription(sdp)
         }
       } catch (err) {
