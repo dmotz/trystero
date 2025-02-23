@@ -11,7 +11,7 @@ The net is full of open, decentralized communication channels: torrent trackers,
 IoT device brokers, boutique file protocols, and niche social networks.
 
 Trystero piggybacks on these networks to automatically establish secure,
-private, p2p connections between your app's users with no effort on your part.
+private, P2P connections between your app's users with no effort on your part.
 
 Peers can connect via
 [🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison)
@@ -45,6 +45,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
+  - [Connection issues / TURN](#connection-issues)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
@@ -581,6 +582,15 @@ the same namespace will return the same room instance.
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
+
+  - `turnConfig` - **(optional)** Specifies a custom list of TURN servers to use
+    (see Connection Issue section). Each item in the list should correspond to
+    an
+    [ICE server config object](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection#iceservers).
+    When passing a TURN config like this, Trystero's default STUN servers will
+    also be used. To override this and use both custom STUN and TURN servers,
+    instead pass the config via the above `rtcConfig.iceServers` option as a
+    list of both STUN/TURN servers — this won't inherit Trystero's defaults.
 
   - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
     list of URLs for the strategy to use to bootstrap P2P connections. These
