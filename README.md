@@ -45,7 +45,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
-  - [Connection issues / TURN](#connection-issues)
+  - [Connection issues / TURN](#connection-issues--turn-servers)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
