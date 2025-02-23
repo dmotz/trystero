@@ -623,7 +623,7 @@ the same namespace will return the same room instance.
 
 - `onError(details)` - **(optional)** A callback function that will be called if
   the room cannot be joined due to an incorrect password. `details` is an
-  object containing `appId`, `roomId`, `peerId`, and `error` decribing the
+  object containing `appId`, `roomId`, `peerId`, and `error` describing the
   error.
 
 Returns an object with the following methods:
