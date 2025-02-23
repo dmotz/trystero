@@ -47,7 +47,7 @@ export default ({init, subscribe, announce}) => {
     const toPlain = withKey(decrypt)
     const toCipher = withKey(encrypt)
 
-    const makeOffer = () => initPeer(true, config.rtcConfig)
+    const makeOffer = () => initPeer(true, config)
 
     const connectPeer = (peer, peerId, clientId) => {
       if (connectedPeers[peerId]) {
@@ -152,7 +152,7 @@ export default ({init, subscribe, announce}) => {
           return
         }
 
-        const peer = initPeer(false, config.rtcConfig)
+        const peer = initPeer(false, config)
         peer.setHandlers({
           connect: () => connectPeer(peer, peerId, clientId),
           close: () => disconnectPeer(peer, peerId)

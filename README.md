@@ -11,7 +11,7 @@ The net is full of open, decentralized communication channels: torrent trackers,
 IoT device brokers, boutique file protocols, and niche social networks.
 
 Trystero piggybacks on these networks to automatically establish secure,
-private, p2p connections between your app's users with no effort on your part.
+private, P2P connections between your app's users with no effort on your part.
 
 Peers can connect via
 [🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison)
@@ -45,6 +45,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
+  - [Connection issues](#connection-issues)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
@@ -471,6 +472,45 @@ export const useRoom = (roomConfig, roomId) => {
 }
 ```
 
+### Connection issues
+
+WebRTC is powerful but some networks simply don't allow direct P2P connections
+using it. If you find that certain user pairings aren't working in Trystero,
+you're likely encountering an issue at the network provider level. To solve this
+you can configure a TURN server which will act as a proxy layer for peers
+that aren't able to connect directly to one another.
+
+1. If you can, confirm that the issue is specific to particular network
+   conditions (e.g. user with ISP A cannot connect to a user with ISP B). If
+   other user pairings are working (like those between two browsers on the same
+   machine), this likely confirms that Trystero is working correctly.
+2. Sign up for a TURN service or host your own. There are various hosted TURN
+   services you can find online (like
+   [Open Relay](https://www.metered.ca/stun-turn) or
+   [Cloudflare](https://developers.cloudflare.com/calls/turn/)), some with free
+   tiers. You can also host an open source TURN server like
+   [coturn](https://github.com/coturn/coturn),
+   [Pion TURN](https://github.com/pion/turn),
+   [Violet](https://github.com/paullouisageneau/violet), or
+   [eturnal](https://github.com/processone/eturnal).
+3. Once you have a TURN server, configure Trystero with it like this:
+   ```js
+   const room = joinRoom(
+     {
+       // ...your app config
+       turnConfig: [
+         {
+           // single string or list of strings of urls to access TURN server
+           urls: ['turn:your-turn-server.ok:1979'],
+           username: 'username',
+           credential: 'password'
+         }
+       ]
+     },
+     'roomId'
+   )
+   ```
+
 ### Supabase setup
 
 To use the Supabase strategy:
@@ -539,10 +579,6 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
-  - `rtcConfig` - **(optional)** Specifies a custom
-    [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
-    for all peer connections.
-
   - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
     list of URLs for the strategy to use to bootstrap P2P connections. These
     would be BitTorrent trackers, Nostr relays, and MQTT brokers, respectively.
@@ -552,6 +588,24 @@ the same namespace will return the same room instance.
     Integer specifying how many torrent trackers to connect to simultaneously in
     case some fail. Passing a `relayUrls` option will cause this option to be
     ignored as the entire list will be used.
+
+  - `rtcConfig` - **(optional)** Specifies a custom
+    [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
+    for all peer connections.
+
+  - `turnConfig` - **(optional)** Specifies a custom list of TURN servers to use
+    (see [Connection issues](#connection-issues) section). Each item in the list
+    should correspond to an
+    [ICE server config object](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection#iceservers).
+    When passing a TURN config like this, Trystero's default STUN servers will
+    also be used. To override this and use both custom STUN and TURN servers,
+    instead pass the config via the above `rtcConfig.iceServers` option as a
+    list of both STUN/TURN servers — this won't inherit Trystero's defaults.
+
+  - `rtcPolyfill` - **(optional)** Use this to pass a custom
+    [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection)-compatible
+    constructor. This is useful for running outside of a browser, such as in
+    Node (still experimental).
 
   - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
     `anon public` API key.
@@ -854,23 +908,19 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 ## Strategy comparison
 
-|                   | one-time setup¹ | bundle size² | time to connect³ |
-| ----------------- | --------------- | ------------ | ---------------- |
-| 🐦 **Nostr**      | none 🏆         | 54K          | ⏱️⏱️             |
-| 📡 **MQTT**       | none 🏆         | 332K         | ⏱️⏱️             |
-| 🌊 **BitTorrent** | none 🏆         | 25K 🏆       | ⏱️⏱️             |
-| ⚡️ **Supabase**  | ~5 mins         | 150K         | ⏱️ 🏆            |
-| 🔥 **Firebase**   | ~5 mins         | 177K         | ⏱️ 🏆            |
-| 🪐 **IPFS**       | none 🏆         | 945K         | ⏱️⏱️             |
+|                   | one-time setup¹ | bundle size² |
+| ----------------- | --------------- | ------------ |
+| 🐦 **Nostr**      | none 🏆         | 16K          |
+| 📡 **MQTT**       | none 🏆         | 75K          |
+| 🌊 **BitTorrent** | none 🏆         | 5K 🏆        |
+| ⚡️ **Supabase**  | ~5 mins         | 27K          |
+| 🔥 **Firebase**   | ~5 mins         | 43K          |
+| 🪐 **IPFS**       | none 🏆         | 143K         |
 
 **¹** All strategies except Supabase and Firebase require zero setup. Supabase
 and Firebase are managed strategies which require setting up an account.
 
-**²** Calculated via Rollup bundling + Terser compression.
-
-**³** Relative speed of peers connecting to each other when joining a room.
-Firebase is near-instantaneous while the other strategies are a bit slower to
-exchange peering info.
+**²** Calculated via Terser minification + Brotli compression.
 
 ### How to choose
 

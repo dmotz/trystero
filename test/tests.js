@@ -126,8 +126,8 @@ export default (strategy, config) =>
 
             const onPeerStream = ([roomId, streamMeta]) =>
               new Promise(res => {
-                window[roomId].onPeerStream((_, peerId, meta) =>
-                  res({peerId, meta})
+                window[roomId].onPeerStream((stream, peerId, meta) =>
+                  res({peerId, meta, streamType: stream.constructor.name})
                 )
 
                 setTimeout(async () => {
@@ -136,8 +136,7 @@ export default (strategy, config) =>
                     video: true
                   })
                   window[roomId].addStream(stream, null, streamMeta)
-                  window.mediaStream = stream
-                }, 1000)
+                }, 999)
               })
 
             const streamMeta = {id: Math.random()}
@@ -146,9 +145,65 @@ export default (strategy, config) =>
               page.evaluate(onPeerStream, args),
               page2.evaluate(onPeerStream, args)
             ])
+            const streamType = 'MediaStream'
 
-            expect(peer1StreamInfo).toEqual({peerId: peer1Id, meta: streamMeta})
-            expect(peer2StreamInfo).toEqual({peerId: peer2Id, meta: streamMeta})
+            expect(peer1StreamInfo).toEqual({
+              peerId: peer1Id,
+              meta: streamMeta,
+              streamType
+            })
+            expect(peer2StreamInfo).toEqual({
+              peerId: peer2Id,
+              meta: streamMeta,
+              streamType
+            })
+
+            // # onPeerTrack()
+
+            const onPeerTrack = ([roomId, streamMeta]) =>
+              new Promise(res => {
+                window[roomId].onPeerTrack((track, stream, peerId, meta) =>
+                  res({
+                    peerId,
+                    meta,
+                    streamType: stream.constructor.name,
+                    trackType: track.constructor.name
+                  })
+                )
+
+                setTimeout(async () => {
+                  const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: true
+                  })
+                  window[roomId].addTrack(
+                    stream.getTracks()[0],
+                    stream,
+                    null,
+                    streamMeta
+                  )
+                }, 999)
+              })
+
+            const [peer2TrackInfo, peer1TrackInfo] = await Promise.all([
+              page.evaluate(onPeerTrack, args),
+              page2.evaluate(onPeerTrack, args)
+            ])
+
+            const trackType = 'MediaStreamTrack'
+
+            expect(peer1TrackInfo).toEqual({
+              peerId: peer1Id,
+              meta: streamMeta,
+              streamType,
+              trackType
+            })
+            expect(peer2TrackInfo).toEqual({
+              peerId: peer2Id,
+              meta: streamMeta,
+              streamType,
+              trackType
+            })
           }
 
           // # getPeers()
