@@ -11,22 +11,14 @@ const unpack = packed => {
   return new Uint8Array(str.length).map((_, i) => str.charCodeAt(i)).buffer
 }
 
-export const sha1 = async str => {
-  if (strToSha1[str]) {
-    return strToSha1[str]
-  }
-
-  const hash = Array.from(
+export const sha1 = async str =>
+  strToSha1[str] ||
+  // eslint-disable-next-line require-atomic-updates
+  (strToSha1[str] = Array.from(
     new Uint8Array(await crypto.subtle.digest('SHA-1', encodeBytes(str)))
   )
     .map(b => b.toString(36))
-    .join('')
-
-  // eslint-disable-next-line require-atomic-updates
-  strToSha1[str] = hash
-
-  return hash
-}
+    .join(''))
 
 export const genKey = async (secret, appId, roomId) =>
   crypto.subtle.importKey(
