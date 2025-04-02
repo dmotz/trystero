@@ -5,7 +5,6 @@ import {
   fromJson,
   genId,
   getRelays,
-  isBrowser,
   libName,
   makeSocket,
   selfId,
@@ -19,8 +18,8 @@ const clients = {}
 const defaultRedundancy = 5
 const tag = 'x'
 const eventMsgType = 'EVENT'
-const privateKey = isBrowser && schnorr.utils.randomPrivateKey()
-const publicKey = isBrowser && toHex(schnorr.getPublicKey(privateKey))
+const privateKey = schnorr.utils.randomPrivateKey()
+const publicKey = toHex(schnorr.getPublicKey(privateKey))
 const subIdToTopic = {}
 const msgHandlers = {}
 const kindCache = {}
