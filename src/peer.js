@@ -95,12 +95,9 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   }
 
   if (initiator) {
-    pc.setLocalDescription().then(() => {
-      handlers.signal?.({
-        type: pc.localDescription.type,
-        sdp: filterTrickle(pc.localDescription.sdp)
-      })
-    })
+    if (!pc.canTrickleIceCandidates) {
+      pc.onnegotiationneeded()
+    }
   }
 
   return {
