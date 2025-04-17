@@ -46,6 +46,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
   - [Connection issues](#connection-issues)
+  - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
