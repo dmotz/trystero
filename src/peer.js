@@ -29,12 +29,12 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     await Promise.race([
       new Promise(resolve => {
         const checkState = () => {
-          // Check if trickle candidates are supported
           if (!pc.canTrickleIceCandidates) {
             pc.removeEventListener(iceStateEvent, checkState)
             resolve()
             return
           }
+
           if (pc.iceGatheringState === 'complete') {
             pc.removeEventListener(iceStateEvent, checkState)
             resolve()
