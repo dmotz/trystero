@@ -147,7 +147,6 @@ export const defaultRelayUrls = [
   'nostr.huszonegy.world',
   'nostr.mom',
   'nostr.sathoarder.com',
-  'nostr.stakey.net',
   'nostr.vulpem.com',
   'relay.fountain.fm',
   'relay.nostraddress.com',
