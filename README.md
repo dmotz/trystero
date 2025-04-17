@@ -26,6 +26,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
+- 🏭⚡ Runs server-side
 - ⚛️🪝 React hooks
 
 You can see what people are building with Trystero [here](https://github.com/jeremyckahn/awesome-trystero).
