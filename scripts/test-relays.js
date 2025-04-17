@@ -5,7 +5,6 @@ import mqtt from 'mqtt'
 import {encodeBytes, toHex, toJson} from '../src/utils.js'
 import {defaultRelayUrls as mqttRelays} from '../src/mqtt.js'
 import {defaultRelayUrls as nostrRelays} from '../src/nostr.js'
-
 import {defaultRelayUrls as torrentRelays} from '../src/torrent.js'
 
 const timeLimit = 5000
@@ -50,22 +49,28 @@ const testRelay = (url, strategy) => {
     `${!err ? '✅' : '❌'} ${(Date.now() - start).toString().padStart(4)}ms ` +
     `${url.replace(/^wss:\/\//, '')}${err ? ` - (${chalk.red(err)})` : ''}`
 
+  let timeout
+
   if (strategy === 'mqtt') {
     const client = mqtt.connect(url)
 
     return new Promise((res, rej) => {
+      timeout = setTimeout(() => rej('timeout'), timeLimit)
       client.on('connect', res)
       client.on('error', rej)
     })
       .then(() => output(url))
       .catch(e => output(url, e))
-      .finally(() => client.end())
+      .finally(() => {
+        clearTimeout(timeout)
+        client.end()
+      })
   }
 
   const ws = new WebSocket(url)
 
   return new Promise((res, rej) => {
-    const timeout = setTimeout(() => rej('timeout'), timeLimit)
+    timeout = setTimeout(() => rej('timeout'), timeLimit)
 
     ws.on('open', () => {
       if (strategy === 'nostr') {
@@ -89,14 +94,14 @@ const testRelay = (url, strategy) => {
       } else {
         res()
       }
-    }).on('error', e => {
-      clearTimeout(timeout)
-      rej('connection error: ' + e.message)
-    })
+    }).on('error', e => rej('connection error: ' + e.message))
   })
     .then(() => output(url))
     .catch(e => output(url, e))
-    .finally(() => ws.close())
+    .finally(() => {
+      clearTimeout(timeout)
+      ws.close()
+    })
 }
 
 const testRelays = ([strategy, relays]) =>
