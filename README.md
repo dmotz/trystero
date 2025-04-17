@@ -530,11 +530,8 @@ import {joinRoom} from 'trystero'
 import {RTCPeerConnection} from 'node-datachannel/polyfill'
 
 const room = joinRoom(
-  {
-    appId: 'node-test',
-    rtcPolyfill: RTCPeerConnection
-  },
-  'room49'
+  {appId: 'your-app-id', rtcPolyfill: RTCPeerConnection},
+  'your-room-name'
 )
 ```
 
