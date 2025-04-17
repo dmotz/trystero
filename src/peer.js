@@ -29,6 +29,12 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     await Promise.race([
       new Promise(resolve => {
         const checkState = () => {
+          // Check if trickle candidates are supported
+          if (!pc.canTrickleIceCandidates) {
+            pc.removeEventListener(iceStateEvent, checkState)
+            resolve()
+            return
+          }
           if (pc.iceGatheringState === 'complete') {
             pc.removeEventListener(iceStateEvent, checkState)
             resolve()
@@ -86,6 +92,12 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
 
   pc.onremovestream = event => {
     handlers.stream?.(event.stream, {removed: true})
+  }
+
+  if (initiator) {
+    if (!pc.canTrickleIceCandidates) {
+      pc.onnegotiationneeded()
+    }
   }
 
   return {
