@@ -26,6 +26,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
+- 🏭⚡ Runs server-side
 - ⚛️🪝 React hooks
 
 You can see what people are building with Trystero [here](https://github.com/jeremyckahn/awesome-trystero).
@@ -46,6 +47,7 @@ You can see what people are building with Trystero [here](https://github.com/jer
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
   - [Connection issues](#connection-issues)
+  - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
@@ -510,6 +512,28 @@ that aren't able to connect directly to one another.
      'roomId'
    )
    ```
+
+### Running server-side (Node, Deno, Bun)
+
+Trystero works wherever JS runs, including server-side like Node, Deno, or Bun.
+Why would you want to run something that helps you avoid servers on a server?
+One reason is if you want an always-on peer which can he useful for remembering
+the last state of data, broadcasting it to new users. Another reason might be to
+run peers that are lighter weight and don't need a full browser running, like an
+embedded device or Raspberry Pi.
+
+Running server-side uses the same syntax as in the browser, but you need to
+import a polyfill for WebRTC support:
+
+```js
+import {joinRoom} from 'trystero'
+import {RTCPeerConnection} from 'node-datachannel/polyfill'
+
+const room = joinRoom(
+  {appId: 'your-app-id', rtcPolyfill: RTCPeerConnection},
+  'your-room-name'
+)
+```
 
 ### Supabase setup
 
