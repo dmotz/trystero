@@ -1,4 +1,4 @@
-import {schnorr} from '@noble/curves/secp256k1'
+import {schnorr, utils} from '@noble/secp256k1'
 import strategy from './strategy.js'
 import {
   encodeBytes,
@@ -18,7 +18,7 @@ const clients = {}
 const defaultRedundancy = 5
 const tag = 'x'
 const eventMsgType = 'EVENT'
-const privateKey = schnorr.utils.randomPrivateKey()
+const privateKey = utils.randomPrivateKey()
 const publicKey = toHex(schnorr.getPublicKey(privateKey))
 const subIdToTopic = {}
 const msgHandlers = {}
