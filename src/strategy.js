@@ -49,7 +49,7 @@ export default ({init, subscribe, announce}) => {
 
     const makeOffer = () => initPeer(true, config)
 
-    const connectPeer = (peer, peerId, clientId) => {
+    const connectPeer = (peer, peerId, relayId) => {
       if (connectedPeers[peerId]) {
         if (connectedPeers[peerId] !== peer) {
           peer.destroy()
@@ -61,7 +61,7 @@ export default ({init, subscribe, announce}) => {
       onPeerConnect(peer, peerId)
 
       pendingOffers[peerId]?.forEach((peer, i) => {
-        if (i !== clientId) {
+        if (i !== relayId) {
           peer.destroy()
         }
       })
@@ -74,15 +74,15 @@ export default ({init, subscribe, announce}) => {
       }
     }
 
-    const prunePendingOffer = (peerId, clientId) => {
+    const prunePendingOffer = (peerId, relayId) => {
       if (connectedPeers[peerId]) {
         return
       }
 
-      const offer = pendingOffers[peerId]?.[clientId]
+      const offer = pendingOffers[peerId]?.[relayId]
 
       if (offer) {
-        delete pendingOffers[peerId][clientId]
+        delete pendingOffers[peerId][relayId]
         offer.destroy()
       }
     }
@@ -107,7 +107,7 @@ export default ({init, subscribe, announce}) => {
         roomId
       })
 
-    const handleMessage = clientId => async (topic, msg, signalPeer) => {
+    const handleMessage = relayId => async (topic, msg, signalPeer) => {
       const [rootTopic, selfTopic] = await all([rootTopicP, selfTopicP])
 
       if (topic !== rootTopic && topic !== selfTopic) {
@@ -122,7 +122,7 @@ export default ({init, subscribe, announce}) => {
       }
 
       if (peerId && !offer && !answer) {
-        if (pendingOffers[peerId]?.[clientId]) {
+        if (pendingOffers[peerId]?.[relayId]) {
           return
         }
 
@@ -132,21 +132,21 @@ export default ({init, subscribe, announce}) => {
         ])
 
         pendingOffers[peerId] ||= []
-        pendingOffers[peerId][clientId] = peer
+        pendingOffers[peerId][relayId] = peer
 
         setTimeout(
-          () => prunePendingOffer(peerId, clientId),
-          announceIntervals[clientId] * 0.9
+          () => prunePendingOffer(peerId, relayId),
+          announceIntervals[relayId] * 0.9
         )
 
         peer.setHandlers({
-          connect: () => connectPeer(peer, peerId, clientId),
+          connect: () => connectPeer(peer, peerId, relayId),
           close: () => disconnectPeer(peer, peerId)
         })
 
         signalPeer(topic, toJson({peerId: selfId, offer}))
       } else if (offer) {
-        const myOffer = pendingOffers[peerId]?.[clientId]
+        const myOffer = pendingOffers[peerId]?.[relayId]
 
         if (myOffer && selfId > peerId) {
           return
@@ -154,7 +154,7 @@ export default ({init, subscribe, announce}) => {
 
         const peer = initPeer(false, config)
         peer.setHandlers({
-          connect: () => connectPeer(peer, peerId, clientId),
+          connect: () => connectPeer(peer, peerId, relayId),
           close: () => disconnectPeer(peer, peerId)
         })
 
@@ -192,13 +192,13 @@ export default ({init, subscribe, announce}) => {
 
         if (peer) {
           peer.setHandlers({
-            connect: () => connectPeer(peer, peerId, clientId),
+            connect: () => connectPeer(peer, peerId, relayId),
             close: () => disconnectPeer(peer, peerId)
           })
 
           peer.signal(plainAnswer)
         } else {
-          const peer = pendingOffers[peerId]?.[clientId]
+          const peer = pendingOffers[peerId]?.[relayId]
 
           if (peer && !peer.isDead) {
             peer.signal(plainAnswer)
@@ -242,9 +242,9 @@ export default ({init, subscribe, announce}) => {
     const announceIntervals = initPromises.map(() => announceIntervalMs)
     const announceTimeouts = []
 
-    const unsubFns = initPromises.map(async (clientP, i) =>
+    const unsubFns = initPromises.map(async (relayP, i) =>
       subscribe(
-        await clientP,
+        await relayP,
         await rootTopicP,
         await selfTopicP,
         handleMessage(i),
@@ -253,15 +253,15 @@ export default ({init, subscribe, announce}) => {
     )
 
     all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
-      const queueAnnounce = async (client, i) => {
-        const ms = await announce(client, rootTopic, selfTopic)
+      const queueAnnounce = async (relay, i) => {
+        const ms = await announce(relay, rootTopic, selfTopic)
 
         if (typeof ms === 'number') {
           announceIntervals[i] = ms
         }
 
         announceTimeouts[i] = setTimeout(
-          () => queueAnnounce(client, i),
+          () => queueAnnounce(relay, i),
           announceIntervals[i]
         )
       }
