@@ -48,7 +48,6 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
 
   let makingOffer = false
   let dataChannel = null
-  let ignoreOffer = false
 
   if (initiator) {
     dataChannel = pc.createDataChannel('data')
@@ -108,27 +107,19 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     },
 
     async signal(sdp) {
-      if (dataChannel?.readyState === 'open') {
-        if (sdp.type === 'offer' || pc.signalingState !== 'stable') {
-          await pc.setRemoteDescription(sdp)
-          if (sdp.type === 'offer') {
-            await pc.setLocalDescription()
-            const answer = await waitForIceGathering(pc)
-            handlers.signal?.({type: answer.type, sdp: answer.sdp})
-            return {type: answer.type, sdp: answer.sdp}
-          }
-        }
+      if (
+        dataChannel?.readyState === 'open' &&
+        !sdp.sdp?.includes('a=rtpmap')
+      ) {
         return
       }
 
       try {
         if (sdp.type === 'offer') {
-          if (makingOffer || pc.signalingState !== 'stable') {
-            ignoreOffer = !initiator
-            if (ignoreOffer) {
-              return
-            }
+          if ((makingOffer || pc.signalingState !== 'stable') && !initiator) {
+            return
           }
+
           await pc.setRemoteDescription(sdp)
           await pc.setLocalDescription()
 
