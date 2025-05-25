@@ -300,7 +300,10 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
       },
       signal: sdp => sendSignal(sdp, id),
       close: () => exitPeer(id),
-      error: () => exitPeer(id)
+      error: err => {
+        console.error(err)
+        exitPeer(id)
+      }
     })
 
     listeners.onPeerJoin(id)
