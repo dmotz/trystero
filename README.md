@@ -930,12 +930,12 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 |                   | one-time setup¹ | bundle size² |
 | ----------------- | --------------- | ------------ |
-| 🐦 **Nostr**      | none 🏆         | 16K          |
+| 🐦 **Nostr**      | none 🏆         | 10K          |
 | 📡 **MQTT**       | none 🏆         | 75K          |
 | 🌊 **BitTorrent** | none 🏆         | 5K 🏆        |
-| ⚡️ **Supabase**  | ~5 mins         | 27K          |
-| 🔥 **Firebase**   | ~5 mins         | 43K          |
-| 🪐 **IPFS**       | none 🏆         | 143K         |
+| ⚡️ **Supabase**  | ~5 mins         | 28K          |
+| 🔥 **Firebase**   | ~5 mins         | 45K          |
+| 🪐 **IPFS**       | none 🏆         | 119K         |
 
 **¹** All strategies except Supabase and Firebase require zero setup. Supabase
 and Firebase are managed strategies which require setting up an account.
