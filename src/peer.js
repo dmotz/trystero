@@ -208,5 +208,6 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
 
 export const defaultIceServers = [
   ...alloc(3, (_, i) => `stun:stun${i || ''}.l.google.com:19302`),
+  'stun:stun.cloudflare.com:3478',
   'stun:global.stun.twilio.com:3478'
 ].map(url => ({urls: url}))
