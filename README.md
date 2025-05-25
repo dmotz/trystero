@@ -708,26 +708,22 @@ Returns an object with the following methods:
     be sent with the track. See `metadata` notes for `addStream()` above for
     more details.
 
-- ### `removeTrack(track, stream, [targetPeers])`
+- ### `removeTrack(track, [targetPeers])`
 
-  Removes a media track from a stream.
+  Removes a media track.
 
   - `track` - The `MediaStreamTrack` to remove.
-
-  - `stream` - The `MediaStream` the track is attached to.
 
   - `targetPeers` - **(optional)** If specified, the track is removed only from
     the target peer ID (string) or list of peer IDs (array).
 
-- ### `replaceTrack(oldTrack, newTrack, stream, [targetPeers])`
+- ### `replaceTrack(oldTrack, newTrack, [targetPeers])`
 
   Replaces a media track with a new one.
 
   - `oldTrack` - The `MediaStreamTrack` to remove.
 
   - `newTrack` - A `MediaStreamTrack` to attach.
-
-  - `stream` - The `MediaStream` the `oldTrack` is attached to.
 
   - `targetPeers` - **(optional)** If specified, the track is replaced only for
     the target peer ID (string) or list of peer IDs (array).
