@@ -1,8 +1,9 @@
-import {alloc} from './utils.js'
+import {all, alloc} from './utils.js'
 
 const iceTimeout = 5000
 const iceStateEvent = 'icegatheringstatechange'
-const filterTrickle = sdp => sdp.replace(/a=ice-options:trickle\s\n/g, '')
+const offerType = 'offer'
+const answerType = 'answer'
 
 export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   const pc = new (rtcPolyfill || RTCPeerConnection)({
@@ -11,6 +12,9 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   })
 
   const handlers = {}
+  let makingOffer = false
+  let isSettingRemoteAnswerPending = false
+  let dataChannel = null
 
   const setupDataChannel = channel => {
     channel.binaryType = 'arraybuffer'
@@ -42,12 +46,9 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
 
     return {
       type: pc.localDescription.type,
-      sdp: filterTrickle(pc.localDescription.sdp)
+      sdp: pc.localDescription.sdp.replace(/a=ice-options:trickle\s\n/g, '')
     }
   }
-
-  let makingOffer = false
-  let dataChannel = null
 
   if (initiator) {
     dataChannel = pc.createDataChannel('data')
@@ -64,7 +65,8 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
       makingOffer = true
       await pc.setLocalDescription()
       const offer = await waitForIceGathering(pc)
-      handlers.signal?.({type: offer.type, sdp: filterTrickle(offer.sdp)})
+
+      handlers.signal?.(offer)
     } catch (err) {
       handlers.error?.(err)
     } finally {
@@ -115,27 +117,39 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
       }
 
       try {
-        if (sdp.type === 'offer') {
-          if ((makingOffer || pc.signalingState !== 'stable') && !initiator) {
-            return
+        if (sdp.type === offerType) {
+          if (
+            makingOffer ||
+            (pc.signalingState !== 'stable' && !isSettingRemoteAnswerPending)
+          ) {
+            if (initiator) {
+              return
+            }
+
+            await all([
+              pc.setLocalDescription({type: 'rollback'}),
+              pc.setRemoteDescription(sdp)
+            ])
+          } else {
+            await pc.setRemoteDescription(sdp)
           }
 
-          await pc.setRemoteDescription(sdp)
           await pc.setLocalDescription()
 
           const answer = await waitForIceGathering(pc)
-          const answerSdp = filterTrickle(answer.sdp)
+          handlers.signal?.(answer)
 
-          handlers.signal?.({type: answer.type, sdp: answerSdp})
-          return {type: answer.type, sdp: answerSdp}
-        } else if (
-          sdp.type === 'answer' &&
-          (pc.signalingState === 'have-local-offer' ||
-            pc.signalingState === 'have-remote-offer')
-        ) {
-          await pc.setRemoteDescription(sdp)
+          return answer
+        } else if (sdp.type === answerType) {
+          isSettingRemoteAnswerPending = true
+          try {
+            await pc.setRemoteDescription(sdp)
+          } finally {
+            isSettingRemoteAnswerPending = false
+          }
         }
       } catch (err) {
+        console.log('error', err)
         handlers.error?.(err)
       }
     },
@@ -147,6 +161,8 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
         dataChannel.close()
       }
       pc.close()
+      makingOffer = false
+      isSettingRemoteAnswerPending = false
     },
 
     setHandlers: newHandlers => Object.assign(handlers, newHandlers),
@@ -154,7 +170,7 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     offerPromise: initiator
       ? new Promise(res => {
           const handler = sdp => {
-            if (sdp.type === 'offer') {
+            if (sdp.type === offerType) {
               res(sdp)
             }
           }
