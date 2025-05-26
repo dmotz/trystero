@@ -957,7 +957,7 @@ Trystero makes it trivial to switch between strategies — just change a single
 import line and quickly experiment:
 
 ```js
-import {joinRoom} from 'trystero/[torrent|nostr|mqtt|supabase|firebase|ipfs]'
+import {joinRoom} from 'trystero/[nostr|mqtt|torrent|supabase|firebase|ipfs]'
 ```
 
 ---
