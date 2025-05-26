@@ -555,7 +555,7 @@ If you want to use the Firebase strategy and don't have an existing project:
 
 <details>
   <summary>
-  *Optional* Configure the database with security rules to limit activity:
+  Optional: configure the database with security rules to limit activity:
   </summary>
 
 ```json
