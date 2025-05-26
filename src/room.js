@@ -307,7 +307,6 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
     })
 
     listeners.onPeerJoin(id)
-    peer.drainEarlyData?.(d => handleData(id, d))
   })
 
   getPing((_, id) => sendPong('', id))
