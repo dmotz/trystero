@@ -71,17 +71,13 @@ declare module 'trystero' {
       metadata?: JsonValue
     ) => Promise<void>[]
 
-    removeTrack: (
-      track: MediaStreamTrack,
-      stream: MediaStream,
-      targetPeers?: TargetPeers
-    ) => void
+    removeTrack: (track: MediaStreamTrack, targetPeers?: TargetPeers) => void
 
     replaceTrack: (
       oldTrack: MediaStreamTrack,
       newTrack: MediaStreamTrack,
-      stream: MediaStream,
-      targetPeers?: TargetPeers
+      targetPeers?: TargetPeers,
+      metadata?: JsonValue
     ) => Promise<void>[]
 
     onPeerJoin: (fn: (peerId: string) => void) => void
