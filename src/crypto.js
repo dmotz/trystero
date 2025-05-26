@@ -7,14 +7,12 @@ const pack = buff => btoa(String.fromCharCode.apply(null, new Uint8Array(buff)))
 
 const unpack = packed => {
   const str = atob(packed)
-
   return new Uint8Array(str.length).map((_, i) => str.charCodeAt(i)).buffer
 }
 
 export const sha1 = async str =>
-  strToSha1[str] ||
   // eslint-disable-next-line require-atomic-updates
-  (strToSha1[str] = Array.from(
+  (strToSha1[str] ||= Array.from(
     new Uint8Array(await crypto.subtle.digest('SHA-1', encodeBytes(str)))
   )
     .map(b => b.toString(36))
