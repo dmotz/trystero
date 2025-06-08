@@ -50,6 +50,7 @@ declare module 'trystero' {
       urls: string | string[]
       username?: string
       credential?: string
+      credentialType?: string
     }[]
   }
 
