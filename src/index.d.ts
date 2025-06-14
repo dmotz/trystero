@@ -45,6 +45,15 @@ declare module 'trystero' {
     relayRedundancy?: number
   }
 
+  export interface TurnConfig {
+    turnConfig?: {
+      urls: string | string[]
+      username?: string
+      credential?: string
+      credentialType?: string
+    }[]
+  }
+
   export interface Room {
     makeAction: <T extends DataPayload>(
       namespace: string
@@ -94,7 +103,7 @@ declare module 'trystero' {
   }
 
   export function joinRoom(
-    config: BaseRoomConfig & RelayConfig,
+    config: BaseRoomConfig & RelayConfig & TurnConfig,
     roomId: string
   ): Room
 
