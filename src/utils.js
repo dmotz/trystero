@@ -73,17 +73,50 @@ export const strToNum = (str, limit = Number.MAX_SAFE_INTEGER) =>
 const defaultRetryMs = 3333
 const socketRetryPeriods = {}
 
+// Prevents reconnecting to the socket until the promise resolves
+let _preventReconnectPromise = null
+// Resolver for the promise that pauses reconnection
+let _resolver = null
+
+export const pauseReconnect = () => {
+  if (_resolver) {
+    _preventReconnectPromise = new Promise(resolve => {
+      _resolver = resolve
+    }).finally(() => {
+      _resolver = null
+      _preventReconnectPromise = null
+    })
+  } else {
+    // If already paused, just return the existing promise
+  }
+}
+
+export const resumeReconnect = () => {
+  if (_resolver) {
+    _resolver()
+  } else {
+    // If not paused, do nothing
+  }
+}
+
 export const makeSocket = (url, onMessage) => {
   const client = {}
 
   const init = () => {
     const socket = new WebSocket(url)
-
-    socket.onclose = () => {
+    const onCloseHandler = () => {
+      if (_preventReconnectPromise) {
+        // If reconnect is paused, wait for the promise to resolve
+        _preventReconnectPromise.then(() => {
+          init()
+        })
+        return
+      }
       socketRetryPeriods[url] ??= defaultRetryMs
       setTimeout(init, socketRetryPeriods[url])
       socketRetryPeriods[url] *= 2
     }
+    socket.onclose = onCloseHandler
 
     socket.onmessage = e => onMessage(e.data)
     client.socket = socket
