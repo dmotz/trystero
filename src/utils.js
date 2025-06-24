@@ -73,41 +73,56 @@ export const strToNum = (str, limit = Number.MAX_SAFE_INTEGER) =>
 const defaultRetryMs = 3333
 const socketRetryPeriods = {}
 
-// Prevents reconnecting to the socket until the promise resolves
-let _preventReconnectPromise = null
+// Prevents reconnection to the socket until the promise resolves
+let reconnectionLockingPromise = null
 // Resolver for the promise that pauses reconnection
-let _resolver = null
+let resolver = null
 
-export const pauseReconnect = () => {
-  if (_resolver) {
-    _preventReconnectPromise = new Promise(resolve => {
-      _resolver = resolve
+/**
+ * Pauses reconnection attempts until resumed.
+ * If already paused, no new promise is created.
+ */
+export const pauseReconnection = () => {
+  if (!reconnectionLockingPromise) {
+    reconnectionLockingPromise = new Promise(resolve => {
+      resolver = resolve
     }).finally(() => {
-      _resolver = null
-      _preventReconnectPromise = null
+      resolver = null
+      reconnectionLockingPromise = null
     })
-  } else {
-    // If already paused, just return the existing promise
   }
+
+  // If already paused, do nothing
 }
 
-export const resumeReconnect = () => {
-  if (_resolver) {
-    _resolver()
-  } else {
-    // If not paused, do nothing
+/**
+ * Resumes reconnection attempts if they are currently paused.
+ * If not paused, this function has no effect.
+ */
+export const resumeReconnection = () => {
+  if (resolver) {
+    // resolver will be set to null after resolving. 
+    // Do not change here to avoid multiple calls to _resolver and creating new locker-promise
+    resolver() 
   }
+
+  // If not paused, do nothing
 }
+
+/**
+ * Returns true if reconnection is currently paused.
+ */
+export const isReconnectionPaused = () => !!reconnectionLockingPromise
 
 export const makeSocket = (url, onMessage) => {
   const client = {}
 
   const init = () => {
     const socket = new WebSocket(url)
-    const onCloseHandler = () => {
-      if (_preventReconnectPromise) {
+    socket.onclose = () => {
+      if (reconnectionLockingPromise) {
         // If reconnect is paused, wait for the promise to resolve
-        _preventReconnectPromise.then(() => {
+        reconnectionLockingPromise.then(() => {
           init()
         })
         return
@@ -116,7 +131,6 @@ export const makeSocket = (url, onMessage) => {
       setTimeout(init, socketRetryPeriods[url])
       socketRetryPeriods[url] *= 2
     }
-    socket.onclose = onCloseHandler
 
     socket.onmessage = e => onMessage(e.data)
     client.socket = socket
