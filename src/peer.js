@@ -1,8 +1,9 @@
-import {alloc} from './utils.js'
+import {all, alloc} from './utils.js'
 
 const iceTimeout = 5000
 const iceStateEvent = 'icegatheringstatechange'
-const filterTrickle = sdp => sdp.replace(/a=ice-options:trickle\s\n/g, '')
+const offerType = 'offer'
+const answerType = 'answer'
 
 export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   const pc = new (rtcPolyfill || RTCPeerConnection)({
@@ -11,6 +12,9 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   })
 
   const handlers = {}
+  let makingOffer = false
+  let isSettingRemoteAnswerPending = false
+  let dataChannel = null
 
   const setupDataChannel = channel => {
     channel.binaryType = 'arraybuffer'
@@ -21,34 +25,24 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     channel.onerror = err => handlers.error?.(err)
   }
 
-  const waitForIceGathering = async pc => {
-    if (!pc.localDescription) {
-      throw new Error('No local description available')
-    }
-
-    await Promise.race([
-      new Promise(resolve => {
+  const waitForIceGathering = pc =>
+    Promise.race([
+      new Promise(res => {
         const checkState = () => {
           if (pc.iceGatheringState === 'complete') {
             pc.removeEventListener(iceStateEvent, checkState)
-            resolve()
+            res()
           }
         }
+
         pc.addEventListener(iceStateEvent, checkState)
         checkState()
       }),
-      new Promise(resolve => setTimeout(resolve, iceTimeout))
-    ])
-
-    return {
+      new Promise(res => setTimeout(res, iceTimeout))
+    ]).then(() => ({
       type: pc.localDescription.type,
-      sdp: filterTrickle(pc.localDescription.sdp)
-    }
-  }
-
-  let makingOffer = false
-  let dataChannel = null
-  let ignoreOffer = false
+      sdp: pc.localDescription.sdp.replace(/a=ice-options:trickle\s\n/g, '')
+    }))
 
   if (initiator) {
     dataChannel = pc.createDataChannel('data')
@@ -65,7 +59,8 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
       makingOffer = true
       await pc.setLocalDescription()
       const offer = await waitForIceGathering(pc)
-      handlers.signal?.({type: offer.type, sdp: filterTrickle(offer.sdp)})
+
+      handlers.signal?.(offer)
     } catch (err) {
       handlers.error?.(err)
     } finally {
@@ -84,9 +79,7 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     handlers.stream?.(e.streams[0])
   }
 
-  pc.onremovestream = event => {
-    handlers.stream?.(event.stream, {removed: true})
-  }
+  pc.onremovestream = e => handlers.stream?.(e.stream)
 
   if (initiator) {
     if (!pc.canTrickleIceCandidates) {
@@ -108,41 +101,43 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     },
 
     async signal(sdp) {
-      if (dataChannel?.readyState === 'open') {
-        if (sdp.type === 'offer' || pc.signalingState !== 'stable') {
-          await pc.setRemoteDescription(sdp)
-          if (sdp.type === 'offer') {
-            await pc.setLocalDescription()
-            const answer = await waitForIceGathering(pc)
-            handlers.signal?.({type: answer.type, sdp: answer.sdp})
-            return {type: answer.type, sdp: answer.sdp}
-          }
-        }
+      if (
+        dataChannel?.readyState === 'open' &&
+        !sdp.sdp?.includes('a=rtpmap')
+      ) {
         return
       }
 
       try {
-        if (sdp.type === 'offer') {
-          if (makingOffer || pc.signalingState !== 'stable') {
-            ignoreOffer = !initiator
-            if (ignoreOffer) {
+        if (sdp.type === offerType) {
+          if (
+            makingOffer ||
+            (pc.signalingState !== 'stable' && !isSettingRemoteAnswerPending)
+          ) {
+            if (initiator) {
               return
             }
+
+            await all([
+              pc.setLocalDescription({type: 'rollback'}),
+              pc.setRemoteDescription(sdp)
+            ])
+          } else {
+            await pc.setRemoteDescription(sdp)
           }
-          await pc.setRemoteDescription(sdp)
+
           await pc.setLocalDescription()
-
           const answer = await waitForIceGathering(pc)
-          const answerSdp = filterTrickle(answer.sdp)
+          handlers.signal?.(answer)
 
-          handlers.signal?.({type: answer.type, sdp: answerSdp})
-          return {type: answer.type, sdp: answerSdp}
-        } else if (
-          sdp.type === 'answer' &&
-          (pc.signalingState === 'have-local-offer' ||
-            pc.signalingState === 'have-remote-offer')
-        ) {
-          await pc.setRemoteDescription(sdp)
+          return answer
+        } else if (sdp.type === answerType) {
+          isSettingRemoteAnswerPending = true
+          try {
+            await pc.setRemoteDescription(sdp)
+          } finally {
+            isSettingRemoteAnswerPending = false
+          }
         }
       } catch (err) {
         handlers.error?.(err)
@@ -152,34 +147,33 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     sendData: data => dataChannel.send(data),
 
     destroy: () => {
-      if (dataChannel) {
-        dataChannel.close()
-      }
+      dataChannel?.close()
       pc.close()
+      makingOffer = false
+      isSettingRemoteAnswerPending = false
     },
 
     setHandlers: newHandlers => Object.assign(handlers, newHandlers),
 
     offerPromise: initiator
-      ? new Promise(res => {
-          const handler = sdp => {
-            if (sdp.type === 'offer') {
-              res(sdp)
-            }
-          }
-          handlers.signal = handler
-        })
+      ? new Promise(
+          res =>
+            (handlers.signal = sdp => {
+              if (sdp.type === offerType) {
+                res(sdp)
+              }
+            })
+        )
       : Promise.resolve(),
 
-    addStream: stream => {
-      stream.getTracks().forEach(track => pc.addTrack(track, stream))
-    },
+    addStream: stream =>
+      stream.getTracks().forEach(track => pc.addTrack(track, stream)),
 
-    removeStream: stream => {
-      pc.getSenders()
+    removeStream: stream =>
+      pc
+        .getSenders()
         .filter(sender => stream.getTracks().includes(sender.track))
-        .forEach(sender => pc.removeTrack(sender))
-    },
+        .forEach(sender => pc.removeTrack(sender)),
 
     addTrack: (track, stream) => pc.addTrack(track, stream),
 
@@ -190,10 +184,10 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
       }
     },
 
-    replaceTrack: async (oldTrack, newTrack) => {
+    replaceTrack: (oldTrack, newTrack) => {
       const sender = pc.getSenders().find(s => s.track === oldTrack)
       if (sender) {
-        await sender.replaceTrack(newTrack)
+        return sender.replaceTrack(newTrack)
       }
     }
   }
@@ -201,5 +195,5 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
 
 export const defaultIceServers = [
   ...alloc(3, (_, i) => `stun:stun${i || ''}.l.google.com:19302`),
-  'stun:global.stun.twilio.com:3478'
+  'stun:stun.cloudflare.com:3478'
 ].map(url => ({urls: url}))

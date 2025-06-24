@@ -2,7 +2,7 @@ import stun from 'stun'
 import {defaultIceServers} from '../src/peer.js'
 
 Promise.all(
-  defaultIceServers.map(url =>
+  defaultIceServers.map(({urls: url}) =>
     stun
       .request(url.replace(/^stun:/, ''))
       .then(() => '✅ ' + url)

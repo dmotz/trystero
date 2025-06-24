@@ -555,7 +555,7 @@ If you want to use the Firebase strategy and don't have an existing project:
 
 <details>
   <summary>
-  [*Optional*] Configure the database with security rules to limit activity:
+  Optional: configure the database with security rules to limit activity:
   </summary>
 
 ```json
@@ -708,26 +708,22 @@ Returns an object with the following methods:
     be sent with the track. See `metadata` notes for `addStream()` above for
     more details.
 
-- ### `removeTrack(track, stream, [targetPeers])`
+- ### `removeTrack(track, [targetPeers])`
 
-  Removes a media track from a stream.
+  Removes a media track.
 
   - `track` - The `MediaStreamTrack` to remove.
-
-  - `stream` - The `MediaStream` the track is attached to.
 
   - `targetPeers` - **(optional)** If specified, the track is removed only from
     the target peer ID (string) or list of peer IDs (array).
 
-- ### `replaceTrack(oldTrack, newTrack, stream, [targetPeers])`
+- ### `replaceTrack(oldTrack, newTrack, [targetPeers])`
 
   Replaces a media track with a new one.
 
   - `oldTrack` - The `MediaStreamTrack` to remove.
 
   - `newTrack` - A `MediaStreamTrack` to attach.
-
-  - `stream` - The `MediaStream` the `oldTrack` is attached to.
 
   - `targetPeers` - **(optional)** If specified, the track is replaced only for
     the target peer ID (string) or list of peer IDs (array).
@@ -934,12 +930,12 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 |                   | one-time setup¹ | bundle size² |
 | ----------------- | --------------- | ------------ |
-| 🐦 **Nostr**      | none 🏆         | 16K          |
-| 📡 **MQTT**       | none 🏆         | 75K          |
-| 🌊 **BitTorrent** | none 🏆         | 5K 🏆        |
-| ⚡️ **Supabase**  | ~5 mins         | 27K          |
-| 🔥 **Firebase**   | ~5 mins         | 43K          |
-| 🪐 **IPFS**       | none 🏆         | 143K         |
+| 🐦 **Nostr**      | none            | 10K          |
+| 📡 **MQTT**       | none            | 75K          |
+| 🌊 **BitTorrent** | none            | 5K           |
+| ⚡️ **Supabase**  | ~5 mins         | 28K          |
+| 🔥 **Firebase**   | ~5 mins         | 45K          |
+| 🪐 **IPFS**       | none            | 119K         |
 
 **¹** All strategies except Supabase and Firebase require zero setup. Supabase
 and Firebase are managed strategies which require setting up an account.
@@ -961,7 +957,7 @@ Trystero makes it trivial to switch between strategies — just change a single
 import line and quickly experiment:
 
 ```js
-import {joinRoom} from 'trystero/[torrent|nostr|mqtt|supabase|firebase|ipfs]'
+import {joinRoom} from 'trystero/[nostr|mqtt|torrent|supabase|firebase|ipfs]'
 ```
 
 ---

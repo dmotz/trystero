@@ -45,6 +45,15 @@ declare module 'trystero' {
     relayRedundancy?: number
   }
 
+  export interface TurnConfig {
+    turnConfig?: {
+      urls: string | string[]
+      username?: string
+      credential?: string
+      credentialType?: string
+    }[]
+  }
+
   export interface Room {
     makeAction: <T extends DataPayload>(
       namespace: string
@@ -71,17 +80,13 @@ declare module 'trystero' {
       metadata?: JsonValue
     ) => Promise<void>[]
 
-    removeTrack: (
-      track: MediaStreamTrack,
-      stream: MediaStream,
-      targetPeers?: TargetPeers
-    ) => void
+    removeTrack: (track: MediaStreamTrack, targetPeers?: TargetPeers) => void
 
     replaceTrack: (
       oldTrack: MediaStreamTrack,
       newTrack: MediaStreamTrack,
-      stream: MediaStream,
-      targetPeers?: TargetPeers
+      targetPeers?: TargetPeers,
+      metadata?: JsonValue
     ) => Promise<void>[]
 
     onPeerJoin: (fn: (peerId: string) => void) => void
@@ -98,7 +103,7 @@ declare module 'trystero' {
   }
 
   export function joinRoom(
-    config: BaseRoomConfig & RelayConfig,
+    config: BaseRoomConfig & RelayConfig & TurnConfig,
     roomId: string
   ): Room
 

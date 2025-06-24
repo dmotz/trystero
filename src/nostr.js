@@ -1,4 +1,4 @@
-import {schnorr} from '@noble/curves/secp256k1'
+import {schnorr, utils} from '@noble/secp256k1'
 import strategy from './strategy.js'
 import {
   encodeBytes,
@@ -18,7 +18,7 @@ const clients = {}
 const defaultRedundancy = 5
 const tag = 'x'
 const eventMsgType = 'EVENT'
-const privateKey = schnorr.utils.randomPrivateKey()
+const privateKey = utils.randomPrivateKey()
 const publicKey = toHex(schnorr.getPublicKey(privateKey))
 const subIdToTopic = {}
 const msgHandlers = {}
@@ -138,20 +138,27 @@ export const getRelaySockets = socketGetter(clients)
 export {selfId} from './utils.js'
 
 export const defaultRelayUrls = [
+  'black.nostrcity.club',
   'eu.purplerelay.com',
   'ftp.halifax.rwth-aachen.de/nostr',
-  'multiplexer.huszonegy.world',
   'nostr.cool110.xyz',
   'nostr.data.haus',
-  'nostr.grooveix.com',
-  'nostr.huszonegy.world',
   'nostr.mom',
+  'nostr.oxtr.dev',
   'nostr.sathoarder.com',
   'nostr.vulpem.com',
+  'nostrelay.memory-art.xyz',
+  'playground.nostrcheck.me/relay',
+  'relay.agorist.space',
+  'relay.binaryrobot.com',
   'relay.fountain.fm',
+  'relay.mostro.network',
   'relay.nostraddress.com',
+  'relay.nostrdice.com',
   'relay.nostromo.social',
+  'relay.oldenburg.cool',
   'relay.snort.social',
   'relay.verified-nostr.com',
+  'sendit.nosflare.com',
   'yabu.me/v2'
 ].map(url => 'wss://' + url)
