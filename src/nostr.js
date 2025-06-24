@@ -135,7 +135,12 @@ export const joinRoom = strategy({
 
 export const getRelaySockets = socketGetter(clients)
 
-export {selfId, pauseReconnect, resumeReconnect} from './utils.js'
+export {
+  selfId,
+  pauseReconnection,
+  resumeReconnection,
+  isReconnectionPaused
+} from './utils.js'
 
 export const defaultRelayUrls = [
   'black.nostrcity.club',

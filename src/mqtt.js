@@ -50,7 +50,13 @@ export const joinRoom = strategy({
 
 export const getRelaySockets = () => ({...sockets})
 
-export {selfId} from './utils.js'
+export {
+  selfId,
+  pauseReconnection,
+  resumeReconnection,
+  isReconnectionPaused
+} from './utils.js'
+
 
 export const defaultRelayUrls = [
   'mqtt.eclipseprojects.io/mqtt',

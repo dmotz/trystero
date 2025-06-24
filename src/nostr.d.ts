@@ -8,5 +8,9 @@ declare module 'trystero/nostr' {
 
   export function getRelaySockets(): Record<string, WebSocket>
 
+  export function pauseReconnection(): void;
+  export function resumeReconnection(): void;
+  export function isReconnectionPaused(): boolean;
+
   export * from 'trystero'
 }

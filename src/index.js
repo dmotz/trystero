@@ -1,1 +1,1 @@
-export {getRelaySockets, joinRoom, selfId} from './nostr.js'
+export {getRelaySockets, joinRoom, selfId, pauseReconnection, resumeReconnection, isReconnectionPaused} from './nostr.js'
