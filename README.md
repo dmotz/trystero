@@ -517,7 +517,7 @@ that aren't able to connect directly to one another.
 
 Trystero works wherever JS runs, including server-side like Node, Deno, or Bun.
 Why would you want to run something that helps you avoid servers on a server?
-One reason is if you want an always-on peer which can he useful for remembering
+One reason is if you want an always-on peer which can be useful for remembering
 the last state of data, broadcasting it to new users. Another reason might be to
 run peers that are lighter weight and don't need a full browser running, like an
 embedded device or Raspberry Pi.
