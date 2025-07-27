@@ -30,7 +30,7 @@
     "@supabase/supabase-js": "^2.49.8",
     "@waku/discovery": "^0.0.8",
     "@waku/sdk": "^0.0.31",
-    "firebase": "^11.8.1",
+    "firebase": "^12.0.0",
     "libp2p": "^2.8.8",
     "mqtt": "^5.13.0"
   },
