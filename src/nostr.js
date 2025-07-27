@@ -29,7 +29,7 @@ const now = () => Math.floor(Date.now() / 1000)
 const topicToKind = topic =>
   (kindCache[topic] ??= strToNum(topic, 10_000) + 20_000)
 
-const createEvent = async (topic, content) => {
+export const createEvent = async (topic, content) => {
   const payload = {
     kind: topicToKind(topic),
     content,
@@ -66,7 +66,7 @@ const createEvent = async (topic, content) => {
   ])
 }
 
-const subscribe = (subId, topic) => {
+export const subscribe = (subId, topic) => {
   subIdToTopic[subId] = topic
   return toJson([
     'REQ',
