@@ -1,5 +1,5 @@
 import WebSocket from 'ws'
-import {schnorr} from '@noble/curves/secp256k1'
+import {schnorr, utils} from '@noble/secp256k1'
 import chalk from 'chalk'
 import mqtt from 'mqtt'
 import {encodeBytes, toHex, toJson} from '../src/utils.js'
@@ -8,7 +8,7 @@ import {defaultRelayUrls as nostrRelays} from '../src/nostr.js'
 import {defaultRelayUrls as torrentRelays} from '../src/torrent.js'
 
 const timeLimit = 5000
-const privateKey = schnorr.utils.randomPrivateKey()
+const privateKey = utils.randomPrivateKey()
 
 const nostrEvent = await (async () => {
   const payload = {
