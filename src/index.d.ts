@@ -104,7 +104,13 @@ declare module 'trystero' {
 
   export function joinRoom(
     config: BaseRoomConfig & RelayConfig & TurnConfig,
-    roomId: string
+    roomId: string,
+    onJoinError?: (details: {
+      error: string
+      appId: string
+      roomId: string
+      peerId: string
+    }) => void
   ): Room
 
   export const selfId: string
