@@ -98,7 +98,7 @@ or download and locally host a JS bundle from the
 ```
 
 By default, the [Nostr strategy](#strategy-comparison) is used. To use a
-different one just use a deep import like this:
+different one, just use a deep import like this:
 
 ```js
 import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
@@ -718,7 +718,7 @@ Returns an object with the following methods:
   - `targetPeers` - **(optional)** If specified, the track is removed only from
     the target peer ID (string) or list of peer IDs (array).
 
-- ### `replaceTrack(oldTrack, newTrack, [targetPeers])`
+- ### `replaceTrack(oldTrack, newTrack, [targetPeers], [metadata])`
 
   Replaces a media track with a new one.
 
