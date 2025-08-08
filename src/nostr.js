@@ -159,6 +159,5 @@ export const defaultRelayUrls = [
   'relay.oldenburg.cool',
   'relay.snort.social',
   'relay.verified-nostr.com',
-  'sendit.nosflare.com',
   'yabu.me/v2'
 ].map(url => 'wss://' + url)
