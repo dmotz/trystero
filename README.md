@@ -98,8 +98,7 @@ or download and locally host a JS bundle from the
 ```
 
 By default, the [Nostr strategy](#strategy-comparison) is used. To use a
-different one just deep import like so (your bundler should handle including
-only relevant code):
+different one just use a deep import like this:
 
 ```js
 import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
@@ -173,9 +172,11 @@ console.log(`my peer ID is ${selfId}`)
 Send peers your video stream:
 
 ```js
-room.addStream(
-  await navigator.mediaDevices.getUserMedia({audio: true, video: true})
-)
+const stream = await navigator.mediaDevices.getUserMedia({
+  audio: true,
+  video: true
+})
+room.addStream(stream)
 ```
 
 Send and subscribe to custom P2P actions:
@@ -264,7 +265,7 @@ room.onPeerStream((stream, peerId) => {
   audio.srcObject = stream
   audio.autoplay = true
 
-  // add the audio to peerAudio object if you want to address it for something
+  // add the audio to peerAudios object if you want to address it for something
   // later (volume, etc.)
   peerAudios[peerId] = audio
 })
@@ -304,7 +305,7 @@ interpreted. Instead of manually adding metadata bytes to the buffer you can
 simply pass a metadata argument in the sender action for your binary payload:
 
 ```js
-const [sendFile, getFile] = makeAction('file')
+const [sendFile, getFile] = room.makeAction('file')
 
 getFile((data, peerId, metadata) =>
   console.log(
@@ -333,7 +334,7 @@ console.log('done sending to all peers')
 
 Action sender functions also take an optional callback function that will be
 continuously called as the transmission progresses. This can be used for showing
-a progress bar to the sender for large tranfers. The callback is called with a
+a progress bar to the sender for large transfers. The callback is called with a
 percentage value between 0 and 1 and the receiving peer's ID:
 
 ```js
@@ -502,7 +503,7 @@ that aren't able to connect directly to one another.
        // ...your app config
        turnConfig: [
          {
-           // single string or list of strings of urls to access TURN server
+           // single string or list of strings of URLs to access TURN server
            urls: ['turn:your-turn-server.ok:1979'],
            username: 'username',
            credential: 'password'
@@ -589,6 +590,7 @@ communication channels and send events. Calling `joinRoom()` multiple times with
 the same namespace will return the same room instance.
 
 - `config` - Configuration object containing the following keys:
+
   - `appId` - **(required)** A unique string identifying your app. When using
     Supabase, this should be set to your project URL (see
     [Supabase setup instructions](#supabase-setup)). If using
@@ -636,7 +638,7 @@ the same namespace will return the same room instance.
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
     initialized Firebase app instance instead of an `appId`. Normally Trystero
     will initialize a Firebase app based on the `appId` but this will fail if
-    youʼve already initialized it for use elsewhere.
+    you've already initialized it for use elsewhere.
 
   - `rootPath` - **(optional, 🔥 Firebase only)** String specifying path where
     Trystero writes its matchmaking data in your database (`'__trystero__'` by
@@ -670,6 +672,7 @@ Returns an object with the following methods:
 - ### `addStream(stream, [targetPeers], [metadata])`
 
   Broadcasts media stream to other peers.
+
   - `stream` - A `MediaStream` with audio and/or video to send to peers in the
     room.
 
@@ -685,6 +688,7 @@ Returns an object with the following methods:
 - ### `removeStream(stream, [targetPeers])`
 
   Stops sending previously sent media stream to other peers.
+
   - `stream` - A previously sent `MediaStream` to stop sending.
 
   - `targetPeers` - **(optional)** If specified, the stream is removed only from
@@ -693,6 +697,7 @@ Returns an object with the following methods:
 - ### `addTrack(track, stream, [targetPeers], [metadata])`
 
   Adds a new media track to a stream.
+
   - `track` - A `MediaStreamTrack` to add to an existing stream.
 
   - `stream` - The target `MediaStream` to attach the new track to.
@@ -707,6 +712,7 @@ Returns an object with the following methods:
 - ### `removeTrack(track, [targetPeers])`
 
   Removes a media track.
+
   - `track` - The `MediaStreamTrack` to remove.
 
   - `targetPeers` - **(optional)** If specified, the track is removed only from
@@ -715,6 +721,7 @@ Returns an object with the following methods:
 - ### `replaceTrack(oldTrack, newTrack, [targetPeers])`
 
   Replaces a media track with a new one.
+
   - `oldTrack` - The `MediaStreamTrack` to remove.
 
   - `newTrack` - A `MediaStreamTrack` to attach.
@@ -726,6 +733,7 @@ Returns an object with the following methods:
 
   Registers a callback function that will be called when a peer joins the room.
   If called more than once, only the latest callback registered is ever called.
+
   - `callback(peerId)` - Function to run whenever a peer joins, called with the
     peer's ID.
 
@@ -739,6 +747,7 @@ Returns an object with the following methods:
 
   Registers a callback function that will be called when a peer leaves the room.
   If called more than once, only the latest callback registered is ever called.
+
   - `callback(peerId)` - Function to run whenever a peer leaves, called with the
     peer's ID.
 
@@ -753,6 +762,7 @@ Returns an object with the following methods:
   Registers a callback function that will be called when a peer sends a media
   stream. If called more than once, only the latest callback registered is ever
   called.
+
   - `callback(stream, peerId, metadata)` - Function to run whenever a peer sends
     a media stream, called with the the peer's stream, ID, and optional metadata
     (see `addStream()` above for details).
@@ -770,6 +780,7 @@ Returns an object with the following methods:
   Registers a callback function that will be called when a peer sends a media
   track. If called more than once, only the latest callback registered is ever
   called.
+
   - `callback(track, stream, peerId, metadata)` - Function to run whenever a
     peer sends a media track, called with the the peer's track, attached stream,
     ID, and optional metadata (see `addTrack()` above for details).
@@ -785,14 +796,18 @@ Returns an object with the following methods:
 - ### `makeAction(actionId)`
 
   Listen for and send custom data actions.
+
   - `actionId` - A string to register this action consistently among all peers.
 
   Returns an array of three functions:
+
   1. #### Sender
+
      - Sends data to peers and returns a promise that resolves when all
        target peers are finished receiving data.
 
      - `(data, [targetPeers], [metadata], [onProgress])`
+
        - `data` - Any value to send (primitive, object, binary). Serialization
          and chunking is handled automatically. Binary data (e.g. `Blob`,
          `TypedArray`) is received by other peer as an agnostic `ArrayBuffer`.
@@ -810,10 +825,12 @@ Returns an object with the following methods:
          [Progress updates](#progress-updates) for an example.
 
   2. #### Receiver
+
      - Registers a callback function that runs when data for this action is
        received from other peers.
 
      - `(data, peerId, metadata)`
+
        - `data` - The value transmitted by the sending peer. Deserialization is
          handled automatically, i.e. a number will be received as a number, an
          object as an object, etc.
@@ -824,11 +841,13 @@ Returns an object with the following methods:
          sender if `data` is binary, e.g. a filename.
 
   3. #### Progress handler
+
      - Registers a callback function that runs when partial data is received
        from peers. You can use this for tracking large binary transfers. See
        [Progress updates](#progress-updates) for an example.
 
      - `(percent, peerId, metadata)`
+
        - `percent` - A number between 0 and 1 indicating the percentage complete
          of the transfer.
 
@@ -855,6 +874,7 @@ Returns an object with the following methods:
 
   Takes a peer ID and returns a promise that resolves to the milliseconds the
   round-trip to that peer took. Use this for measuring latency.
+
   - `peerId` - Peer ID string of the target peer.
 
   Example:
