@@ -98,7 +98,12 @@ declare module 'trystero' {
     ) => void
 
     onPeerTrack: (
-      fn: (track: MediaStreamTrack, stream: MediaStream, peerId: string) => void
+      fn: (
+        track: MediaStreamTrack,
+        stream: MediaStream,
+        peerId: string,
+        metadata: JsonValue
+      ) => void
     ) => void
   }
 
