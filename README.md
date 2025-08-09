@@ -484,18 +484,19 @@ you can configure a TURN server which will act as a proxy layer for peers
 that aren't able to connect directly to one another.
 
 1. If you can, confirm that the issue is specific to particular network
-   conditions (e.g. user with ISP A cannot connect to a user with ISP B). If
+   conditions (e.g. user with ISP X cannot connect to a user with ISP Y). If
    other user pairings are working (like those between two browsers on the same
    machine), this likely confirms that Trystero is working correctly.
 2. Sign up for a TURN service or host your own. There are various hosted TURN
-   services you can find online (like
-   [Open Relay](https://www.metered.ca/stun-turn) or
-   [Cloudflare](https://developers.cloudflare.com/calls/turn/)), some with free
-   tiers. You can also host an open source TURN server like
-   [coturn](https://github.com/coturn/coturn),
+   services you can find online like [Cloudflare](https://developers.cloudflare.com/calls/turn/)
+   (which offers a free tier with 1,000 GB traffic per month) or
+   [Open Relay](https://www.metered.ca/stun-turn). You can also host an open
+   source TURN server like [coturn](https://github.com/coturn/coturn),
    [Pion TURN](https://github.com/pion/turn),
    [Violet](https://github.com/paullouisageneau/violet), or
-   [eturnal](https://github.com/processone/eturnal).
+   [eturnal](https://github.com/processone/eturnal). Keep in mind data will
+   only go through the TURN server for peers that can't directly connect and
+   will still be end-to-end encrypted.
 3. Once you have a TURN server, configure Trystero with it like this:
    ```js
    const room = joinRoom(
