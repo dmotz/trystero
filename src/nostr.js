@@ -147,7 +147,6 @@ export const defaultRelayUrls = [
   'nostr.oxtr.dev',
   'nostr.sathoarder.com',
   'nostr.vulpem.com',
-  'nostrelay.memory-art.xyz',
   'playground.nostrcheck.me/relay',
   'relay.agorist.space',
   'relay.binaryrobot.com',
