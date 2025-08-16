@@ -97,9 +97,10 @@ Promise.all(
     mqtt: mqttRelays,
     torrent: torrentRelays
   }).map(testRelays)
-).then(res =>
+).then(res => {
   res.forEach(([strategy, list]) => {
     console.log(strategy.toUpperCase() + ':')
     console.log(list.join('\n'), '\n')
   })
-)
+  process.exit(0)
+})
