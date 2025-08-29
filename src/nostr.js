@@ -1,6 +1,6 @@
 import {schnorr} from '@noble/secp256k1'
 import strategy from './strategy.js'
-import {digest} from './crypto.js'
+import {hashWith} from './crypto.js'
 import {
   fromJson,
   genId,
@@ -38,7 +38,7 @@ export const createEvent = async (topic, content) => {
     pubkey
   }
 
-  const id = await digest(
+  const id = await hashWith(
     'SHA-256',
     toJson([
       0,
