@@ -913,7 +913,7 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 |                   | one-time setup¹ | bundle size² |
 | ----------------- | --------------- | ------------ |
-| 🐦 **Nostr**      | none            | 10K          |
+| 🐦 **Nostr**      | none            | 8K           |
 | 📡 **MQTT**       | none            | 75K          |
 | 🌊 **BitTorrent** | none            | 5K           |
 | ⚡️ **Supabase**  | ~5 mins         | 28K          |
