@@ -133,15 +133,12 @@ export {selfId} from './utils.js'
 
 export const defaultRelayUrls = [
   'black.nostrcity.club',
-  'eu.purplerelay.com',
   'ftp.halifax.rwth-aachen.de/nostr',
   'nos.lol',
   'nostr.cool110.xyz',
   'nostr.data.haus',
-  'nostr.oxtr.dev',
   'nostr.sathoarder.com',
   'nostr.vulpem.com',
-  'playground.nostrcheck.me/relay',
   'relay.agorist.space',
   'relay.binaryrobot.com',
   'relay.damus.io',
