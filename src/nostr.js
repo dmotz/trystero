@@ -1,7 +1,7 @@
-import {schnorr, utils} from '@noble/secp256k1'
+import {schnorr} from '@noble/secp256k1'
 import strategy from './strategy.js'
+import {digest} from './crypto.js'
 import {
-  encodeBytes,
   fromJson,
   genId,
   getRelays,
@@ -18,8 +18,8 @@ const clients = {}
 const defaultRedundancy = 5
 const tag = 'x'
 const eventMsgType = 'EVENT'
-const privateKey = utils.randomPrivateKey()
-const publicKey = toHex(schnorr.getPublicKey(privateKey))
+const {secretKey, publicKey} = schnorr.keygen()
+const pubkey = toHex(publicKey)
 const subIdToTopic = {}
 const msgHandlers = {}
 const kindCache = {}
@@ -32,36 +32,30 @@ const topicToKind = topic =>
 export const createEvent = async (topic, content) => {
   const payload = {
     kind: topicToKind(topic),
-    content,
-    pubkey: publicKey,
+    tags: [[tag, topic]],
     created_at: now(),
-    tags: [[tag, topic]]
+    content,
+    pubkey
   }
 
-  const id = toHex(
-    new Uint8Array(
-      await crypto.subtle.digest(
-        'SHA-256',
-        encodeBytes(
-          toJson([
-            0,
-            payload.pubkey,
-            payload.created_at,
-            payload.kind,
-            payload.tags,
-            payload.content
-          ])
-        )
-      )
-    )
+  const id = await digest(
+    'SHA-256',
+    toJson([
+      0,
+      payload.pubkey,
+      payload.created_at,
+      payload.kind,
+      payload.tags,
+      payload.content
+    ])
   )
 
   return toJson([
     eventMsgType,
     {
       ...payload,
-      id,
-      sig: toHex(await schnorr.sign(id, privateKey))
+      id: toHex(id),
+      sig: toHex(await schnorr.signAsync(id, secretKey))
     }
   ])
 }

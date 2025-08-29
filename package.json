@@ -26,7 +26,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@noble/secp256k1": "^1.7.1",
+    "@noble/secp256k1": "^3.0.0",
     "@supabase/supabase-js": "^2.49.8",
     "@waku/discovery": "^0.0.8",
     "@waku/sdk": "^0.0.31",
