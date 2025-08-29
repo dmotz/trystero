@@ -10,11 +10,12 @@ const unpack = packed => {
   return new Uint8Array(str.length).map((_, i) => str.charCodeAt(i)).buffer
 }
 
+export const digest = async (algo, str) =>
+  new Uint8Array(await crypto.subtle.digest(algo, encodeBytes(str)))
+
 export const sha1 = async str =>
   // eslint-disable-next-line require-atomic-updates
-  (strToSha1[str] ||= Array.from(
-    new Uint8Array(await crypto.subtle.digest('SHA-1', encodeBytes(str)))
-  )
+  (strToSha1[str] ||= Array.from(await digest('SHA-1', str))
     .map(b => b.toString(36))
     .join(''))
 
