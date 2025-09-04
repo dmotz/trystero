@@ -25,6 +25,7 @@ export default ({init, subscribe, announce}) => {
   let initPromises
   let offerPool
   let offerCleanupTimer
+  let cleanupWatchOnline
 
   return (config, roomId, onJoinError) => {
     const {appId} = config
@@ -238,9 +239,7 @@ export default ({init, subscribe, announce}) => {
           })),
         offerTtl * 1.03
       )
-      if(!config.disableWatchOnline){
-        watchOnline()
-      }
+      cleanupWatchOnline = config.disableWatchOnline ? noOp : watchOnline()
     }
 
     const announceIntervals = initPromises.map(() => announceIntervalMs)
@@ -288,6 +287,8 @@ export default ({init, subscribe, announce}) => {
         announceTimeouts.forEach(clearTimeout)
         unsubFns.forEach(async f => (await f)())
         clearInterval(offerCleanupTimer)
+        cleanupWatchOnline()
+        didInit = false
       }
     ))
   }
