@@ -63,6 +63,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
       return
     }
 
+    peerMap[id].destroy()
     delete peerMap[id]
     delete pendingTransmissions[id]
     delete pendingPongs[id]

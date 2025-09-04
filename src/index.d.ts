@@ -98,13 +98,24 @@ declare module 'trystero' {
     ) => void
 
     onPeerTrack: (
-      fn: (track: MediaStreamTrack, stream: MediaStream, peerId: string) => void
+      fn: (
+        track: MediaStreamTrack,
+        stream: MediaStream,
+        peerId: string,
+        metadata: JsonValue
+      ) => void
     ) => void
   }
 
   export function joinRoom(
     config: BaseRoomConfig & RelayConfig & TurnConfig,
-    roomId: string
+    roomId: string,
+    onJoinError?: (details: {
+      error: string
+      appId: string
+      roomId: string
+      peerId: string
+    }) => void
   ): Room
 
   export const selfId: string
