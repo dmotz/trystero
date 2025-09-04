@@ -87,19 +87,18 @@ You can install with npm (`npm i trystero`) and import like so:
 import {joinRoom} from 'trystero'
 ```
 
-Or maybe you prefer a simple script tag? Download a pre-built JS file from the
-[latest release](https://github.com/dmotz/trystero/releases/latest) and import
-it locally:
+Or maybe you prefer a simple script tag? You can just import Trystero from a CDN
+or download and locally host a JS bundle from the
+[latest release](https://github.com/dmotz/trystero/releases/latest):
 
 ```html
 <script type="module">
-  import {joinRoom} from './trystero-torrent.min.js'
+  import {joinRoom} from 'https://esm.run/trystero'
 </script>
 ```
 
 By default, the [Nostr strategy](#strategy-comparison) is used. To use a
-different one just deep import like so (your bundler should handle including
-only relevant code):
+different one, just use a deep import like this:
 
 ```js
 import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
@@ -173,9 +172,11 @@ console.log(`my peer ID is ${selfId}`)
 Send peers your video stream:
 
 ```js
-room.addStream(
-  await navigator.mediaDevices.getUserMedia({audio: true, video: true})
-)
+const stream = await navigator.mediaDevices.getUserMedia({
+  audio: true,
+  video: true
+})
+room.addStream(stream)
 ```
 
 Send and subscribe to custom P2P actions:
@@ -264,7 +265,7 @@ room.onPeerStream((stream, peerId) => {
   audio.srcObject = stream
   audio.autoplay = true
 
-  // add the audio to peerAudio object if you want to address it for something
+  // add the audio to peerAudios object if you want to address it for something
   // later (volume, etc.)
   peerAudios[peerId] = audio
 })
@@ -304,7 +305,7 @@ interpreted. Instead of manually adding metadata bytes to the buffer you can
 simply pass a metadata argument in the sender action for your binary payload:
 
 ```js
-const [sendFile, getFile] = makeAction('file')
+const [sendFile, getFile] = room.makeAction('file')
 
 getFile((data, peerId, metadata) =>
   console.log(
@@ -333,7 +334,7 @@ console.log('done sending to all peers')
 
 Action sender functions also take an optional callback function that will be
 continuously called as the transmission progresses. This can be used for showing
-a progress bar to the sender for large tranfers. The callback is called with a
+a progress bar to the sender for large transfers. The callback is called with a
 percentage value between 0 and 1 and the receiving peer's ID:
 
 ```js
@@ -483,18 +484,19 @@ you can configure a TURN server which will act as a proxy layer for peers
 that aren't able to connect directly to one another.
 
 1. If you can, confirm that the issue is specific to particular network
-   conditions (e.g. user with ISP A cannot connect to a user with ISP B). If
+   conditions (e.g. user with ISP X cannot connect to a user with ISP Y). If
    other user pairings are working (like those between two browsers on the same
    machine), this likely confirms that Trystero is working correctly.
 2. Sign up for a TURN service or host your own. There are various hosted TURN
-   services you can find online (like
-   [Open Relay](https://www.metered.ca/stun-turn) or
-   [Cloudflare](https://developers.cloudflare.com/calls/turn/)), some with free
-   tiers. You can also host an open source TURN server like
-   [coturn](https://github.com/coturn/coturn),
+   services you can find online like [Cloudflare](https://developers.cloudflare.com/calls/turn/)
+   (which offers a free tier with 1,000 GB traffic per month) or
+   [Open Relay](https://www.metered.ca/stun-turn). You can also host an open
+   source TURN server like [coturn](https://github.com/coturn/coturn),
    [Pion TURN](https://github.com/pion/turn),
    [Violet](https://github.com/paullouisageneau/violet), or
-   [eturnal](https://github.com/processone/eturnal).
+   [eturnal](https://github.com/processone/eturnal). Keep in mind data will
+   only go through the TURN server for peers that can't directly connect and
+   will still be end-to-end encrypted.
 3. Once you have a TURN server, configure Trystero with it like this:
    ```js
    const room = joinRoom(
@@ -502,7 +504,7 @@ that aren't able to connect directly to one another.
        // ...your app config
        turnConfig: [
          {
-           // single string or list of strings of urls to access TURN server
+           // single string or list of strings of URLs to access TURN server
            urls: ['turn:your-turn-server.ok:1979'],
            username: 'username',
            credential: 'password'
@@ -517,7 +519,7 @@ that aren't able to connect directly to one another.
 
 Trystero works wherever JS runs, including server-side like Node, Deno, or Bun.
 Why would you want to run something that helps you avoid servers on a server?
-One reason is if you want an always-on peer which can he useful for remembering
+One reason is if you want an always-on peer which can be useful for remembering
 the last state of data, broadcasting it to new users. Another reason might be to
 run peers that are lighter weight and don't need a full browser running, like an
 embedded device or Raspberry Pi.
@@ -582,14 +584,13 @@ known ahead of time.
 
 ## API
 
-### `joinRoom(config, roomId, [onError])`
+### `joinRoom(config, roomId, [onJoinError])`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events. Calling `joinRoom()` multiple times with
 the same namespace will return the same room instance.
 
 - `config` - Configuration object containing the following keys:
-
   - `appId` - **(required)** A unique string identifying your app. When using
     Supabase, this should be set to your project URL (see
     [Supabase setup instructions](#supabase-setup)). If using
@@ -637,7 +638,7 @@ the same namespace will return the same room instance.
   - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
     initialized Firebase app instance instead of an `appId`. Normally Trystero
     will initialize a Firebase app based on the `appId` but this will fail if
-    youʼve already initialized it for use elsewhere.
+    you've already initialized it for use elsewhere.
 
   - `rootPath` - **(optional, 🔥 Firebase only)** String specifying path where
     Trystero writes its matchmaking data in your database (`'__trystero__'` by
@@ -650,9 +651,9 @@ the same namespace will return the same room instance.
 
 - `roomId` - A string to namespace peers and events within a room.
 
-- `onError(details)` - **(optional)** A callback function that will be called if
-  the room cannot be joined due to an incorrect password. `details` is an
-  object containing `appId`, `roomId`, `peerId`, and `error` describing the
+- `onJoinError(details)` - **(optional)** A callback function that will be
+  called if the room cannot be joined due to an incorrect password. `details` is
+  an object containing `appId`, `roomId`, `peerId`, and `error` describing the
   error.
 
 Returns an object with the following methods:
@@ -671,7 +672,6 @@ Returns an object with the following methods:
 - ### `addStream(stream, [targetPeers], [metadata])`
 
   Broadcasts media stream to other peers.
-
   - `stream` - A `MediaStream` with audio and/or video to send to peers in the
     room.
 
@@ -687,7 +687,6 @@ Returns an object with the following methods:
 - ### `removeStream(stream, [targetPeers])`
 
   Stops sending previously sent media stream to other peers.
-
   - `stream` - A previously sent `MediaStream` to stop sending.
 
   - `targetPeers` - **(optional)** If specified, the stream is removed only from
@@ -696,7 +695,6 @@ Returns an object with the following methods:
 - ### `addTrack(track, stream, [targetPeers], [metadata])`
 
   Adds a new media track to a stream.
-
   - `track` - A `MediaStreamTrack` to add to an existing stream.
 
   - `stream` - The target `MediaStream` to attach the new track to.
@@ -711,16 +709,14 @@ Returns an object with the following methods:
 - ### `removeTrack(track, [targetPeers])`
 
   Removes a media track.
-
   - `track` - The `MediaStreamTrack` to remove.
 
   - `targetPeers` - **(optional)** If specified, the track is removed only from
     the target peer ID (string) or list of peer IDs (array).
 
-- ### `replaceTrack(oldTrack, newTrack, [targetPeers])`
+- ### `replaceTrack(oldTrack, newTrack, [targetPeers], [metadata])`
 
   Replaces a media track with a new one.
-
   - `oldTrack` - The `MediaStreamTrack` to remove.
 
   - `newTrack` - A `MediaStreamTrack` to attach.
@@ -732,7 +728,6 @@ Returns an object with the following methods:
 
   Registers a callback function that will be called when a peer joins the room.
   If called more than once, only the latest callback registered is ever called.
-
   - `callback(peerId)` - Function to run whenever a peer joins, called with the
     peer's ID.
 
@@ -746,7 +741,6 @@ Returns an object with the following methods:
 
   Registers a callback function that will be called when a peer leaves the room.
   If called more than once, only the latest callback registered is ever called.
-
   - `callback(peerId)` - Function to run whenever a peer leaves, called with the
     peer's ID.
 
@@ -761,7 +755,6 @@ Returns an object with the following methods:
   Registers a callback function that will be called when a peer sends a media
   stream. If called more than once, only the latest callback registered is ever
   called.
-
   - `callback(stream, peerId, metadata)` - Function to run whenever a peer sends
     a media stream, called with the the peer's stream, ID, and optional metadata
     (see `addStream()` above for details).
@@ -779,7 +772,6 @@ Returns an object with the following methods:
   Registers a callback function that will be called when a peer sends a media
   track. If called more than once, only the latest callback registered is ever
   called.
-
   - `callback(track, stream, peerId, metadata)` - Function to run whenever a
     peer sends a media track, called with the the peer's track, attached stream,
     ID, and optional metadata (see `addTrack()` above for details).
@@ -795,18 +787,14 @@ Returns an object with the following methods:
 - ### `makeAction(actionId)`
 
   Listen for and send custom data actions.
-
   - `actionId` - A string to register this action consistently among all peers.
 
   Returns an array of three functions:
-
   1. #### Sender
-
      - Sends data to peers and returns a promise that resolves when all
        target peers are finished receiving data.
 
      - `(data, [targetPeers], [metadata], [onProgress])`
-
        - `data` - Any value to send (primitive, object, binary). Serialization
          and chunking is handled automatically. Binary data (e.g. `Blob`,
          `TypedArray`) is received by other peer as an agnostic `ArrayBuffer`.
@@ -824,12 +812,10 @@ Returns an object with the following methods:
          [Progress updates](#progress-updates) for an example.
 
   2. #### Receiver
-
      - Registers a callback function that runs when data for this action is
        received from other peers.
 
      - `(data, peerId, metadata)`
-
        - `data` - The value transmitted by the sending peer. Deserialization is
          handled automatically, i.e. a number will be received as a number, an
          object as an object, etc.
@@ -840,13 +826,11 @@ Returns an object with the following methods:
          sender if `data` is binary, e.g. a filename.
 
   3. #### Progress handler
-
      - Registers a callback function that runs when partial data is received
        from peers. You can use this for tracking large binary transfers. See
        [Progress updates](#progress-updates) for an example.
 
      - `(percent, peerId, metadata)`
-
        - `percent` - A number between 0 and 1 indicating the percentage complete
          of the transfer.
 
@@ -873,7 +857,6 @@ Returns an object with the following methods:
 
   Takes a peer ID and returns a promise that resolves to the milliseconds the
   round-trip to that peer took. Use this for measuring latency.
-
   - `peerId` - Peer ID string of the target peer.
 
   Example:
@@ -930,7 +913,7 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 
 |                   | one-time setup¹ | bundle size² |
 | ----------------- | --------------- | ------------ |
-| 🐦 **Nostr**      | none            | 10K          |
+| 🐦 **Nostr**      | none            | 8K           |
 | 📡 **MQTT**       | none            | 75K          |
 | 🌊 **BitTorrent** | none            | 5K           |
 | ⚡️ **Supabase**  | ~5 mins         | 28K          |

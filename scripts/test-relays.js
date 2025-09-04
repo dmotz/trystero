@@ -1,47 +1,16 @@
 import WebSocket from 'ws'
-import {schnorr} from '@noble/curves/secp256k1'
 import chalk from 'chalk'
 import mqtt from 'mqtt'
-import {encodeBytes, toHex, toJson} from '../src/utils.js'
+import {genId} from '../src/utils.js'
 import {defaultRelayUrls as mqttRelays} from '../src/mqtt.js'
-import {defaultRelayUrls as nostrRelays} from '../src/nostr.js'
+import {
+  createEvent,
+  defaultRelayUrls as nostrRelays,
+  subscribe
+} from '../src/nostr.js'
 import {defaultRelayUrls as torrentRelays} from '../src/torrent.js'
 
 const timeLimit = 5000
-const privateKey = schnorr.utils.randomPrivateKey()
-
-const nostrEvent = await (async () => {
-  const payload = {
-    kind: 29333,
-    content: Math.random().toString(36).slice(2),
-    pubkey: toHex(schnorr.getPublicKey(privateKey)),
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [['x', Math.random().toString(36).slice(2)]]
-  }
-
-  const id = toHex(
-    new Uint8Array(
-      await crypto.subtle.digest(
-        'SHA-256',
-        encodeBytes(
-          toJson([
-            0,
-            payload.pubkey,
-            payload.created_at,
-            payload.kind,
-            payload.tags,
-            payload.content
-          ])
-        )
-      )
-    )
-  )
-
-  return toJson([
-    'EVENT',
-    {...payload, id, sig: toHex(await schnorr.sign(id, privateKey))}
-  ])
-})()
 
 const testRelay = (url, strategy) => {
   const start = Date.now()
@@ -72,25 +41,37 @@ const testRelay = (url, strategy) => {
   return new Promise((res, rej) => {
     timeout = setTimeout(() => rej('timeout'), timeLimit)
 
-    ws.on('open', () => {
+    ws.on('open', async () => {
       if (strategy === 'nostr') {
+        const topic = genId(64)
+        const content = Math.random().toString(36)
+
         ws.on('message', msg => {
           try {
-            const [event, , success, errMsg] = JSON.parse(msg.toString())
+            const [event, , successOrStatus, errMsg] = JSON.parse(
+              msg.toString()
+            )
+
+            if (event === 'CLOSED') {
+              rej(successOrStatus)
+              return
+            }
 
             if (event === 'OK') {
-              if (success) {
-                res()
+              if (successOrStatus) {
+                ws.send(subscribe(topic, content))
               } else {
                 rej(errMsg)
               }
+            } else if (event === 'EOSE') {
+              res()
             }
           } catch {
             rej('failed to parse nostr response')
           }
         })
 
-        ws.send(nostrEvent)
+        ws.send(await createEvent(topic, content))
       } else {
         res()
       }
@@ -116,9 +97,10 @@ Promise.all(
     mqtt: mqttRelays,
     torrent: torrentRelays
   }).map(testRelays)
-).then(res =>
+).then(res => {
   res.forEach(([strategy, list]) => {
     console.log(strategy.toUpperCase() + ':')
     console.log(list.join('\n'), '\n')
   })
-)
+  process.exit(0)
+})

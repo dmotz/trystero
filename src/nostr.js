@@ -1,7 +1,7 @@
-import {schnorr, utils} from '@noble/secp256k1'
+import {schnorr} from '@noble/secp256k1'
 import strategy from './strategy.js'
+import {hashWith} from './crypto.js'
 import {
-  encodeBytes,
   fromJson,
   genId,
   getRelays,
@@ -18,8 +18,8 @@ const clients = {}
 const defaultRedundancy = 5
 const tag = 'x'
 const eventMsgType = 'EVENT'
-const privateKey = utils.randomPrivateKey()
-const publicKey = toHex(schnorr.getPublicKey(privateKey))
+const {secretKey, publicKey} = schnorr.keygen()
+const pubkey = toHex(publicKey)
 const subIdToTopic = {}
 const msgHandlers = {}
 const kindCache = {}
@@ -29,44 +29,38 @@ const now = () => Math.floor(Date.now() / 1000)
 const topicToKind = topic =>
   (kindCache[topic] ??= strToNum(topic, 10_000) + 20_000)
 
-const createEvent = async (topic, content) => {
+export const createEvent = async (topic, content) => {
   const payload = {
     kind: topicToKind(topic),
-    content,
-    pubkey: publicKey,
+    tags: [[tag, topic]],
     created_at: now(),
-    tags: [[tag, topic]]
+    content,
+    pubkey
   }
 
-  const id = toHex(
-    new Uint8Array(
-      await crypto.subtle.digest(
-        'SHA-256',
-        encodeBytes(
-          toJson([
-            0,
-            payload.pubkey,
-            payload.created_at,
-            payload.kind,
-            payload.tags,
-            payload.content
-          ])
-        )
-      )
-    )
+  const id = await hashWith(
+    'SHA-256',
+    toJson([
+      0,
+      payload.pubkey,
+      payload.created_at,
+      payload.kind,
+      payload.tags,
+      payload.content
+    ])
   )
 
   return toJson([
     eventMsgType,
     {
       ...payload,
-      id,
-      sig: toHex(await schnorr.sign(id, privateKey))
+      id: toHex(id),
+      sig: toHex(await schnorr.signAsync(id, secretKey))
     }
   ])
 }
 
-const subscribe = (subId, topic) => {
+export const subscribe = (subId, topic) => {
   subIdToTopic[subId] = topic
   return toJson([
     'REQ',
@@ -144,26 +138,21 @@ export {
 
 export const defaultRelayUrls = [
   'black.nostrcity.club',
-  'eu.purplerelay.com',
   'ftp.halifax.rwth-aachen.de/nostr',
+  'nos.lol',
   'nostr.cool110.xyz',
   'nostr.data.haus',
-  'nostr.mom',
-  'nostr.oxtr.dev',
   'nostr.sathoarder.com',
   'nostr.vulpem.com',
-  'nostrelay.memory-art.xyz',
-  'playground.nostrcheck.me/relay',
   'relay.agorist.space',
   'relay.binaryrobot.com',
+  'relay.damus.io',
   'relay.fountain.fm',
   'relay.mostro.network',
   'relay.nostraddress.com',
   'relay.nostrdice.com',
   'relay.nostromo.social',
   'relay.oldenburg.cool',
-  'relay.snort.social',
   'relay.verified-nostr.com',
-  'sendit.nosflare.com',
   'yabu.me/v2'
 ].map(url => 'wss://' + url)

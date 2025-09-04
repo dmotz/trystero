@@ -33,7 +33,7 @@ export const toHex = buffer =>
 
 export const topicPath = (...parts) => parts.join('@')
 
-const shuffle = (xs, seed) => {
+export const shuffle = (xs, seed) => {
   const a = [...xs]
   const rand = () => {
     const x = sin(seed++) * 10_000
