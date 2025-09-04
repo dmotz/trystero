@@ -35,24 +35,30 @@ You can see what people are building with Trystero [here](https://github.com/jer
 
 ## Contents
 
-- [How it works](#how-it-works)
-- [Get started](#get-started)
-- [Listen for events](#listen-for-events)
-- [Broadcast events](#broadcast-events)
-- [Audio and video](#audio-and-video)
-- [Advanced](#advanced)
-  - [Binary metadata](#binary-metadata)
-  - [Action promises](#action-promises)
-  - [Progress updates](#progress-updates)
-  - [Encryption](#encryption)
-  - [React hooks](#react-hooks)
-  - [Connection issues](#connection-issues)
-  - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
-  - [Supabase setup](#supabase-setup)
-  - [Firebase setup](#firebase-setup)
-- [API](#api)
-- [Strategy comparison](#strategy-comparison)
-  - [How to choose](#how-to-choose)
+- [✨🤝✨ Trystero](#-trystero)
+  - [Contents](#contents)
+  - [How it works](#how-it-works)
+  - [Get started](#get-started)
+  - [Listen for events](#listen-for-events)
+  - [Broadcast events](#broadcast-events)
+  - [Audio and video](#audio-and-video)
+  - [Advanced](#advanced)
+    - [Binary metadata](#binary-metadata)
+    - [Action promises](#action-promises)
+    - [Progress updates](#progress-updates)
+    - [Encryption](#encryption)
+    - [React hooks](#react-hooks)
+    - [Connection issues](#connection-issues)
+    - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
+    - [Supabase setup](#supabase-setup)
+    - [Firebase setup](#firebase-setup)
+  - [API](#api)
+    - [`joinRoom(config, roomId, [onJoinError])`](#joinroomconfig-roomid-onjoinerror)
+    - [`selfId`](#selfid)
+    - [`getRelaySockets()`](#getrelaysockets)
+    - [`getOccupants(config, roomId)`](#getoccupantsconfig-roomid)
+  - [Strategy comparison](#strategy-comparison)
+    - [How to choose](#how-to-choose)
 
 ---
 
@@ -648,6 +654,11 @@ the same namespace will return the same room instance.
   - `libp2pConfig` - **(optional, 🪐 IPFS only)**
     [`Libp2pOptions`](https://libp2p.github.io/js-libp2p/types/libp2p.index.Libp2pOptions.html)
     where you can specify a list of static peers for bootstrapping.
+
+  - `disableWatchOnline` - **(optional)** Boolean (default: `false`) that
+    when set to `true` disables automatically pausing and resuming reconnection
+    attempts when the browser goes offline and comes back online. This is useful
+    if you want to manage this behavior yourself.
 
 - `roomId` - A string to namespace peers and events within a room.
 

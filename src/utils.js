@@ -156,3 +156,13 @@ export const makeSocket = (url, onMessage) => {
 
 export const socketGetter = clientMap => () =>
   fromEntries(entries(clientMap).map(([url, client]) => [url, client.socket]))
+
+export const watchOnline = ()=>{
+  if(isBrowser){
+    const controller = new AbortController()
+    addEventListener('online', () => resumeReconnection(),{signal: controller.signal})
+    addEventListener('offline', () => pauseReconnection(),{signal: controller.signal})
+    return () => controller.abort()
+  }
+  return noOp
+}

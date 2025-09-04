@@ -10,7 +10,8 @@ import {
   noOp,
   selfId,
   toJson,
-  topicPath
+  topicPath,
+  watchOnline,
 } from './utils.js'
 
 const poolSize = 20
@@ -237,6 +238,9 @@ export default ({init, subscribe, announce}) => {
           })),
         offerTtl * 1.03
       )
+      if(!config.disableWatchOnline){
+        watchOnline()
+      }
     }
 
     const announceIntervals = initPromises.map(() => announceIntervalMs)
