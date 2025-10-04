@@ -1,10 +1,4 @@
-import {
-  createDecoder,
-  createEncoder,
-  createLightNode,
-  Protocols
-} from '@waku/sdk'
-import {wakuPeerExchangeDiscovery} from '@waku/discovery'
+import {createLightNode} from '@waku/sdk'
 import strategy from './strategy.js'
 import {
   all,
@@ -15,40 +9,23 @@ import {
   toJson
 } from './utils.js'
 
-const pubsubTopic = '/waku/2/default-waku/proto'
-
-const contentTopic = topic => `/${libName}/0/${topic}/json`
+const contentTopic = topic => `/${libName}-${topic}/0/msg/json`
 
 const sendMessage = (node, topic, payload) =>
   node.lightPush.send(
-    createEncoder({
-      pubsubTopic,
-      contentTopic: contentTopic(topic),
-      ephemeral: true
-    }),
-    {payload: encodeBytes(payload)}
+    node.createEncoder({contentTopic: contentTopic(topic), ephemeral: true}),
+    {payload: encodeBytes(payload)},
+    {autoRetry: true}
   )
 
 export const joinRoom = strategy({
-  init: config =>
+  init: () =>
     createLightNode({
-      defaultBootstrap: false,
-      pubsubTopics: [pubsubTopic],
-      bootstrapPeers: [
-        '/dns4/waku.myrandomdemos.online/tcp/8000/wss/p2p/16Uiu2HAmKfC2QUvMVyBsVjuEzdo1hVhRddZxo69YkBuXYvuZ83sc',
-        '/dns4/node-01.do-ams3.wakuv2.prod.status.im/tcp/8000/wss/p2p/16Uiu2HAmL5okWopX7NqZWBUKVqW8iUxCEmd5GMHLVPwCgzYzQv3e',
-        '/dns4/node-01.gc-us-central1-a.wakuv2.prod.statusim.net/tcp/8000/wss/p2p/16Uiu2HAmVkKntsECaYfefR1V2yCR79CegLATuTPE6B9TxgxBiiiA',
-        '/dns4/node-01.ac-cn-hongkong-c.wakuv2.prod.status.im/tcp/8000/wss/p2p/16Uiu2HAm4v86W3bmT1BiH6oSPzcsSr24iDQpSN5Qa992BCjjwgrD',
-        '/dns4/node-01.do-ams3.wakuv2.test.status.im/tcp/8000/wss/p2p/16Uiu2HAmPLe7Mzm8TsYUubgCAW1aJoeFScxrLj8ppHFivPo97bUZ'
-      ],
-      libp2p: {
-        peerDiscovery: [wakuPeerExchangeDiscovery([pubsubTopic])],
-        hideWebSocketInfo: true,
-        ...config.libp2pConfig
-      }
+      defaultBootstrap: true,
+      discovery: {dns: true, peerExchange: true, peerCache: true}
     }).then(async node => {
       await node.start()
-      await node.waitForPeers([Protocols.LightPush, Protocols.Filter])
+      await node.waitForPeers()
       return node
     }),
 
@@ -62,12 +39,11 @@ export const joinRoom = strategy({
     }
 
     const unsubFns = await all(
-      [rootTopic, selfTopic].map(topic =>
-        node.filter.subscribe(
-          createDecoder(contentTopic(topic), pubsubTopic),
-          handleMsg(topic)
-        )
-      )
+      [rootTopic, selfTopic].map(topic => {
+        const decoder = node.createDecoder({contentTopic: contentTopic(topic)})
+        node.filter.subscribe(decoder, handleMsg(topic))
+        return () => node.filter.unsubscribe(decoder)
+      })
     )
 
     return () => unsubFns.forEach(f => f())
