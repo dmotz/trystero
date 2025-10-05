@@ -31,7 +31,6 @@
     "@waku/discovery": "^0.0.8",
     "@waku/sdk": "^0.0.31",
     "firebase": "^12.2.1",
-    "libp2p": "^2.8.8",
     "mqtt": "^5.13.0"
   },
   "devDependencies": {
