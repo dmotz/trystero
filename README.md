@@ -645,10 +645,6 @@ the same namespace will return the same room instance.
     default). Changing this is useful if you want to run multiple apps using the
     same database and don't want to worry about namespace collisions.
 
-  - `libp2pConfig` - **(optional, 🪐 IPFS only)**
-    [`Libp2pOptions`](https://libp2p.github.io/js-libp2p/types/libp2p.index.Libp2pOptions.html)
-    where you can specify a list of static peers for bootstrapping.
-
 - `roomId` - A string to namespace peers and events within a room.
 
 - `onJoinError(details)` - **(optional)** A callback function that will be
