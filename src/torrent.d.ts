@@ -3,7 +3,8 @@ declare module 'trystero/torrent' {
 
   export function joinRoom(
     config: BaseRoomConfig & RelayConfig,
-    roomId: string
+    roomId: string,
+    manualRelayReconnection?: boolean
   ): Room
 
   export function getRelaySockets(): Record<string, WebSocket>
