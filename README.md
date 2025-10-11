@@ -29,36 +29,35 @@ on top of WebRTC:
 - 🏭⚡ Runs server-side
 - ⚛️🪝 React hooks
 
-You can see what people are building with Trystero [here](https://github.com/jeremyckahn/awesome-trystero).
+You can see what people are building with Trystero
+[here](https://github.com/jeremyckahn/awesome-trystero).
 
 ---
 
 ## Contents
 
-- [✨🤝✨ Trystero](#-trystero)
-  - [Contents](#contents)
-  - [How it works](#how-it-works)
-  - [Get started](#get-started)
-  - [Listen for events](#listen-for-events)
-  - [Broadcast events](#broadcast-events)
-  - [Audio and video](#audio-and-video)
-  - [Advanced](#advanced)
-    - [Binary metadata](#binary-metadata)
-    - [Action promises](#action-promises)
-    - [Progress updates](#progress-updates)
-    - [Encryption](#encryption)
-    - [React hooks](#react-hooks)
-    - [Connection issues](#connection-issues)
-    - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
-    - [Supabase setup](#supabase-setup)
-    - [Firebase setup](#firebase-setup)
-  - [API](#api)
-    - [`joinRoom(config, roomId, [onJoinError])`](#joinroomconfig-roomid-onjoinerror)
-    - [`selfId`](#selfid)
-    - [`getRelaySockets()`](#getrelaysockets)
-    - [`getOccupants(config, roomId)`](#getoccupantsconfig-roomid)
-  - [Strategy comparison](#strategy-comparison)
-    - [How to choose](#how-to-choose)
+- [How it works](#how-it-works)
+- [Get started](#get-started)
+- [Listen for events](#listen-for-events)
+- [Broadcast events](#broadcast-events)
+- [Audio and video](#audio-and-video)
+- [Advanced](#advanced)
+  - [Binary metadata](#binary-metadata)
+  - [Action promises](#action-promises)
+  - [Progress updates](#progress-updates)
+  - [Encryption](#encryption)
+  - [React hooks](#react-hooks)
+  - [Connection issues](#connection-issues)
+  - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
+  - [Supabase setup](#supabase-setup)
+  - [Firebase setup](#firebase-setup)
+- [API](#api)
+  - [`joinRoom(config, roomId, [onJoinError])`](#joinroomconfig-roomid-onjoinerror)
+  - [`selfId`](#selfid)
+  - [`getRelaySockets()`](#getrelaysockets)
+  - [`getOccupants(config, roomId)`](#getoccupantsconfig-roomid)
+- [Strategy comparison](#strategy-comparison)
+  - [How to choose](#how-to-choose)
 
 ---
 
@@ -126,8 +125,8 @@ const room = joinRoom(config, 'yoyodyne')
 ```
 
 The first argument is a configuration object that requires an `appId`. This
-should be a completely unique identifier for your app¹. The second argument
-is the room ID.
+should be a completely unique identifier for your app¹. The second argument is
+the room ID.
 
 > Why rooms? Browsers can only handle a limited amount of WebRTC connections at
 > a time so it's recommended to design your app such that users are divided into
@@ -241,8 +240,8 @@ room.onPeerLeave(peerId =>
 
 > Actions are smart and handle serialization and chunking for you behind the
 > scenes. This means you can send very large files and whatever data you send
-> will be received on the other side as the same type (a number as a number,
-> a string as a string, an object as an object, binary as binary, etc.).
+> will be received on the other side as the same type (a number as a number, a
+> string as a string, an object as an object, binary as binary, etc.).
 
 ## Audio and video
 
@@ -403,8 +402,8 @@ means.
 Trystero functions are idempotent so they already work out of the box as React
 hooks.
 
-Here's a simple example component where each peer syncs their favorite
-color to everyone else:
+Here's a simple example component where each peer syncs their favorite color to
+everyone else:
 
 ```jsx
 import {joinRoom} from 'trystero'
@@ -486,23 +485,24 @@ export const useRoom = (roomConfig, roomId) => {
 WebRTC is powerful but some networks simply don't allow direct P2P connections
 using it. If you find that certain user pairings aren't working in Trystero,
 you're likely encountering an issue at the network provider level. To solve this
-you can configure a TURN server which will act as a proxy layer for peers
-that aren't able to connect directly to one another.
+you can configure a TURN server which will act as a proxy layer for peers that
+aren't able to connect directly to one another.
 
 1. If you can, confirm that the issue is specific to particular network
    conditions (e.g. user with ISP X cannot connect to a user with ISP Y). If
    other user pairings are working (like those between two browsers on the same
    machine), this likely confirms that Trystero is working correctly.
 2. Sign up for a TURN service or host your own. There are various hosted TURN
-   services you can find online like [Cloudflare](https://developers.cloudflare.com/calls/turn/)
-   (which offers a free tier with 1,000 GB traffic per month) or
+   services you can find online like
+   [Cloudflare](https://developers.cloudflare.com/calls/turn/) (which offers a
+   free tier with 1,000 GB traffic per month) or
    [Open Relay](https://www.metered.ca/stun-turn). You can also host an open
    source TURN server like [coturn](https://github.com/coturn/coturn),
    [Pion TURN](https://github.com/pion/turn),
    [Violet](https://github.com/paullouisageneau/violet), or
-   [eturnal](https://github.com/processone/eturnal). Keep in mind data will
-   only go through the TURN server for peers that can't directly connect and
-   will still be end-to-end encrypted.
+   [eturnal](https://github.com/processone/eturnal). Keep in mind data will only
+   go through the TURN server for peers that can't directly connect and will
+   still be end-to-end encrypted.
 3. Once you have a TURN server, configure Trystero with it like this:
    ```js
    const room = joinRoom(
@@ -549,9 +549,8 @@ To use the Supabase strategy:
 
 1. Create a [Supabase](https://supabase.com) project or use an existing one
 2. On the dashboard, go to Project Settings -> API
-3. Copy the Project URL and set that as the `appId` in the Trystero config,
-   copy the `anon public` API key and set it as `supabaseKey` in the Trystero
-   config
+3. Copy the Project URL and set that as the `appId` in the Trystero config, copy
+   the `anon public` API key and set it as `supabaseKey` in the Trystero config
 
 ### Firebase setup
 
@@ -599,9 +598,9 @@ the same namespace will return the same room instance.
 - `config` - Configuration object containing the following keys:
   - `appId` - **(required)** A unique string identifying your app. When using
     Supabase, this should be set to your project URL (see
-    [Supabase setup instructions](#supabase-setup)). If using
-    Firebase, this should be the `databaseURL` from your Firebase config (also
-    see `firebaseApp` below for an alternative way of configuring the Firebase
+    [Supabase setup instructions](#supabase-setup)). If using Firebase, this
+    should be the `databaseURL` from your Firebase config (also see
+    `firebaseApp` below for an alternative way of configuring the Firebase
     strategy).
 
   - `password` - **(optional)** A string to encrypt session descriptions via
@@ -651,15 +650,11 @@ the same namespace will return the same room instance.
     default). Changing this is useful if you want to run multiple apps using the
     same database and don't want to worry about namespace collisions.
 
-  - `libp2pConfig` - **(optional, 🪐 IPFS only)**
-    [`Libp2pOptions`](https://libp2p.github.io/js-libp2p/types/libp2p.index.Libp2pOptions.html)
-    where you can specify a list of static peers for bootstrapping.
-
   - `manualRelayReconnection` - **(optional, 🐦 Nostr and 🌊 BitTorrent only)**
-    Boolean (default: `false`) that when set to `true` disables
-    automatically pausing and resuming reconnection attempts when the browser
-    goes offline and comes back online. This is useful if you want to manage
-    this behavior yourself.
+    Boolean (default: `false`) that when set to `true` disables automatically
+    pausing and resuming reconnection attempts when the browser goes offline and
+    comes back online. This is useful if you want to manage this behavior
+    yourself.
 
 - `roomId` - A string to namespace peers and events within a room.
 
@@ -678,8 +673,8 @@ Returns an object with the following methods:
 
   Returns a map of
   [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
-  for the peers present in room (not including the local user). The keys of
-  this object are the respective peers' IDs.
+  for the peers present in room (not including the local user). The keys of this
+  object are the respective peers' IDs.
 
 - ### `addStream(stream, [targetPeers], [metadata])`
 
@@ -803,8 +798,8 @@ Returns an object with the following methods:
 
   Returns an array of three functions:
   1. #### Sender
-     - Sends data to peers and returns a promise that resolves when all
-       target peers are finished receiving data.
+     - Sends data to peers and returns a promise that resolves when all target
+       peers are finished receiving data.
 
      - `(data, [targetPeers], [metadata], [onProgress])`
        - `data` - Any value to send (primitive, object, binary). Serialization
@@ -908,14 +903,14 @@ console.log(trystero.getRelaySockets())
 ### `pauseRelayReconnection()`
 
 **(🐦 Nostr, 🌊 BitTorrent only)** Normally Trystero will try to automatically
-reconnect to relay sockets unless `manualRelayReconnection: true` is set in
-the room config. Calling this function stops relay reconnection attempts until
+reconnect to relay sockets unless `manualRelayReconnection: true` is set in the
+room config. Calling this function stops relay reconnection attempts until
 `resumeRelayReconnection()` is called.
 
 ### `resumeRelayReconnection()`
 
-**(🐦 Nostr, 🌊 BitTorrent, only)** Allows relay reconnection attempts to resume.
-(See `pauseRelayReconnection()` above).
+**(🐦 Nostr, 🌊 BitTorrent, only)** Allows relay reconnection attempts to
+resume. (See `pauseRelayReconnection()` above).
 
 ### `getOccupants(config, roomId)`
 
