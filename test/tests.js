@@ -20,7 +20,7 @@ const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
 const sleep = ms => new Promise(res => setTimeout(res, ms))
 
 const concurrentRooms = 3
-const relayRedundancy = 4
+const defaultRelayRedundancy = 4
 
 export default (strategy, config) =>
   test(`Trystero: ${strategy}`, async ({page, browser, browserName}) => {
@@ -30,16 +30,6 @@ export default (strategy, config) =>
 
     if (proxy) {
       console.log(`\n👺 using proxy: ${proxy}\n`)
-    }
-
-    const isRelayStrategy =
-      strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
-
-    const roomConfig = {
-      appId: `trystero-test-${Math.random()}`,
-      password: '03d1p@M@@s' + Math.random(),
-      ...(isRelayStrategy ? {relayRedundancy} : {}),
-      ...config
     }
 
     const scriptUrl = `../dist/trystero-${strategy}.min.js`
@@ -60,6 +50,23 @@ export default (strategy, config) =>
 
     await page.evaluate(loadLib, scriptUrl)
     await page2.evaluate(loadLib, scriptUrl)
+
+    const isRelayStrategy =
+      strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
+
+    const relayRedundancy = isRelayStrategy
+      ? Math.min(
+          defaultRelayRedundancy,
+          await page.evaluate(() => window.trystero.defaultRelayUrls.length)
+        )
+      : 0
+
+    const roomConfig = {
+      appId: `trystero-test-${Math.random()}`,
+      password: '03d1p@M@@s' + Math.random(),
+      ...(isRelayStrategy ? {relayRedundancy} : {}),
+      ...config
+    }
 
     // # selfId
 
@@ -430,7 +437,7 @@ export default (strategy, config) =>
           }
 
           console.log(
-            '  ⏱️   ',
+            '  ✅   ',
             `${shortBrowsers[browserName]}:`,
             emojis[strategy],
             strategy.padEnd(12, ' '),
