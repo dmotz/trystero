@@ -82,7 +82,7 @@ let resolver = null
  * Pauses reconnection attempts until resumed.
  * If already paused, no new promise is created.
  */
-export const pauseReconnection = () => {
+export const pauseRelayReconnection = () => {
   if (!reconnectionLockingPromise) {
     reconnectionLockingPromise = new Promise(resolve => {
       resolver = resolve
@@ -91,28 +91,17 @@ export const pauseReconnection = () => {
       reconnectionLockingPromise = null
     })
   }
-
-  // If already paused, do nothing
 }
 
 /**
  * Resumes reconnection attempts if they are currently paused.
  * If not paused, this function has no effect.
  */
-export const resumeReconnection = () => {
-  if (resolver) {
-    // resolver will be set to null after resolving. 
-    // Do not change here to avoid multiple calls to _resolver and creating new locker-promise
-    resolver() 
-  }
-
+export const resumeRelayReconnection = () =>
+  // resolver will be set to null after resolving.
+  // Do not change here to avoid multiple calls to _resolver and creating new locker-promise
   // If not paused, do nothing
-}
-
-/**
- * Returns true if reconnection is currently paused.
- */
-export const isReconnectionPaused = () => !!reconnectionLockingPromise
+  resolver?.()
 
 export const makeSocket = (url, onMessage) => {
   const client = {}
@@ -122,9 +111,7 @@ export const makeSocket = (url, onMessage) => {
     socket.onclose = () => {
       if (reconnectionLockingPromise) {
         // If reconnect is paused, wait for the promise to resolve
-        reconnectionLockingPromise.then(() => {
-          init()
-        })
+        reconnectionLockingPromise.then(init)
         return
       }
       socketRetryPeriods[url] ??= defaultRetryMs
@@ -157,12 +144,19 @@ export const makeSocket = (url, onMessage) => {
 export const socketGetter = clientMap => () =>
   fromEntries(entries(clientMap).map(([url, client]) => [url, client.socket]))
 
-export const watchOnline = ()=>{
-  if(isBrowser){
+export const watchOnline = () => {
+  if (isBrowser) {
     const controller = new AbortController()
-    addEventListener('online', () => resumeReconnection(),{signal: controller.signal})
-    addEventListener('offline', () => pauseReconnection(),{signal: controller.signal})
+
+    addEventListener('online', resumeRelayReconnection, {
+      signal: controller.signal
+    })
+    addEventListener('offline', pauseRelayReconnection, {
+      signal: controller.signal
+    })
+
     return () => controller.abort()
   }
+
   return noOp
 }

@@ -11,7 +11,7 @@ import {
   selfId,
   toJson,
   topicPath,
-  watchOnline,
+  watchOnline
 } from './utils.js'
 
 const poolSize = 20
@@ -239,7 +239,7 @@ export default ({init, subscribe, announce}) => {
           })),
         offerTtl * 1.03
       )
-      cleanupWatchOnline = config.disableWatchOnline ? noOp : watchOnline()
+      cleanupWatchOnline = config.manualRelayReconnection ? noOp : watchOnline()
     }
 
     const announceIntervals = initPromises.map(() => announceIntervalMs)

@@ -176,9 +176,8 @@ export const getRelaySockets = socketGetter(clients)
 
 export {
   selfId,
-  pauseReconnection,
-  resumeReconnection,
-  isReconnectionPaused
+  pauseRelayReconnection,
+  resumeRelayReconnection
 } from './utils.js'
 
 export const defaultRelayUrls = [
