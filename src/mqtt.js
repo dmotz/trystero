@@ -50,13 +50,7 @@ export const joinRoom = strategy({
 
 export const getRelaySockets = () => ({...sockets})
 
-export {
-  selfId,
-  pauseReconnection,
-  resumeReconnection,
-  isReconnectionPaused
-} from './utils.js'
-
+export {selfId} from './utils.js'
 
 export const defaultRelayUrls = [
   'test.mosquitto.org:8081/mqtt',
