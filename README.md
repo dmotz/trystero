@@ -655,10 +655,11 @@ the same namespace will return the same room instance.
     [`Libp2pOptions`](https://libp2p.github.io/js-libp2p/types/libp2p.index.Libp2pOptions.html)
     where you can specify a list of static peers for bootstrapping.
 
-  - `disableWatchOnline` - **(optional)** Boolean (default: `false`) that
-    when set to `true` disables automatically pausing and resuming reconnection
-    attempts when the browser goes offline and comes back online. This is useful
-    if you want to manage this behavior yourself.
+  - `manualRelayReconnection` - **(optional, 🐦 Nostr and 🌊 BitTorrent only)**
+    Boolean (default: `false`) that when set to `true` disables
+    automatically pausing and resuming reconnection attempts when the browser
+    goes offline and comes back online. This is useful if you want to manage
+    this behavior yourself.
 
 - `roomId` - A string to namespace peers and events within a room.
 
@@ -903,6 +904,18 @@ console.log(trystero.getRelaySockets())
 //  "wss://tracker.openwebtorrent.com": WebSocket
 //  }
 ```
+
+### `pauseRelayReconnection()`
+
+**(🐦 Nostr, 🌊 BitTorrent only)** Normally Trystero will try to automatically
+reconnect to relay sockets unless `manualRelayReconnection: true` is set in
+the room config. Calling this function stops relay reconnection attempts until
+`resumeRelayReconnection()` is called.
+
+### `resumeRelayReconnection()`
+
+**(🐦 Nostr, 🌊 BitTorrent, only)** Allows relay reconnection attempts to resume.
+(See `pauseRelayReconnection()` above).
 
 ### `getOccupants(config, roomId)`
 
