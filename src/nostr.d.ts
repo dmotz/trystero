@@ -3,10 +3,13 @@ declare module 'trystero/nostr' {
 
   export function joinRoom(
     config: BaseRoomConfig & RelayConfig,
-    roomId: string
+    roomId: string,
+    manualRelayReconnection?: boolean
   ): Room
 
   export function getRelaySockets(): Record<string, WebSocket>
+  export function pauseRelayReconnection(): void
+  export function resumeRelayReconnection(): void
 
   export * from 'trystero'
 }

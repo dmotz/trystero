@@ -174,7 +174,11 @@ export const joinRoom = strategy({
 
 export const getRelaySockets = socketGetter(clients)
 
-export {selfId} from './utils.js'
+export {
+  selfId,
+  pauseRelayReconnection,
+  resumeRelayReconnection
+} from './utils.js'
 
 export const defaultRelayUrls = [
   'tracker.webtorrent.dev',
