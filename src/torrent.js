@@ -101,6 +101,8 @@ export const joinRoom = strategy({
         }
       })
 
+      client.isPassive = !!config.passive
+      client.isActive = !config.passive
       const {url} = client
 
       clients[url] = client
@@ -147,8 +149,11 @@ export const joinRoom = strategy({
       }
 
       send(client, rootTopic, {
+        left: client.isActive ? 1 : 0,
         numwant: offerPoolSize,
-        offers: entries(offers).map(([id, {offer}]) => ({offer_id: id, offer}))
+        offers: client.isActive
+          ? entries(offers).map(([id, {offer}]) => ({offer_id: id, offer}))
+          : []
       })
     }
 
