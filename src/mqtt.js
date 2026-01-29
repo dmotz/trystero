@@ -55,5 +55,7 @@ export {selfId} from './utils.js'
 export const defaultRelayUrls = [
   'test.mosquitto.org:8081/mqtt',
   'broker.emqx.io:8084/mqtt',
+  'public:public@public.cloud.shiftr.io',
+  'broker-cn.emqx.io:8084/mqtt',
   'broker.hivemq.com:8884/mqtt'
 ].map(url => 'wss://' + url)
