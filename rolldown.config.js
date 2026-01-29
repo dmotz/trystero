@@ -1,7 +1,7 @@
 const config = {
   output: {
     format: 'es',
-    minify: true,
+    minify: !process.env.NO_MINIFY,
     codeSplitting: false
   }
 }
