@@ -7,8 +7,20 @@ const proxy = process.env.PROXY
 const logPrefix = (strategy, browser, pageN) =>
   `${emojis[strategy]} ${colorize[pageN - 1](strategy)} ${shortBrowsers[browser]}${pageN}:`
 
-const onConsole = (strategy, browser, pageN) => msg =>
-  console.log(logPrefix(strategy, browser, pageN), msg)
+const onConsole = (strategy, browser, pageN) => async msg => {
+  const values = []
+  const loc = msg.location()
+  for (const arg of msg.args()) {
+    values.push(await arg.jsonValue())
+  }
+
+  console.log(
+    logPrefix(strategy, browser, pageN),
+    msg.text(),
+    ...values,
+    `@${loc.lineNumber}:${loc.columnNumber}`
+  )
+}
 
 const onError = (strategy, browser, pageN) => err =>
   console.log('❌', logPrefix(strategy, browser, pageN), err)
@@ -33,10 +45,10 @@ export default (strategy, config) =>
     }
 
     const scriptUrl = `../dist/trystero-${strategy}.min.js`
-    const context = await browser.newContext(
+    const context2 = await browser.newContext(
       proxy ? {proxy: {server: 'http://' + proxy, bypass: 'localhost'}} : {}
     )
-    const page2 = await context.newPage()
+    const page2 = await context2.newPage()
 
     page.on('console', onConsole(strategy, browserName, 1))
     page2.on('console', onConsole(strategy, browserName, 2))
