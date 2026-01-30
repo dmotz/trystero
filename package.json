@@ -27,7 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@noble/secp256k1": "^3.0.0",
-    "@supabase/supabase-js": "^2.75.0",
+    "@supabase/supabase-js": "^2.93.3",
     "@waku/sdk": "^0.0.35",
     "firebase": "^12.4.0",
     "mqtt": "^5.14.1"
