@@ -1,6 +1,6 @@
 import {createClient} from '@supabase/supabase-js'
 import strategy from './strategy.js'
-import {selfId} from './utils.js'
+import {selfId, values} from './utils.js'
 
 const events = {
   broadcast: 'broadcast',
@@ -8,36 +8,55 @@ const events = {
   sdp: 'sdp'
 }
 
+const clientChannels = new WeakMap()
+
+const getChannelName = topic => `room:${topic}:messages`
+
+const getChannelCache = client => {
+  if (!clientChannels.has(client)) {
+    clientChannels.set(client, {channels: {}, pending: {}})
+  }
+  return clientChannels.get(client)
+}
+
+const getOrCreateChannel = (client, topic, event, onPayload) => {
+  const cache = getChannelCache(client)
+
+  if (cache.channels[topic]) {
+    return Promise.resolve(cache.channels[topic])
+  }
+
+  if (cache.pending[topic]) {
+    return cache.pending[topic]
+  }
+
+  cache.pending[topic] = new Promise(res => {
+    const chan = client.channel(getChannelName(topic), {
+      config: {broadcast: {self: false}}
+    })
+
+    chan
+      .on('broadcast', {event}, ({payload}) => onPayload?.(payload))
+      .subscribe(status => {
+        if (status === 'SUBSCRIBED') {
+          cache.channels[topic] = chan
+          delete cache.pending[topic]
+          res(chan)
+        }
+      })
+  })
+
+  return cache.pending[topic]
+}
+
 export const joinRoom = strategy({
-  init: config => createClient(config.appId, config.supabaseKey),
+  init: config =>
+    // @TODO reusing client instances makes the tests fail
+    createClient(config.appId, config.supabaseKey),
 
   subscribe: (client, rootTopic, selfTopic, onMessage) => {
-    const allChans = []
-    const subscribe = (topic, cb) => {
-      const chan = client.channel(topic)
-
-      chan.subscribe(async status => {
-        if (status === 'SUBSCRIBED') {
-          if (didUnsub) {
-            client.removeChannel(chan)
-            return
-          }
-
-          allChans.push(chan)
-          return cb(chan)
-        }
-
-        if (status === 'CLOSED') {
-          return
-        }
-
-        await client.removeChannel(chan)
-        setTimeout(() => subscribe(topic, cb), 999)
-      })
-    }
-
     const handleMessage = (peerTopic, signal) =>
-      subscribe(peerTopic, chan =>
+      getOrCreateChannel(client, peerTopic, events.sdp).then(chan =>
         chan.send({
           type: events.broadcast,
           event: events.sdp,
@@ -45,32 +64,30 @@ export const joinRoom = strategy({
         })
       )
 
-    subscribe(selfTopic, chan =>
-      chan.on(events.broadcast, {event: events.sdp}, ({payload}) =>
-        onMessage(selfTopic, payload, handleMessage)
-      )
+    getOrCreateChannel(client, selfTopic, events.sdp, payload =>
+      onMessage(selfTopic, payload, handleMessage)
     )
 
-    subscribe(rootTopic, chan =>
-      chan.on(events.broadcast, {event: events.join}, ({payload}) =>
-        onMessage(rootTopic, payload, handleMessage)
-      )
+    getOrCreateChannel(client, rootTopic, events.join, payload =>
+      onMessage(rootTopic, payload, handleMessage)
     )
-
-    let didUnsub = false
 
     return () => {
-      allChans.forEach(chan => client.removeChannel(chan))
-      didUnsub = true
+      const cache = getChannelCache(client)
+      values(cache.channels).forEach(chan => client.removeChannel(chan))
+      cache.channels = {}
+      cache.pending = {}
     }
   },
 
   announce: (client, rootTopic) =>
-    client.channel(rootTopic).send({
-      type: events.broadcast,
-      event: events.join,
-      payload: {peerId: selfId}
-    })
+    getOrCreateChannel(client, rootTopic, events.join).then(chan =>
+      chan.send({
+        type: events.broadcast,
+        event: events.join,
+        payload: {peerId: selfId}
+      })
+    )
 })
 
 export {selfId} from './utils.js'
