@@ -9,7 +9,7 @@ import {
   toJson
 } from './utils.js'
 
-const contentTopic = topic => `/${libName}-${topic}/0/msg/json`
+const contentTopic = topic => `/${libName.toLowerCase()}-${topic}/0/msg/json`
 
 const sendMessage = (node, topic, payload) =>
   node.lightPush.send(
@@ -18,9 +18,11 @@ const sendMessage = (node, topic, payload) =>
     {autoRetry: true}
   )
 
+let node
+
 export const joinRoom = strategy({
   init: () =>
-    createLightNode({
+    (node ||= createLightNode({
       defaultBootstrap: true,
       discovery: {dns: true, peerExchange: true, peerCache: true},
       libp2p: {hideWebSocketInfo: true}
