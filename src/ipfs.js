@@ -22,7 +22,8 @@ export const joinRoom = strategy({
   init: () =>
     createLightNode({
       defaultBootstrap: true,
-      discovery: {dns: true, peerExchange: true, peerCache: true}
+      discovery: {dns: true, peerExchange: true, peerCache: true},
+      libp2p: {hideWebSocketInfo: true}
     }).then(async node => {
       await node.start()
       await node.waitForPeers()
