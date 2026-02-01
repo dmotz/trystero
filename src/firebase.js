@@ -21,19 +21,14 @@ const dbs = {}
 
 const getPath = (...xs) => xs.join('/')
 
-const initDb = config => {
-  if (config.firebaseApp) {
-    const url = config.firebaseApp.options.databaseURL
-    return dbs[url] || (dbs[url] = getDatabase(config.firebaseApp))
-  }
-
-  return (
-    dbs[config.appId] ||
-    (dbs[config.appId] = getDatabase(
-      initializeApp({databaseURL: config.appId})
-    ))
-  )
-}
+const initDb = config =>
+  config.firebaseApp
+    ? (dbs[config.firebaseApp.options.databaseURL] ||= getDatabase(
+        config.firebaseApp
+      ))
+    : (dbs[config.appId] ||= getDatabase(
+        initializeApp({databaseURL: config.appId})
+      ))
 
 export const joinRoom = strategy({
   init: config => ref(initDb(config), config.rootPath || defaultRootPath),
