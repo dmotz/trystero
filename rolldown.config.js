@@ -2,6 +2,7 @@ const config = {
   output: {
     format: 'es',
     minify: !process.env.NO_MINIFY,
+    sourcemap: true,
     codeSplitting: false
   }
 }
