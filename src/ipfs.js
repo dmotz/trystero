@@ -1,13 +1,6 @@
 import {createLightNode} from '@waku/sdk'
 import strategy from './strategy.js'
-import {
-  all,
-  decodeBytes,
-  encodeBytes,
-  libName,
-  selfId,
-  toJson
-} from './utils.js'
+import {decodeBytes, encodeBytes, libName, selfId, toJson} from './utils.js'
 
 const contentTopic = topic => `/${libName.toLowerCase()}-${topic}/0/msg/json`
 
@@ -30,9 +23,9 @@ export const joinRoom = strategy({
       await node.start()
       await node.waitForPeers()
       return node
-    }),
+    })),
 
-  subscribe: async (node, rootTopic, selfTopic, onMessage) => {
+  subscribe: (node, rootTopic, selfTopic, onMessage) => {
     const handleMsg = topic => msg => {
       if (msg.payload) {
         onMessage(topic, decodeBytes(msg.payload), (peerTopic, signal) =>
@@ -41,13 +34,11 @@ export const joinRoom = strategy({
       }
     }
 
-    const unsubFns = await all(
-      [rootTopic, selfTopic].map(topic => {
-        const decoder = node.createDecoder({contentTopic: contentTopic(topic)})
-        node.filter.subscribe(decoder, handleMsg(topic))
-        return () => node.filter.unsubscribe(decoder)
-      })
-    )
+    const unsubFns = [rootTopic, selfTopic].map(topic => {
+      const decoder = node.createDecoder({contentTopic: contentTopic(topic)})
+      node.filter.subscribe(decoder, handleMsg(topic))
+      return () => node.filter.unsubscribe(decoder)
+    })
 
     return () => unsubFns.forEach(f => f())
   },
