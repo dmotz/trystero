@@ -224,14 +224,14 @@ Let's say we want users to be able to name themselves:
 const idsToNames = {}
 const [sendName, getName] = room.makeAction('name')
 
-// tell other peers currently in the room our name
-sendName('Oedipa')
-
-// tell newcomers
+// tell new peers your name when they connect
 room.onPeerJoin(peerId => sendName('Oedipa', peerId))
 
 // listen for peers naming themselves
 getName((name, peerId) => (idsToNames[peerId] = name))
+
+// tell all peers at once when your name changes
+nameInput.addEventListener('change', e => sendName(e.target.value))
 
 room.onPeerLeave(peerId =>
   console.log(`${idsToNames[peerId] || 'a weird stranger'} left`)
@@ -935,7 +935,7 @@ console.log((await trystero.getOccupants(config, 'the_scope')).length)
 | 🐦 **Nostr**      | none            | 8K           |
 | 📡 **MQTT**       | none            | 75K          |
 | 🌊 **BitTorrent** | none            | 5K           |
-| ⚡️ **Supabase**  | ~5 mins         | 28K          |
+| ⚡️ **Supabase**   | ~5 mins         | 28K          |
 | 🔥 **Firebase**   | ~5 mins         | 45K          |
 | 🪐 **IPFS**       | none            | 119K         |
 
