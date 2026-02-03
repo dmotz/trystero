@@ -656,6 +656,17 @@ the same namespace will return the same room instance.
     comes back online. This is useful if you want to manage this behavior
     yourself.
 
+  - `passive` - **(optional)** Boolean (default: `false`) that when set to
+    `true` puts the peer into "passive" listening mode.
+    - **Pub/Sub (MQTT, Nostr, IPFS, Firebase):** Passive peers subscribe to
+      the room topic but **do not publish** their own presence.
+    - **BitTorrent:** Passive peers announce themselves as **seeders**
+      (completed downloads). Standard trackers do not report seeders to other
+      seeders, preventing "zombie swarms" of backup nodes while ensuring they
+      are discoverable by active peers (leechers).
+    This is useful for building "backup" or "relay" nodes that should only
+    become active when real users are present.
+
 - `roomId` - A string to namespace peers and events within a room.
 
 - `onJoinError(details)` - **(optional)** A callback function that will be
@@ -675,6 +686,11 @@ Returns an object with the following methods:
   [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
   for the peers present in room (not including the local user). The keys of this
   object are the respective peers' IDs.
+
+- ### `isPassive()`
+
+  Returns a boolean indicating whether the local peer is currently in passive
+  mode.
 
 - ### `addStream(stream, [targetPeers], [metadata])`
 

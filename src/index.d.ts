@@ -15,6 +15,13 @@ declare module 'trystero' {
     appId: string
     password?: string
     rtcConfig?: RTCConfiguration
+    /**
+     * When true, peer operates in passive/listening mode:
+     * - Never announces, only responds to announcements from other peers
+     * - Passive peers cannot discover each other (prevents "zombie swarms")
+     * - Useful for superpeers/relays that should only exist when normal peers are present
+     */
+    passive?: boolean
   }
 
   export interface ActionSender<T> {
@@ -64,6 +71,11 @@ declare module 'trystero' {
     leave: () => Promise<void>
 
     getPeers: () => Record<string, RTCPeerConnection>
+
+    /**
+     * Check if this peer is in passive mode
+     */
+    isPassive: () => boolean
 
     addStream: (
       stream: MediaStream,
