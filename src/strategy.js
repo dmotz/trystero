@@ -37,6 +37,7 @@ export default ({init, subscribe, announce}) => {
 
     const pendingOffers = {}
     const connectedPeers = {}
+    const pendingHandshakes = new Set()
     let isActive = !isPassive // Passive peers start inactive
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
@@ -55,7 +56,12 @@ export default ({init, subscribe, announce}) => {
 
     const checkDeactivate = () => {
       // Passive peers deactivate when all peers disconnect
-      if (isPassive && Object.keys(connectedPeers).length === 0 && isActive) {
+      if (
+        isPassive &&
+        Object.keys(connectedPeers).length === 0 &&
+        pendingHandshakes.size === 0 &&
+        isActive
+      ) {
         isActive = false
         initPromises.forEach(async p => ((await p).isActive = false))
       }
@@ -69,6 +75,7 @@ export default ({init, subscribe, announce}) => {
         return
       }
 
+      pendingHandshakes.delete(peer)
       connectedPeers[peerId] = peer
       onPeerConnect(peer, peerId)
 
@@ -81,10 +88,11 @@ export default ({init, subscribe, announce}) => {
     }
 
     const disconnectPeer = (peer, peerId) => {
+      pendingHandshakes.delete(peer)
       if (connectedPeers[peerId] === peer) {
         delete connectedPeers[peerId]
-        checkDeactivate()
       }
+      checkDeactivate()
     }
 
     const prunePendingOffer = (peerId, relayId) => {
@@ -92,11 +100,13 @@ export default ({init, subscribe, announce}) => {
         return
       }
 
-      const offer = pendingOffers[peerId]?.[relayId]
+      const peer = pendingOffers[peerId]?.[relayId]
 
-      if (offer) {
+      if (peer) {
         delete pendingOffers[peerId][relayId]
-        offer.destroy()
+        pendingHandshakes.delete(peer)
+        peer.destroy()
+        checkDeactivate()
       }
     }
 
@@ -190,6 +200,7 @@ export default ({init, subscribe, announce}) => {
           connect: () => connectPeer(peer, peerId, relayId),
           close: () => disconnectPeer(peer, peerId)
         })
+        pendingHandshakes.add(peer)
 
         signalPeer(topic, toJson({peerId: selfId, offer}))
       } else if (offer) {
@@ -204,17 +215,23 @@ export default ({init, subscribe, announce}) => {
           connect: () => connectPeer(peer, peerId, relayId),
           close: () => disconnectPeer(peer, peerId)
         })
+        pendingHandshakes.add(peer)
 
         let plainOffer
 
         try {
           plainOffer = await toPlain(offer)
         } catch {
+          pendingHandshakes.delete(peer)
+          peer.destroy()
           handleJoinError(peerId, 'offer')
+          checkDeactivate()
           return
         }
 
         if (peer.isDead) {
+          pendingHandshakes.delete(peer)
+          checkDeactivate()
           return
         }
 
@@ -242,8 +259,15 @@ export default ({init, subscribe, announce}) => {
             connect: () => connectPeer(peer, peerId, relayId),
             close: () => disconnectPeer(peer, peerId)
           })
+          pendingHandshakes.add(peer)
 
-          peer.signal(plainAnswer)
+          try {
+            peer.signal(plainAnswer)
+          } catch {
+            pendingHandshakes.delete(peer)
+            peer.destroy()
+            checkDeactivate()
+          }
         } else {
           const peer = pendingOffers[peerId]?.[relayId]
 
