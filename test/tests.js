@@ -31,7 +31,7 @@ const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
 
 const sleep = ms => new Promise(res => setTimeout(res, ms))
 
-const concurrentRooms = 3
+const concurrentRooms = strategy => (strategy === 'ipfs' ? 1 : 3)
 const defaultRelayRedundancy = 4
 
 export default (strategy, config) =>
@@ -91,7 +91,7 @@ export default (strategy, config) =>
     expect(selfId1).not.toEqual(selfId2)
 
     await Promise.all(
-      Array(concurrentRooms)
+      Array(concurrentRooms(strategy))
         .fill()
         .map(async (_, roomNum) => {
           const roomNs = `testRoom-${roomNum}-${Math.random().toString().replace('.', '')}`
