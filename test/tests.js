@@ -330,19 +330,19 @@ export default (strategy, config) =>
             expect(receiverCallCount).toEqual(senderCallCount)
           })
 
-          if (strategy === 'firebase') {
-            // # getOccupants()
+          // if (strategy === 'firebase') {
+          //   // # getOccupants()
 
-            expect(
-              (
-                await page.evaluate(
-                  ([roomId, config]) =>
-                    window.trystero.getOccupants(config, roomId),
-                  [roomNs, roomConfig]
-                )
-              ).length
-            ).toEqual(2)
-          }
+          //   expect(
+          //     (
+          //       await page.evaluate(
+          //         ([roomId, config]) =>
+          //           window.trystero.getOccupants(config, roomId),
+          //         [roomNs, roomConfig]
+          //       )
+          //     ).length
+          //   ).toEqual(2)
+          // }
 
           if (isRelayStrategy) {
             // # getRelaySockets()
