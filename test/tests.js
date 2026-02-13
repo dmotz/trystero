@@ -1,33 +1,8 @@
 import {test, expect} from '@playwright/test'
-import chalk from 'chalk'
+import {attachPageLogging, emojis, shortBrowsers} from './logger'
 
 const testUrl = 'https://localhost:8080/test'
 const proxy = process.env.PROXY
-
-const logPrefix = (strategy, browser, pageN) =>
-  `${emojis[strategy]} ${colorize[pageN - 1](strategy)} ${shortBrowsers[browser]}${pageN}:`
-
-const onConsole = (strategy, browser, pageN) => async msg => {
-  const values = []
-  const loc = msg.location()
-  for (const arg of msg.args()) {
-    values.push(await arg.jsonValue())
-  }
-
-  console.log(
-    logPrefix(strategy, browser, pageN),
-    msg.text(),
-    ...values,
-    `@${loc.lineNumber}:${loc.columnNumber}`
-  )
-}
-
-const onError = (strategy, browser, pageN) => err =>
-  console.log('❌', logPrefix(strategy, browser, pageN), err)
-
-const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
-  k => chalk[k]
-)
 
 const sleep = ms => new Promise(res => setTimeout(res, ms))
 
@@ -50,10 +25,11 @@ export default (strategy, config) =>
     )
     const page2 = await context2.newPage()
 
-    page.on('console', onConsole(strategy, browserName, 1))
-    page2.on('console', onConsole(strategy, browserName, 2))
-    page.on('pageerror', onError(strategy, browserName, 1))
-    page2.on('pageerror', onError(strategy, browserName, 2))
+    await attachPageLogging({
+      strategy,
+      browserName,
+      pages: [page, page2]
+    })
 
     await page.goto(testUrl)
     await page2.goto(testUrl)
@@ -458,18 +434,3 @@ export default (strategy, config) =>
         })
     )
   })
-
-const emojis = {
-  nostr: '🐦',
-  mqtt: '📡',
-  torrent: '🌊',
-  supabase: '⚡️',
-  firebase: '🔥',
-  ipfs: '🪐'
-}
-
-const shortBrowsers = {
-  chromium: chalk.green('CH'),
-  webkit: chalk.blue('WK'),
-  firefox: chalk.yellow('FF')
-}
