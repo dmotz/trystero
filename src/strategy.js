@@ -28,7 +28,8 @@ export default ({init, subscribe, announce}) => {
   let cleanupWatchOnline
 
   return (config, roomId, onJoinError) => {
-    const {appId} = config
+    const {appId, passive} = config
+    const isPassive = !!passive
 
     if (occupiedRooms[appId]?.[roomId]) {
       return occupiedRooms[appId][roomId]
@@ -36,6 +37,8 @@ export default ({init, subscribe, announce}) => {
 
     const pendingOffers = {}
     const connectedPeers = {}
+    const pendingHandshakes = new Set()
+    let isActive = !isPassive // Passive peers start inactive
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
@@ -51,6 +54,19 @@ export default ({init, subscribe, announce}) => {
 
     const makeOffer = () => initPeer(true, config)
 
+    const checkDeactivate = () => {
+      // Passive peers deactivate when all peers disconnect
+      if (
+        isPassive &&
+        Object.keys(connectedPeers).length === 0 &&
+        pendingHandshakes.size === 0 &&
+        isActive
+      ) {
+        isActive = false
+        initPromises.forEach(async p => ((await p).isActive = false))
+      }
+    }
+
     const connectPeer = (peer, peerId, relayId) => {
       if (connectedPeers[peerId]) {
         if (connectedPeers[peerId] !== peer) {
@@ -59,6 +75,7 @@ export default ({init, subscribe, announce}) => {
         return
       }
 
+      pendingHandshakes.delete(peer)
       connectedPeers[peerId] = peer
       onPeerConnect(peer, peerId)
 
@@ -71,9 +88,11 @@ export default ({init, subscribe, announce}) => {
     }
 
     const disconnectPeer = (peer, peerId) => {
+      pendingHandshakes.delete(peer)
       if (connectedPeers[peerId] === peer) {
         delete connectedPeers[peerId]
       }
+      checkDeactivate()
     }
 
     const prunePendingOffer = (peerId, relayId) => {
@@ -81,11 +100,13 @@ export default ({init, subscribe, announce}) => {
         return
       }
 
-      const offer = pendingOffers[peerId]?.[relayId]
+      const peer = pendingOffers[peerId]?.[relayId]
 
-      if (offer) {
+      if (peer) {
         delete pendingOffers[peerId][relayId]
-        offer.destroy()
+        pendingHandshakes.delete(peer)
+        peer.destroy()
+        checkDeactivate()
       }
     }
 
@@ -109,7 +130,25 @@ export default ({init, subscribe, announce}) => {
         roomId
       })
 
+    const queueAnnounce = async (relay, i) => {
+      const [rootTopic, selfTopic] = await all([rootTopicP, selfTopicP])
+
+      if (!isPassive || isActive) {
+        const ms = await announce(relay, rootTopic, selfTopic)
+
+        if (typeof ms === 'number') {
+          announceIntervals[i] = ms
+        }
+      }
+
+      announceTimeouts[i] = setTimeout(
+        () => queueAnnounce(relay, i),
+        announceIntervals[i]
+      )
+    }
+
     const handleMessage = relayId => async (topic, msg, signalPeer) => {
+      try {
       const [rootTopic, selfTopic] = await all([rootTopicP, selfTopicP])
 
       if (topic !== rootTopic && topic !== selfTopic) {
@@ -120,6 +159,22 @@ export default ({init, subscribe, announce}) => {
         typeof msg === 'string' ? fromJson(msg) : msg
 
       if (peerId === selfId || connectedPeers[peerId]) {
+        return
+      }
+
+      // Passive peer logic: activate when any peer announces or sends an offer
+      if (isPassive && !isActive && !answer) {
+        isActive = true
+        initPromises.forEach(async (relayP, i) => {
+          const relay = await relayP
+          relay.isActive = true
+          clearTimeout(announceTimeouts[i])
+          queueAnnounce(relay, i)
+        })
+      }
+
+      // Skip if we're passive and not yet active
+      if (isPassive && !isActive) {
         return
       }
 
@@ -145,6 +200,7 @@ export default ({init, subscribe, announce}) => {
           connect: () => connectPeer(peer, peerId, relayId),
           close: () => disconnectPeer(peer, peerId)
         })
+        pendingHandshakes.add(peer)
 
         signalPeer(topic, toJson({peerId: selfId, offer}))
       } else if (offer) {
@@ -159,17 +215,23 @@ export default ({init, subscribe, announce}) => {
           connect: () => connectPeer(peer, peerId, relayId),
           close: () => disconnectPeer(peer, peerId)
         })
+        pendingHandshakes.add(peer)
 
         let plainOffer
 
         try {
           plainOffer = await toPlain(offer)
         } catch {
+          pendingHandshakes.delete(peer)
+          peer.destroy()
           handleJoinError(peerId, 'offer')
+          checkDeactivate()
           return
         }
 
         if (peer.isDead) {
+          pendingHandshakes.delete(peer)
+          checkDeactivate()
           return
         }
 
@@ -197,8 +259,15 @@ export default ({init, subscribe, announce}) => {
             connect: () => connectPeer(peer, peerId, relayId),
             close: () => disconnectPeer(peer, peerId)
           })
+          pendingHandshakes.add(peer)
 
-          peer.signal(plainAnswer)
+          try {
+            peer.signal(plainAnswer)
+          } catch {
+            pendingHandshakes.delete(peer)
+            peer.destroy()
+            checkDeactivate()
+          }
         } else {
           const peer = pendingOffers[peerId]?.[relayId]
 
@@ -206,6 +275,9 @@ export default ({init, subscribe, announce}) => {
             peer.signal(plainAnswer)
           }
         }
+      }
+      } catch (e) {
+        console.error('Error in handleMessage', e);
       }
     }
 
@@ -255,33 +327,23 @@ export default ({init, subscribe, announce}) => {
       )
     )
 
-    all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
-      const queueAnnounce = async (relay, i) => {
-        const ms = await announce(relay, rootTopic, selfTopic)
-
-        if (typeof ms === 'number') {
-          announceIntervals[i] = ms
-        }
-
-        announceTimeouts[i] = setTimeout(
-          () => queueAnnounce(relay, i),
-          announceIntervals[i]
-        )
-      }
-
-      unsubFns.forEach(async (didSub, i) => {
-        await didSub
-        queueAnnounce(await initPromises[i], i)
-      })
+    initPromises.forEach(async (relayP, i) => {
+      await unsubFns[i]
+      queueAnnounce(await relayP, i)
     })
 
     let onPeerConnect = noOp
 
     occupiedRooms[appId] ||= {}
 
-    return (occupiedRooms[appId][roomId] = room(
+    const roomInstance = room(
       f => (onPeerConnect = f),
-      id => delete connectedPeers[id],
+      id => {
+        if (connectedPeers[id]) {
+          delete connectedPeers[id]
+          checkDeactivate()
+        }
+      },
       () => {
         delete occupiedRooms[appId][roomId]
         announceTimeouts.forEach(clearTimeout)
@@ -290,6 +352,11 @@ export default ({init, subscribe, announce}) => {
         cleanupWatchOnline()
         didInit = false
       }
-    ))
+    )
+
+    // Expose passive status for application layer
+    roomInstance.isPassive = () => isPassive
+
+    return (occupiedRooms[appId][roomId] = roomInstance)
   }
 }
