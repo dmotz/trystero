@@ -1,0 +1,23 @@
+{
+  "plugins": ["typescript"],
+  "rules": {
+    "array-callback-return": "error",
+    "curly": "error",
+    "eqeqeq": "error",
+    "no-duplicate-imports": "error",
+    "no-else-return": "error",
+    "no-extra-label": "error",
+    "no-lonely-if": "error",
+    "no-unused-labels": "off",
+    "no-self-compare": "error",
+    "no-template-curly-in-string": "error",
+    "no-throw-literal": "error",
+    "no-unused-expressions": "error",
+    "no-unused-vars": "error",
+    "no-var": "error",
+    "prefer-arrow-callback": "error",
+    "prefer-const": "error",
+    "prefer-rest-params": "error",
+    "prefer-spread": "error"
+  }
+}

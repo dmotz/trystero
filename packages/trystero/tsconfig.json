@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {"path": "../nostr"},
+    {"path": "../torrent"},
+    {"path": "../mqtt"},
+    {"path": "../ipfs"},
+    {"path": "../supabase"},
+    {"path": "../firebase"}
+  ]
+}

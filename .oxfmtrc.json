@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [],
+  "semi": false,
+  "printWidth": 80,
+  "tabWidth": 2,
+  "singleQuote": true,
+  "bracketSpacing": false,
+  "arrowParens": "avoid",
+  "endOfLine": "lf",
+  "trailingComma": "none",
+  "proseWrap": "always"
+}
