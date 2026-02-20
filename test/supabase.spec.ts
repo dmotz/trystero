@@ -1,4 +1,4 @@
-import runTests from './tests.js'
+import runTests from './tests'
 
 runTests('supabase', {
   appId: 'https://swhajnendtrtanrqufqg.supabase.co',

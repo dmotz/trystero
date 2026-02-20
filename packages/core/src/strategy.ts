@@ -1,6 +1,6 @@
-import {decrypt, encrypt, genKey, sha1} from './crypto.js'
-import initPeer from './peer.js'
-import room from './room.js'
+import {decrypt, encrypt, genKey, sha1} from './crypto'
+import initPeer from './peer'
+import room from './room'
 import {
   all,
   alloc,
@@ -13,7 +13,7 @@ import {
   toJson,
   topicPath,
   watchOnline
-} from './utils.js'
+} from './utils'
 import type {
   BaseRoomConfig,
   JoinRoom,
@@ -22,7 +22,7 @@ import type {
   PeerHandle,
   Signal,
   StrategyAdapter
-} from './types.js'
+} from './types'
 
 const poolSize = 20
 const announceIntervalMs = 5_333

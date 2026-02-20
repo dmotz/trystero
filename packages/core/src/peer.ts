@@ -1,5 +1,5 @@
-import {all, alloc} from './utils.js'
-import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types.js'
+import {all, alloc} from './utils'
+import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
 const disconnectedCloseDelayMs = 5_000

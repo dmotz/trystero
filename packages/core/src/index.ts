@@ -1,7 +1,7 @@
-export {default as createStrategy} from './strategy.js'
-export {default as initPeer, defaultIceServers} from './peer.js'
-export {default as createRoom} from './room.js'
-export {decrypt, encrypt, genKey, hashWith, sha1} from './crypto.js'
+export {default as createStrategy} from './strategy'
+export {default as initPeer, defaultIceServers} from './peer'
+export {default as createRoom} from './room'
+export {decrypt, encrypt, genKey, hashWith, sha1} from './crypto'
 export {
   all,
   alloc,
@@ -29,7 +29,7 @@ export {
   topicPath,
   values,
   watchOnline
-} from './utils.js'
+} from './utils'
 
 export type {
   ActionProgress,
@@ -58,4 +58,4 @@ export type {
   StrategyOnMessage,
   TargetPeers,
   TurnServerConfig
-} from './types.js'
+} from './types'

@@ -1,4 +1,4 @@
-import type {BaseRoomConfig, RelayConfig, SocketClient} from './types.js'
+import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
 
 const {floor, random, sin} = Math
 

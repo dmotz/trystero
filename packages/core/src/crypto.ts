@@ -1,4 +1,4 @@
-import {decodeBytes, encodeBytes} from './utils.js'
+import {decodeBytes, encodeBytes} from './utils'
 
 const algo = 'AES-GCM'
 const strToSha1: Record<string, string> = {}

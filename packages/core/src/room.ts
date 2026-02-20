@@ -12,7 +12,7 @@ import {
   mkErr,
   noOp,
   toJson
-} from './utils.js'
+} from './utils'
 import type {
   ActionProgress,
   ActionReceiver,
@@ -22,7 +22,7 @@ import type {
   PeerHandle,
   Room,
   TargetPeers
-} from './types.js'
+} from './types'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12

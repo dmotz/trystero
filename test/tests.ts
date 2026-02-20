@@ -1,6 +1,6 @@
 // @ts-nocheck
 import {expect, test} from '@playwright/test'
-import {attachPageLogging, emojis, shortBrowsers} from './logger.js'
+import {attachPageLogging, emojis, shortBrowsers} from './logger'
 
 const testUrl = 'https://localhost:8080/test'
 const proxy = process.env.PROXY
