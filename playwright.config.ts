@@ -1,5 +1,18 @@
 import {devices} from '@playwright/test'
 
+const minPort = 10_000
+const maxPort = 60_000
+const configuredPort = Number(process.env['TRYSTERO_TEST_PORT'])
+const testPort =
+  Number.isInteger(configuredPort) &&
+  configuredPort >= minPort &&
+  configuredPort <= 65_535
+    ? configuredPort
+    : Math.floor(Math.random() * (maxPort - minPort + 1)) + minPort
+const testUrl = `https://localhost:${testPort}/test`
+
+process.env['TRYSTERO_TEST_PORT'] = String(testPort)
+
 export default {
   timeout: 53_333,
   use: {
@@ -34,9 +47,8 @@ export default {
     }
   ],
   webServer: {
-    command:
-      'serve -p 8080 --ssl-cert ./test/certs/cert.pem --ssl-key ./test/certs/key.pem',
-    url: 'https://localhost:8080/test',
+    command: `serve -p ${testPort} --ssl-cert ./test/certs/cert.pem --ssl-key ./test/certs/key.pem`,
+    url: testUrl,
     ignoreHTTPSErrors: true
   }
 }

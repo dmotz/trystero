@@ -2,7 +2,8 @@
 import {expect, test} from '@playwright/test'
 import {attachPageLogging, emojis, shortBrowsers} from './logger'
 
-const testUrl = 'https://localhost:8080/test'
+const testPort = process.env.TRYSTERO_TEST_PORT ?? '8080'
+const testUrl = `https://localhost:${testPort}/test`
 const proxy = process.env.PROXY
 
 const sleep = ms => new Promise(res => setTimeout(res, ms))
