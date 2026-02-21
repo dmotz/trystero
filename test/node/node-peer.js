@@ -1,22 +1,23 @@
-import {joinRoom} from '@trystero/nostr'
 import {RTCPeerConnection} from 'werift'
 
 const role = process.env['TRYSTERO_NODE_ROLE']
-const appId = process.env['TRYSTERO_NODE_APP_ID']
+const strategy = process.env['TRYSTERO_NODE_STRATEGY']
 const roomId = process.env['TRYSTERO_NODE_ROOM_ID']
+const roomConfigJson = process.env['TRYSTERO_NODE_ROOM_CONFIG']
 
-if (!role || !appId || !roomId) {
+if (!role || !strategy || !roomId || !roomConfigJson) {
   console.error('missing peer test env vars')
   process.exit(1)
 }
 
-const room = joinRoom(
-  {
-    appId,
-    rtcPolyfill: RTCPeerConnection
-  },
-  roomId
-)
+const roomConfig = {
+  ...JSON.parse(roomConfigJson),
+  rtcPolyfill: RTCPeerConnection
+}
+
+const {joinRoom} = await import(`@trystero/${strategy}`)
+
+const room = joinRoom(roomConfig, roomId)
 
 const [sendPing, getPing] = room.makeAction('ping')
 const [sendPong, getPong] = room.makeAction('pong')
