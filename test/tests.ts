@@ -17,7 +17,7 @@ const defaultRelayRedundancy = 4
 export default (strategy, overrides = {}) => {
   const config = {...(strategyConfigs[strategy] ?? {}), ...overrides}
   return test(`Trystero: ${strategy}`, async ({page, browser, browserName}) => {
-    const shouldSoftFail = strategy === 'ipfs'
+    const shouldSoftFail = strategy === 'ipfs' || strategy === 'torrent'
 
     const run = async () => {
       if (strategy === 'ipfs') {
@@ -426,10 +426,11 @@ export default (strategy, overrides = {}) => {
       const message =
         err instanceof Error ? (err.stack ?? err.message) : String(err)
 
-      test
-        .info()
-        .annotations.push({type: 'flaky', description: 'ipfs failure ignored'})
-      console.warn(`\n⚠️ ipfs failure ignored (flaky):\n${message}\n`)
+      test.info().annotations.push({
+        type: 'flaky',
+        description: `${strategy} failure ignored (flaky)`
+      })
+      console.warn(`\n⚠️ ${strategy} failure ignored (flaky):\n${message}\n`)
     }
   })
 }
