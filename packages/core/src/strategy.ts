@@ -230,7 +230,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const getOffers = (n: number): Promise<OfferRecord[]> => {
-      offerPool.push(...alloc(n, makeOffer))
+      const missingOffers = Math.max(0, n - offerPool.length)
+
+      if (missingOffers > 0) {
+        offerPool.push(...alloc(missingOffers, makeOffer))
+      }
 
       return all(
         offerPool
