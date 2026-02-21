@@ -5,6 +5,8 @@ import {attachPageLogging, emojis, shortBrowsers} from './logger'
 const testPort = process.env.TRYSTERO_TEST_PORT ?? '8080'
 const testUrl = `https://localhost:${testPort}/test`
 const proxy = process.env.PROXY
+const useTestOnlyMdnsFallback =
+  process.env.TRYSTERO_TEST_FORCE_LOOPBACK_MDNS !== '0'
 
 const sleep = ms => new Promise(res => setTimeout(res, ms))
 
@@ -62,6 +64,9 @@ export default (strategy, config = {}) =>
         appId: `trystero-test-${Math.random()}`,
         password: '03d1p@M@@s' + Math.random(),
         ...(isRelayStrategy ? {relayRedundancy} : {}),
+        ...(useTestOnlyMdnsFallback && browserName === 'webkit'
+          ? {_test_only_mdnsHostFallbackToLoopback: true}
+          : {}),
         ...config
       }
 

@@ -29,6 +29,7 @@ export type BaseRoomConfig = {
   rtcPolyfill?: typeof RTCPeerConnection
   turnConfig?: TurnServerConfig[]
   manualRelayReconnection?: boolean
+  _test_only_mdnsHostFallbackToLoopback?: boolean
 }
 
 export type RelayConfig = {

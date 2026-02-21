@@ -12,9 +12,17 @@ type SdpDescription = {
   sdp: string
 }
 
+const rewriteMdnsCandidatesToLoopback = (sdp: string): string =>
+  sdp.replace(/ (\S+\.local) (\d+) typ host/g, ' 127.0.0.1 $2 typ host')
+
 export default (
   initiator: boolean,
-  {rtcConfig, rtcPolyfill, turnConfig}: BaseRoomConfig
+  {
+    rtcConfig,
+    rtcPolyfill,
+    turnConfig,
+    _test_only_mdnsHostFallbackToLoopback
+  }: BaseRoomConfig
 ): PeerHandle => {
   const pc = new (rtcPolyfill ?? RTCPeerConnection)({
     iceServers: defaultIceServers.concat(turnConfig ?? []),
@@ -104,12 +112,13 @@ export default (
       new Promise<void>(res => setTimeout(res, iceTimeout))
     ])
 
+    const localSdp = peerConnection.localDescription?.sdp ?? ''
+
     return {
       type: (peerConnection.localDescription?.type ?? offerType) as RTCSdpType,
-      sdp: (peerConnection.localDescription?.sdp ?? '').replace(
-        /a=ice-options:trickle\s\n/g,
-        ''
-      )
+      sdp: _test_only_mdnsHostFallbackToLoopback
+        ? rewriteMdnsCandidatesToLoopback(localSdp)
+        : localSdp
     }
   }
 
@@ -224,7 +233,15 @@ export default (
       }
 
       try {
-        const rtcSdp: RTCSessionDescriptionInit = sdp
+        const normalizedSdp =
+          _test_only_mdnsHostFallbackToLoopback && sdp.sdp
+            ? rewriteMdnsCandidatesToLoopback(sdp.sdp)
+            : sdp.sdp
+
+        const rtcSdp: RTCSessionDescriptionInit = {
+          ...sdp,
+          sdp: normalizedSdp
+        }
 
         if (sdp.type === offerType) {
           if (
