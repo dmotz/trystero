@@ -1,6 +1,7 @@
 // @ts-nocheck
 import {expect, test} from '@playwright/test'
 import {attachPageLogging, emojis, shortBrowsers} from './logger'
+import {strategyConfigs} from './strategy-configs'
 
 const testPort = process.env.TRYSTERO_TEST_PORT ?? '8080'
 const testUrl = `https://localhost:${testPort}/test`
@@ -13,8 +14,9 @@ const sleep = ms => new Promise(res => setTimeout(res, ms))
 const concurrentRooms = strategy => (strategy === 'ipfs' ? 1 : 3)
 const defaultRelayRedundancy = 4
 
-export default (strategy, config = {}) =>
-  test(`Trystero: ${strategy}`, async ({page, browser, browserName}) => {
+export default (strategy, overrides = {}) => {
+  const config = {...(strategyConfigs[strategy] ?? {}), ...overrides}
+  return test(`Trystero: ${strategy}`, async ({page, browser, browserName}) => {
     const shouldSoftFail = strategy === 'ipfs'
 
     const run = async () => {
@@ -430,3 +432,4 @@ export default (strategy, config = {}) =>
       console.warn(`\n⚠️ ipfs failure ignored (flaky):\n${message}\n`)
     }
   })
+}
