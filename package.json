@@ -33,20 +33,22 @@
     "trystero": "workspace:*"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.29.7",
+    "@changesets/cli": "^2.29.8",
     "@playwright/test": "^1.58.2",
-    "@types/node": "^25.2.3",
+    "@types/node": "^25.3.0",
     "chalk": "^5.6.2",
+    "jiti": "^2.6.1",
     "mqtt": "^5.15.0",
-    "oxfmt": "^0.33.0",
-    "oxlint": "^1.48.0",
-    "oxlint-tsgolint": "^0.13.0",
+    "oxfmt": "^0.34.0",
+    "oxlint": "^1.49.0",
+    "oxlint-tsgolint": "^0.14.2",
     "playwright": "^1.58.2",
     "rolldown": "1.0.0-rc.1",
     "serve": "^14.2.5",
     "source-map": "^0.7.6",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.2",
+    "typescript": "^5.9.3",
+    "werift": "^0.22.9",
     "ws": "^8.19.0"
   },
   "packageManager": "pnpm@10.4.0"
