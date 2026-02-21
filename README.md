@@ -535,7 +535,7 @@ import a polyfill for WebRTC support:
 
 ```js
 import {joinRoom} from 'trystero'
-import {RTCPeerConnection} from 'node-datachannel/polyfill'
+import {RTCPeerConnection} from 'werift'
 
 const room = joinRoom(
   {appId: 'your-app-id', rtcPolyfill: RTCPeerConnection},
