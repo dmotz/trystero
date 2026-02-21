@@ -28,6 +28,8 @@ const poolSize = 20
 const announceIntervalMs = 5_333
 const announceWarmupIntervalsMs = [233, 533, 1_033] as const
 const offerTtl = 57_333
+const offerRefreshAgeMs = offerTtl
+const offerLeaseTtlMs = 180_000
 const offerPostAnswerTtlMs = 9_000
 const offerIdSize = 12
 const disconnectedPeerGraceMs = 7_500
@@ -63,13 +65,18 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     Record<string, ReturnType<typeof room>>
   > = {}
 
+  const hasActiveRooms = (): boolean =>
+    Object.values(occupiedRooms).some(rooms => Object.keys(rooms).length > 0)
+
+  const leasedOfferPeers = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
+  const recyclingOfferPeers = new Set<PeerHandle>()
+  const pooledOfferPeers = new Set<PeerHandle>()
+
   let didInit = false
   let initPromises: Promise<TRelay>[] = []
   let offerPool: PeerHandle[] = []
   let offerCleanupTimer: ReturnType<typeof setInterval> | null = null
   let cleanupWatchOnline: () => void = noOp
-  const hasActiveRooms = (): boolean =>
-    Object.values(occupiedRooms).some(rooms => Object.keys(rooms).length > 0)
 
   return (config: TConfig, roomId: string, onJoinError) => {
     const debugLog = (...args: unknown[]): void => console.log(...args)
@@ -80,12 +87,13 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const peerStates: Record<string, PeerState> = {}
-    let didLeaveRoom = false
-    const OFFER_PLACEHOLDER = Symbol('offer-placeholder')
+    const offerPlaceholder = 'offer-placeholder'
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
     const key = genKey(config.password ?? '', appId, roomId)
+
+    let didLeaveRoom = false
 
     const withKey =
       (f: (keyP: Promise<CryptoKey>, text: string) => Promise<string>) =>
@@ -98,6 +106,167 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const toCipher = withKey(encrypt)
 
     const makeOffer = (): PeerHandle => initPeer(true, config)
+
+    const pushOfferToPool = (peer: PeerHandle): void => {
+      if (
+        peer.isDead ||
+        pooledOfferPeers.has(peer) ||
+        leasedOfferPeers.has(peer)
+      ) {
+        return
+      }
+
+      offerPool.push(peer)
+      pooledOfferPeers.add(peer)
+    }
+
+    const shiftOffersFromPool = (n: number): PeerHandle[] => {
+      const peers: PeerHandle[] = []
+
+      while (peers.length < n && offerPool.length > 0) {
+        const peer = offerPool.shift()
+
+        if (!peer) {
+          break
+        }
+
+        pooledOfferPeers.delete(peer)
+        peers.push(peer)
+      }
+
+      return peers
+    }
+
+    const claimLeasedOfferPeer = (peer: PeerHandle): void => {
+      const timer = leasedOfferPeers.get(peer)
+
+      if (timer) {
+        clearTimeout(timer)
+        leasedOfferPeers.delete(peer)
+      }
+    }
+
+    const recycleOfferPeer = (peer: PeerHandle): void => {
+      if (peer.isDead || recyclingOfferPeers.has(peer)) {
+        return
+      }
+
+      if (peer.connection.remoteDescription) {
+        peer.destroy()
+        return
+      }
+
+      if (!didInit) {
+        peer.destroy()
+        return
+      }
+
+      recyclingOfferPeers.add(peer)
+
+      peer.setHandlers({
+        connect: noOp,
+        close: noOp,
+        error: noOp
+      })
+
+      void peer
+        .getOffer(true)
+        .then(offer => {
+          if (!offer || offer.type !== 'offer' || peer.isDead || !didInit) {
+            peer.destroy()
+            return
+          }
+
+          pushOfferToPool(peer)
+        })
+        .catch(() => peer.destroy())
+        .finally(() => recyclingOfferPeers.delete(peer))
+    }
+
+    const reclaimLeasedOfferPeer = (peer: PeerHandle): void => {
+      const timer = leasedOfferPeers.get(peer)
+
+      if (!timer) {
+        return
+      }
+
+      clearTimeout(timer)
+      leasedOfferPeers.delete(peer)
+      recycleOfferPeer(peer)
+    }
+
+    const leaseOfferPeer = (peer: PeerHandle): void => {
+      claimLeasedOfferPeer(peer)
+
+      leasedOfferPeers.set(
+        peer,
+        setTimeout(() => {
+          leasedOfferPeers.delete(peer)
+          recycleOfferPeer(peer)
+        }, offerLeaseTtlMs)
+      )
+    }
+
+    const getEncryptedOffer = async (peer: PeerHandle): Promise<string> => {
+      const plainOffer = await peer.getOffer(
+        Date.now() - peer.created > offerRefreshAgeMs
+      )
+
+      if (!plainOffer || plainOffer.type !== 'offer') {
+        throw mkErr('failed to get offer for peer')
+      }
+
+      return (await toCipher(plainOffer)).sdp
+    }
+
+    const checkoutOffers = (
+      n: number,
+      leaseOffers: boolean
+    ): Promise<OfferRecord[]> => {
+      const peers = shiftOffersFromPool(n)
+      const missingOffers = Math.max(0, n - peers.length)
+
+      if (missingOffers > 0) {
+        peers.push(...alloc(missingOffers, makeOffer))
+      }
+
+      const toOfferRecord = async (
+        candidate: PeerHandle,
+        didRetry = false
+      ): Promise<OfferRecord> => {
+        try {
+          const offer = await getEncryptedOffer(candidate)
+
+          if (leaseOffers) {
+            leaseOfferPeer(candidate)
+
+            return {
+              peer: candidate,
+              offer,
+              claim: () => claimLeasedOfferPeer(candidate),
+              reclaim: () => reclaimLeasedOfferPeer(candidate)
+            }
+          }
+
+          return {peer: candidate, offer}
+        } catch (err) {
+          claimLeasedOfferPeer(candidate)
+          pooledOfferPeers.delete(candidate)
+          candidate.destroy()
+
+          if (!didRetry) {
+            return toOfferRecord(makeOffer(), true)
+          }
+
+          throw err
+        }
+      }
+
+      return all(peers.map(peer => toOfferRecord(peer)))
+    }
+
+    const getOffers = (n: number): Promise<OfferRecord[]> =>
+      checkoutOffers(n, true)
 
     const makeState = (): PeerState => ({
       status: 'idle',
@@ -197,7 +366,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       state.offerRelayTimers = []
 
       if (state.offerPeer && state.offerPeer !== state.connectedPeer) {
-        state.offerPeer.destroy()
+        if (
+          state.offerAnswered ||
+          state.offerPeer.connection.remoteDescription
+        ) {
+          state.offerPeer.destroy()
+        } else {
+          recycleOfferPeer(state.offerPeer)
+        }
       }
 
       state.offerPeer = null
@@ -229,24 +405,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }, ttlMs)
     }
 
-    const getOffers = (n: number): Promise<OfferRecord[]> => {
-      const missingOffers = Math.max(0, n - offerPool.length)
-
-      if (missingOffers > 0) {
-        offerPool.push(...alloc(missingOffers, makeOffer))
-      }
-
-      return all(
-        offerPool
-          .splice(0, n)
-          .map(peer =>
-            peer.offerPromise
-              .then(offer => toCipher(offer as Signal))
-              .then(offer => ({peer, offer: offer.sdp}))
-          )
-      )
-    }
-
     const ensureOffer = (
       state: PeerState,
       peerId: string,
@@ -265,7 +423,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
 
       state.offerInitPromise = (async () => {
-        const firstOffer = (await getOffers(1))[0]
+        const firstOffer = (await checkoutOffers(1, false))[0]
 
         if (!firstOffer) {
           throw mkErr('failed to allocate offer peer')
@@ -443,6 +601,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         const answer = payload['answer'] as string | undefined
         const offerId = payload['offerId'] as string | undefined
         const peer = payload['peer'] as PeerHandle | undefined
+        const hasOutgoingOfferHint = payload['hasOutgoingOffer'] === true
 
         if (peerId === selfId) {
           return
@@ -508,7 +667,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             return
           }
 
-          state.offerRelays[relayId] = OFFER_PLACEHOLDER
+          state.offerRelays[relayId] = offerPlaceholder
           updateStatus(state)
         }
 
@@ -521,7 +680,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         if (topic !== rootTopic && topic !== selfTopic) {
           if (
             isAnnouncement &&
-            peerStates[peerId]?.offerRelays[relayId] === OFFER_PLACEHOLDER
+            peerStates[peerId]?.offerRelays[relayId] === offerPlaceholder
           ) {
             clearOfferRelay(peerStates[peerId], relayId)
           }
@@ -538,14 +697,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             state.answeringPeer ||
             state.offerAnswered
           ) {
-            if (state?.offerRelays[relayId] === OFFER_PLACEHOLDER) {
+            if (state?.offerRelays[relayId] === offerPlaceholder) {
               clearOfferRelay(state, relayId)
             }
 
             return
           }
 
-          if (state.offerRelays[relayId] !== OFFER_PLACEHOLDER) {
+          if (state.offerRelays[relayId] !== offerPlaceholder) {
             return
           }
 
@@ -562,9 +721,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             state.connectedPeer ||
             state.answeringPeer ||
             state.offerAnswered ||
-            state.offerRelays[relayId] !== OFFER_PLACEHOLDER
+            state.offerRelays[relayId] !== offerPlaceholder
           ) {
-            if (state.offerRelays[relayId] === OFFER_PLACEHOLDER) {
+            if (state.offerRelays[relayId] === offerPlaceholder) {
               clearOfferRelay(state, relayId)
             }
 
@@ -601,9 +760,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             return
           }
 
-          const hasOutgoingOffer = Boolean(
+          const hasTrackedOutgoingOffer = Boolean(
             state.offerPeer || state.offerRelays.some(Boolean)
           )
+          const hasOutgoingOffer =
+            hasTrackedOutgoingOffer || hasOutgoingOfferHint
 
           // Deterministic glare tie-break:
           // lower ID keeps outgoing offer; higher ID backs off and answers.
@@ -611,7 +772,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             return
           }
 
-          if (hasOutgoingOffer) {
+          if (hasTrackedOutgoingOffer) {
             resetOfferState(state)
           }
 
@@ -687,6 +848,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           DEV: debugLog('got answer from', peerId)
 
           if (peer) {
+            claimLeasedOfferPeer(peer)
             peer.setHandlers({
               connect: () => connectPeer(peer, peerId, relayId),
               close: () => disconnectPeer(peer, peerId)
@@ -743,24 +905,23 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     if (!didInit) {
       const initRes = init(config)
-      offerPool = alloc(poolSize, makeOffer)
+      offerPool = []
+      pooledOfferPeers.clear()
+      alloc(poolSize, makeOffer).forEach(pushOfferToPool)
       initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(value =>
         Promise.resolve(value)
       )
       didInit = true
-      offerCleanupTimer = setInterval(
-        () =>
-          (offerPool = offerPool.filter(peer => {
-            const shouldLive = Date.now() - peer.created < offerTtl
+      offerCleanupTimer = setInterval(() => {
+        offerPool = offerPool.filter(peer => {
+          if (peer.isDead) {
+            pooledOfferPeers.delete(peer)
+            return false
+          }
 
-            if (!shouldLive) {
-              peer.destroy()
-            }
-
-            return shouldLive
-          })),
-        offerTtl * 1.03
-      )
+          return true
+        })
+      }, offerTtl)
       cleanupWatchOnline = config.manualRelayReconnection ? noOp : watchOnline()
     }
 
@@ -888,13 +1049,27 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           return
         }
 
+        didInit = false
+
         if (offerCleanupTimer) {
           clearInterval(offerCleanupTimer)
           offerCleanupTimer = null
         }
 
+        offerPool.forEach(peer => peer.destroy())
+        offerPool = []
+        pooledOfferPeers.clear()
+
+        leasedOfferPeers.forEach((timeout, peer) => {
+          clearTimeout(timeout)
+          peer.destroy()
+        })
+        leasedOfferPeers.clear()
+
+        recyclingOfferPeers.forEach(peer => peer.destroy())
+        recyclingOfferPeers.clear()
+
         cleanupWatchOnline()
-        didInit = false
       }
     ))
   }

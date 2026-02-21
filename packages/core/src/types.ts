@@ -119,6 +119,7 @@ export type PeerHandle = {
   connection: RTCPeerConnection
   channel: RTCDataChannel | null
   isDead: boolean
+  getOffer: (restartIce?: boolean) => Promise<Signal | void>
   signal: (sdp: Signal) => Promise<Signal | void>
   sendData: (data: Uint8Array) => void
   destroy: () => void
@@ -150,6 +151,8 @@ export type StrategyOnMessage = (
 export type OfferRecord = {
   peer: PeerHandle
   offer: string
+  claim?: () => void
+  reclaim?: () => void
 }
 
 export type MaybePromise<T> = T | Promise<T>

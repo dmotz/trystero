@@ -32,6 +32,8 @@ export default (
   const handlers: PeerHandlers = {}
   const pendingSignals: Signal[] = []
   const pendingData: ArrayBuffer[] = []
+  const pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}> =
+    []
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
   let dataChannel: RTCDataChannel | null = null
@@ -97,20 +99,30 @@ export default (
   const waitForIceGathering = async (
     peerConnection: RTCPeerConnection
   ): Promise<SdpDescription> => {
-    await Promise.race([
-      new Promise<void>(res => {
-        const checkState = (): void => {
-          if (peerConnection.iceGatheringState === 'complete') {
-            peerConnection.removeEventListener(iceStateEvent, checkState)
-            res()
-          }
-        }
+    let timeout: ReturnType<typeof setTimeout> | null = null
 
-        peerConnection.addEventListener(iceStateEvent, checkState)
-        checkState()
-      }),
-      new Promise<void>(res => setTimeout(res, iceTimeout))
-    ])
+    try {
+      await Promise.race([
+        new Promise<void>(res => {
+          const checkState = (): void => {
+            if (peerConnection.iceGatheringState === 'complete') {
+              peerConnection.removeEventListener(iceStateEvent, checkState)
+              res()
+            }
+          }
+
+          peerConnection.addEventListener(iceStateEvent, checkState)
+          checkState()
+        }),
+        new Promise<void>(res => {
+          timeout = setTimeout(res, iceTimeout)
+        })
+      ])
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+    }
 
     const localSdp = peerConnection.localDescription?.sdp ?? ''
 
@@ -132,18 +144,42 @@ export default (
     }
   }
 
-  pc.onnegotiationneeded = async () => {
+  const createOffer = async (restartIce = false): Promise<Signal | void> => {
+    if (pc.connectionState === 'closed') {
+      return
+    }
+
     try {
       makingOffer = true
-      await pc.setLocalDescription()
+
+      if (restartIce) {
+        if (
+          pc.signalingState !== 'stable' &&
+          pc.signalingState !== 'closed' &&
+          pc.localDescription?.type === offerType
+        ) {
+          await pc.setLocalDescription({type: 'rollback'})
+        }
+
+        if (typeof pc.restartIce === 'function') {
+          pc.restartIce()
+        }
+      }
+
+      await pc.setLocalDescription(
+        restartIce ? await pc.createOffer({iceRestart: true}) : undefined
+      )
       const offer = await waitForIceGathering(pc)
       emitSignal(offer)
+      return offer
     } catch (err) {
       handlers.error?.(err)
     } finally {
       makingOffer = false
     }
   }
+
+  pc.onnegotiationneeded = async () => createOffer(false)
 
   pc.onconnectionstatechange = () => {
     if (
@@ -177,11 +213,15 @@ export default (
     const stream = e.streams[0]
 
     if (stream) {
+      if (!handlers.track && !handlers.stream) {
+        pendingTracks.push({track: e.track, stream})
+        return
+      }
+
       handlers.track?.(e.track, stream)
       handlers.stream?.(stream)
     }
   }
-
   ;(
     pc as RTCPeerConnection & {
       onremovestream: ((e: {stream: MediaStream}) => void) | null
@@ -222,6 +262,22 @@ export default (
 
     get isDead(): boolean {
       return pc.connectionState === 'closed'
+    },
+
+    getOffer: async (restartIce = false): Promise<Signal | void> => {
+      if (!initiator) {
+        return
+      }
+
+      if (restartIce) {
+        return createOffer(true)
+      }
+
+      if (pc.localDescription?.type === offerType) {
+        return waitForIceGathering(pc)
+      }
+
+      return offerPromise
     },
 
     async signal(sdp: Signal): Promise<Signal | void> {
@@ -303,6 +359,14 @@ export default (
 
       if (signal) {
         appendSignalHandler(signal)
+      }
+
+      if ((handlers.track || handlers.stream) && pendingTracks.length > 0) {
+        const queued = pendingTracks.splice(0)
+        queued.forEach(({track, stream}) => {
+          handlers.track?.(track, stream)
+          handlers.stream?.(stream)
+        })
       }
     },
 

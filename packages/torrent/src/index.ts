@@ -1,7 +1,6 @@
 import {
   createStrategy,
   entries,
-  fromEntries,
   fromJson,
   genId,
   getRelays,
@@ -33,7 +32,7 @@ const announceFns: Record<
 > = {}
 const subscriptionTokens: Record<string, Record<string, symbol>> = {}
 const trackerAnnounceMs: Record<string, number> = {}
-const handledSignals: Record<string, boolean> = {}
+const handledSignals: Record<string, number> = {}
 const msgHandlers: Record<
   string,
   Record<string, ((data: TrackerMessage) => void) | undefined>
@@ -44,6 +43,7 @@ const offerPoolSize = 10
 const defaultAnnounceMs = 10_000
 const maxAnnounceMs = 20_000
 const offerRetentionMs = 120_000
+const signalDedupeWindowMs = 4_000
 const defaultRedundancy = 3
 
 export type TorrentRoomConfig = BaseRoomConfig & RelayConfig
@@ -141,12 +141,24 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
 
           const signalType = data.offer ? 'offer' : 'answer'
           const signalKey = `${topic}:${signalType}:${data.offer_id}:${data.peer_id ?? ''}`
+          const nowMs = Date.now()
+          const lastHandledMs = handledSignals[signalKey]
 
-          if (handledSignals[signalKey]) {
+          if (
+            typeof lastHandledMs === 'number' &&
+            nowMs - lastHandledMs < signalDedupeWindowMs
+          ) {
             return
           }
 
-          handledSignals[signalKey] = true
+          handledSignals[signalKey] = nowMs
+
+          entries(handledSignals).forEach(([key, handledAtMs]) => {
+            if (nowMs - handledAtMs > signalDedupeWindowMs * 6) {
+              delete handledSignals[key]
+            }
+          })
+
           msgHandlers[client.url]?.[topic]?.(data)
         }
       })
@@ -171,12 +183,44 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
 
     activeTokens[rootTopic] = subscriptionToken
 
+    const claimOutstandingOffer = (
+      offerId: string
+    ): OfferRecord | undefined => {
+      const offer = outstandingOffers[offerId]
+
+      if (!offer) {
+        return
+      }
+
+      delete outstandingOffers[offerId]
+      offer.claim?.()
+
+      return offer
+    }
+
+    const reclaimOutstandingOffer = (offerId: string): void => {
+      const offer = outstandingOffers[offerId]
+
+      if (!offer) {
+        return
+      }
+
+      delete outstandingOffers[offerId]
+      offer.reclaim?.()
+    }
+
+    const reclaimAllOutstandingOffers = (): void => {
+      entries(outstandingOffers).forEach(([offerId]) => {
+        reclaimOutstandingOffer(offerId)
+      })
+    }
+
     const pruneOutstandingOffers = (): void => {
       const now = Date.now()
 
       entries(outstandingOffers).forEach(([offerId, offer]) => {
         if (now - offer.createdAt > offerRetentionMs) {
-          delete outstandingOffers[offerId]
+          reclaimOutstandingOffer(offerId)
         }
       })
     }
@@ -185,7 +229,11 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
       if (data.offer && data.peer_id && data.offer_id) {
         void onMessage(
           rootTopic,
-          {offer: data.offer, peerId: data.peer_id},
+          {
+            offer: data.offer,
+            peerId: data.peer_id,
+            hasOutgoingOffer: entries(outstandingOffers).length > 0
+          },
           (_, signal) =>
             void send(client, rootTopic, {
               answer: fromJson<Record<string, unknown>>(signal)['answer'],
@@ -194,11 +242,9 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
             })
         )
       } else if (data.answer && data.offer_id && data.peer_id) {
-        const offer = outstandingOffers[data.offer_id]
+        const offer = claimOutstandingOffer(data.offer_id)
 
         if (offer) {
-          delete outstandingOffers[data.offer_id]
-
           void onMessage(
             rootTopic,
             {
@@ -221,20 +267,26 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
 
       pruneOutstandingOffers()
 
-      const offers = fromEntries(
-        (await getOffers(offerPoolSize)).map((peerAndOffer: OfferRecord) => [
-          genId(hashLimit),
-          peerAndOffer
-        ])
-      ) as Record<string, OfferRecord>
+      const outstandingCount = entries(outstandingOffers).length
+      const missingOffers = Math.max(0, offerPoolSize - outstandingCount)
 
-      entries(offers).forEach(([offerId, offer]) => {
-        outstandingOffers[offerId] = {...offer, createdAt: Date.now()}
-      })
+      if (missingOffers > 0) {
+        ;(await getOffers(missingOffers)).forEach(peerAndOffer => {
+          outstandingOffers[genId(hashLimit)] = {
+            ...peerAndOffer,
+            createdAt: Date.now()
+          }
+        })
+      }
+
+      const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
+        offer_id: id,
+        offer
+      }))
 
       void send(client, rootTopic, {
         numwant: offerPoolSize,
-        offers: entries(offers).map(([id, {offer}]) => ({offer_id: id, offer}))
+        offers
       })
     }
 
@@ -245,9 +297,7 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
 
     return () => {
       if (activeTokens[rootTopic] !== subscriptionToken) {
-        entries(outstandingOffers).forEach(([offerId]) => {
-          delete outstandingOffers[offerId]
-        })
+        reclaimAllOutstandingOffers()
 
         return
       }
@@ -268,9 +318,7 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
 
       delete activeTokens[rootTopic]
 
-      entries(outstandingOffers).forEach(([offerId]) => {
-        delete outstandingOffers[offerId]
-      })
+      reclaimAllOutstandingOffers()
     }
   },
 
