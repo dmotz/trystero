@@ -37,7 +37,17 @@ const onConsole = (strategy, browser, pageN) => async msg => {
   const loc = msg.location()
 
   for (const arg of msg.args()) {
-    values.push(await arg.jsonValue())
+    try {
+      values.push(await arg.jsonValue())
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+
+      if (message.includes('Target page, context or browser has been closed')) {
+        return
+      }
+
+      values.push('[Unable to serialize]')
+    }
   }
 
   const text = msg.text()
