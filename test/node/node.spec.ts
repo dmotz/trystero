@@ -93,15 +93,6 @@ test(
   'Trystero: nostr strategy works with two Node peers on public relays',
   {timeout: 120_000},
   async t => {
-    const polyfillLoaded = await import('werift')
-      .then(() => true)
-      .catch(() => false)
-
-    if (!polyfillLoaded) {
-      t.skip('werift polyfill is unavailable in this environment')
-      return
-    }
-
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
     const appId = `trystero-node-${suffix}`
     const roomId = `room-${suffix}`
