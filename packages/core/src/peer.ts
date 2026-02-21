@@ -6,6 +6,8 @@ const disconnectedCloseDelayMs = 5_000
 const iceStateEvent = 'icegatheringstatechange'
 const offerType = 'offer'
 const answerType = 'answer'
+const candidateType = 'candidate'
+const outOfRangePattern = /out of range/i
 
 type SdpDescription = {
   type: RTCSdpType
@@ -18,6 +20,7 @@ const rewriteMdnsCandidatesToLoopback = (sdp: string): string =>
 export default (
   initiator: boolean,
   {
+    trickleIce,
     rtcConfig,
     rtcPolyfill,
     turnConfig,
@@ -32,6 +35,8 @@ export default (
   const handlers: PeerHandlers = {}
   const pendingSignals: Signal[] = []
   const pendingData: ArrayBuffer[] = []
+  const shouldTrickleIce = trickleIce !== false
+  const pendingRemoteCandidates: RTCIceCandidateInit[] = []
   const pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}> =
     []
   let makingOffer = false
@@ -79,6 +84,139 @@ export default (
     }
   }
 
+  const normalizeSdp = (sdp: string): string =>
+    _test_only_mdnsHostFallbackToLoopback
+      ? rewriteMdnsCandidatesToLoopback(sdp)
+      : sdp
+
+  const normalizeCandidate = (
+    candidate: RTCIceCandidateInit
+  ): RTCIceCandidateInit => {
+    if (
+      !_test_only_mdnsHostFallbackToLoopback ||
+      typeof candidate.candidate !== 'string'
+    ) {
+      return candidate
+    }
+
+    const normalizedCandidate = rewriteMdnsCandidatesToLoopback(
+      candidate.candidate
+    )
+
+    return normalizedCandidate === candidate.candidate
+      ? candidate
+      : {...candidate, candidate: normalizedCandidate}
+  }
+
+  const localDescriptionSignal = (
+    peerConnection: RTCPeerConnection
+  ): SdpDescription => ({
+    type: (peerConnection.localDescription?.type ?? offerType) as RTCSdpType,
+    sdp: normalizeSdp(peerConnection.localDescription?.sdp ?? '')
+  })
+
+  const getRemoteUfrag = (): string | null => {
+    const sdp = pc.remoteDescription?.sdp
+
+    if (!sdp) {
+      return null
+    }
+
+    const match = sdp.match(/a=ice-ufrag:([^\s]+)/)
+    return match?.[1] ?? null
+  }
+
+  const getRemoteMediaSectionCount = (): number =>
+    (pc.remoteDescription?.sdp?.match(/^m=/gm) ?? []).length
+
+  const canApplyRemoteCandidate = (candidate: RTCIceCandidateInit): boolean => {
+    if (!pc.remoteDescription) {
+      return false
+    }
+
+    const remoteMLineCount = getRemoteMediaSectionCount()
+
+    if (
+      typeof candidate.sdpMLineIndex === 'number' &&
+      remoteMLineCount > 0 &&
+      candidate.sdpMLineIndex >= remoteMLineCount
+    ) {
+      return false
+    }
+
+    const remoteUfrag = getRemoteUfrag()
+
+    if (
+      remoteUfrag &&
+      candidate.usernameFragment &&
+      candidate.usernameFragment !== remoteUfrag
+    ) {
+      return false
+    }
+
+    return true
+  }
+
+  const addIceCandidateSafe = async (
+    candidate: RTCIceCandidateInit
+  ): Promise<boolean> => {
+    try {
+      await pc.addIceCandidate(candidate)
+      return true
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        outOfRangePattern.test(err.message) &&
+        typeof candidate.sdpMLineIndex === 'number'
+      ) {
+        return false
+      }
+
+      throw err
+    }
+  }
+
+  const flushPendingRemoteCandidates = async (): Promise<void> => {
+    if (!pc.remoteDescription || pendingRemoteCandidates.length === 0) {
+      return
+    }
+
+    const queuedCandidates = pendingRemoteCandidates.splice(0)
+    const stillPending: RTCIceCandidateInit[] = []
+
+    for (const candidate of queuedCandidates) {
+      if (!canApplyRemoteCandidate(candidate)) {
+        stillPending.push(candidate)
+        continue
+      }
+
+      const didApply = await addIceCandidateSafe(candidate)
+
+      if (!didApply) {
+        stillPending.push(candidate)
+      }
+    }
+
+    if (stillPending.length > 0) {
+      pendingRemoteCandidates.push(...stillPending)
+    }
+  }
+
+  const addRemoteCandidate = async (
+    candidate: RTCIceCandidateInit
+  ): Promise<void> => {
+    if (canApplyRemoteCandidate(candidate)) {
+      const didApply = await addIceCandidateSafe(candidate)
+
+      if (!didApply) {
+        pendingRemoteCandidates.push(candidate)
+      }
+      return
+    }
+
+    pendingRemoteCandidates.push(candidate)
+  }
+
   const setupDataChannel = (channel: RTCDataChannel): void => {
     channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = 0xffff
@@ -124,14 +262,16 @@ export default (
       }
     }
 
-    const localSdp = peerConnection.localDescription?.sdp ?? ''
+    return localDescriptionSignal(peerConnection)
+  }
 
-    return {
-      type: (peerConnection.localDescription?.type ?? offerType) as RTCSdpType,
-      sdp: _test_only_mdnsHostFallbackToLoopback
-        ? rewriteMdnsCandidatesToLoopback(localSdp)
-        : localSdp
-    }
+  const emitLocalDescriptionSignal = async (): Promise<SdpDescription> => {
+    const signal = shouldTrickleIce
+      ? localDescriptionSignal(pc)
+      : await waitForIceGathering(pc)
+
+    emitSignal(signal)
+    return signal
   }
 
   if (initiator) {
@@ -169,8 +309,7 @@ export default (
       await pc.setLocalDescription(
         restartIce ? await pc.createOffer({iceRestart: true}) : undefined
       )
-      const offer = await waitForIceGathering(pc)
-      emitSignal(offer)
+      const offer = await emitLocalDescriptionSignal()
       return offer
     } catch (err) {
       handlers.error?.(err)
@@ -181,6 +320,27 @@ export default (
 
   pc.onnegotiationneeded = async () => createOffer(false)
 
+  pc.onicecandidate = ({candidate}) => {
+    if (!shouldTrickleIce || !candidate) {
+      return
+    }
+
+    const candidatePayload = normalizeCandidate(
+      typeof candidate.toJSON === 'function'
+        ? candidate.toJSON()
+        : {
+            candidate: candidate.candidate,
+            sdpMid: candidate.sdpMid,
+            sdpMLineIndex: candidate.sdpMLineIndex,
+            usernameFragment: candidate.usernameFragment
+          }
+    )
+
+    emitSignal({
+      type: candidateType,
+      sdp: JSON.stringify(candidatePayload)
+    })
+  }
   pc.onconnectionstatechange = () => {
     if (
       pc.connectionState === 'connected' ||
@@ -274,13 +434,29 @@ export default (
       }
 
       if (pc.localDescription?.type === offerType) {
-        return waitForIceGathering(pc)
+        return shouldTrickleIce
+          ? localDescriptionSignal(pc)
+          : waitForIceGathering(pc)
       }
 
       return offerPromise
     },
 
     async signal(sdp: Signal): Promise<Signal | void> {
+      if (sdp.type === candidateType) {
+        try {
+          const candidate = JSON.parse(sdp.sdp) as RTCIceCandidateInit | null
+
+          if (candidate && typeof candidate === 'object') {
+            await addRemoteCandidate(normalizeCandidate(candidate))
+          }
+        } catch (err) {
+          handlers.error?.(err)
+        }
+
+        return
+      }
+
       if (
         dataChannel?.readyState === 'open' &&
         !sdp.sdp?.includes('a=rtpmap')
@@ -289,14 +465,9 @@ export default (
       }
 
       try {
-        const normalizedSdp =
-          _test_only_mdnsHostFallbackToLoopback && sdp.sdp
-            ? rewriteMdnsCandidatesToLoopback(sdp.sdp)
-            : sdp.sdp
-
         const rtcSdp: RTCSessionDescriptionInit = {
           ...sdp,
-          sdp: normalizedSdp
+          sdp: normalizeSdp(sdp.sdp)
         }
 
         if (sdp.type === offerType) {
@@ -316,9 +487,9 @@ export default (
             await pc.setRemoteDescription(rtcSdp)
           }
 
+          await flushPendingRemoteCandidates()
           await pc.setLocalDescription()
-          const answer = await waitForIceGathering(pc)
-          emitSignal(answer)
+          const answer = await emitLocalDescriptionSignal()
 
           return answer
         }
@@ -328,6 +499,7 @@ export default (
 
           try {
             await pc.setRemoteDescription(rtcSdp)
+            await flushPendingRemoteCandidates()
           } finally {
             isSettingRemoteAnswerPending = false
           }

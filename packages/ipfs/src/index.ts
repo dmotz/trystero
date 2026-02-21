@@ -38,7 +38,7 @@ let node: any
 
 export type IpfsRoomConfig = BaseRoomConfig
 
-export const joinRoom: JoinRoom<IpfsRoomConfig> = createStrategy({
+const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createStrategy({
   init: () =>
     (node ??= createLightNode({
       defaultBootstrap: true,
@@ -83,6 +83,17 @@ export const joinRoom: JoinRoom<IpfsRoomConfig> = createStrategy({
   announce: (activeNode, rootTopic) =>
     sendMessage(activeNode, rootTopic, toJson({peerId: selfId}))
 })
+
+export const joinRoom: JoinRoom<IpfsRoomConfig> = (
+  config,
+  roomId,
+  onJoinError
+) =>
+  joinRoomStrategy(
+    {...config, trickleIce: config.trickleIce ?? false},
+    roomId,
+    onJoinError
+  )
 
 export {selfId}
 

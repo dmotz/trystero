@@ -34,6 +34,8 @@ const offerPostAnswerTtlMs = 9_000
 const offerIdSize = 12
 const disconnectedPeerGraceMs = 7_500
 const answeringTtlMs = 8_000
+const candidateType = 'candidate'
+const legacyCandidateKey = '__legacy__'
 
 type PeerState = {
   status: 'idle' | 'offering' | 'answering' | 'connected'
@@ -47,12 +49,15 @@ type PeerState = {
   }> | null
   offerAnswered: boolean
   offerRelays: unknown[]
+  offerSignalRelays: Array<((signal: Signal) => void) | undefined>
+  offerSignalBacklog: Signal[]
   offerRelayTimers: Array<ReturnType<typeof setTimeout> | undefined>
   offerExpiryTimer: ReturnType<typeof setTimeout> | null
   connectedPeer: PeerHandle | null
   connectedPeerUnhealthySinceMs: number | null
   answeringExpiryTimer: ReturnType<typeof setTimeout> | null
   answeringPeer: PeerHandle | null
+  pendingCandidates: Record<string, Signal[]>
 }
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
@@ -276,12 +281,15 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       offerInitPromise: null,
       offerAnswered: false,
       offerRelays: [],
+      offerSignalRelays: [],
+      offerSignalBacklog: [],
       offerRelayTimers: [],
       offerExpiryTimer: null,
       connectedPeer: null,
       connectedPeerUnhealthySinceMs: null,
       answeringExpiryTimer: null,
-      answeringPeer: null
+      answeringPeer: null,
+      pendingCandidates: {}
     })
 
     const getState = (peerId: string): PeerState =>
@@ -341,6 +349,30 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }, answeringTtlMs)
     }
 
+    const flushBufferedCandidates = async (
+      state: PeerState,
+      peer: PeerHandle,
+      offerId?: string
+    ): Promise<void> => {
+      const keys = offerId
+        ? [offerId, legacyCandidateKey]
+        : [legacyCandidateKey]
+
+      for (const key of keys) {
+        const buffered = state.pendingCandidates[key]
+
+        if (!buffered?.length) {
+          continue
+        }
+
+        delete state.pendingCandidates[key]
+
+        for (const candidate of buffered) {
+          await peer.signal(candidate)
+        }
+      }
+    }
+
     const clearOfferRelay = (state: PeerState, relayId: number): void => {
       if (state.offerRelayTimers[relayId]) {
         clearTimeout(state.offerRelayTimers[relayId])
@@ -353,24 +385,38 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     }
 
+    const hasRemoteDescription = (peer: PeerHandle): boolean => {
+      if (peer.isDead || peer.connection.connectionState === 'closed') {
+        return true
+      }
+
+      try {
+        return Boolean(peer.connection.remoteDescription)
+      } catch {
+        return true
+      }
+    }
+
     const resetOfferState = (state: PeerState): void => {
+      const previousOfferAnswered = state.offerAnswered
+
       if (state.offerExpiryTimer) {
         clearTimeout(state.offerExpiryTimer)
         state.offerExpiryTimer = null
       }
 
       state.offerInitPromise = null
-      state.offerAnswered = false
       state.offerRelays.forEach((_, relayId) => clearOfferRelay(state, relayId))
       state.offerRelays = []
+      state.offerSignalRelays = []
       state.offerRelayTimers = []
+      state.offerSignalBacklog = []
 
       if (state.offerPeer && state.offerPeer !== state.connectedPeer) {
-        if (
-          state.offerAnswered ||
-          state.offerPeer.connection.remoteDescription
-        ) {
-          state.offerPeer.destroy()
+        if (previousOfferAnswered || hasRemoteDescription(state.offerPeer)) {
+          if (!state.offerPeer.isDead) {
+            state.offerPeer.destroy()
+          }
         } else {
           recycleOfferPeer(state.offerPeer)
         }
@@ -379,6 +425,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       state.offerPeer = null
       state.offerId = null
       state.offerSdp = null
+      state.offerAnswered = false
       updateStatus(state)
     }
 
@@ -435,10 +482,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         state.offerId = genId(offerIdSize)
         state.offerSdp = offer
         state.offerAnswered = false
+        state.offerSignalBacklog = []
         updateStatus(state)
 
         peer.setHandlers({
           connect: () => connectPeer(peer, peerId, relayId),
+          signal: signal => {
+            if (state.offerPeer !== peer) {
+              return
+            }
+
+            state.offerSignalBacklog.push(signal)
+            state.offerSignalRelays.forEach(sendSignal => sendSignal?.(signal))
+          },
           close: () => {
             if (state.offerPeer === peer && !state.connectedPeer) {
               resetOfferState(state)
@@ -599,6 +655,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           typeof payload['peerId'] === 'string' ? payload['peerId'] : ''
         const offer = payload['offer'] as string | undefined
         const answer = payload['answer'] as string | undefined
+        const candidate = payload['candidate'] as string | undefined
         const offerId = payload['offerId'] as string | undefined
         const peer = payload['peer'] as PeerHandle | undefined
         const hasOutgoingOfferHint = payload['hasOutgoingOffer'] === true
@@ -643,7 +700,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           }
         }
 
-        const isAnnouncement = Boolean(peerId && !offer && !answer)
+        const isAnnouncement = Boolean(
+          peerId && !offer && !answer && !candidate
+        )
 
         if (isAnnouncement) {
           const state = getState(peerId)
@@ -743,6 +802,44 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             (announceIntervals[relayId] ?? announceIntervalMs) * 0.9
           )
 
+          let didSendOffer = false
+
+          state.offerSignalRelays[relayId] = signal => {
+            if (!didSendOffer) {
+              return
+            }
+
+            if (
+              didLeaveRoom ||
+              state.connectedPeer ||
+              state.offerPeer !== offerInfo.peer ||
+              state.offerId !== offerInfo.offerId ||
+              signal.type !== candidateType
+            ) {
+              return
+            }
+
+            void toCipher(signal).then(encryptedSignal => {
+              if (
+                didLeaveRoom ||
+                state.connectedPeer ||
+                state.offerPeer !== offerInfo.peer ||
+                state.offerId !== offerInfo.offerId
+              ) {
+                return
+              }
+
+              signalPeer(
+                peerTopic,
+                toJson({
+                  peerId: selfId,
+                  offerId: offerInfo.offerId,
+                  candidate: encryptedSignal.sdp
+                })
+              )
+            })
+          }
+
           DEV: debugLog('sending offer to', peerId)
 
           signalPeer(
@@ -752,6 +849,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
               offerId: offerInfo.offerId,
               offer: offerInfo.offer
             })
+          )
+
+          didSendOffer = true
+          state.offerSignalBacklog.forEach(signal =>
+            state.offerSignalRelays[relayId]?.(signal)
           )
         } else if (offer) {
           const state = getState(peerId)
@@ -810,31 +912,89 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
           DEV: debugLog('got offer from', peerId)
 
-          const [peerTopic, answerSignal] = await all([
-            sha1(topicPath(rootTopicPlaintext, peerId)),
-            answerPeer.signal(plainOffer)
-          ])
+          const peerTopic = await sha1(topicPath(rootTopicPlaintext, peerId))
 
           if (didLeaveRoom) {
             return
           }
 
-          DEV: debugLog('sending answer to', peerId)
+          answerPeer.setHandlers({
+            signal: signal => {
+              if (
+                didLeaveRoom ||
+                state.answeringPeer !== answerPeer ||
+                answerPeer.isDead
+              ) {
+                return
+              }
 
-          if (!answerSignal) {
+              if (signal.type !== 'answer' && signal.type !== candidateType) {
+                return
+              }
+
+              void toCipher(signal).then(encryptedSignal => {
+                if (
+                  didLeaveRoom ||
+                  state.answeringPeer !== answerPeer ||
+                  answerPeer.isDead
+                ) {
+                  return
+                }
+
+                const payloadToSend: Record<string, unknown> = {
+                  peerId: selfId
+                }
+
+                if (signal.type === 'answer') {
+                  payloadToSend['answer'] = encryptedSignal.sdp
+                } else {
+                  payloadToSend['candidate'] = encryptedSignal.sdp
+                }
+
+                if (offerId) {
+                  payloadToSend['offerId'] = offerId
+                }
+
+                signalPeer(peerTopic, toJson(payloadToSend))
+              })
+            }
+          })
+
+          DEV: debugLog('sending answer to', peerId)
+          await answerPeer.signal(plainOffer)
+          await flushBufferedCandidates(state, answerPeer, offerId)
+        } else if (candidate) {
+          let plainCandidate: Signal
+
+          try {
+            plainCandidate = await toPlain({
+              type: candidateType,
+              sdp: candidate
+            })
+          } catch {
             return
           }
 
-          const payloadToSend: Record<string, unknown> = {
-            peerId: selfId,
-            answer: (await toCipher(answerSignal)).sdp
+          const state = getState(peerId)
+          const offerPeerMatch =
+            offerId && state?.offerPeer && state.offerId === offerId
+              ? state.offerPeer
+              : null
+          const answeringPeer = state?.answeringPeer ?? null
+          const fallbackOfferPeer =
+            !offerId && state?.offerPeer ? state.offerPeer : null
+          const targetPeer =
+            peer && !peer.isDead
+              ? peer
+              : (offerPeerMatch ?? answeringPeer ?? fallbackOfferPeer)
+
+          if (!targetPeer || targetPeer.isDead) {
+            const pendingKey = offerId ?? legacyCandidateKey
+            ;(state.pendingCandidates[pendingKey] ??= []).push(plainCandidate)
+            return
           }
 
-          if (offerId) {
-            payloadToSend['offerId'] = offerId
-          }
-
-          signalPeer(peerTopic, toJson(payloadToSend))
+          void targetPeer.signal(plainCandidate)
         } else if (answer) {
           let plainAnswer: Signal
 

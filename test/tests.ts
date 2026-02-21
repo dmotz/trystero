@@ -66,7 +66,8 @@ export default (strategy, overrides = {}) => {
         appId: `trystero-test-${Math.random()}`,
         password: '03d1p@M@@s' + Math.random(),
         ...(isRelayStrategy ? {relayRedundancy} : {}),
-        ...(useTestOnlyMdnsFallback && browserName === 'webkit'
+        ...(useTestOnlyMdnsFallback &&
+        (browserName === 'webkit' || browserName === 'firefox')
           ? {_test_only_mdnsHostFallbackToLoopback: true}
           : {}),
         ...config

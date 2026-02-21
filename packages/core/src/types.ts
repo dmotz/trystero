@@ -25,6 +25,7 @@ export type TurnServerConfig = {
 export type BaseRoomConfig = {
   appId: string
   password?: string
+  trickleIce?: boolean
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
   turnConfig?: TurnServerConfig[]
@@ -99,10 +100,17 @@ export type Room = {
   ) => void
 }
 
-export type Signal = {
+export type SessionSignal = {
   type: RTCSdpType
   sdp: string
 }
+
+export type CandidateSignal = {
+  type: 'candidate'
+  sdp: string
+}
+
+export type Signal = SessionSignal | CandidateSignal
 
 export type PeerHandlers = {
   data?: (data: ArrayBuffer) => void

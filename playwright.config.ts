@@ -28,7 +28,8 @@ export default {
       ],
       firefoxUserPrefs: {
         'media.navigator.permission.disabled': true,
-        'media.navigator.streams.fake': true
+        'media.navigator.streams.fake': true,
+        'media.peerconnection.ice.obfuscate_host_addresses': false
       }
     }
   },

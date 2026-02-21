@@ -91,7 +91,7 @@ const warn = (url: string, msg: string, didFail = false): void =>
     `${libName}: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
   )
 
-export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
+const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
       const client = makeSocket(rawUrl, rawData => {
@@ -324,6 +324,17 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = createStrategy({
 
   announce: client => trackerAnnounceMs[client.url]
 })
+
+export const joinRoom: JoinRoom<TorrentRoomConfig> = (
+  config,
+  roomId,
+  onJoinError
+) =>
+  joinRoomStrategy(
+    {...config, trickleIce: config.trickleIce ?? false},
+    roomId,
+    onJoinError
+  )
 
 export const getRelaySockets = socketGetter(clients)
 
