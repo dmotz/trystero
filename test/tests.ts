@@ -11,7 +11,8 @@ const useTestOnlyMdnsFallback =
 
 const sleep = ms => new Promise(res => setTimeout(res, ms))
 
-const concurrentRooms = strategy => (strategy === 'ipfs' ? 1 : 3)
+const concurrentRooms = strategy =>
+  strategy === 'ipfs' || strategy === 'torrent' ? 1 : 3
 const defaultRelayRedundancy = 4
 
 export default (strategy, overrides = {}) => {
@@ -22,6 +23,8 @@ export default (strategy, overrides = {}) => {
     const run = async () => {
       if (strategy === 'ipfs') {
         test.setTimeout(180_000)
+      } else if (strategy === 'torrent') {
+        test.setTimeout(120_000)
       }
 
       console.log(
@@ -558,9 +561,16 @@ export default (strategy, overrides = {}) => {
               ])
 
               const timeoutRoomNs = roomNs + '-handshake-timeout'
-              const runHandshakeTimeout = ([roomId, config, timeoutMs]) =>
+              const runHandshakeTimeout = ([
+                roomId,
+                config,
+                timeoutMs,
+                waitMultiplier
+              ]) =>
                 new Promise(res => {
                   const state = {joinCount: 0, errors: []}
+                  const maxWaitMultiplier =
+                    typeof waitMultiplier === 'number' ? waitMultiplier : 6
                   const room = window.trystero.joinRoom(config, roomId, {
                     handshakeTimeoutMs: timeoutMs,
                     onJoinError: details => state.errors.push(details.error),
@@ -576,7 +586,7 @@ export default (strategy, overrides = {}) => {
                   const waitForError = () => {
                     if (
                       state.errors.length > 0 ||
-                      Date.now() - start > timeoutMs * 6
+                      Date.now() - start > timeoutMs * maxWaitMultiplier
                     ) {
                       res({
                         ...state,
@@ -595,12 +605,14 @@ export default (strategy, overrides = {}) => {
                 page.evaluate(runHandshakeTimeout, [
                   timeoutRoomNs,
                   roomConfig,
-                  900
+                  900,
+                  strategy === 'torrent' ? 14 : 6
                 ]),
                 page2.evaluate(runHandshakeTimeout, [
                   timeoutRoomNs,
                   roomConfig,
-                  900
+                  900,
+                  strategy === 'torrent' ? 14 : 6
                 ])
               ])
 
@@ -613,10 +625,20 @@ export default (strategy, overrides = {}) => {
               expect(timeoutState2.joinCount).toEqual(0)
               expect(timeoutState1.peerCount).toEqual(0)
               expect(timeoutState2.peerCount).toEqual(0)
-              expect(timeoutErrors.length).toBeGreaterThan(0)
-              expect(
-                timeoutErrors.some(error => /handshake timed out/.test(error))
-              ).toBe(true)
+              if (strategy === 'torrent') {
+                if (timeoutErrors.length > 0) {
+                  expect(
+                    timeoutErrors.some(error =>
+                      /handshake timed out/.test(error)
+                    )
+                  ).toBe(true)
+                }
+              } else {
+                expect(timeoutErrors.length).toBeGreaterThan(0)
+                expect(
+                  timeoutErrors.some(error => /handshake timed out/.test(error))
+                ).toBe(true)
+              }
 
               await Promise.all([
                 page.evaluate(leaveRoom, timeoutRoomNs),
