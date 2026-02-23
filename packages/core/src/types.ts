@@ -15,6 +15,31 @@ export type JoinError = {
 
 export type JoinErrorHandler = (details: JoinError) => void
 
+export type HandshakePayload = {
+  data: DataPayload
+  metadata?: JsonValue
+}
+
+export type HandshakeSender = (
+  data: DataPayload,
+  metadata?: JsonValue
+) => Promise<void>
+
+export type HandshakeReceiver = () => Promise<HandshakePayload>
+
+export type PeerHandshake = (
+  peerId: string,
+  send: HandshakeSender,
+  receive: HandshakeReceiver,
+  isInitiator: boolean
+) => Promise<void>
+
+export type JoinRoomCallbacks = {
+  onJoinError?: JoinErrorHandler
+  onPeerHandshake?: PeerHandshake
+  handshakeTimeoutMs?: number
+}
+
 export type TurnServerConfig = {
   urls: string | string[]
   username?: string
@@ -187,7 +212,7 @@ export type StrategyAdapter<
 export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (
   config: TConfig,
   roomId: string,
-  onJoinError?: JoinErrorHandler
+  callbacks?: JoinRoomCallbacks
 ) => Room
 
 export type SocketClient = {

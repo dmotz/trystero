@@ -328,12 +328,12 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 export const joinRoom: JoinRoom<TorrentRoomConfig> = (
   config,
   roomId,
-  onJoinError
+  callbacks
 ) =>
   joinRoomStrategy(
     {...config, trickleIce: config.trickleIce ?? false},
     roomId,
-    onJoinError
+    callbacks
   )
 
 export const getRelaySockets = socketGetter(clients)
@@ -345,6 +345,6 @@ export const defaultRelayUrls = [
   'tracker.openwebtorrent.com',
   'tracker.btorrent.xyz',
   'tracker.files.fm:7073/announce'
-].map(url => 'wss://' + url)
+].map(url => 'ws://' + url)
 
 export type * from '@trystero/core'

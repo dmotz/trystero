@@ -17,6 +17,7 @@ import {
 import type {
   BaseRoomConfig,
   JoinRoom,
+  JoinRoomCallbacks,
   JoinRoomConfig,
   OfferRecord,
   PeerHandle,
@@ -83,9 +84,35 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   let offerCleanupTimer: ReturnType<typeof setInterval> | null = null
   let cleanupWatchOnline: () => void = noOp
 
-  return (config: TConfig, roomId: string, onJoinError) => {
+  return (config: TConfig, roomId: string, callbacks?: JoinRoomCallbacks) => {
+    if (!config) {
+      throw mkErr('requires a config map as the first argument')
+    }
+
+    if (callbacks && typeof callbacks !== 'object') {
+      throw mkErr('third argument must be a callbacks object')
+    }
+
     const debugLog = (...args: unknown[]): void => console.log(...args)
     const {appId} = config
+    const onJoinError = callbacks?.onJoinError
+    const onPeerHandshake = callbacks?.onPeerHandshake
+    const handshakeTimeoutMs = callbacks?.handshakeTimeoutMs
+
+    if (!appId) {
+      throw mkErr('config map is missing appId field')
+    }
+
+    if (!roomId) {
+      throw mkErr('roomId argument required')
+    }
+
+    if (
+      handshakeTimeoutMs !== undefined &&
+      (!Number.isFinite(handshakeTimeoutMs) || handshakeTimeoutMs <= 0)
+    ) {
+      throw mkErr('handshakeTimeoutMs must be a positive number')
+    }
 
     if (occupiedRooms[appId]?.[roomId]) {
       return occupiedRooms[appId][roomId]
@@ -1051,18 +1078,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
       }
 
-    if (!config) {
-      throw mkErr('requires a config map as the first argument')
-    }
-
-    if (!appId) {
-      throw mkErr('config map is missing appId field')
-    }
-
-    if (!roomId) {
-      throw mkErr('roomId argument required')
-    }
-
     if (!didInit) {
       const initRes = init(config)
       offerPool = []
@@ -1150,6 +1165,17 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     })
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
+    const roomOptions = {
+      ...(onPeerHandshake ? {onPeerHandshake} : {}),
+      ...(handshakeTimeoutMs === undefined ? {} : {handshakeTimeoutMs}),
+      onHandshakeError: (peerId: string, error: string) =>
+        onJoinError?.({
+          error,
+          appId,
+          peerId,
+          roomId
+        })
+    }
 
     occupiedRooms[appId] ??= {}
 
@@ -1230,7 +1256,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         recyclingOfferPeers.clear()
 
         cleanupWatchOnline()
-      }
+      },
+      roomOptions
     ))
   }
 }

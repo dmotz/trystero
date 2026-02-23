@@ -52,7 +52,7 @@ You can see what people are building with Trystero
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
-  - [`joinRoom(config, roomId, [onJoinError])`](#joinroomconfig-roomid-onjoinerror)
+  - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
   - [`selfId`](#selfid)
   - [`getRelaySockets()`](#getrelaysockets)
   - [`getOccupants(config, roomId)`](#getoccupantsconfig-roomid)
@@ -589,7 +589,7 @@ known ahead of time.
 
 ## API
 
-### `joinRoom(config, roomId, [onJoinError])`
+### `joinRoom(config, roomId, [callbacks])`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events. Calling `joinRoom()` multiple times with
@@ -658,10 +658,55 @@ the same namespace will return the same room instance.
 
 - `roomId` - A string to namespace peers and events within a room.
 
-- `onJoinError(details)` - **(optional)** A callback function that will be
-  called if the room cannot be joined due to an incorrect password. `details` is
-  an object containing `appId`, `roomId`, `peerId`, and `error` describing the
-  error.
+- `callbacks` - **(optional)** Callback config object containing:
+  - `onJoinError(details)` - Called when room join fails due to an incorrect
+    password or when handshake admission fails (including timeout). `details` is
+    an object containing `appId`, `roomId`, `peerId`, and `error` describing the
+    failure.
+
+  - `onPeerHandshake(peerId, send, receive, isInitiator)` - Async predicate that
+    runs after the transport connects but before the peer becomes active.
+    Return/resolve to accept the peer, throw/reject to deny the peer.
+    - `peerId` - ID of the pending peer.
+    - `send(data, [metadata])` - Sends handshake payloads to the pending peer.
+    - `receive()` - Resolves to the next handshake message from the peer as
+      `{data, metadata}`.
+    - `isInitiator` - Deterministic role flag for avoiding protocol deadlocks.
+
+  - `handshakeTimeoutMs` - Timeout for pending handshakes in milliseconds
+    (`10000` by default). If exceeded, the peer is denied and `onJoinError` is
+    called.
+
+  During handshake, the peer remains pending and is not included in `getPeers()`
+  and does not trigger Trystero API events (`onPeerJoin`, action receivers,
+  stream/track callbacks). Non-handshake data received while pending is dropped.
+
+  Minimal handshake example:
+
+  ```js
+  import {joinRoom} from 'trystero'
+
+  const room = joinRoom({appId: 'my-app'}, 'secure-room', {
+    onPeerHandshake: async (_, send, receive, isInitiator) => {
+      if (isInitiator) {
+        await send({challenge: 'prove-you-know-the-secret'})
+        const {data} = await receive()
+
+        if (data?.response !== 'shared-secret') {
+          throw new Error('handshake rejected')
+        }
+      } else {
+        const {data} = await receive()
+
+        if (data?.challenge !== 'prove-you-know-the-secret') {
+          throw new Error('handshake rejected')
+        }
+
+        await send({response: 'shared-secret'})
+      }
+    }
+  })
+  ```
 
 Returns an object with the following methods:
 

@@ -11,6 +11,7 @@ import {
   libName,
   mkErr,
   noOp,
+  selfId,
   toJson
 } from './utils'
 import type {
@@ -18,8 +19,12 @@ import type {
   ActionReceiver,
   ActionSender,
   DataPayload,
+  HandshakePayload,
+  HandshakeReceiver,
+  HandshakeSender,
   JsonValue,
   PeerHandle,
+  PeerHandshake,
   Room,
   TargetPeers
 } from './types'
@@ -34,7 +39,13 @@ const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
+const defaultHandshakeTimeoutMs = 10_000
 const internalNs = (ns: string): string => '@_' + ns
+
+type ActionOptions = {
+  sendToPending: boolean
+  receiveWhilePending: boolean
+}
 
 type ActionState = {
   onComplete: (
@@ -50,6 +61,7 @@ type ActionState = {
     f: (percent: number, peerId: string, metadata?: JsonValue) => void
   ) => void
   send: ActionSender
+  options: ActionOptions
 }
 
 type PendingTransmission = {
@@ -63,17 +75,70 @@ type PendingActionPayload = {
   metadata?: JsonValue
 }
 
+type PendingPeerState = {
+  peer: PeerHandle
+  isActive: boolean
+  didLocalHandshakePass: boolean
+  didReceiveRemoteReady: boolean
+  handshakeTimer: ReturnType<typeof setTimeout> | null
+  pendingHandshakePayloads: HandshakePayload[]
+  handshakeWaiters: Array<{
+    resolve: (payload: HandshakePayload) => void
+    reject: (reason?: unknown) => void
+  }>
+}
+
+type RoomOptions = {
+  onPeerHandshake?: PeerHandshake
+  onHandshakeError?: (peerId: string, error: string) => void
+  handshakeTimeoutMs?: number
+}
+
 const toByteArray = (value: ArrayBuffer | ArrayBufferView): Uint8Array =>
   value instanceof ArrayBuffer
     ? new Uint8Array(value)
     : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
 
+const toReasonMessage = (reason: unknown, fallback: string): string => {
+  if (reason instanceof Error && reason.message) {
+    return reason.message
+  }
+
+  if (typeof reason === 'string' && reason) {
+    return reason
+  }
+
+  if (reason === undefined || reason === null) {
+    return fallback
+  }
+
+  return String(reason)
+}
+
+const toError = (reason: unknown, fallback: string): Error =>
+  reason instanceof Error ? reason : mkErr(toReasonMessage(reason, fallback))
+
+const toHandshakeErrorMessage = (reason: unknown): string => {
+  const message = toReasonMessage(reason, 'unknown error')
+
+  return message.startsWith('handshake ')
+    ? message
+    : `handshake failed: ${message}`
+}
+
 export default (
   onPeer: (f: (peer: PeerHandle, id: string) => void) => void,
   onPeerLeave: (id: string) => void,
-  onSelfLeave: () => void
+  onSelfLeave: () => void,
+  {
+    onPeerHandshake,
+    onHandshakeError,
+    handshakeTimeoutMs = defaultHandshakeTimeoutMs
+  }: RoomOptions = {}
 ): Room => {
   const peerMap: Record<string, PeerHandle> = {}
+  const activePeerMap: Record<string, PeerHandle> = {}
+  const peerStates: Record<string, PendingPeerState> = {}
   const actions: Record<string, ActionState> = {}
   const actionsCache: Record<
     string,
@@ -105,15 +170,16 @@ export default (
 
   const iterate = (
     targets: TargetPeers,
-    f: (id: string, peer: PeerHandle) => Promise<void> | void
+    f: (id: string, peer: PeerHandle) => Promise<void> | void,
+    {includePending = false}: {includePending?: boolean} = {}
   ): Promise<void>[] =>
     (targets
       ? Array.isArray(targets)
         ? targets
         : [targets]
-      : keys(peerMap)
+      : keys(includePending ? peerMap : activePeerMap)
     ).flatMap(id => {
-      const peer = peerMap[id]
+      const peer = includePending ? peerMap[id] : activePeerMap[id]
 
       if (!peer) {
         console.warn(`${libName}: no peer with id ${id} found`)
@@ -123,15 +189,33 @@ export default (
       return [Promise.resolve(f(id, peer))]
     })
 
-  const clearPeerState = (id: string): void => {
+  const clearPeerState = (
+    id: string,
+    reason: unknown = mkErr('peer disconnected')
+  ): void => {
+    const state = peerStates[id]
+
+    if (state) {
+      if (state.handshakeTimer) {
+        clearTimeout(state.handshakeTimer)
+      }
+
+      state.pendingHandshakePayloads.length = 0
+      const err = toError(reason, 'peer disconnected')
+
+      state.handshakeWaiters.splice(0).forEach(waiter => waiter.reject(err))
+      delete peerStates[id]
+    }
+
     delete peerMap[id]
+    delete activePeerMap[id]
     delete pendingTransmissions[id]
     delete pendingPongs[id]
     delete pendingStreamMetas[id]
     delete pendingTrackMetas[id]
   }
 
-  const exitPeer = (id: string, peer?: PeerHandle): void => {
+  const exitPeer = (id: string, peer?: PeerHandle, reason?: unknown): void => {
     const current = peerMap[id]
 
     if (!current) {
@@ -142,18 +226,35 @@ export default (
       return
     }
 
+    const wasActive = Boolean(activePeerMap[id])
+
     current.destroy()
-    clearPeerState(id)
-    listeners.onPeerLeave(id)
+    clearPeerState(id, reason)
+
+    if (wasActive) {
+      listeners.onPeerLeave(id)
+    }
+
     onPeerLeave(id)
   }
 
-  const makeAction = <T extends DataPayload = DataPayload>(
-    type: string
+  const makeActionInternal = <T extends DataPayload = DataPayload>(
+    type: string,
+    options: Partial<ActionOptions> = {}
   ): [ActionSender<T>, ActionReceiver<T>, ActionProgress] => {
     const cached = actionsCache[type]
 
     if (actions[type] && cached) {
+      const cachedOptions = actions[type].options
+
+      if (
+        cachedOptions.sendToPending !== Boolean(options.sendToPending) ||
+        cachedOptions.receiveWhilePending !==
+          Boolean(options.receiveWhilePending)
+      ) {
+        throw mkErr(`action type "${type}" cannot be redefined`)
+      }
+
       return cached as unknown as [
         ActionSender<T>,
         ActionReceiver<T>,
@@ -174,6 +275,10 @@ export default (
       )
     }
 
+    const normalizedOptions = {
+      sendToPending: Boolean(options.sendToPending),
+      receiveWhilePending: Boolean(options.receiveWhilePending)
+    }
     const typeBytesPadded = new Uint8Array(typeByteLimit)
     typeBytesPadded.set(typeBytes)
 
@@ -284,45 +389,55 @@ export default (
         nonce = (nonce + 1) & oneByteMax
 
         await all(
-          iterate(targets, async (id, peer) => {
-            const {channel} = peer
-            let chunkN = 0
+          iterate(
+            targets,
+            async (id, peer) => {
+              const {channel} = peer
+              let chunkN = 0
 
-            while (chunkN < chunkTotal) {
-              const chunk = chunks[chunkN]
+              while (chunkN < chunkTotal) {
+                const chunk = chunks[chunkN]
 
-              if (!chunk) {
-                break
+                if (!chunk) {
+                  break
+                }
+
+                if (
+                  channel &&
+                  channel.bufferedAmount > channel.bufferedAmountLowThreshold
+                ) {
+                  await new Promise<void>(res => {
+                    const next = (): void => {
+                      channel.removeEventListener(buffLowEvent, next)
+                      res()
+                    }
+
+                    channel.addEventListener(buffLowEvent, next)
+                  })
+                }
+
+                const currentPeer = normalizedOptions.sendToPending
+                  ? peerMap[id]
+                  : activePeerMap[id]
+
+                if (!currentPeer || currentPeer !== peer) {
+                  break
+                }
+
+                peer.sendData(chunk)
+                chunkN++
+                const progressByte = chunk[progressIndex] ?? oneByteMax
+                onProgress?.(progressByte / oneByteMax, id, meta)
               }
-
-              if (
-                channel &&
-                channel.bufferedAmount > channel.bufferedAmountLowThreshold
-              ) {
-                await new Promise<void>(res => {
-                  const next = (): void => {
-                    channel.removeEventListener(buffLowEvent, next)
-                    res()
-                  }
-
-                  channel.addEventListener(buffLowEvent, next)
-                })
-              }
-
-              if (!peerMap[id]) {
-                break
-              }
-
-              peer.sendData(chunk)
-              chunkN++
-              const progressByte = chunk[progressIndex] ?? oneByteMax
-              onProgress?.(progressByte / oneByteMax, id, meta)
-            }
-          })
+            },
+            {includePending: normalizedOptions.sendToPending}
+          )
         )
 
         return []
-      }
+      },
+
+      options: normalizedOptions
     }
 
     return (actionsCache[type] = [
@@ -332,12 +447,29 @@ export default (
     ]) as unknown as [ActionSender<T>, ActionReceiver<T>, ActionProgress]
   }
 
+  const makeAction = <T extends DataPayload = DataPayload>(
+    type: string
+  ): [ActionSender<T>, ActionReceiver<T>, ActionProgress] =>
+    makeActionInternal<T>(type)
+
   const handleData = (id: string, data: ArrayBuffer): void => {
+    const state = peerStates[id]
+
+    if (!state) {
+      return
+    }
+
     const buffer = new Uint8Array(data)
     const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex)).replaceAll(
       '\x00',
       ''
     )
+    const action = actions[type]
+
+    if (!state.isActive && !action?.options.receiveWhilePending) {
+      return
+    }
+
     const nonce = buffer[nonceIndex] ?? 0
     const tag = buffer[tagIndex] ?? 0
     const progress = buffer[progressIndex] ?? 0
@@ -358,7 +490,7 @@ export default (
       target.chunks.push(payload)
     }
 
-    actions[type]?.onProgress(progress / oneByteMax, id, target.meta)
+    action?.onProgress(progress / oneByteMax, id, target.meta)
 
     if (!isLast) {
       return
@@ -376,8 +508,8 @@ export default (
     delete pendingTransmissions[id][type][nonce]
 
     if (isBinary) {
-      if (actions[type]) {
-        actions[type].onComplete(full, id, target.meta)
+      if (action) {
+        action.onComplete(full, id, target.meta)
       } else {
         ;(pendingActionPayloads[type] ??= []).push({
           payload: full,
@@ -389,8 +521,8 @@ export default (
       const text = decodeBytes(full)
       const decoded = isJson ? fromJson<JsonValue>(text) : text
 
-      if (actions[type]) {
-        actions[type].onComplete(decoded, id)
+      if (action) {
+        action.onComplete(decoded, id)
       } else {
         ;(pendingActionPayloads[type] ??= []).push({
           payload: decoded,
@@ -406,22 +538,209 @@ export default (
 
     entries(peerMap).forEach(([id, peer]) => {
       peer.destroy()
-      delete peerMap[id]
+      clearPeerState(id, mkErr('room left'))
     })
 
     onSelfLeave()
   }
 
-  const [sendPing, getPing] = makeAction<string>(internalNs('ping'))
-  const [sendPong, getPong] = makeAction<string>(internalNs('pong'))
-  const [sendSignal, getSignal] = makeAction(internalNs('signal'))
-  const [sendStreamMeta, getStreamMeta] = makeAction<JsonValue>(
+  const [sendPing, getPing] = makeActionInternal<string>(internalNs('ping'))
+  const [sendPong, getPong] = makeActionInternal<string>(internalNs('pong'))
+  const [sendSignal, getSignal] = makeActionInternal(internalNs('signal'))
+  const [sendStreamMeta, getStreamMeta] = makeActionInternal<JsonValue>(
     internalNs('stream')
   )
-  const [sendTrackMeta, getTrackMeta] = makeAction<JsonValue>(
+  const [sendTrackMeta, getTrackMeta] = makeActionInternal<JsonValue>(
     internalNs('track')
   )
-  const [sendLeave, getLeave] = makeAction<string>(internalNs('leave'))
+  const [sendLeave, getLeave] = makeActionInternal<string>(
+    internalNs('leave'),
+    {
+      sendToPending: true,
+      receiveWhilePending: true
+    }
+  )
+  const [sendHandshakeData, getHandshakeData] = makeActionInternal<DataPayload>(
+    internalNs('hsdata'),
+    {sendToPending: true, receiveWhilePending: true}
+  )
+  const [sendHandshakeReady, getHandshakeReady] = makeActionInternal<string>(
+    internalNs('hsready'),
+    {sendToPending: true, receiveWhilePending: true}
+  )
+
+  const maybeActivatePeer = (id: string, peer?: PeerHandle): void => {
+    const state = peerStates[id]
+
+    if (!state || (peer && state.peer !== peer) || state.isActive) {
+      return
+    }
+
+    if (!state.didLocalHandshakePass || !state.didReceiveRemoteReady) {
+      return
+    }
+
+    state.isActive = true
+    activePeerMap[id] = state.peer
+
+    if (state.handshakeTimer) {
+      clearTimeout(state.handshakeTimer)
+      state.handshakeTimer = null
+    }
+
+    listeners.onPeerJoin(id)
+  }
+
+  const failPeerHandshake = (
+    id: string,
+    peer: PeerHandle,
+    reason: unknown
+  ): void => {
+    const state = peerStates[id]
+
+    if (!state || state.peer !== peer) {
+      return
+    }
+
+    const error = toHandshakeErrorMessage(reason)
+
+    onHandshakeError?.(id, error)
+    exitPeer(id, peer, mkErr(error))
+  }
+
+  const markLocalHandshakePassed = (id: string, peer: PeerHandle): void => {
+    const state = peerStates[id]
+
+    if (!state || state.peer !== peer || state.isActive) {
+      return
+    }
+
+    state.didLocalHandshakePass = true
+
+    void sendHandshakeReady('', id).catch(err =>
+      failPeerHandshake(
+        id,
+        peer,
+        `failed sending handshake readiness: ${toReasonMessage(
+          err,
+          'unknown send failure'
+        )}`
+      )
+    )
+    maybeActivatePeer(id, peer)
+  }
+
+  const startPeerHandshake = (id: string, peer: PeerHandle): void => {
+    const state = peerStates[id]
+
+    if (!state || state.peer !== peer) {
+      return
+    }
+
+    state.handshakeTimer = setTimeout(
+      () =>
+        failPeerHandshake(
+          id,
+          peer,
+          `handshake timed out after ${handshakeTimeoutMs}ms`
+        ),
+      handshakeTimeoutMs
+    )
+
+    const sendHandshake: HandshakeSender = async (data, metadata) => {
+      await sendHandshakeData(data, id, metadata)
+    }
+
+    const receiveHandshake: HandshakeReceiver = () =>
+      new Promise<HandshakePayload>((resolve, reject) => {
+        const current = peerStates[id]
+
+        if (!current || current.peer !== peer) {
+          reject(mkErr('peer disconnected during handshake'))
+          return
+        }
+
+        const payload = current.pendingHandshakePayloads.shift()
+
+        if (payload) {
+          resolve(payload)
+          return
+        }
+
+        current.handshakeWaiters.push({resolve, reject})
+      })
+
+    const isInitiator = selfId < id
+
+    void Promise.resolve(
+      onPeerHandshake?.(id, sendHandshake, receiveHandshake, isInitiator)
+    )
+      .then(() => markLocalHandshakePassed(id, peer))
+      .catch(err => failPeerHandshake(id, peer, err))
+  }
+
+  getPing((_, id) => sendPong('', id))
+
+  getPong((_, id) => {
+    pendingPongs[id]?.()
+    delete pendingPongs[id]
+  })
+
+  getSignal((sdp, id) => {
+    if (!activePeerMap[id]) {
+      return
+    }
+
+    void peerMap[id]?.signal(sdp as never)
+  })
+
+  getStreamMeta((meta, id) => {
+    if (!activePeerMap[id]) {
+      return
+    }
+
+    pendingStreamMetas[id] = meta
+  })
+
+  getTrackMeta((meta, id) => {
+    if (!activePeerMap[id]) {
+      return
+    }
+
+    pendingTrackMetas[id] = meta
+  })
+
+  getLeave((_, id) => exitPeer(id, undefined, mkErr('peer left room')))
+
+  getHandshakeData((data, id, metadata) => {
+    const state = peerStates[id]
+
+    if (!state || state.isActive) {
+      return
+    }
+
+    const payload =
+      metadata === undefined ? {data} : ({data, metadata} as HandshakePayload)
+    const pending = state.handshakeWaiters.shift()
+
+    if (pending) {
+      pending.resolve(payload)
+      return
+    }
+
+    state.pendingHandshakePayloads.push(payload)
+  })
+
+  getHandshakeReady((_, id) => {
+    const state = peerStates[id]
+
+    if (!state || state.isActive) {
+      return
+    }
+
+    state.didReceiveRemoteReady = true
+    maybeActivatePeer(id)
+  })
 
   onPeer((peer, id) => {
     const existingPeer = peerMap[id]
@@ -432,51 +751,57 @@ export default (
       }
 
       existingPeer.destroy()
-      clearPeerState(id)
+      clearPeerState(id, mkErr('peer replaced'))
     }
 
     peerMap[id] = peer
+    peerStates[id] = {
+      peer,
+      isActive: false,
+      didLocalHandshakePass: false,
+      didReceiveRemoteReady: false,
+      handshakeTimer: null,
+      pendingHandshakePayloads: [],
+      handshakeWaiters: []
+    }
 
     peer.setHandlers({
       data: d => handleData(id, d),
       stream: stream => {
+        if (!activePeerMap[id]) {
+          return
+        }
+
         listeners.onPeerStream(stream, id, pendingStreamMetas[id])
         delete pendingStreamMetas[id]
       },
       track: (track, stream) => {
+        if (!activePeerMap[id]) {
+          return
+        }
+
         listeners.onPeerTrack(track, stream, id, pendingTrackMetas[id])
         delete pendingTrackMetas[id]
       },
-      signal: sdp => sendSignal(sdp as unknown as DataPayload, id),
-      close: () => exitPeer(id, peer),
+      signal: sdp => {
+        if (!activePeerMap[id]) {
+          return
+        }
+
+        void sendSignal(sdp as unknown as DataPayload, id)
+      },
+      close: () => exitPeer(id, peer, mkErr('peer disconnected')),
       error: err => {
         console.error(`${libName} peer error:`, err)
-        exitPeer(id, peer)
+        exitPeer(id, peer, err)
       }
     })
 
-    listeners.onPeerJoin(id)
+    startPeerHandshake(id, peer)
   })
-
-  getPing((_, id) => sendPong('', id))
-
-  getPong((_, id) => {
-    pendingPongs[id]?.()
-    delete pendingPongs[id]
-  })
-
-  getSignal((sdp, id) => peerMap[id]?.signal(sdp as never))
-
-  getStreamMeta((meta, id) => (pendingStreamMetas[id] = meta))
-
-  getTrackMeta((meta, id) => (pendingTrackMetas[id] = meta))
-
-  getLeave((_, id) => exitPeer(id))
 
   if (isBrowser) {
-    addEventListener('beforeunload', () => {
-      void leave()
-    })
+    addEventListener('beforeunload', leave)
   }
 
   return {
@@ -500,7 +825,7 @@ export default (
 
     getPeers: () =>
       fromEntries(
-        entries(peerMap).map(([id, peer]) => [id, peer.connection])
+        entries(activePeerMap).map(([id, peer]) => [id, peer.connection])
       ) as Record<string, RTCPeerConnection>,
 
     addStream: (stream, targets, meta) =>
@@ -540,7 +865,7 @@ export default (
 
     onPeerJoin: f => {
       listeners.onPeerJoin = f
-      keys(peerMap).forEach(peerId => f(peerId))
+      keys(activePeerMap).forEach(peerId => f(peerId))
     },
 
     onPeerLeave: f => (listeners.onPeerLeave = f),

@@ -84,15 +84,11 @@ const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createStrategy({
     sendMessage(activeNode, rootTopic, toJson({peerId: selfId}))
 })
 
-export const joinRoom: JoinRoom<IpfsRoomConfig> = (
-  config,
-  roomId,
-  onJoinError
-) =>
+export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>
   joinRoomStrategy(
     {...config, trickleIce: config.trickleIce ?? false},
     roomId,
-    onJoinError
+    callbacks
   )
 
 export {selfId}
