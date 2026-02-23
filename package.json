@@ -15,7 +15,7 @@
     "test": "NO_MINIFY=1 pnpm build && playwright test ./test",
     "test:node": "jiti ./test/node/node.spec.ts",
     "test:ice": "jiti scripts/test-ice.ts",
-    "test:proxy": "PROXY=$(node scripts/find-proxy.ts) pnpm test",
+    "test:proxy": "PROXY=$(jiti scripts/find-proxy.ts) pnpm test",
     "test:relays": "jiti scripts/test-relays.ts",
     "lint": "oxlint --type-aware --type-check .",
     "lint:fix": "oxlint --type-aware --type-check . --fix",
