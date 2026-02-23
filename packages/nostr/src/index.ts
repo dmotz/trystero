@@ -158,17 +158,13 @@ export const defaultRelayUrls = [
   'black.nostrcity.club',
   'ftp.halifax.rwth-aachen.de/nostr',
   'nos.lol',
-  'nostr.cool110.xyz',
   'nostr.data.haus',
   'nostr.sathoarder.com',
   'nostr.vulpem.com',
-  'relay.agorist.space',
   'relay.binaryrobot.com',
   'relay.fountain.fm',
   'relay.mostro.network',
   'relay.nostrdice.com',
-  'relay.oldenburg.cool',
-  'relay.verified-nostr.com',
   'yabu.me/v2'
 ].map(url => 'wss://' + url)
 
