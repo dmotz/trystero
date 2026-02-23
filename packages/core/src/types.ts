@@ -56,6 +56,7 @@ export type BaseRoomConfig = {
   turnConfig?: TurnServerConfig[]
   manualRelayReconnection?: boolean
   _test_only_mdnsHostFallbackToLoopback?: boolean
+  _test_only_sharedPeerIdleMs?: number
 }
 
 export type RelayConfig = {

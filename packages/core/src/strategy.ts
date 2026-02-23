@@ -1,26 +1,33 @@
-import {decrypt, encrypt, genKey, sha1} from './crypto'
+import {decrypt, encrypt, genKey, hashWith, sha1} from './crypto'
 import initPeer from './peer'
 import room from './room'
 import {
   all,
   alloc,
+  decodeBytes,
+  encodeBytes,
   fromJson,
   genId,
   libName,
   mkErr,
   noOp,
   selfId,
+  toHex,
   toJson,
   topicPath,
   watchOnline
 } from './utils'
 import type {
   BaseRoomConfig,
+  HandshakeReceiver,
+  HandshakeSender,
   JoinRoom,
   JoinRoomCallbacks,
   JoinRoomConfig,
   OfferRecord,
   PeerHandle,
+  PeerHandshake,
+  PeerHandlers,
   Signal,
   StrategyAdapter
 } from './types'
@@ -35,8 +42,53 @@ const offerPostAnswerTtlMs = 9_000
 const offerIdSize = 12
 const disconnectedPeerGraceMs = 7_500
 const answeringTtlMs = 8_000
+const sharedPeerIdleMsDefault = 120_000
 const candidateType = 'candidate'
 const legacyCandidateKey = '__legacy__'
+const roomFrameVersion = 1
+
+type SharedRemoteTrackRef = {
+  track: MediaStreamTrack
+  stream: MediaStream
+}
+
+type SharedPeerBinding = {
+  roomId: string
+  handlers: PeerHandlers
+  pendingData: ArrayBuffer[]
+  pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}>
+  detach: () => void
+  proxy: PeerHandle
+}
+
+type SharedPeerState = {
+  appId: string
+  peerId: string
+  peer: PeerHandle
+  bindings: Record<string, SharedPeerBinding>
+  pendingDataByRoom: Map<string, ArrayBuffer[]>
+  idleTimer: ReturnType<typeof setTimeout> | null
+  controlRoomId: string | null
+  streamOwners: Map<MediaStream, Set<string>>
+  trackOwners: Map<MediaStreamTrack, {stream: MediaStream; rooms: Set<string>}>
+  remoteStreamsByKey: Map<string, MediaStream>
+  remoteTracksByKey: Map<string, SharedRemoteTrackRef>
+  idleMs: number
+  isClosing: boolean
+}
+
+type SharedMediaProxyPeer = PeerHandle & {
+  __trysteroGetRemoteStreamByKey?: (key: string) => MediaStream | undefined
+  __trysteroSetRemoteStreamByKey?: (key: string, stream: MediaStream) => void
+  __trysteroGetRemoteTrackByKey?: (
+    key: string
+  ) => SharedRemoteTrackRef | undefined
+  __trysteroSetRemoteTrackByKey?: (
+    key: string,
+    track: MediaStreamTrack,
+    stream: MediaStream
+  ) => void
+}
 
 type PeerState = {
   status: 'idle' | 'offering' | 'answering' | 'connected'
@@ -66,6 +118,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   subscribe,
   announce
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
+  const sharedPeersByApp: Record<string, Record<string, SharedPeerState>> = {}
   const occupiedRooms: Record<
     string,
     Record<string, ReturnType<typeof room>>
@@ -73,6 +126,44 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
   const hasActiveRooms = (): boolean =>
     Object.values(occupiedRooms).some(rooms => Object.keys(rooms).length > 0)
+
+  const wrapRoomFrame = (roomId: string, data: Uint8Array): Uint8Array => {
+    const roomBytes = encodeBytes(roomId)
+    const frame = new Uint8Array(3 + roomBytes.byteLength + data.byteLength)
+
+    frame[0] = roomFrameVersion
+    frame[1] = (roomBytes.byteLength >>> 8) & 0xff
+    frame[2] = roomBytes.byteLength & 0xff
+    frame.set(roomBytes, 3)
+    frame.set(data, 3 + roomBytes.byteLength)
+
+    return frame
+  }
+
+  const unwrapRoomFrame = (
+    data: ArrayBuffer
+  ): {roomId: string; payload: ArrayBuffer} | null => {
+    const buffer = new Uint8Array(data)
+
+    if (buffer.byteLength < 3 || buffer[0] !== roomFrameVersion) {
+      return null
+    }
+
+    const roomSize = ((buffer[1] ?? 0) << 8) | (buffer[2] ?? 0)
+    const headerSize = 3 + roomSize
+
+    if (roomSize <= 0 || buffer.byteLength < headerSize) {
+      return null
+    }
+
+    const roomId = decodeBytes(buffer.subarray(3, headerSize))
+    const payload = buffer.subarray(headerSize)
+
+    return {
+      roomId,
+      payload: payload.slice().buffer
+    }
+  }
 
   const leasedOfferPeers = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
   const recyclingOfferPeers = new Set<PeerHandle>()
@@ -136,6 +227,429 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const toPlain = withKey(decrypt)
     const toCipher = withKey(encrypt)
+    const sharedPeerMap = (sharedPeersByApp[appId] ??= {})
+    const sharedPeerIdleMs =
+      config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
+
+    const getSharedPeerHealth = (peer: PeerHandle): 'live' | 'stale' => {
+      const {connection, channel} = peer
+
+      if (
+        peer.isDead ||
+        connection.connectionState === 'closed' ||
+        connection.connectionState === 'failed' ||
+        connection.iceConnectionState === 'closed' ||
+        connection.iceConnectionState === 'failed' ||
+        channel?.readyState === 'closing' ||
+        channel?.readyState === 'closed'
+      ) {
+        return 'stale'
+      }
+
+      return 'live'
+    }
+
+    const clearSharedIdleTimer = (shared: SharedPeerState): void => {
+      if (shared.idleTimer) {
+        clearTimeout(shared.idleTimer)
+        shared.idleTimer = null
+      }
+    }
+
+    const pruneSharedRoomOwnership = (
+      shared: SharedPeerState,
+      roomIdToRemove: string
+    ): void => {
+      shared.streamOwners.forEach((rooms, stream) => {
+        rooms.delete(roomIdToRemove)
+
+        if (rooms.size === 0) {
+          shared.streamOwners.delete(stream)
+          shared.peer.removeStream(stream)
+        }
+      })
+
+      shared.trackOwners.forEach((entry, track) => {
+        entry.rooms.delete(roomIdToRemove)
+
+        if (entry.rooms.size === 0) {
+          shared.trackOwners.delete(track)
+          shared.peer.removeTrack(track)
+        }
+      })
+    }
+
+    const clearSharedPeerState = (
+      peerId: string,
+      {destroyPeer}: {destroyPeer: boolean}
+    ): void => {
+      const shared = sharedPeerMap[peerId]
+
+      if (!shared) {
+        return
+      }
+
+      if (shared.isClosing) {
+        return
+      }
+
+      clearSharedIdleTimer(shared)
+      shared.isClosing = true
+
+      if (destroyPeer && !shared.peer.isDead) {
+        shared.peer.destroy()
+      }
+
+      const bindings = Object.values(shared.bindings)
+      shared.bindings = {}
+      shared.controlRoomId = null
+      delete sharedPeerMap[peerId]
+
+      bindings.forEach(binding => {
+        binding.handlers.close?.()
+        binding.pendingData.length = 0
+        binding.pendingTracks.length = 0
+      })
+
+      shared.remoteStreamsByKey.clear()
+      shared.remoteTracksByKey.clear()
+      shared.pendingDataByRoom.clear()
+
+      if (Object.keys(sharedPeerMap).length === 0) {
+        delete sharedPeersByApp[appId]
+      }
+    }
+
+    const scheduleSharedIdleTimer = (shared: SharedPeerState): void => {
+      if (shared.isClosing || Object.keys(shared.bindings).length > 0) {
+        return
+      }
+
+      clearSharedIdleTimer(shared)
+
+      shared.idleTimer = setTimeout(() => {
+        const current = sharedPeerMap[shared.peerId]
+
+        if (!current || Object.keys(current.bindings).length > 0) {
+          return
+        }
+
+        clearSharedPeerState(shared.peerId, {
+          destroyPeer: true
+        })
+      }, shared.idleMs)
+    }
+
+    const getSharedSignalBinding = (
+      shared: SharedPeerState
+    ): SharedPeerBinding | null => {
+      if (shared.controlRoomId) {
+        const selected = shared.bindings[shared.controlRoomId]
+
+        if (selected?.handlers.signal) {
+          return selected
+        }
+      }
+
+      const fallback = Object.values(shared.bindings).find(binding =>
+        Boolean(binding.handlers.signal)
+      )
+
+      if (!fallback) {
+        return null
+      }
+
+      shared.controlRoomId = fallback.roomId
+      return fallback
+    }
+
+    const flushBindingQueues = (binding: SharedPeerBinding): void => {
+      const {handlers} = binding
+
+      if (handlers.data && binding.pendingData.length > 0) {
+        const queued = binding.pendingData.splice(0)
+        queued.forEach(payload => handlers.data?.(payload))
+      }
+
+      if ((handlers.track || handlers.stream) && binding.pendingTracks.length) {
+        const queued = binding.pendingTracks.splice(0)
+        queued.forEach(({track, stream}) => {
+          handlers.track?.(track, stream)
+          handlers.stream?.(stream)
+        })
+      }
+    }
+
+    const dispatchSharedData = (
+      shared: SharedPeerState,
+      data: ArrayBuffer
+    ): void => {
+      const decoded = unwrapRoomFrame(data)
+
+      if (!decoded) {
+        return
+      }
+
+      const binding = shared.bindings[decoded.roomId]
+
+      if (!binding) {
+        const pending = shared.pendingDataByRoom.get(decoded.roomId) ?? []
+        pending.push(decoded.payload)
+        shared.pendingDataByRoom.set(decoded.roomId, pending)
+        return
+      }
+
+      if (binding.handlers.data) {
+        binding.handlers.data(decoded.payload)
+      } else {
+        binding.pendingData.push(decoded.payload)
+      }
+    }
+
+    const dispatchSharedSignal = (
+      shared: SharedPeerState,
+      signal: Signal
+    ): void => {
+      const binding = getSharedSignalBinding(shared)
+      binding?.handlers.signal?.(signal)
+    }
+
+    const dispatchSharedTrack = (
+      shared: SharedPeerState,
+      track: MediaStreamTrack,
+      stream: MediaStream
+    ): void => {
+      Object.values(shared.bindings).forEach(binding => {
+        if (binding.handlers.track || binding.handlers.stream) {
+          binding.handlers.track?.(track, stream)
+          binding.handlers.stream?.(stream)
+          return
+        }
+
+        binding.pendingTracks.push({track, stream})
+      })
+    }
+
+    const registerSharedPeer = (
+      peerId: string,
+      peer: PeerHandle
+    ): SharedPeerState => {
+      const existing = sharedPeerMap[peerId]
+
+      if (existing) {
+        clearSharedIdleTimer(existing)
+
+        if (existing.peer === peer) {
+          return existing
+        }
+
+        clearSharedPeerState(peerId, {
+          destroyPeer: true
+        })
+      }
+
+      const shared: SharedPeerState = {
+        appId,
+        peerId,
+        peer,
+        bindings: {},
+        pendingDataByRoom: new Map(),
+        idleTimer: null,
+        controlRoomId: null,
+        streamOwners: new Map(),
+        trackOwners: new Map(),
+        remoteStreamsByKey: new Map(),
+        remoteTracksByKey: new Map(),
+        idleMs: sharedPeerIdleMs,
+        isClosing: false
+      }
+
+      peer.setHandlers({
+        data: data => dispatchSharedData(shared, data),
+        signal: signal => dispatchSharedSignal(shared, signal),
+        close: () =>
+          clearSharedPeerState(peerId, {
+            destroyPeer: false
+          }),
+        error: err => {
+          console.error(`${libName} peer error:`, err)
+          clearSharedPeerState(peerId, {destroyPeer: false})
+        },
+        track: (track, stream) => dispatchSharedTrack(shared, track, stream)
+      })
+
+      sharedPeerMap[peerId] = shared
+      return shared
+    }
+
+    const bindRoomToSharedPeer = (
+      peerId: string,
+      shared: SharedPeerState,
+      {
+        onDetach
+      }: {
+        onDetach: () => void
+      }
+    ): {proxy: PeerHandle; isNew: boolean} => {
+      const existingBinding = shared.bindings[roomId]
+
+      if (existingBinding) {
+        clearSharedIdleTimer(shared)
+        return {proxy: existingBinding.proxy, isNew: false}
+      }
+
+      const binding: SharedPeerBinding = {
+        roomId,
+        handlers: {},
+        pendingData: [],
+        pendingTracks: [],
+        detach: noOp,
+        proxy: {} as PeerHandle
+      }
+
+      const detachBinding = (): void => {
+        if (!shared.bindings[roomId]) {
+          return
+        }
+
+        pruneSharedRoomOwnership(shared, roomId)
+        delete shared.bindings[roomId]
+
+        if (shared.controlRoomId === roomId) {
+          shared.controlRoomId = Object.keys(shared.bindings)[0] ?? null
+        }
+
+        onDetach()
+        scheduleSharedIdleTimer(shared)
+      }
+
+      const proxy: SharedMediaProxyPeer = {
+        created: shared.peer.created,
+        get connection() {
+          return shared.peer.connection
+        },
+        get channel() {
+          return shared.peer.channel
+        },
+        get isDead() {
+          return shared.peer.isDead
+        },
+        getOffer: (restartIce?: boolean) => shared.peer.getOffer(restartIce),
+        signal: (sdp: Signal) => shared.peer.signal(sdp),
+        sendData: data => shared.peer.sendData(wrapRoomFrame(roomId, data)),
+        destroy: () => detachBinding(),
+        setHandlers: newHandlers => {
+          const {signal, ...rest} = newHandlers
+
+          Object.assign(binding.handlers, rest)
+
+          if (signal) {
+            binding.handlers.signal = signal
+          }
+
+          flushBindingQueues(binding)
+        },
+        offerPromise: shared.peer.offerPromise,
+        addStream: stream => {
+          const owners = shared.streamOwners.get(stream) ?? new Set<string>()
+          const shouldAttach = owners.size === 0
+
+          owners.add(roomId)
+          shared.streamOwners.set(stream, owners)
+
+          if (shouldAttach) {
+            shared.peer.addStream(stream)
+          }
+        },
+        removeStream: stream => {
+          const owners = shared.streamOwners.get(stream)
+
+          if (!owners) {
+            return
+          }
+
+          owners.delete(roomId)
+
+          if (owners.size === 0) {
+            shared.streamOwners.delete(stream)
+            shared.peer.removeStream(stream)
+          }
+        },
+        addTrack: (track, stream) => {
+          const entry = shared.trackOwners.get(track) ?? {
+            stream,
+            rooms: new Set<string>()
+          }
+          const shouldAttach = entry.rooms.size === 0
+
+          entry.stream = stream
+          entry.rooms.add(roomId)
+          shared.trackOwners.set(track, entry)
+
+          if (shouldAttach) {
+            return shared.peer.addTrack(track, stream)
+          }
+
+          return (
+            shared.peer.connection.getSenders().find(s => s.track === track) ??
+            shared.peer.addTrack(track, stream)
+          )
+        },
+        removeTrack: track => {
+          const entry = shared.trackOwners.get(track)
+
+          if (!entry) {
+            return
+          }
+
+          entry.rooms.delete(roomId)
+
+          if (entry.rooms.size === 0) {
+            shared.trackOwners.delete(track)
+            shared.peer.removeTrack(track)
+          }
+        },
+        replaceTrack: (oldTrack, newTrack) => {
+          const oldEntry = shared.trackOwners.get(oldTrack)
+
+          if (oldEntry) {
+            shared.trackOwners.delete(oldTrack)
+
+            const nextEntry = shared.trackOwners.get(newTrack) ?? {
+              stream: oldEntry.stream,
+              rooms: new Set<string>()
+            }
+
+            oldEntry.rooms.forEach(room => nextEntry.rooms.add(room))
+            shared.trackOwners.set(newTrack, nextEntry)
+          }
+
+          return shared.peer.replaceTrack(oldTrack, newTrack)
+        },
+        __trysteroGetRemoteStreamByKey: key =>
+          shared.remoteStreamsByKey.get(key),
+        __trysteroSetRemoteStreamByKey: (key, stream) =>
+          void shared.remoteStreamsByKey.set(key, stream),
+        __trysteroGetRemoteTrackByKey: key => shared.remoteTracksByKey.get(key),
+        __trysteroSetRemoteTrackByKey: (key, track, stream) =>
+          void shared.remoteTracksByKey.set(key, {track, stream})
+      }
+
+      binding.proxy = proxy
+      binding.detach = detachBinding
+      shared.bindings[roomId] = binding
+      shared.controlRoomId ??= roomId
+      clearSharedIdleTimer(shared)
+
+      const pendingData = shared.pendingDataByRoom.get(roomId)
+
+      if (pendingData?.length) {
+        binding.pendingData.push(...pendingData)
+        shared.pendingDataByRoom.delete(roomId)
+      }
+
+      return {proxy, isNew: true}
+    }
 
     const makeOffer = (): PeerHandle => initPeer(true, config)
 
@@ -548,6 +1062,42 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       return state.offerInitPromise
     }
 
+    const attachSharedPeerToRoom = (
+      peerId: string,
+      shared: SharedPeerState
+    ): void => {
+      const state = getState(peerId)
+
+      if (state.answeringExpiryTimer) {
+        clearTimeout(state.answeringExpiryTimer)
+        state.answeringExpiryTimer = null
+      }
+
+      state.answeringPeer = null
+
+      const {proxy, isNew} = bindRoomToSharedPeer(peerId, shared, {
+        onDetach: () => {
+          const current = peerStates[peerId]
+
+          if (current?.connectedPeer === shared.peer) {
+            current.connectedPeer = null
+            current.connectedPeerUnhealthySinceMs = null
+            updateStatus(current)
+          }
+        }
+      })
+
+      state.connectedPeer = shared.peer
+      state.connectedPeerUnhealthySinceMs = null
+      updateStatus(state)
+
+      if (isNew) {
+        onPeerConnect(proxy, peerId)
+      }
+
+      resetOfferState(state)
+    }
+
     const connectPeer = (
       peer: PeerHandle,
       peerId: string,
@@ -561,25 +1111,49 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       const state = getState(peerId)
 
       if (state.connectedPeer) {
-        DEV: debugLog('already connected to', peerId, '- destroying duplicate')
+        DEV: debugLog('already connected to', peerId, '- checking shared state')
+        const shared = sharedPeerMap[peerId]
 
-        if (state.connectedPeer !== peer) {
-          peer.destroy()
+        if (
+          shared &&
+          state.connectedPeer === shared.peer &&
+          shared.bindings[roomId]
+        ) {
+          return
         }
 
+        if (state.connectedPeer !== peer && !peer.isDead) {
+          peer.destroy()
+        }
         return
       }
 
-      DEV: debugLog('peer connected:', peerId, relayId)
-      state.connectedPeer = peer
-      state.connectedPeerUnhealthySinceMs = null
-      if (state.answeringExpiryTimer) {
-        clearTimeout(state.answeringExpiryTimer)
-        state.answeringExpiryTimer = null
+      let shared = sharedPeerMap[peerId]
+
+      if (shared && getSharedPeerHealth(shared.peer) === 'stale') {
+        clearSharedPeerState(peerId, {
+          destroyPeer: true
+        })
+        shared = undefined
       }
-      state.answeringPeer = null
-      onPeerConnect(peer, peerId)
-      resetOfferState(state)
+
+      if (shared && shared.peer !== peer) {
+        if (!peer.isDead) {
+          peer.destroy()
+        }
+
+        DEV: debugLog('reusing existing shared peer for', peerId)
+        attachSharedPeerToRoom(peerId, shared)
+        return
+      }
+
+      if (!shared) {
+        shared = registerSharedPeer(peerId, peer)
+      }
+
+      DEV: debugLog('peer connected:', peerId, relayId)
+
+      attachSharedPeerToRoom(peerId, shared)
     }
 
     const getConnectedPeerHealth = (
@@ -699,7 +1273,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
           if (health === 'live') {
             state.connectedPeerUnhealthySinceMs = null
-            DEV: debugLog('ignoring message from connected peer:', peerId)
+            // DEV: debugLog('ignoring message from connected peer:', peerId)
             return
           }
 
@@ -727,11 +1301,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           }
         }
 
+        let shared = sharedPeerMap[peerId]
+
+        if (shared && getSharedPeerHealth(shared.peer) === 'stale') {
+          clearSharedPeerState(peerId, {
+            destroyPeer: true
+          })
+          shared = undefined
+        }
+
         const isAnnouncement = Boolean(
           peerId && !offer && !answer && !candidate
         )
 
-        if (isAnnouncement) {
+        if (isAnnouncement && !shared) {
           const state = getState(peerId)
           const shouldLeadOffer = selfId < peerId
 
@@ -771,6 +1354,23 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             clearOfferRelay(peerStates[peerId], relayId)
           }
 
+          return
+        }
+
+        if (shared && isAnnouncement) {
+          attachSharedPeerToRoom(peerId, shared)
+          return
+        }
+
+        if (
+          shared &&
+          shared.bindings[roomId] &&
+          (offer || answer || candidate)
+        ) {
+          DEV: debugLog(
+            'ignoring room signal because shared binding already exists:',
+            peerId
+          )
           return
         }
 
@@ -1165,12 +1765,84 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     })
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
+    const sharedPassword = config.password ?? ''
+    const hashSharedPasswordChallenge = (challenge: string): Promise<string> =>
+      hashWith(
+        'SHA-256',
+        `${challenge}:${sharedPassword}:${appId}:${roomId}`
+      ).then(toHex)
+
+    const runSharedPasswordHandshake = async (
+      send: HandshakeSender,
+      receive: HandshakeReceiver,
+      isInitiator: boolean
+    ): Promise<void> => {
+      if (!sharedPassword) {
+        return
+      }
+
+      if (isInitiator) {
+        const challenge = genId(36)
+        await send({__trystero_pw: 'challenge', c: challenge})
+        const {data} = await receive()
+
+        if (
+          !data ||
+          typeof data !== 'object' ||
+          (data as {__trystero_pw?: unknown}).__trystero_pw !== 'response' ||
+          typeof (data as {h?: unknown}).h !== 'string'
+        ) {
+          throw new Error(
+            `incorrect password (${sharedPassword}) for overlapping room`
+          )
+        }
+
+        const expected = await hashSharedPasswordChallenge(challenge)
+
+        if ((data as {h: string}).h !== expected) {
+          throw new Error(
+            `incorrect password (${sharedPassword}) for overlapping room`
+          )
+        }
+
+        return
+      }
+
+      const {data} = await receive()
+
+      if (
+        !data ||
+        typeof data !== 'object' ||
+        (data as {__trystero_pw?: unknown}).__trystero_pw !== 'challenge' ||
+        typeof (data as {c?: unknown}).c !== 'string'
+      ) {
+        throw new Error(
+          `incorrect password (${sharedPassword}) for overlapping room`
+        )
+      }
+
+      await send({
+        __trystero_pw: 'response',
+        h: await hashSharedPasswordChallenge((data as {c: string}).c)
+      })
+    }
+
+    const composedPeerHandshake: PeerHandshake | undefined =
+      sharedPassword || onPeerHandshake
+        ? async (peerId, send, receive, isInitiator): Promise<void> => {
+            await runSharedPasswordHandshake(send, receive, isInitiator)
+            await onPeerHandshake?.(peerId, send, receive, isInitiator)
+          }
+        : undefined
+
     const roomOptions = {
-      ...(onPeerHandshake ? {onPeerHandshake} : {}),
+      ...(composedPeerHandshake
+        ? {onPeerHandshake: composedPeerHandshake}
+        : {}),
       ...(handshakeTimeoutMs === undefined ? {} : {handshakeTimeoutMs}),
       onHandshakeError: (peerId: string, error: string) =>
         onJoinError?.({
-          error,
+          error: error.replace(/^handshake failed: /, ''),
           appId,
           peerId,
           roomId
@@ -1197,14 +1869,18 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         didLeaveRoom = true
         onPeerConnect = noOp
 
-        Object.values(peerStates).forEach(state => {
+        Object.entries(peerStates).forEach(([peerId, state]) => {
           if (state.answeringExpiryTimer) {
             clearTimeout(state.answeringExpiryTimer)
             state.answeringExpiryTimer = null
           }
 
           if (state.connectedPeer && !state.connectedPeer.isDead) {
-            state.connectedPeer.destroy()
+            const shared = sharedPeerMap[peerId]
+
+            if (!shared || shared.peer !== state.connectedPeer) {
+              state.connectedPeer.destroy()
+            }
           }
 
           if (state.answeringPeer && !state.answeringPeer.isDead) {

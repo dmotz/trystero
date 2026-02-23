@@ -6,6 +6,7 @@ import {
   entries,
   fromEntries,
   fromJson,
+  genId,
   isBrowser,
   keys,
   libName,
@@ -94,6 +95,42 @@ type RoomOptions = {
   handshakeTimeoutMs?: number
 }
 
+type InternalStreamMeta = {
+  k: string
+  m?: JsonValue
+}
+
+type InternalTrackMeta = {
+  k: string
+  m?: JsonValue
+}
+
+type PendingStreamMeta = {
+  key: string
+  metadata?: JsonValue
+}
+
+type PendingTrackMeta = {
+  key: string
+  metadata?: JsonValue
+}
+
+type RemoteTrackRef = {
+  track: MediaStreamTrack
+  stream: MediaStream
+}
+
+type SharedMediaCachePeer = PeerHandle & {
+  __trysteroGetRemoteStreamByKey?: (key: string) => MediaStream | undefined
+  __trysteroSetRemoteStreamByKey?: (key: string, stream: MediaStream) => void
+  __trysteroGetRemoteTrackByKey?: (key: string) => RemoteTrackRef | undefined
+  __trysteroSetRemoteTrackByKey?: (
+    key: string,
+    track: MediaStreamTrack,
+    stream: MediaStream
+  ) => void
+}
+
 const toByteArray = (value: ArrayBuffer | ArrayBufferView): Uint8Array =>
   value instanceof ArrayBuffer
     ? new Uint8Array(value)
@@ -150,8 +187,10 @@ export default (
   > = {}
   const pendingActionPayloads: Record<string, PendingActionPayload[]> = {}
   const pendingPongs: Record<string, (() => void) | undefined> = {}
-  const pendingStreamMetas: Record<string, JsonValue | undefined> = {}
-  const pendingTrackMetas: Record<string, JsonValue | undefined> = {}
+  const pendingStreamMetas: Record<string, PendingStreamMeta[]> = {}
+  const pendingTrackMetas: Record<string, PendingTrackMeta[]> = {}
+  const localStreamKeys = new WeakMap<MediaStream, string>()
+  const localTrackKeys = new WeakMap<MediaStreamTrack, string>()
   const listeners = {
     onPeerJoin: noOp as (peerId: string) => void,
     onPeerLeave: noOp as (peerId: string) => void,
@@ -188,6 +227,64 @@ export default (
 
       return [Promise.resolve(f(id, peer))]
     })
+
+  const getStreamKey = (stream: MediaStream): string => {
+    const existing = localStreamKeys.get(stream)
+
+    if (existing) {
+      return existing
+    }
+
+    const key = genId(20)
+    localStreamKeys.set(stream, key)
+
+    return key
+  }
+
+  const getTrackKey = (track: MediaStreamTrack): string => {
+    const existing = localTrackKeys.get(track)
+
+    if (existing) {
+      return existing
+    }
+
+    const key = genId(20)
+    localTrackKeys.set(track, key)
+
+    return key
+  }
+
+  const getSharedMediaPeer = (id: string): SharedMediaCachePeer | null =>
+    (peerMap[id] as SharedMediaCachePeer | undefined) ?? null
+
+  const emitStream = (
+    id: string,
+    key: string,
+    stream: MediaStream,
+    metadata?: JsonValue
+  ): void => {
+    if (!activePeerMap[id]) {
+      return
+    }
+
+    getSharedMediaPeer(id)?.__trysteroSetRemoteStreamByKey?.(key, stream)
+    listeners.onPeerStream(stream, id, metadata)
+  }
+
+  const emitTrack = (
+    id: string,
+    key: string,
+    track: MediaStreamTrack,
+    stream: MediaStream,
+    metadata?: JsonValue
+  ): void => {
+    if (!activePeerMap[id]) {
+      return
+    }
+
+    getSharedMediaPeer(id)?.__trysteroSetRemoteTrackByKey?.(key, track, stream)
+    listeners.onPeerTrack(track, stream, id, metadata)
+  }
 
   const clearPeerState = (
     id: string,
@@ -547,10 +644,9 @@ export default (
   const [sendPing, getPing] = makeActionInternal<string>(internalNs('ping'))
   const [sendPong, getPong] = makeActionInternal<string>(internalNs('pong'))
   const [sendSignal, getSignal] = makeActionInternal(internalNs('signal'))
-  const [sendStreamMeta, getStreamMeta] = makeActionInternal<JsonValue>(
-    internalNs('stream')
-  )
-  const [sendTrackMeta, getTrackMeta] = makeActionInternal<JsonValue>(
+  const [sendStreamMeta, getStreamMeta] =
+    makeActionInternal<InternalStreamMeta>(internalNs('stream'))
+  const [sendTrackMeta, getTrackMeta] = makeActionInternal<InternalTrackMeta>(
     internalNs('track')
   )
   const [sendLeave, getLeave] = makeActionInternal<string>(
@@ -679,6 +775,42 @@ export default (
       .catch(err => failPeerHandshake(id, peer, err))
   }
 
+  const toStreamMeta = (value: DataPayload): PendingStreamMeta | null => {
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      typeof (value as {k?: unknown}).k === 'string'
+    ) {
+      return {
+        key: (value as {k: string}).k,
+        ...(Object.hasOwn(value as object, 'm')
+          ? {metadata: (value as {m?: JsonValue}).m}
+          : {})
+      }
+    }
+
+    return null
+  }
+
+  const toTrackMeta = (value: DataPayload): PendingTrackMeta | null => {
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      typeof (value as {k?: unknown}).k === 'string'
+    ) {
+      return {
+        key: (value as {k: string}).k,
+        ...(Object.hasOwn(value as object, 'm')
+          ? {metadata: (value as {m?: JsonValue}).m}
+          : {})
+      }
+    }
+
+    return null
+  }
+
   getPing((_, id) => sendPong('', id))
 
   getPong((_, id) => {
@@ -699,7 +831,21 @@ export default (
       return
     }
 
-    pendingStreamMetas[id] = meta
+    const parsed = toStreamMeta(meta)
+
+    if (!parsed) {
+      return
+    }
+
+    ;(pendingStreamMetas[id] ??= []).push(parsed)
+
+    const cached = getSharedMediaPeer(id)?.__trysteroGetRemoteStreamByKey?.(
+      parsed.key
+    )
+
+    if (cached) {
+      emitStream(id, parsed.key, cached, parsed.metadata)
+    }
   })
 
   getTrackMeta((meta, id) => {
@@ -707,7 +853,21 @@ export default (
       return
     }
 
-    pendingTrackMetas[id] = meta
+    const parsed = toTrackMeta(meta)
+
+    if (!parsed) {
+      return
+    }
+
+    ;(pendingTrackMetas[id] ??= []).push(parsed)
+
+    const cached = getSharedMediaPeer(id)?.__trysteroGetRemoteTrackByKey?.(
+      parsed.key
+    )
+
+    if (cached) {
+      emitTrack(id, parsed.key, cached.track, cached.stream, parsed.metadata)
+    }
   })
 
   getLeave((_, id) => exitPeer(id, undefined, mkErr('peer left room')))
@@ -772,16 +932,26 @@ export default (
           return
         }
 
-        listeners.onPeerStream(stream, id, pendingStreamMetas[id])
-        delete pendingStreamMetas[id]
+        const next = pendingStreamMetas[id]?.shift()
+
+        if (!next) {
+          return
+        }
+
+        emitStream(id, next.key, stream, next.metadata)
       },
       track: (track, stream) => {
         if (!activePeerMap[id]) {
           return
         }
 
-        listeners.onPeerTrack(track, stream, id, pendingTrackMetas[id])
-        delete pendingTrackMetas[id]
+        const next = pendingTrackMetas[id]?.shift()
+
+        if (!next) {
+          return
+        }
+
+        emitTrack(id, next.key, track, stream, next.metadata)
       },
       signal: sdp => {
         if (!activePeerMap[id]) {
@@ -830,9 +1000,12 @@ export default (
 
     addStream: (stream, targets, meta) =>
       iterate(targets, async (id, peer) => {
-        if (meta) {
-          await sendStreamMeta(meta, id)
+        const payload: InternalStreamMeta = {
+          k: getStreamKey(stream),
+          ...(meta === undefined ? {} : {m: meta})
         }
+
+        await sendStreamMeta(payload, id)
 
         peer.addStream(stream)
       }),
@@ -843,9 +1016,12 @@ export default (
 
     addTrack: (track, stream, targets, meta) =>
       iterate(targets, async (id, peer) => {
-        if (meta) {
-          await sendTrackMeta(meta, id)
+        const payload: InternalTrackMeta = {
+          k: getTrackKey(track),
+          ...(meta === undefined ? {} : {m: meta})
         }
+
+        await sendTrackMeta(payload, id)
 
         peer.addTrack(track, stream)
       }),
@@ -856,9 +1032,12 @@ export default (
 
     replaceTrack: (oldTrack, newTrack, targets, meta) =>
       iterate(targets, async (id, peer) => {
-        if (meta) {
-          await sendTrackMeta(meta, id)
+        const payload: InternalTrackMeta = {
+          k: getTrackKey(newTrack),
+          ...(meta === undefined ? {} : {m: meta})
         }
+
+        await sendTrackMeta(payload, id)
 
         await peer.replaceTrack(oldTrack, newTrack)
       }),

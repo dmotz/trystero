@@ -218,6 +218,7 @@ export default (strategy, overrides = {}) => {
             expect(await page2.evaluate(getPeerId, roomNs)).toEqual(peer1Id)
 
             const ping = ([roomId, id]) => window[roomId].ping(id)
+            const leaveRoom = roomId => window[roomId]?.leave()
 
             expect(await page.evaluate(ping, [roomNs, peer2Id])).toBeLessThan(
               1000
@@ -265,6 +266,64 @@ export default (strategy, overrides = {}) => {
                 [roomNs, 'mucho']
               )
             ).toBe(true)
+
+            if (roomNum === 0) {
+              const isolatedRoomA = roomNs + '-isolation-a'
+              const isolatedRoomB = roomNs + '-isolation-b'
+
+              const verifyActionIsolation = ([roomA, roomB, config, label]) => {
+                const roomARef = window.trystero.joinRoom(config, roomA)
+                const roomBRef = window.trystero.joinRoom(config, roomB)
+                window[roomA] = roomARef
+                window[roomB] = roomBRef
+
+                const [sendSharedA, getSharedA] = roomARef.makeAction('shared')
+                const [sendSharedB, getSharedB] = roomBRef.makeAction('shared')
+
+                return Promise.all([
+                  new Promise(res => roomARef.onPeerJoin(res)),
+                  new Promise(res => roomBRef.onPeerJoin(res))
+                ]).then(([peerA, peerB]) =>
+                  Promise.all([
+                    new Promise(res => getSharedA(res)),
+                    new Promise(res => getSharedB(res)),
+                    sendSharedA({room: roomA, from: label}, peerA),
+                    sendSharedB({room: roomB, from: label}, peerB)
+                  ]).then(([receivedA, receivedB]) => ({receivedA, receivedB}))
+                )
+              }
+
+              const [isolationResult1, isolationResult2] = await Promise.all([
+                page.evaluate(verifyActionIsolation, [
+                  isolatedRoomA,
+                  isolatedRoomB,
+                  roomConfig,
+                  'page-1'
+                ]),
+                page2.evaluate(verifyActionIsolation, [
+                  isolatedRoomA,
+                  isolatedRoomB,
+                  roomConfig,
+                  'page-2'
+                ])
+              ])
+
+              expect(isolationResult1).toEqual({
+                receivedA: {room: isolatedRoomA, from: 'page-2'},
+                receivedB: {room: isolatedRoomB, from: 'page-2'}
+              })
+              expect(isolationResult2).toEqual({
+                receivedA: {room: isolatedRoomA, from: 'page-1'},
+                receivedB: {room: isolatedRoomB, from: 'page-1'}
+              })
+
+              await Promise.all([
+                page.evaluate(leaveRoom, isolatedRoomA),
+                page2.evaluate(leaveRoom, isolatedRoomA),
+                page.evaluate(leaveRoom, isolatedRoomB),
+                page2.evaluate(leaveRoom, isolatedRoomB)
+              ])
+            }
 
             const makeBinaryAction = ([roomId, message, metadata]) => {
               const [sendBinary, getBinary, onProgress] =
@@ -481,8 +540,6 @@ export default (strategy, overrides = {}) => {
               const sendHandshakePost = ([roomId, payload]) =>
                 window[`hsSendPost_${roomId}`](payload)
 
-              const leaveRoom = roomId => window[roomId]?.leave()
-
               await Promise.all([
                 page.evaluate(setupHandshakeRoom, [
                   handshakeRoomNs,
@@ -651,9 +708,30 @@ export default (strategy, overrides = {}) => {
               roomNs
             )
 
+            const overlapRoomNs = roomNs + '-overlap'
+            const joinOverlapRoom = ([roomId, config]) => {
+              window[roomId] = window.trystero.joinRoom(config, roomId)
+              return new Promise(res => window[roomId].onPeerJoin(res))
+            }
+
+            const [overlapPeer1, overlapPeer2] = await Promise.all([
+              page.evaluate(joinOverlapRoom, [overlapRoomNs, roomConfig]),
+              page2.evaluate(joinOverlapRoom, [overlapRoomNs, roomConfig])
+            ])
+
+            expect(overlapPeer1).toEqual(selfId2)
+            expect(overlapPeer2).toEqual(selfId1)
+
             await page2.evaluate(roomId => window[roomId].leave(), roomNs)
 
             expect(await peer1onLeaveId).toEqual(peer2Id)
+
+            expect(
+              await page.evaluate(ping, [overlapRoomNs, overlapPeer1])
+            ).toBeLessThan(1000)
+            expect(
+              await page2.evaluate(ping, [overlapRoomNs, overlapPeer2])
+            ).toBeLessThan(1000)
 
             expect(
               await page2.evaluate(
@@ -702,6 +780,11 @@ export default (strategy, overrides = {}) => {
                 new RegExp(`^${selfId1}|${selfId2}`)
               )
             }
+
+            await Promise.all([
+              page.evaluate(leaveRoom, overlapRoomNs),
+              page2.evaluate(leaveRoom, overlapRoomNs)
+            ])
 
             console.log(
               '  ✅   ',
