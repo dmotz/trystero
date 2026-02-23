@@ -13,7 +13,7 @@
     "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
     "typecheck": "pnpm -r typecheck && tsc -p tsconfig.json --noEmit",
     "test": "NO_MINIFY=1 pnpm build && playwright test ./test",
-    "test:node": "jiti ./test/node/node.spec.ts",
+    "test:node": "pnpm run build && jiti ./test/node/node.spec.ts",
     "test:ice": "pnpm run build && jiti scripts/test-ice.ts",
     "test:proxy": "PROXY=$(jiti scripts/find-proxy.ts) pnpm test",
     "test:relays": "pnpm run build && jiti scripts/test-relays.ts",
