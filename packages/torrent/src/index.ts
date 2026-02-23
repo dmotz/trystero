@@ -345,6 +345,6 @@ export const defaultRelayUrls = [
   'tracker.openwebtorrent.com',
   'tracker.btorrent.xyz',
   'tracker.files.fm:7073/announce'
-].map(url => 'ws://' + url)
+].map(url => 'wss://' + url)
 
 export type * from '@trystero/core'
