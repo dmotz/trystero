@@ -129,12 +129,7 @@ type InternalTrackMeta = {
   m?: JsonValue
 }
 
-type PendingStreamMeta = {
-  key: string
-  metadata?: JsonValue
-}
-
-type PendingTrackMeta = {
+type PendingMediaMeta = {
   key: string
   metadata?: JsonValue
 }
@@ -268,8 +263,8 @@ export default (
   > = {}
   const pendingActionPayloads: Record<string, PendingActionPayload[]> = {}
   const pendingPongs: Record<string, PendingPongWaiter[] | undefined> = {}
-  const pendingStreamMetas: Record<string, PendingStreamMeta[]> = {}
-  const pendingTrackMetas: Record<string, PendingTrackMeta[]> = {}
+  const pendingStreamMetas: Record<string, PendingMediaMeta[]> = {}
+  const pendingTrackMetas: Record<string, PendingMediaMeta[]> = {}
   const localStreamKeys = new WeakMap<MediaStream, string>()
   const localTrackKeys = new WeakMap<MediaStreamTrack, string>()
   const listeners = {
@@ -856,25 +851,7 @@ export default (
       .catch(err => failPeerHandshake(id, peer, err))
   }
 
-  const toStreamMeta = (value: DataPayload): PendingStreamMeta | null => {
-    if (
-      value &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      typeof (value as {k?: unknown}).k === 'string'
-    ) {
-      return {
-        key: (value as {k: string}).k,
-        ...(Object.hasOwn(value as object, 'm')
-          ? {metadata: (value as {m?: JsonValue}).m}
-          : {})
-      }
-    }
-
-    return null
-  }
-
-  const toTrackMeta = (value: DataPayload): PendingTrackMeta | null => {
+  const toPendingMediaMeta = (value: DataPayload): PendingMediaMeta | null => {
     if (
       value &&
       typeof value === 'object' &&
@@ -918,7 +895,7 @@ export default (
       return
     }
 
-    const parsed = toStreamMeta(meta)
+    const parsed = toPendingMediaMeta(meta)
 
     if (!parsed) {
       return
@@ -940,7 +917,7 @@ export default (
       return
     }
 
-    const parsed = toTrackMeta(meta)
+    const parsed = toPendingMediaMeta(meta)
 
     if (!parsed) {
       return
