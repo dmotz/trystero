@@ -226,6 +226,13 @@ export default (strategy, overrides = {}) => {
             expect(await page2.evaluate(ping, [roomNs, peer1Id])).toBeLessThan(
               1000
             )
+            const [concurrentPingA, concurrentPingB] = await Promise.all([
+              page.evaluate(ping, [roomNs, peer2Id]),
+              page.evaluate(ping, [roomNs, peer2Id])
+            ])
+
+            expect(concurrentPingA).toBeLessThan(1000)
+            expect(concurrentPingB).toBeLessThan(1000)
 
             const makeAction = ([roomId, message]) => {
               const [sendMessage, getMessage] =
@@ -703,6 +710,28 @@ export default (strategy, overrides = {}) => {
               ])
             }
 
+            const disableAutoPong = roomId => {
+              const [, onPing] = window[roomId].makeAction('@_ping')
+
+              onPing(() => {})
+            }
+
+            const pendingPing = ([roomId, id]) =>
+              window[roomId].ping(id).then(
+                ms => ({status: 'resolved', ms}),
+                err => ({
+                  status: 'rejected',
+                  message: String(err?.message ?? err)
+                })
+              )
+
+            await page2.evaluate(disableAutoPong, roomNs)
+
+            const disconnectedPing = page.evaluate(pendingPing, [
+              roomNs,
+              peer2Id
+            ])
+
             const peer1onLeaveId = page.evaluate(
               roomId => new Promise(window[roomId].onPeerLeave),
               roomNs
@@ -724,6 +753,12 @@ export default (strategy, overrides = {}) => {
 
             await page2.evaluate(roomId => window[roomId].leave(), roomNs)
 
+            const disconnectedPingResult = await disconnectedPing
+
+            expect(disconnectedPingResult.status).toEqual('rejected')
+            expect(disconnectedPingResult.message).toMatch(
+              /peer left room|peer disconnected|room left/
+            )
             expect(await peer1onLeaveId).toEqual(peer2Id)
 
             expect(
