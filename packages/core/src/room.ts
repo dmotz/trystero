@@ -119,12 +119,7 @@ type RoomOptions = {
   handshakeTimeoutMs?: number
 }
 
-type InternalStreamMeta = {
-  k: string
-  m?: JsonValue
-}
-
-type InternalTrackMeta = {
+type InternalMediaMeta = {
   k: string
   m?: JsonValue
 }
@@ -304,6 +299,24 @@ export default (
 
       return [Promise.resolve(f(id, peer))]
     })
+
+  const applyMediaOp = <T extends InternalMediaMeta>(
+    targets: TargetPeers,
+    key: string,
+    metadata: JsonValue | undefined,
+    sendMeta: ActionSender<T>,
+    op: (peer: PeerHandle) => Promise<unknown> | unknown
+  ): Promise<void>[] => {
+    const payload = {
+      k: key,
+      ...(metadata === undefined ? {} : {m: metadata})
+    } as T
+
+    return iterate(targets, async (id, peer) => {
+      await sendMeta(payload, id)
+      await op(peer)
+    })
+  }
 
   const getStreamKey = (stream: MediaStream): string => {
     const existing = localStreamKeys.get(stream)
@@ -720,9 +733,10 @@ export default (
   const [sendPing, getPing] = makeActionInternal<string>(internalNs('ping'))
   const [sendPong, getPong] = makeActionInternal<string>(internalNs('pong'))
   const [sendSignal, getSignal] = makeActionInternal(internalNs('signal'))
-  const [sendStreamMeta, getStreamMeta] =
-    makeActionInternal<InternalStreamMeta>(internalNs('stream'))
-  const [sendTrackMeta, getTrackMeta] = makeActionInternal<InternalTrackMeta>(
+  const [sendStreamMeta, getStreamMeta] = makeActionInternal<InternalMediaMeta>(
+    internalNs('stream')
+  )
+  const [sendTrackMeta, getTrackMeta] = makeActionInternal<InternalMediaMeta>(
     internalNs('track')
   )
   const [sendLeave, getLeave] = makeActionInternal<string>(
@@ -1097,48 +1111,27 @@ export default (
       ) as Record<string, RTCPeerConnection>,
 
     addStream: (stream, targets, meta) =>
-      iterate(targets, async (id, peer) => {
-        const payload: InternalStreamMeta = {
-          k: getStreamKey(stream),
-          ...(meta === undefined ? {} : {m: meta})
-        }
-
-        await sendStreamMeta(payload, id)
-
+      applyMediaOp(targets, getStreamKey(stream), meta, sendStreamMeta, peer =>
         peer.addStream(stream)
-      }),
+      ),
 
     removeStream: (stream, targets) => {
       void iterate(targets, (_, peer) => peer.removeStream(stream))
     },
 
     addTrack: (track, stream, targets, meta) =>
-      iterate(targets, async (id, peer) => {
-        const payload: InternalTrackMeta = {
-          k: getTrackKey(track),
-          ...(meta === undefined ? {} : {m: meta})
-        }
-
-        await sendTrackMeta(payload, id)
-
+      applyMediaOp(targets, getTrackKey(track), meta, sendTrackMeta, peer =>
         peer.addTrack(track, stream)
-      }),
+      ),
 
     removeTrack: (track, targets) => {
       void iterate(targets, (_, peer) => peer.removeTrack(track))
     },
 
     replaceTrack: (oldTrack, newTrack, targets, meta) =>
-      iterate(targets, async (id, peer) => {
-        const payload: InternalTrackMeta = {
-          k: getTrackKey(newTrack),
-          ...(meta === undefined ? {} : {m: meta})
-        }
-
-        await sendTrackMeta(payload, id)
-
-        await peer.replaceTrack(oldTrack, newTrack)
-      }),
+      applyMediaOp(targets, getTrackKey(newTrack), meta, sendTrackMeta, peer =>
+        peer.replaceTrack(oldTrack, newTrack)
+      ),
 
     onPeerJoin: f => {
       listeners.onPeerJoin = f
