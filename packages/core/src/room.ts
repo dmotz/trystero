@@ -136,6 +136,11 @@ type PendingTrackMeta = {
   metadata?: JsonValue
 }
 
+type PendingPongWaiter = {
+  resolve: () => void
+  reject: (reason: unknown) => void
+}
+
 type RemoteTrackRef = {
   track: MediaStreamTrack
   stream: MediaStream
@@ -207,7 +212,7 @@ export default (
     Record<string, Record<number, PendingTransmission>>
   > = {}
   const pendingActionPayloads: Record<string, PendingActionPayload[]> = {}
-  const pendingPongs: Record<string, (() => void) | undefined> = {}
+  const pendingPongs: Record<string, PendingPongWaiter[] | undefined> = {}
   const pendingStreamMetas: Record<string, PendingStreamMeta[]> = {}
   const pendingTrackMetas: Record<string, PendingTrackMeta[]> = {}
   const localStreamKeys = new WeakMap<MediaStream, string>()
@@ -313,6 +318,7 @@ export default (
     reason: unknown = mkErr('peer disconnected')
   ): void => {
     const state = peerStates[id]
+    const err = toError(reason, 'peer disconnected')
 
     if (state) {
       if (state.handshakeTimer) {
@@ -320,7 +326,6 @@ export default (
       }
 
       state.pendingHandshakePayloads.length = 0
-      const err = toError(reason, 'peer disconnected')
 
       state.handshakeWaiters.splice(0).forEach(waiter => waiter.reject(err))
       delete peerStates[id]
@@ -329,6 +334,7 @@ export default (
     delete peerMap[id]
     delete activePeerMap[id]
     delete pendingTransmissions[id]
+    pendingPongs[id]?.splice(0).forEach(waiter => waiter.reject(err))
     delete pendingPongs[id]
     delete pendingStreamMetas[id]
     delete pendingTrackMetas[id]
@@ -837,8 +843,14 @@ export default (
   getPing((_, id) => sendPong('', id))
 
   getPong((_, id) => {
-    pendingPongs[id]?.()
-    delete pendingPongs[id]
+    const queue = pendingPongs[id]
+    const waiter = queue?.shift()
+
+    waiter?.resolve()
+
+    if (queue && !queue.length) {
+      delete pendingPongs[id]
+    }
   })
 
   getSignal((sdp, id) => {
@@ -1005,16 +1017,48 @@ export default (
     leave,
 
     ping: async id => {
-      if (!id) {
-        throw mkErr('ping() must be called with target peer ID')
+      if (!activePeerMap[id]) {
+        throw mkErr(`no active peer with id ${id}`)
       }
 
       const start = Date.now()
 
-      void sendPing('', id)
-      await new Promise<void>(res => {
-        pendingPongs[id] = res
+      await new Promise<void>((resolve, reject) => {
+        const queue = (pendingPongs[id] ??= [])
+
+        const clearFromQueue = (): void => {
+          const currentQueue = pendingPongs[id]
+
+          if (!currentQueue) {
+            return
+          }
+
+          const i = currentQueue.indexOf(waiter)
+
+          if (i > -1) {
+            currentQueue.splice(i, 1)
+          }
+
+          if (!currentQueue.length) {
+            delete pendingPongs[id]
+          }
+        }
+
+        const waiter: PendingPongWaiter = {
+          resolve: () => {
+            clearFromQueue()
+            resolve()
+          },
+          reject: reason => {
+            clearFromQueue()
+            reject(toError(reason, 'peer disconnected'))
+          }
+        }
+
+        queue.push(waiter)
+        void sendPing('', id).catch(err => waiter.reject(err))
       })
+
       return Date.now() - start
     },
 
