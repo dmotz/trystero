@@ -32,13 +32,15 @@ import type {
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12
+const nonceByteLimit = 2
 const typeIndex = 0
 const nonceIndex = typeIndex + typeByteLimit
-const tagIndex = nonceIndex + 1
+const tagIndex = nonceIndex + nonceByteLimit
 const progressIndex = tagIndex + 1
 const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
+const twoByteMax = 0xffff
 const buffLowEvent = 'bufferedamountlow'
 const channelCloseEvent = 'close'
 const channelErrorEvent = 'error'
@@ -548,7 +550,7 @@ export default (
           )
 
           chunk.set(typeBytesPadded)
-          chunk.set([nonce], nonceIndex)
+          chunk.set([nonce >> 8, nonce & oneByteMax], nonceIndex)
           chunk.set(
             [
               Number(isLast) |
@@ -574,7 +576,7 @@ export default (
           return chunk
         })
 
-        nonce = (nonce + 1) & oneByteMax
+        nonce = (nonce + 1) & twoByteMax
 
         await all(
           iterate(
@@ -655,7 +657,8 @@ export default (
       return
     }
 
-    const nonce = buffer[nonceIndex] ?? 0
+    const nonce =
+      ((buffer[nonceIndex] ?? 0) << 8) | (buffer[nonceIndex + 1] ?? 0)
     const tag = buffer[tagIndex] ?? 0
     const progress = buffer[progressIndex] ?? 0
     const payload = buffer.subarray(payloadIndex)
