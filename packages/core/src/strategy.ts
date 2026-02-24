@@ -1229,7 +1229,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const handleJoinError = (peerId: string, sdpType: string): void => {
       onJoinError?.({
-        error: `incorrect password (${config.password}) when decrypting ${sdpType}`,
+        error: `incorrect room password when decrypting ${sdpType}`,
         appId,
         peerId,
         roomId
