@@ -40,8 +40,11 @@ const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
+const channelCloseEvent = 'close'
+const channelErrorEvent = 'error'
 const unloadEvent = 'beforeunload'
 const defaultHandshakeTimeoutMs = 10_000
+const backpressureWaitTimeoutMs = 10_000
 const internalNs = (ns: string): string => '@_' + ns
 const beforeUnloadRoomCleanups = new Set<() => void>()
 
@@ -187,6 +190,58 @@ const toHandshakeErrorMessage = (reason: unknown): string => {
   return message.startsWith('handshake ')
     ? message
     : `handshake failed: ${message}`
+}
+
+const waitForBufferedAmountLow = (
+  channel: RTCDataChannel,
+  timeoutMs = backpressureWaitTimeoutMs
+): Promise<boolean> => {
+  if (
+    channel.readyState !== 'open' ||
+    channel.bufferedAmount <= channel.bufferedAmountLowThreshold
+  ) {
+    return Promise.resolve(channel.readyState === 'open')
+  }
+
+  return new Promise<boolean>(res => {
+    let settled = false
+    let timeout: ReturnType<typeof setTimeout> | null = null
+
+    const finish = (didDrain: boolean): void => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      channel.removeEventListener(buffLowEvent, onBufferLow)
+      channel.removeEventListener(channelCloseEvent, onCloseOrError)
+      channel.removeEventListener(channelErrorEvent, onCloseOrError)
+
+      if (timeout) {
+        clearTimeout(timeout)
+      }
+
+      res(didDrain)
+    }
+
+    const onBufferLow = (): void => finish(true)
+    const onCloseOrError = (): void => finish(false)
+
+    channel.addEventListener(buffLowEvent, onBufferLow)
+    channel.addEventListener(channelCloseEvent, onCloseOrError)
+    channel.addEventListener(channelErrorEvent, onCloseOrError)
+
+    timeout = setTimeout(() => finish(false), timeoutMs)
+
+    if (channel.readyState !== 'open') {
+      finish(false)
+      return
+    }
+
+    if (channel.bufferedAmount <= channel.bufferedAmountLowThreshold) {
+      finish(true)
+    }
+  })
 }
 
 export default (
@@ -531,14 +586,11 @@ export default (
                   channel &&
                   channel.bufferedAmount > channel.bufferedAmountLowThreshold
                 ) {
-                  await new Promise<void>(res => {
-                    const next = (): void => {
-                      channel.removeEventListener(buffLowEvent, next)
-                      res()
-                    }
+                  const didDrain = await waitForBufferedAmountLow(channel)
 
-                    channel.addEventListener(buffLowEvent, next)
-                  })
+                  if (!didDrain) {
+                    break
+                  }
                 }
 
                 const currentPeer = normalizedOptions.sendToPending
