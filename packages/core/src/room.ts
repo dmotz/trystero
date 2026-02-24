@@ -40,8 +40,29 @@ const payloadIndex = progressIndex + 1
 const chunkSize = 16 * 2 ** 10 - payloadIndex
 const oneByteMax = 0xff
 const buffLowEvent = 'bufferedamountlow'
+const unloadEvent = 'beforeunload'
 const defaultHandshakeTimeoutMs = 10_000
 const internalNs = (ns: string): string => '@_' + ns
+const beforeUnloadRoomCleanups = new Set<() => void>()
+
+const cleanupActiveRoomsOnBeforeUnload = (): void =>
+  beforeUnloadRoomCleanups.forEach(cleanup => cleanup())
+
+const registerBeforeUnloadCleanup = (cleanup: () => void): (() => void) => {
+  beforeUnloadRoomCleanups.add(cleanup)
+
+  if (beforeUnloadRoomCleanups.size === 1) {
+    addEventListener(unloadEvent, cleanupActiveRoomsOnBeforeUnload)
+  }
+
+  return (): void => {
+    beforeUnloadRoomCleanups.delete(cleanup)
+
+    if (!beforeUnloadRoomCleanups.size) {
+      removeEventListener(unloadEvent, cleanupActiveRoomsOnBeforeUnload)
+    }
+  }
+}
 
 type ActionOptions = {
   sendToPending: boolean
@@ -206,6 +227,7 @@ export default (
       metadata?: JsonValue
     ) => void
   }
+  let unregisterBeforeUnloadCleanup: () => void = noOp
 
   const iterate = (
     targets: TargetPeers,
@@ -638,6 +660,7 @@ export default (
       clearPeerState(id, mkErr('room left'))
     })
 
+    unregisterBeforeUnloadCleanup()
     onSelfLeave()
   }
 
@@ -971,7 +994,9 @@ export default (
   })
 
   if (isBrowser) {
-    addEventListener('beforeunload', leave)
+    unregisterBeforeUnloadCleanup = registerBeforeUnloadCleanup(() =>
+      leave().catch(noOp)
+    )
   }
 
   return {
