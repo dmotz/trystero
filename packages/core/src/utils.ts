@@ -81,7 +81,13 @@ export const getRelays = <TConfig extends BaseRoomConfig & RelayConfig>(
 
 export const toJson = JSON.stringify
 
-export const fromJson = JSON.parse as <T>(json: string) => T
+export const fromJson = <T>(s: string): T => {
+  try {
+    return JSON.parse(s)
+  } catch {
+    throw mkErr(`failed to parse JSON: ${s}`)
+  }
+}
 
 export const strToNum = (
   str: string,
