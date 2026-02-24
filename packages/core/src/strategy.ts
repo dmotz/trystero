@@ -231,10 +231,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const sharedPeerIdleMs =
       config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
 
-    const getSharedPeerHealth = (peer: PeerHandle): 'live' | 'stale' => {
+    const isPeerStale = (peer: PeerHandle): boolean => {
       const {connection, channel} = peer
 
-      if (
+      return (
         peer.isDead ||
         connection.connectionState === 'closed' ||
         connection.connectionState === 'failed' ||
@@ -242,12 +242,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         connection.iceConnectionState === 'failed' ||
         channel?.readyState === 'closing' ||
         channel?.readyState === 'closed'
-      ) {
-        return 'stale'
-      }
-
-      return 'live'
+      )
     }
+
+    const getSharedPeerHealth = (peer: PeerHandle): 'live' | 'stale' =>
+      isPeerStale(peer) ? 'stale' : 'live'
 
     const clearSharedIdleTimer = (shared: SharedPeerState): void => {
       if (shared.idleTimer) {
@@ -1159,15 +1158,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const getConnectedPeerHealth = (
       peer: PeerHandle
     ): 'live' | 'transient' | 'stale' => {
-      const {connection, channel} = peer
-      const isStale =
-        peer.isDead ||
-        connection.connectionState === 'closed' ||
-        connection.connectionState === 'failed' ||
-        connection.iceConnectionState === 'closed' ||
-        connection.iceConnectionState === 'failed' ||
-        channel?.readyState === 'closing' ||
-        channel?.readyState === 'closed'
+      const {channel} = peer
+      const isStale = isPeerStale(peer)
 
       if (isStale) {
         return 'stale'
