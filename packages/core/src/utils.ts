@@ -36,11 +36,7 @@ export const toErrorMessage = (reason: unknown, fallback: string): string => {
     return reason
   }
 
-  if (reason === undefined || reason === null) {
-    return fallback
-  }
-
-  return String(reason)
+  return toJson(reason ?? fallback)
 }
 
 export const toError = (reason: unknown, fallback: string): Error =>

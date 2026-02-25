@@ -131,9 +131,11 @@ const runNodeTests = (
           throw new Error(
             failures
               .map(failure =>
-                failure.status === 'rejected'
-                  ? String(failure.reason?.message ?? failure.reason)
-                  : ''
+                JSON.stringify(
+                  failure.status === 'rejected'
+                    ? (failure.reason?.message ?? failure.reason)
+                    : ''
+                )
               )
               .join('\n\n')
           )

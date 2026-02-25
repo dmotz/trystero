@@ -853,7 +853,9 @@ export default (
       onPeerHandshake?.(id, sendHandshake, receiveHandshake, isInitiator)
     )
       .then(() => markLocalHandshakePassed(id, peer))
-      .catch(err => failPeerHandshake(id, peer, toError(err, 'handshake failed')))
+      .catch(err =>
+        failPeerHandshake(id, peer, toError(err, 'handshake failed'))
+      )
   }
 
   const toPendingMediaMeta = (value: DataPayload): PendingMediaMeta | null => {
