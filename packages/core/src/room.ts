@@ -307,7 +307,7 @@ export default (
     key: string,
     metadata: JsonValue | undefined,
     sendMeta: ActionSender<T>,
-    op: (peer: PeerHandle) => Promise<unknown> | unknown
+    op: (peer: PeerHandle) => void
   ): Promise<void>[] => {
     const payload = {
       k: key,
@@ -316,7 +316,7 @@ export default (
 
     return iterate(targets, async (id, peer) => {
       await sendMeta(payload, id)
-      await op(peer)
+      op(peer)
     })
   }
 

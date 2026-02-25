@@ -108,10 +108,10 @@ const runNodeTests = (
     ...config
   }
 
-  test(
+  void test(
     `Trystero: ${strategy} connects peers using node`,
     {timeout, skip},
-    async t => {
+    async () => {
       const peers = [
         startPeer({role: 'initiator', strategy, roomId, roomConfig}),
         startPeer({role: 'responder', strategy, roomId, roomConfig})

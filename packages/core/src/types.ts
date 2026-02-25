@@ -161,7 +161,7 @@ export type PeerHandle = {
   offerPromise: Promise<Signal | void>
   addStream: (stream: MediaStream) => void
   removeStream: (stream: MediaStream) => void
-  addTrack: (track: MediaStreamTrack, stream: MediaStream) => RTCRtpSender
+  addTrack: (track: MediaStreamTrack, stream: MediaStream) => void
   removeTrack: (track: MediaStreamTrack) => void
   replaceTrack: (
     oldTrack: MediaStreamTrack,

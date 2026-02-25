@@ -108,7 +108,7 @@ const testSocketRelay = async (
         const content = Math.random().toString(36)
         const subId = genId(64)
 
-        socket.on('message', rawMsg => {
+        socket.on('message', (rawMsg: WebSocket.RawData) => {
           try {
             const msg = JSON.parse(rawDataToString(rawMsg)) as unknown[]
             const event = asString(msg[0])
@@ -141,7 +141,7 @@ const testSocketRelay = async (
         socket.send(await createEvent(topic, content))
       })
 
-      socket.on('error', error =>
+      socket.on('error', (error: Error) =>
         reject(new Error(`connection error: ${toErrMsg(error)}`))
       )
     })
