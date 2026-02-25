@@ -6,8 +6,10 @@ import {
   alloc,
   decodeBytes,
   encodeBytes,
+  entries,
   fromJson,
   genId,
+  keys,
   libName,
   mkErr,
   noOp,
@@ -15,6 +17,7 @@ import {
   toHex,
   toJson,
   topicPath,
+  values,
   watchOnline
 } from './utils'
 import type {
@@ -129,7 +132,7 @@ export default <
   > = {}
 
   const hasActiveRooms = (): boolean =>
-    Object.values(occupiedRooms).some(rooms => Object.keys(rooms).length > 0)
+    values(occupiedRooms).some(rooms => keys(rooms).length > 0)
 
   const wrapRoomFrame = (roomId: string, data: Uint8Array): Uint8Array => {
     const roomBytes = encodeBytes(roomId)
@@ -303,7 +306,7 @@ export default <
         shared.peer.destroy()
       }
 
-      const bindings = Object.values(shared.bindings)
+      const bindings = values(shared.bindings)
       shared.bindings = {}
       shared.controlRoomId = null
       delete sharedPeerMap[peerId]
@@ -318,13 +321,13 @@ export default <
       shared.remoteTracksByKey.clear()
       shared.pendingDataByRoom.clear()
 
-      if (Object.keys(sharedPeerMap).length === 0) {
+      if (keys(sharedPeerMap).length === 0) {
         delete sharedPeersByApp[appId]
       }
     }
 
     const scheduleSharedIdleTimer = (shared: SharedPeerState): void => {
-      if (shared.isClosing || Object.keys(shared.bindings).length > 0) {
+      if (shared.isClosing || keys(shared.bindings).length > 0) {
         return
       }
 
@@ -333,7 +336,7 @@ export default <
       shared.idleTimer = setTimeout(() => {
         const current = sharedPeerMap[shared.peerId]
 
-        if (!current || Object.keys(current.bindings).length > 0) {
+        if (!current || keys(current.bindings).length > 0) {
           return
         }
 
@@ -354,7 +357,7 @@ export default <
         }
       }
 
-      const fallback = Object.values(shared.bindings).find(binding =>
+      const fallback = values(shared.bindings).find(binding =>
         Boolean(binding.handlers.signal)
       )
 
@@ -422,7 +425,7 @@ export default <
       track: MediaStreamTrack,
       stream: MediaStream
     ): void => {
-      Object.values(shared.bindings).forEach(binding => {
+      values(shared.bindings).forEach(binding => {
         if (binding.handlers.track || binding.handlers.stream) {
           binding.handlers.track?.(track, stream)
           binding.handlers.stream?.(stream)
@@ -519,7 +522,7 @@ export default <
         delete shared.bindings[roomId]
 
         if (shared.controlRoomId === roomId) {
-          shared.controlRoomId = Object.keys(shared.bindings)[0] ?? null
+          shared.controlRoomId = keys(shared.bindings)[0] ?? null
         }
 
         onDetach()
@@ -1865,7 +1868,7 @@ export default <
         didLeaveRoom = true
         onPeerConnect = noOp
 
-        Object.entries(peerStates).forEach(([peerId, state]) => {
+        entries(peerStates).forEach(([peerId, state]) => {
           if (state.answeringExpiryTimer) {
             clearTimeout(state.answeringExpiryTimer)
             state.answeringExpiryTimer = null
@@ -1892,7 +1895,7 @@ export default <
         if (occupiedRooms[appId]) {
           delete occupiedRooms[appId][roomId]
 
-          if (Object.keys(occupiedRooms[appId]).length === 0) {
+          if (keys(occupiedRooms[appId]).length === 0) {
             delete occupiedRooms[appId]
           }
         }

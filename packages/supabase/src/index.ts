@@ -5,7 +5,10 @@ import {
 } from '@supabase/supabase-js'
 import {
   createStrategy,
+  entries,
+  keys,
   selfId,
+  values,
   type BaseRoomConfig,
   type JoinRoom
 } from '@trystero/core'
@@ -51,7 +54,7 @@ const bindEvent = (entry: ChannelEntry, event: string): void => {
 
   entry.boundEvents[event] = true
   entry.channel.on('broadcast', {event}, ({payload}) => {
-    Object.values(entry.listeners[event] ?? {}).forEach(listener =>
+    values(entry.listeners[event] ?? {}).forEach(listener =>
       listener(payload)
     )
   })
@@ -80,7 +83,7 @@ const addListener = (
 
     delete listeners[listenerId]
 
-    if (Object.keys(listeners).length === 0) {
+    if (keys(listeners).length === 0) {
       delete entry.listeners[event]
     }
   }
@@ -132,14 +135,14 @@ const getOrCreateChannel = (
 }
 
 const hasListeners = (entry: ChannelEntry): boolean =>
-  Object.values(entry.listeners).some(
-    listeners => Object.keys(listeners).length > 0
+  values(entry.listeners).some(
+    listeners => keys(listeners).length > 0
   )
 
 const removeUnusedChannels = (client: SupabaseClient): void => {
   const cache = getChannelCache(client)
 
-  Object.entries(cache.channels).forEach(([topic, entry]) => {
+  entries(cache.channels).forEach(([topic, entry]) => {
     if (hasListeners(entry)) {
       return
     }
