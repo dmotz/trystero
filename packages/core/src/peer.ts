@@ -1,4 +1,4 @@
-import {all, alloc} from './utils'
+import {all, alloc, toError} from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
@@ -231,7 +231,8 @@ export default (
     }
     channel.onopen = () => handlers.connect?.()
     channel.onclose = emitClose
-    channel.onerror = err => handlers.error?.(err)
+    channel.onerror = ({error}) =>
+      handlers.error?.(toError(error, 'data channel error'))
   }
 
   const waitForIceGathering = async (
@@ -312,7 +313,7 @@ export default (
       const offer = await emitLocalDescriptionSignal()
       return offer
     } catch (err) {
-      handlers.error?.(err)
+      handlers.error?.(toError(err, 'failed to create local offer'))
     } finally {
       makingOffer = false
     }
@@ -451,7 +452,7 @@ export default (
             await addRemoteCandidate(normalizeCandidate(candidate))
           }
         } catch (err) {
-          handlers.error?.(err)
+          handlers.error?.(toError(err, 'failed to parse remote candidate'))
         }
 
         return
@@ -505,7 +506,7 @@ export default (
           }
         }
       } catch (err) {
-        handlers.error?.(err)
+        handlers.error?.(toError(err, 'failed to apply remote signal'))
       }
     },
 

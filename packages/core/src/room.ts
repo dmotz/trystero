@@ -13,6 +13,8 @@ import {
   mkErr,
   noOp,
   selfId,
+  toError,
+  toErrorMessage,
   toJson
 } from './utils'
 import type {
@@ -111,7 +113,7 @@ type PendingPeerState = {
   pendingHandshakePayloads: HandshakePayload[]
   handshakeWaiters: Array<{
     resolve: (payload: HandshakePayload) => void
-    reject: (reason?: unknown) => void
+    reject: (error: Error) => void
   }>
 }
 
@@ -133,7 +135,7 @@ type PendingMediaMeta = {
 
 type PendingPongWaiter = {
   resolve: () => void
-  reject: (reason: unknown) => void
+  reject: (error: Error) => void
 }
 
 type RemoteTrackRef = {
@@ -157,27 +159,8 @@ const toByteArray = (value: ArrayBuffer | ArrayBufferView): Uint8Array =>
     ? new Uint8Array(value)
     : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
 
-const toReasonMessage = (reason: unknown, fallback: string): string => {
-  if (reason instanceof Error && reason.message) {
-    return reason.message
-  }
-
-  if (typeof reason === 'string' && reason) {
-    return reason
-  }
-
-  if (reason === undefined || reason === null) {
-    return fallback
-  }
-
-  return String(reason)
-}
-
-const toError = (reason: unknown, fallback: string): Error =>
-  reason instanceof Error ? reason : mkErr(toReasonMessage(reason, fallback))
-
-const toHandshakeErrorMessage = (reason: unknown): string => {
-  const message = toReasonMessage(reason, 'unknown error')
+const toHandshakeErrorMessage = (error: Error): string => {
+  const message = toErrorMessage(error, 'unknown error')
 
   return message.startsWith('handshake ')
     ? message
@@ -380,7 +363,7 @@ export default (
 
   const clearPeerState = (
     id: string,
-    reason: unknown = mkErr('peer disconnected')
+    reason: Error = mkErr('peer disconnected')
   ): void => {
     const state = peerStates[id]
     const err = toError(reason, 'peer disconnected')
@@ -405,7 +388,7 @@ export default (
     delete pendingTrackMetas[id]
   }
 
-  const exitPeer = (id: string, peer?: PeerHandle, reason?: unknown): void => {
+  const exitPeer = (id: string, peer?: PeerHandle, reason?: Error): void => {
     const current = peerMap[id]
 
     if (!current) {
@@ -783,7 +766,7 @@ export default (
   const failPeerHandshake = (
     id: string,
     peer: PeerHandle,
-    reason: unknown
+    reason: Error
   ): void => {
     const state = peerStates[id]
 
@@ -810,10 +793,12 @@ export default (
       failPeerHandshake(
         id,
         peer,
-        `failed sending handshake readiness: ${toReasonMessage(
-          err,
-          'unknown send failure'
-        )}`
+        mkErr(
+          `failed sending handshake readiness: ${toErrorMessage(
+            err,
+            'unknown send failure'
+          )}`
+        )
       )
     )
     maybeActivatePeer(id, peer)
@@ -831,7 +816,7 @@ export default (
         failPeerHandshake(
           id,
           peer,
-          `handshake timed out after ${handshakeTimeoutMs}ms`
+          mkErr(`handshake timed out after ${handshakeTimeoutMs}ms`)
         ),
       handshakeTimeoutMs
     )
@@ -856,7 +841,10 @@ export default (
           return
         }
 
-        current.handshakeWaiters.push({resolve, reject})
+        current.handshakeWaiters.push({
+          resolve,
+          reject: error => reject(error)
+        })
       })
 
     const isInitiator = selfId < id
@@ -865,7 +853,7 @@ export default (
       onPeerHandshake?.(id, sendHandshake, receiveHandshake, isInitiator)
     )
       .then(() => markLocalHandshakePassed(id, peer))
-      .catch(err => failPeerHandshake(id, peer, err))
+      .catch(err => failPeerHandshake(id, peer, toError(err, 'handshake failed')))
   }
 
   const toPendingMediaMeta = (value: DataPayload): PendingMediaMeta | null => {
@@ -1042,7 +1030,7 @@ export default (
         void sendSignal(sdp as unknown as DataPayload, id)
       },
       close: () => exitPeer(id, peer, mkErr('peer disconnected')),
-      error: err => {
+      error: (err: Error) => {
         console.error(`${libName} peer error:`, err)
         exitPeer(id, peer, err)
       }
@@ -1097,12 +1085,14 @@ export default (
           },
           reject: reason => {
             clearFromQueue()
-            reject(toError(reason, 'peer disconnected'))
+            reject(reason)
           }
         }
 
         queue.push(waiter)
-        void sendPing('', id).catch(err => waiter.reject(err))
+        void sendPing('', id).catch(err =>
+          waiter.reject(toError(err, 'peer disconnected'))
+        )
       })
 
       return Date.now() - start

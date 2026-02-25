@@ -27,6 +27,25 @@ export const noOp = (): void => {}
 
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
+export const toErrorMessage = (reason: unknown, fallback: string): string => {
+  if (reason instanceof Error && reason.message) {
+    return reason.message
+  }
+
+  if (typeof reason === 'string' && reason) {
+    return reason
+  }
+
+  if (reason === undefined || reason === null) {
+    return fallback
+  }
+
+  return String(reason)
+}
+
+export const toError = (reason: unknown, fallback: string): Error =>
+  reason instanceof Error ? reason : mkErr(toErrorMessage(reason, fallback))
+
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 

@@ -145,7 +145,7 @@ export type PeerHandlers = {
   stream?: (stream: MediaStream) => void
   track?: (track: MediaStreamTrack, stream: MediaStream) => void
   signal?: (signal: Signal) => void
-  error?: (err: unknown) => void
+  error?: (err: Error) => void
 }
 
 export type PeerHandle = {
