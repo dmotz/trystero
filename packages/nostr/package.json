@@ -7,21 +7,15 @@
     "dist"
   ],
   "type": "module",
+  "dependencies": {
+    "@noble/secp256k1": "^3.0.0",
+    "@trystero/core": "workspace:*"
+  },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@noble/secp256k1": "^3.0.0",
-    "@trystero/core": "workspace:*"
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
   }
 }

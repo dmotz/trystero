@@ -4,14 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm -r build && pnpm build:bundles",
-    "build:bundles": "rolldown -c rolldown.config.ts",
+    "build": "tsdown",
     "changeset": "changeset",
     "changeset:version": "changeset version",
     "changeset:publish": "changeset publish",
     "find-proxy": "jiti scripts/find-proxy.ts",
     "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
-    "typecheck": "pnpm -r typecheck && tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "NO_MINIFY=1 pnpm build && playwright test ./test",
     "test:node": "pnpm run build && jiti ./test/node/node.spec.ts",
     "test:bun": "pnpm run build && bun test test/node/node.spec.ts",
@@ -34,6 +33,7 @@
     "trystero": "workspace:*"
   },
   "devDependencies": {
+    "@arethetypeswrong/core": "^0.18.2",
     "@changesets/cli": "^2.29.8",
     "@playwright/test": "^1.58.2",
     "@types/node": "^25.3.0",
@@ -44,10 +44,11 @@
     "oxlint": "^1.50.0",
     "oxlint-tsgolint": "^0.14.2",
     "playwright": "^1.58.2",
-    "rolldown": "1.0.0-rc.1",
+    "publint": "^0.3.17",
     "serve": "^14.2.5",
     "source-map": "^0.7.6",
     "ts-node": "^10.9.2",
+    "tsdown": "^0.15.12",
     "typescript": "^5.9.3",
     "werift": "^0.22.9",
     "ws": "^8.19.0"

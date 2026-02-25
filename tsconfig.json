@@ -4,7 +4,7 @@
     "composite": false,
     "noEmit": true
   },
-  "include": ["playwright.config.ts", "rolldown.config.ts", "test/**/*.ts"],
+  "include": ["playwright.config.ts", "test/**/*.ts"],
   "references": [
     {"path": "./packages/core"},
     {"path": "./packages/nostr"},

@@ -7,43 +7,6 @@
     "dist"
   ],
   "type": "module",
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./nostr": {
-      "types": "./dist/nostr.d.ts",
-      "import": "./dist/nostr.js"
-    },
-    "./torrent": {
-      "types": "./dist/torrent.d.ts",
-      "import": "./dist/torrent.js"
-    },
-    "./mqtt": {
-      "types": "./dist/mqtt.d.ts",
-      "import": "./dist/mqtt.js"
-    },
-    "./ipfs": {
-      "types": "./dist/ipfs.d.ts",
-      "import": "./dist/ipfs.js"
-    },
-    "./supabase": {
-      "types": "./dist/supabase.d.ts",
-      "import": "./dist/supabase.js"
-    },
-    "./firebase": {
-      "types": "./dist/firebase.d.ts",
-      "import": "./dist/firebase.js"
-    }
-  },
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
   "dependencies": {
     "@trystero/firebase": "workspace:*",
     "@trystero/ipfs": "workspace:*",
@@ -51,5 +14,18 @@
     "@trystero/nostr": "workspace:*",
     "@trystero/supabase": "workspace:*",
     "@trystero/torrent": "workspace:*"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./firebase": "./dist/firebase.js",
+    "./ipfs": "./dist/ipfs.js",
+    "./mqtt": "./dist/mqtt.js",
+    "./nostr": "./dist/nostr.js",
+    "./supabase": "./dist/supabase.js",
+    "./torrent": "./dist/torrent.js",
+    "./package.json": "./package.json"
   }
 }
