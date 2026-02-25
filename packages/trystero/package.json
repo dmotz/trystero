@@ -7,14 +7,6 @@
     "dist"
   ],
   "type": "module",
-  "dependencies": {
-    "@trystero/firebase": "workspace:*",
-    "@trystero/ipfs": "workspace:*",
-    "@trystero/mqtt": "workspace:*",
-    "@trystero/nostr": "workspace:*",
-    "@trystero/supabase": "workspace:*",
-    "@trystero/torrent": "workspace:*"
-  },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,5 +19,13 @@
     "./supabase": "./dist/supabase.js",
     "./torrent": "./dist/torrent.js",
     "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@trystero/firebase": "workspace:*",
+    "@trystero/ipfs": "workspace:*",
+    "@trystero/mqtt": "workspace:*",
+    "@trystero/nostr": "workspace:*",
+    "@trystero/supabase": "workspace:*",
+    "@trystero/torrent": "workspace:*"
   }
 }

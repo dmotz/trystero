@@ -1,6 +1,13 @@
 import {resolve} from 'node:path'
 
-const strategyNames = ['firebase', 'ipfs', 'mqtt', 'nostr', 'supabase', 'torrent']
+const strategyNames = [
+  'firebase',
+  'ipfs',
+  'mqtt',
+  'nostr',
+  'supabase',
+  'torrent'
+]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
 

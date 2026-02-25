@@ -7,18 +7,18 @@
     "dist"
   ],
   "type": "module",
-  "dependencies": {
-    "@supabase/supabase-js": "^2.95.3",
-    "@trystero/core": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^25.2.3"
-  },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
     "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.95.3",
+    "@trystero/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3"
   }
 }
