@@ -8,9 +8,6 @@
     "changeset": "changeset",
     "changeset:version": "changeset version",
     "changeset:publish": "changeset publish",
-    "find-proxy": "jiti scripts/find-proxy.ts",
-    "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "NO_MINIFY=1 pnpm build && playwright test ./test",
     "test:node": "pnpm run build && jiti ./test/node/node.spec.ts",
     "test:bun": "pnpm run build && bun test test/node/node.spec.ts",
@@ -20,7 +17,10 @@
     "lint": "oxlint --type-aware --type-check .",
     "lint:fix": "oxlint --type-aware --type-check . --fix",
     "format": "oxfmt --check .",
-    "format:write": "oxfmt ."
+    "format:write": "oxfmt .",
+    "find-proxy": "jiti scripts/find-proxy.ts",
+    "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@trystero/core": "workspace:*",
