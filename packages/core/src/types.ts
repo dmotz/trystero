@@ -54,7 +54,6 @@ export type BaseRoomConfig = {
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
   turnConfig?: TurnServerConfig[]
-  manualRelayReconnection?: boolean
   _test_only_mdnsHostFallbackToLoopback?: boolean
   _test_only_sharedPeerIdleMs?: number
 }
@@ -62,6 +61,7 @@ export type BaseRoomConfig = {
 export type RelayConfig = {
   relayUrls?: string[]
   relayRedundancy?: number
+  manualRelayReconnection?: boolean
 }
 
 export type JoinRoomConfig = BaseRoomConfig & RelayConfig

@@ -28,6 +28,7 @@ import type {
   PeerHandle,
   PeerHandshake,
   PeerHandlers,
+  RelayConfig,
   Signal,
   StrategyAdapter
 } from './types'
@@ -113,7 +114,10 @@ type PeerState = {
   pendingCandidates: Record<string, Signal[]>
 }
 
-export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
+export default <
+  TRelay,
+  TConfig extends BaseRoomConfig & RelayConfig = JoinRoomConfig
+>({
   init,
   subscribe,
   announce
