@@ -10,6 +10,13 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const dropDevLabelStatements = {
+  inputOptions: {
+    transform: {
+      dropLabels: ['DEV']
+    }
+  }
+}
 
 const browserBundleConfigs = strategyNames.map((name, index) => ({
   workspace: false as const,
@@ -26,7 +33,8 @@ const browserBundleConfigs = strategyNames.map((name, index) => ({
   alias: {
     '@trystero/core': coreSourcePath
   },
-  clean: index === 0
+  clean: index === 0,
+  ...dropDevLabelStatements
 }))
 
 export default [
@@ -41,7 +49,8 @@ export default [
     sourcemap: true,
     exports: true,
     publint: ci,
-    attw: ci
+    attw: ci,
+    ...dropDevLabelStatements
   },
   {
     workspace: {
@@ -61,7 +70,8 @@ export default [
     sourcemap: true,
     exports: true,
     publint: ci,
-    attw: ci
+    attw: ci,
+    ...dropDevLabelStatements
   },
   ...browserBundleConfigs
 ]
