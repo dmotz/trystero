@@ -49,6 +49,7 @@ You can see what people are building with Trystero
   - [React hooks](#react-hooks)
   - [Connection issues](#connection-issues)
   - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
+  - [Write your own strategy](#write-your-own-strategy)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
@@ -540,6 +541,83 @@ import {RTCPeerConnection} from 'werift'
 const room = joinRoom(
   {appId: 'your-app-id', rtcPolyfill: RTCPeerConnection},
   'your-room-name'
+)
+```
+
+### Write your own strategy
+
+If you want to provide your own signaling backend, you can build a custom
+strategy with `createStrategy`.
+
+The example below assumes a WebSocket relay that does simple pub/sub routing:
+
+- Client sends
+  `{"type": "subscribe" | "unsubscribe" | "publish", "topic", "payload"}`
+- Server broadcasts `{"topic", "payload"}` to subscribers of each topic
+
+```js
+import {createStrategy, selfId, toJson} from 'trystero/core'
+
+export const joinRoom = createStrategy({
+  // Define init as a function that returns a promise of your signaling client.
+  // Resolve the promise when your client is ready to send messages.
+  // You can also return an array of client promises for redundancy.
+  // In this case, the client is a single WebSocket.
+  init: config =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(config.relayUrl)
+      ws.addEventListener('open', () => resolve(ws), {once: true})
+      ws.addEventListener('error', reject, {once: true})
+    }),
+
+  // subscribe takes 4 arguments:
+  // 1. One of the relay clients you defined in init.
+  // 2. roomTopic is the channel where peers in a room announce their presence.
+  // 3. selfTopic is the current peer's own channel where messages specific to
+  //    it should flow (i.e. offers and answers from external peers).
+  // 4. onMessage is a function that should be called when your relay client
+  // gets a message. Call it with the topic, data payload, and a callback
+  // function that takes another topic and payload.
+  // It should return a cleanup function that unsubscribes
+  subscribe: (client, roomTopic, selfTopic, onMessage) => {
+    const topics = [rootTopic, selfTopic]
+    const onWsMessage = event => {
+      const {topic, payload} = JSON.parse(String(event.data))
+
+      if (!topics.includes(topic)) {
+        return
+      }
+
+      onMessage(topic, payload, (peerTopic, signal) =>
+        client.send(
+          toJson({type: 'publish', topic: peerTopic, payload: signal})
+        )
+      )
+    }
+
+    client.addEventListener('message', onWsMessage)
+    topics.forEach(topic => client.send(toJson({type: 'subscribe', topic})))
+
+    return () => {
+      topics.forEach(topic => client.send(toJson({type: 'unsubscribe', topic})))
+      client.removeEventListener('message', onWsMessage)
+    }
+  },
+
+  // announce takes a relay client and a roomTopic
+  announce: (client, roomTopic) =>
+    client.send(
+      toJson({
+        type: 'publish',
+        topic: rootTopic,
+        payload: toJson({peerId: selfId})
+      })
+    )
+})
+
+const room = joinRoom(
+  {appId: 'my-app-id', relayUrl: 'wss://my-relay.example'},
+  'my-room-id'
 )
 ```
 
