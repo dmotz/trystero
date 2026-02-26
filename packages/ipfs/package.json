@@ -2,7 +2,26 @@
   "name": "@trystero/ipfs",
   "version": "0.23.0",
   "description": "Waku/IPFS strategy for Trystero",
+  "keywords": [
+    "chat",
+    "decentralized",
+    "ipfs",
+    "matchmaking",
+    "p2p",
+    "pairing",
+    "peer to peer",
+    "react",
+    "realtime",
+    "serverless",
+    "signaling",
+    "webrtc"
+  ],
   "license": "MIT",
+  "author": {
+    "name": "Dan Motzenbecker",
+    "email": "dan@oxism.com",
+    "url": "https://oxism.com"
+  },
   "files": [
     "dist"
   ],

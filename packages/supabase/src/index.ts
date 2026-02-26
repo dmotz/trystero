@@ -54,9 +54,7 @@ const bindEvent = (entry: ChannelEntry, event: string): void => {
 
   entry.boundEvents[event] = true
   entry.channel.on('broadcast', {event}, ({payload}) => {
-    values(entry.listeners[event] ?? {}).forEach(listener =>
-      listener(payload)
-    )
+    values(entry.listeners[event] ?? {}).forEach(listener => listener(payload))
   })
 }
 
@@ -135,9 +133,7 @@ const getOrCreateChannel = (
 }
 
 const hasListeners = (entry: ChannelEntry): boolean =>
-  values(entry.listeners).some(
-    listeners => keys(listeners).length > 0
-  )
+  values(entry.listeners).some(listeners => keys(listeners).length > 0)
 
 const removeUnusedChannels = (client: SupabaseClient): void => {
   const cache = getChannelCache(client)

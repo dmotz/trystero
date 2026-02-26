@@ -2,7 +2,28 @@
   "name": "@trystero/torrent",
   "version": "0.23.0",
   "description": "Torrent tracker strategy for Trystero",
+  "keywords": [
+    "bittorrent",
+    "chat",
+    "decentralized",
+    "matchmaking",
+    "p2p",
+    "pairing",
+    "peer to peer",
+    "react",
+    "realtime",
+    "serverless",
+    "signaling",
+    "torrent",
+    "webrtc",
+    "webtorrent"
+  ],
   "license": "MIT",
+  "author": {
+    "name": "Dan Motzenbecker",
+    "email": "dan@oxism.com",
+    "url": "https://oxism.com"
+  },
   "files": [
     "dist"
   ],
