@@ -521,14 +521,14 @@ aren't able to connect directly to one another.
    )
    ```
 
-### Running server-side (Node, Deno, Bun)
+### Running server-side (Node, Bun)
 
-Trystero works wherever JS runs, including server-side like Node, Deno, or Bun.
-Why would you want to run something that helps you avoid servers on a server?
-One reason is if you want an always-on peer which can be useful for remembering
-the last state of data, broadcasting it to new users. Another reason might be to
-run peers that are lighter weight and don't need a full browser running, like an
-embedded device or Raspberry Pi.
+Trystero works outside browsers too, like in Node or Bun. Why would you want to
+run something that helps you avoid servers on a server? One reason is if you
+want an always-on peer which can be useful for remembering the last state of
+data, broadcasting it to new users. Another reason might be to run peers that
+are lighter weight and don't need a full browser running, like an embedded
+device or Raspberry Pi.
 
 Running server-side uses the same syntax as in the browser, but you need to
 import a polyfill for WebRTC support:
