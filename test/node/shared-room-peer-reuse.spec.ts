@@ -5,6 +5,7 @@ import {createStrategy, encrypt, genKey} from '@trystero/core'
 
 type Subscriber = {
   rootTopic: string
+  selfTopic: string
   onMessage: (
     topic: string,
     msg: unknown,
@@ -168,8 +169,8 @@ void test(
 
     const joinRoom = createStrategy({
       init: () => ({}),
-      subscribe: async (_relay, rootTopic, _selfTopic, onMessage) => {
-        subscribers.push({rootTopic, onMessage})
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
         return () => {}
       },
       announce: () => {}
@@ -256,6 +257,95 @@ void test(
     } finally {
       await overlappingRoom?.leave().catch(() => {})
       await primaryRoom.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: isolates same roomId across appIds on one strategy instance',
+  {timeout: 10_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+    let initCount = 0
+
+    const joinRoom = createStrategy({
+      init: () => {
+        initCount += 1
+        return {}
+      },
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {}
+    })
+
+    const roomId = 'shared-room'
+    const appAConfig = {
+      appId: `app-a-${Date.now()}`,
+      rtcPolyfill: MockRTCPeerConnection
+    }
+    const appBConfig = {
+      appId: `app-b-${Date.now()}`,
+      relayUrls: ['wss://ignored-for-second-app.example'],
+      rtcPolyfill: MockRTCPeerConnection
+    }
+
+    const appARoom = joinRoom(appAConfig, roomId)
+    const appBRoom = joinRoom(appBConfig, roomId)
+
+    try {
+      await waitFor(() => subscribers.length >= 2)
+
+      const appASub = subscribers[0]
+      const appBSub = subscribers[1]
+
+      assert.equal(
+        initCount,
+        1,
+        'strategy init should run once for a shared createStrategy instance'
+      )
+      assert.notEqual(
+        appARoom,
+        appBRoom,
+        'same roomId in different appIds should not reuse the same room instance'
+      )
+      assert.notEqual(
+        appASub.rootTopic,
+        appBSub.rootTopic,
+        'root topics should be app-scoped for same roomId'
+      )
+      assert.notEqual(
+        appASub.selfTopic,
+        appBSub.selfTopic,
+        'self topics should be app-scoped for same roomId'
+      )
+
+      let crossSignalCount = 0
+
+      await appASub.onMessage(
+        appBSub.rootTopic,
+        {peerId: 'peer-from-app-b'},
+        () => {
+          crossSignalCount += 1
+        }
+      )
+      await appBSub.onMessage(
+        appASub.rootTopic,
+        {peerId: 'peer-from-app-a'},
+        () => {
+          crossSignalCount += 1
+        }
+      )
+
+      assert.equal(
+        crossSignalCount,
+        0,
+        'cross-app announcements should be ignored when topics do not match the room app scope'
+      )
+    } finally {
+      await appARoom.leave().catch(() => {})
+      await appBRoom.leave().catch(() => {})
     }
   }
 )
