@@ -56,7 +56,6 @@ You can see what people are building with Trystero
   - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
   - [`selfId`](#selfid)
   - [`getRelaySockets()`](#getrelaysockets)
-  - [`getOccupants(config, roomId)`](#getoccupantsconfig-roomid)
 - [Strategy comparison](#strategy-comparison)
   - [How to choose](#how-to-choose)
 
@@ -1034,22 +1033,6 @@ room config. Calling this function stops relay reconnection attempts until
 
 **(🐦 Nostr, 🌊 BitTorrent, only)** Allows relay reconnection attempts to
 resume. (See `pauseRelayReconnection()` above).
-
-### `getOccupants(config, roomId)`
-
-**(🔥 Firebase only)** Returns a promise that resolves to a list of user IDs
-present in the given namespace. This is useful for checking how many users are
-in a room without joining it.
-
-- `config` - A configuration object
-- `roomId` - A namespace string that you'd pass to `joinRoom()`.
-
-Example:
-
-```js
-console.log((await trystero.getOccupants(config, 'the_scope')).length)
-// => 3
-```
 
 ## Strategy comparison
 

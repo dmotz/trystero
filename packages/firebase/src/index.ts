@@ -15,9 +15,6 @@ import {
   createStrategy,
   libName,
   selfId,
-  sha1,
-  topicPath,
-  values,
   type BaseRoomConfig,
   type JoinRoom
 } from '@trystero/core'
@@ -159,34 +156,6 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
     void onDisconnect(presenceRef).remove()
   }
 })
-
-export const getOccupants = (
-  config: FirebaseRoomConfig,
-  roomId: string
-): Promise<string[]> =>
-  sha1(topicPath(libName, config.appId, roomId)).then(
-    rootTopic =>
-      new Promise(res => {
-        void onValue(
-          ref(
-            initDb(config),
-            `${config.rootPath ?? defaultRootPath}/${rootTopic}`
-          ),
-          data =>
-            res(
-              values(data.val() ?? {})
-                .map(
-                  entry =>
-                    (entry as Record<string, {peerId?: string}> | undefined)?.[
-                      presencePath
-                    ]?.peerId
-                )
-                .filter(Boolean) as string[]
-            ),
-          {onlyOnce: true}
-        )
-      })
-  )
 
 export {selfId}
 
