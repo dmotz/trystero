@@ -2,6 +2,32 @@
   "name": "trystero-monorepo",
   "version": "0.23.0",
   "private": true,
+  "keywords": [
+    "bittorrent",
+    "chat",
+    "decentralized",
+    "firebase",
+    "ipfs",
+    "matchmaking",
+    "mqtt",
+    "nostr",
+    "p2p",
+    "pairing",
+    "peer to peer",
+    "react",
+    "realtime",
+    "serverless",
+    "signaling",
+    "supabase",
+    "torrent",
+    "webrtc",
+    "webtorrent"
+  ],
+  "author": {
+    "name": "Dan Motzenbecker",
+    "email": "dan@oxism.com",
+    "url": "https://oxism.com"
+  },
   "type": "module",
   "scripts": {
     "build": "tsdown",
