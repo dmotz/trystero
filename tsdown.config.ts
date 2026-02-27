@@ -1,6 +1,6 @@
 import {resolve} from 'node:path'
 
-const noMinify = process.env['NO_MINIFY']
+const testBuild = process.env['TEST_BUILD'] === '1'
 
 const strategyNames = [
   'firebase',
@@ -12,7 +12,7 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
-const dropDevLabelStatements = noMinify
+const dropDevLabelStatements = testBuild
   ? {}
   : {
       inputOptions: {
@@ -32,7 +32,7 @@ const browserBundleConfigs = strategyNames.map((name, index) => ({
   format: 'es' as const,
   platform: 'browser' as const,
   sourcemap: true,
-  minify: !noMinify,
+  minify: !testBuild,
   noExternal: [/^@trystero\//],
   alias: {
     '@trystero/core': coreSourcePath
@@ -41,7 +41,7 @@ const browserBundleConfigs = strategyNames.map((name, index) => ({
   ...dropDevLabelStatements
 }))
 
-export default [
+const buildAllConfigs = [
   {
     workspace: {
       include: ['packages/*'],
@@ -79,3 +79,5 @@ export default [
   },
   ...browserBundleConfigs
 ]
+
+export default testBuild ? browserBundleConfigs : buildAllConfigs
