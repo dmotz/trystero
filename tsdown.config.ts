@@ -1,5 +1,7 @@
 import {resolve} from 'node:path'
 
+const noMinify = process.env['NO_MINIFY']
+
 const strategyNames = [
   'firebase',
   'ipfs',
@@ -10,13 +12,15 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
-const dropDevLabelStatements = {
-  inputOptions: {
-    transform: {
-      dropLabels: ['DEV']
+const dropDevLabelStatements = noMinify
+  ? {}
+  : {
+      inputOptions: {
+        transform: {
+          dropLabels: ['DEV']
+        }
+      }
     }
-  }
-}
 
 const browserBundleConfigs = strategyNames.map((name, index) => ({
   workspace: false as const,
@@ -28,7 +32,7 @@ const browserBundleConfigs = strategyNames.map((name, index) => ({
   format: 'es' as const,
   platform: 'browser' as const,
   sourcemap: true,
-  minify: !process.env['NO_MINIFY'],
+  minify: !noMinify,
   noExternal: [/^@trystero\//],
   alias: {
     '@trystero/core': coreSourcePath
