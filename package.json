@@ -31,11 +31,11 @@
   "type": "module",
   "scripts": {
     "build": "tsdown",
-    "build:browser": "TEST_BUILD=1 tsdown",
+    "build:test": "TEST_BUILD=1 tsdown",
     "changeset": "changeset",
     "changeset:version": "changeset version",
     "changeset:publish": "changeset publish",
-    "test": "pnpm run build:browser && playwright test ./test",
+    "test": "pnpm run build:test && playwright test ./test",
     "test:node": "pnpm run build && jiti ./test/node/node.spec.ts",
     "test:bun": "pnpm run build && bun test test/node/node.spec.ts",
     "test:ice": "pnpm run build && jiti scripts/test-ice.ts",
