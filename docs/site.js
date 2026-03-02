@@ -133,7 +133,7 @@ function updatePeerInfo() {
 
 function dropFruit([fruitIndex, x, y]) {
   const fruit = fruits[fruitIndex]
-  if (!fruit || typeof x !== 'number' || typeof y !== 'number') {
+  if (fruits.indexOf(fruit) === -1 || typeof x !== 'number' || typeof y !== 'number') {
     return
   }
 
