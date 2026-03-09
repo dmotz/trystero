@@ -33,17 +33,15 @@
     "dist"
   ],
   "type": "module",
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./firebase": "./dist/firebase.js",
-    "./ipfs": "./dist/ipfs.js",
-    "./mqtt": "./dist/mqtt.js",
-    "./nostr": "./dist/nostr.js",
-    "./supabase": "./dist/supabase.js",
-    "./torrent": "./dist/torrent.js",
+    ".": "./dist/index.mjs",
+    "./firebase": "./dist/firebase.mjs",
+    "./ipfs": "./dist/ipfs.mjs",
+    "./mqtt": "./dist/mqtt.mjs",
+    "./nostr": "./dist/nostr.mjs",
+    "./supabase": "./dist/supabase.mjs",
+    "./torrent": "./dist/torrent.mjs",
     "./package.json": "./package.json"
   },
   "dependencies": {
