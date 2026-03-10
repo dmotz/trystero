@@ -12,6 +12,19 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const packageDepsConfig = {
+  deps: {
+    skipNodeModulesBundle: true
+  }
+}
+
+const browserBundleDepsConfig = {
+  deps: {
+    alwaysBundle: [/^@trystero\//],
+    onlyAllowBundle: false
+  }
+}
+
 const dropDevLabelStatements = testBuild
   ? {}
   : {
@@ -33,7 +46,7 @@ const browserBundleConfigs = strategyNames.map((name, index) => ({
   platform: 'browser' as const,
   sourcemap: true,
   minify: !testBuild,
-  noExternal: [/^@trystero\//],
+  ...browserBundleDepsConfig,
   alias: {
     '@trystero/core': coreSourcePath
   },
@@ -52,6 +65,7 @@ const buildAllConfigs = [
     unbundle: true,
     sourcemap: true,
     exports: true,
+    ...packageDepsConfig,
     publint: ci,
     attw: ci,
     ...dropDevLabelStatements
@@ -73,6 +87,7 @@ const buildAllConfigs = [
     unbundle: true,
     sourcemap: true,
     exports: true,
+    ...packageDepsConfig,
     publint: ci,
     attw: ci,
     ...dropDevLabelStatements
