@@ -853,6 +853,9 @@ Returns an object with the following methods:
   - `targetPeers` - **(optional)** If specified, the track is replaced only for
     the target peer ID (string) or list of peer IDs (array).
 
+  - `metadata` - **(optional)** Additional metadata (any serializable type) to
+    be sent with the replacement track.
+
 - ### `onPeerJoin(callback)`
 
   Registers a callback function that will be called when a peer joins the room.
