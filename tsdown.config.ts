@@ -21,7 +21,7 @@ const packageDepsConfig = {
 const browserBundleDepsConfig = {
   deps: {
     alwaysBundle: [/^@trystero\//],
-    onlyAllowBundle: false
+    onlyBundle: false
   }
 }
 
