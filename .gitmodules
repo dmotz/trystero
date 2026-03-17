@@ -1,0 +1,3 @@
+[submodule "src/github"]
+	path = src/github
+	url = https://github.com/adnahmed/github.git
