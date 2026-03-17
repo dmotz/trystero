@@ -1,4 +1,4 @@
-export default ['firebase', 'ipfs', 'mqtt', 'nostr', 'supabase', 'torrent'].map(
+export default ['firebase', 'github', 'ipfs', 'mqtt', 'nostr', 'supabase', 'torrent'].map(
   name => ({
     input: `src/${name}.js`,
     output: {

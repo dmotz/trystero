@@ -9,6 +9,7 @@
   "exports": {
     ".": "./src/index.js",
     "./firebase": "./src/firebase.js",
+    "./github": "./src/github.js",
     "./ipfs": "./src/ipfs.js",
     "./mqtt": "./src/mqtt.js",
     "./nostr": "./src/nostr.js",
@@ -27,6 +28,7 @@
   "license": "MIT",
   "dependencies": {
     "@noble/secp256k1": "^3.0.0",
+    "octokit": "^4.0.0",
     "@supabase/supabase-js": "^2.93.3",
     "@waku/sdk": "^0.0.36",
     "firebase": "^12.8.0",
