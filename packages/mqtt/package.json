@@ -1,6 +1,6 @@
 {
   "name": "@trystero/mqtt",
-  "version": "0.23.0",
+  "version": "0.23.0-beta.1",
   "description": "MQTT strategy for Trystero",
   "keywords": [
     "bittorrent",
