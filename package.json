@@ -50,7 +50,9 @@
   "scripts": {
     "build": "rolldown -c rolldown.config.js",
     "get-bundle-sizes": "node scripts/get-bundle-sizes.js",
-    "test": "NO_MINIFY=1 npm run build && playwright test ./test",
+    "test": "NO_MINIFY=1 npm run build && playwright test ./test --grep-invert @trickle-perf",
+    "test-trickle-perf": "NO_MINIFY=1 npm run build && playwright test -c playwright.perf.config.js ./test/perf-trickle-firebase.spec.js ./test/perf-trickle-mqtt.spec.js ./test/perf-trickle-nostr.spec.js ./test/perf-trickle-torrent.spec.js --workers=4",
+    "test-trickle-perf-verbose": "NO_MINIFY=1 npm run build && PERF_TRICKLE_VERBOSE=1 playwright test -c playwright.perf.config.js ./test/perf-trickle-firebase.spec.js ./test/perf-trickle-mqtt.spec.js ./test/perf-trickle-nostr.spec.js ./test/perf-trickle-torrent.spec.js --workers=4",
     "test-proxy": "PROXY=$(node scripts/find-proxy.js) npm run test",
     "test-ice": "node scripts/test-ice.js",
     "test-relays": "node scripts/test-relays.js"
