@@ -4,11 +4,14 @@ const iceTimeout = 5000
 const iceStateEvent = 'icegatheringstatechange'
 const offerType = 'offer'
 const answerType = 'answer'
+const candidateType = 'candidate'
 
-export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
-  const pc = new (rtcPolyfill || RTCPeerConnection)({
-    iceServers: defaultIceServers.concat(turnConfig || []),
-    ...rtcConfig
+export default (initiator, config) => {
+  const useTrickle = config?.trickle === true
+
+  const pc = new (config?.rtcPolyfill || RTCPeerConnection)({
+    iceServers: defaultIceServers.concat(config?.turnConfig || []),
+    ...(config?.rtcConfig || {})
   })
 
   const handlers = {}
@@ -54,12 +57,44 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     }
   }
 
-  pc.onnegotiationneeded = async () => {
+  const attachTrickleIceCandidateSignaling = () => {
+    pc.onicecandidate = event => {
+      if (event.candidate != null) {
+        const rtcIceCandidate = event.candidate
+        handlers.signal?.({
+          type: candidateType,
+          candidate: {
+            candidate: rtcIceCandidate.candidate,
+            sdpMid: rtcIceCandidate.sdpMid,
+            sdpMLineIndex: rtcIceCandidate.sdpMLineIndex,
+            usernameFragment: rtcIceCandidate.usernameFragment ?? null
+          }
+        })
+      }
+    }
+  }
+
+  const onNegotiationNeededTrickle = async () => {
+    try {
+      makingOffer = true
+      await pc.setLocalDescription()
+      handlers.signal?.({
+        type: pc.localDescription.type,
+        sdp: pc.localDescription.sdp
+      })
+      attachTrickleIceCandidateSignaling()
+    } catch (err) {
+      handlers.error?.(err)
+    } finally {
+      makingOffer = false
+    }
+  }
+
+  const onNegotiationNeededNonTrickle = async () => {
     try {
       makingOffer = true
       await pc.setLocalDescription()
       const offer = await waitForIceGathering(pc)
-
       handlers.signal?.(offer)
     } catch (err) {
       handlers.error?.(err)
@@ -67,6 +102,10 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
       makingOffer = false
     }
   }
+
+  pc.onnegotiationneeded = useTrickle
+    ? onNegotiationNeededTrickle
+    : onNegotiationNeededNonTrickle
 
   pc.onconnectionstatechange = () => {
     if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
@@ -87,6 +126,63 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
     }
   }
 
+  const handleTrickleIceCandidate = async candidateEnvelope => {
+    if (!useTrickle) return
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidateEnvelope.candidate))
+    } catch (err) {
+      handlers.error?.(err)
+    }
+  }
+
+  const handleSdpDescription = async sdp => {
+    if (dataChannel?.readyState === 'open' && !sdp?.sdp?.includes('a=rtpmap')) {
+      return
+    }
+
+    try {
+      if (sdp?.type === offerType) {
+        if (
+          makingOffer ||
+          (pc.signalingState !== 'stable' && !isSettingRemoteAnswerPending)
+        ) {
+          if (initiator) {
+            return
+          }
+
+          await all([
+            pc.setLocalDescription({type: 'rollback'}),
+            pc.setRemoteDescription(sdp)
+          ])
+        } else {
+          await pc.setRemoteDescription(sdp)
+        }
+
+        await pc.setLocalDescription()
+        if (useTrickle) {
+          handlers.signal?.({
+            type: pc.localDescription.type,
+            sdp: pc.localDescription.sdp
+          })
+          attachTrickleIceCandidateSignaling()
+          return {type: pc.localDescription.type, sdp: pc.localDescription.sdp}
+        }
+        const answer = await waitForIceGathering(pc)
+        handlers.signal?.(answer)
+        return answer
+      } else if (sdp?.type === answerType) {
+        isSettingRemoteAnswerPending = true
+        try {
+          await pc.setRemoteDescription(sdp)
+        } finally {
+          isSettingRemoteAnswerPending = false
+        }
+      }
+    } catch (err) {
+      handlers.error?.(err)
+    }
+  }
+
   return {
     created: Date.now(),
 
@@ -100,48 +196,15 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
       return pc.connectionState === 'closed'
     },
 
-    async signal(sdp) {
-      if (
-        dataChannel?.readyState === 'open' &&
-        !sdp.sdp?.includes('a=rtpmap')
-      ) {
+    async signal(envelope) {
+      // candidate-type envelopes carry individual ICE candidates; others are SDP offers/answers
+      if (envelope?.type === candidateType) {
+        await handleTrickleIceCandidate(envelope)
         return
       }
 
-      try {
-        if (sdp.type === offerType) {
-          if (
-            makingOffer ||
-            (pc.signalingState !== 'stable' && !isSettingRemoteAnswerPending)
-          ) {
-            if (initiator) {
-              return
-            }
-
-            await all([
-              pc.setLocalDescription({type: 'rollback'}),
-              pc.setRemoteDescription(sdp)
-            ])
-          } else {
-            await pc.setRemoteDescription(sdp)
-          }
-
-          await pc.setLocalDescription()
-          const answer = await waitForIceGathering(pc)
-          handlers.signal?.(answer)
-
-          return answer
-        } else if (sdp.type === answerType) {
-          isSettingRemoteAnswerPending = true
-          try {
-            await pc.setRemoteDescription(sdp)
-          } finally {
-            isSettingRemoteAnswerPending = false
-          }
-        }
-      } catch (err) {
-        handlers.error?.(err)
-      }
+      // treat non-candidate envelopes as SDP descriptions from the remote peer
+      return await handleSdpDescription(envelope)
     },
 
     sendData: data => dataChannel.send(data),

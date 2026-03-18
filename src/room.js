@@ -299,7 +299,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
         listeners.onPeerTrack(track, stream, id, pendingTrackMetas[id])
         delete pendingTrackMetas[id]
       },
-      signal: sdp => sendSignal(sdp, id),
+      signal: envelope => sendSignal(envelope, id),
       close: () => exitPeer(id),
       error: err => {
         console.error(err)
@@ -317,7 +317,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
     delete pendingPongs[id]
   })
 
-  getSignal((sdp, id) => peerMap[id]?.signal(sdp))
+  getSignal((envelope, id) => peerMap[id]?.signal(envelope))
 
   getStreamMeta((meta, id) => (pendingStreamMetas[id] = meta))
 

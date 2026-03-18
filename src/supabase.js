@@ -50,6 +50,7 @@ const getOrCreateChannel = (client, topic, event, onPayload) => {
 }
 
 export const joinRoom = strategy({
+  trickle: true,
   init: config =>
     // @TODO reusing client instances makes the tests fail
     createClient(config.appId, config.supabaseKey),

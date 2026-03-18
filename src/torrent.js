@@ -58,6 +58,7 @@ const warn = (url, msg, didFail) =>
   )
 
 export const joinRoom = strategy({
+  trickle: false,
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
       const client = makeSocket(rawUrl, rawData => {

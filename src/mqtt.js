@@ -8,6 +8,7 @@ const msgHandlers = {}
 const getClientId = ({options}) => options.host + options.path
 
 export const joinRoom = strategy({
+  trickle: true,
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
       const client = mqtt.connect(url)

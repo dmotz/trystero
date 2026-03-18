@@ -31,6 +31,7 @@ const initDb = config =>
       ))
 
 export const joinRoom = strategy({
+  trickle: true,
   init: config => ref(initDb(config), config.rootPath || defaultRootPath),
 
   subscribe: (rootRef, rootTopic, selfTopic, onMessage) => {

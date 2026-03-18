@@ -14,6 +14,7 @@ const sendMessage = (node, topic, payload) =>
 let node
 
 export const joinRoom = strategy({
+  trickle: true,
   init: () =>
     (node ||= createLightNode({
       defaultBootstrap: true,

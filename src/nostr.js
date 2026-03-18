@@ -79,6 +79,7 @@ const unsubscribe = subId => {
 }
 
 export const joinRoom = strategy({
+  trickle: true,
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
       const client = makeSocket(url, data => {
