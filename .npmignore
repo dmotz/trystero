@@ -8,3 +8,4 @@ test-results/
 .oxlintrc.json
 playwright.config.ts
 rolldown.config.ts
+_ignore
