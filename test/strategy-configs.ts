@@ -1,6 +1,6 @@
-import {defaultRelayUrls as mqttRelays} from '@trystero/mqtt'
-import {defaultRelayUrls as nostrRelays} from '@trystero/nostr'
-import {defaultRelayUrls as torrentRelays} from '@trystero/torrent'
+import {defaultRelayUrls as mqttRelays} from '@trystero-p2p/mqtt'
+import {defaultRelayUrls as nostrRelays} from '@trystero-p2p/nostr'
+import {defaultRelayUrls as torrentRelays} from '@trystero-p2p/torrent'
 
 const defaultRelayRedundancy = 4
 

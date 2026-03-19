@@ -1,5 +1,5 @@
 import {Socket} from 'node:net'
-import {shuffle} from '@trystero/core'
+import {shuffle} from '@trystero-p2p/core'
 
 const proxyListEndpoint =
   'https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all&skip=0&limit=2000'

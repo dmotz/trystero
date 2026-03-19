@@ -1,1 +1,1 @@
-export * from '@trystero/supabase'
+export * from '@trystero-p2p/supabase'

@@ -1,5 +1,5 @@
 {
-  "name": "@trystero/torrent",
+  "name": "@trystero-p2p/torrent",
   "version": "0.23.0-beta.1",
   "description": "Torrent tracker strategy for Trystero",
   "keywords": [
@@ -34,6 +34,6 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@trystero/core": "workspace:*"
+    "@trystero-p2p/core": "workspace:*"
   }
 }

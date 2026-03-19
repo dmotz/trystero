@@ -1,5 +1,5 @@
 {
-  "name": "@trystero/nostr",
+  "name": "@trystero-p2p/nostr",
   "version": "0.23.0-beta.1",
   "description": "Nostr strategy for Trystero",
   "keywords": [
@@ -33,6 +33,6 @@
   },
   "dependencies": {
     "@noble/secp256k1": "^3.0.0",
-    "@trystero/core": "workspace:*"
+    "@trystero-p2p/core": "workspace:*"
   }
 }

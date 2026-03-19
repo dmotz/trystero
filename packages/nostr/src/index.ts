@@ -18,7 +18,7 @@ import {
   type JoinRoom,
   type RelayConfig,
   type SocketClient
-} from '@trystero/core'
+} from '@trystero-p2p/core'
 
 const clients: Record<string, SocketClient> = {}
 const defaultRedundancy = 5
@@ -248,4 +248,4 @@ export const defaultRelayUrls = [
   'yabu.me/v2'
 ].map(url => 'wss://' + url)
 
-export type * from '@trystero/core'
+export type * from '@trystero-p2p/core'

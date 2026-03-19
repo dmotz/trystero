@@ -1,5 +1,5 @@
 {
-  "name": "@trystero/core",
+  "name": "@trystero-p2p/core",
   "version": "0.23.0-beta.1",
   "description": "Core primitives for Trystero strategy implementations",
   "keywords": [

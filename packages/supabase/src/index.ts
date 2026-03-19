@@ -11,7 +11,7 @@ import {
   values,
   type BaseRoomConfig,
   type JoinRoom
-} from '@trystero/core'
+} from '@trystero-p2p/core'
 
 const events = {
   broadcast: 'broadcast',
@@ -204,4 +204,4 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
 
 export {selfId}
 
-export type * from '@trystero/core'
+export type * from '@trystero-p2p/core'

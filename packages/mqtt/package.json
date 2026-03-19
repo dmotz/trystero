@@ -1,5 +1,5 @@
 {
-  "name": "@trystero/mqtt",
+  "name": "@trystero-p2p/mqtt",
   "version": "0.23.0-beta.1",
   "description": "MQTT strategy for Trystero",
   "keywords": [
@@ -39,7 +39,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@trystero/core": "workspace:*",
+    "@trystero-p2p/core": "workspace:*",
     "mqtt": "^5.15.0"
   }
 }

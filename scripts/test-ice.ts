@@ -1,6 +1,6 @@
 import {randomBytes} from 'node:crypto'
 import {createSocket} from 'node:dgram'
-import {defaultIceServers} from '@trystero/core'
+import {defaultIceServers} from '@trystero-p2p/core'
 
 const stunMagicCookie = 0x2112_a442
 const probeTimeoutMs = 3_500

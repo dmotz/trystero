@@ -17,7 +17,7 @@ import {
   type OfferRecord,
   type RelayConfig,
   type SocketClient
-} from '@trystero/core'
+} from '@trystero-p2p/core'
 
 const clients: Record<string, SocketClient> = {}
 const topicToInfoHash: Record<string, string> = {}
@@ -347,4 +347,4 @@ export const defaultRelayUrls = [
   'tracker.files.fm:7073/announce'
 ].map(url => 'wss://' + url)
 
-export type * from '@trystero/core'
+export type * from '@trystero-p2p/core'

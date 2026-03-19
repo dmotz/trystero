@@ -1,7 +1,7 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {createStrategy} from '@trystero/core'
+import {createStrategy} from '@trystero-p2p/core'
 
 void test(
   'Trystero: strategy reuses offer peers across repeated batch allocations',

@@ -17,7 +17,7 @@ import {
   selfId,
   type BaseRoomConfig,
   type JoinRoom
-} from '@trystero/core'
+} from '@trystero-p2p/core'
 
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
@@ -159,4 +159,4 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
 
 export {selfId}
 
-export type * from '@trystero/core'
+export type * from '@trystero-p2p/core'

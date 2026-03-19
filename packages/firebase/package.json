@@ -1,5 +1,5 @@
 {
-  "name": "@trystero/firebase",
+  "name": "@trystero-p2p/firebase",
   "version": "0.23.0-beta.1",
   "description": "Firebase strategy for Trystero",
   "keywords": [
@@ -32,7 +32,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@trystero/core": "workspace:*",
+    "@trystero-p2p/core": "workspace:*",
     "firebase": "^12.11.0"
   }
 }

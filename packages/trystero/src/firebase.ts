@@ -1,1 +1,1 @@
-export * from '@trystero/firebase'
+export * from '@trystero-p2p/firebase'

@@ -1,1 +1,1 @@
-export * from '@trystero/mqtt'
+export * from '@trystero-p2p/mqtt'

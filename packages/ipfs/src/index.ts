@@ -8,7 +8,7 @@ import {
   toJson,
   type BaseRoomConfig,
   type JoinRoom
-} from '@trystero/core'
+} from '@trystero-p2p/core'
 
 const contentTopic = (topic: string): string =>
   `/${libName.toLowerCase()}-${topic}/0/msg/json`
@@ -93,4 +93,4 @@ export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>
 
 export {selfId}
 
-export type * from '@trystero/core'
+export type * from '@trystero-p2p/core'

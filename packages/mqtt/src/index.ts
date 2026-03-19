@@ -7,7 +7,7 @@ import {
   type BaseRoomConfig,
   type JoinRoom,
   type RelayConfig
-} from '@trystero/core'
+} from '@trystero-p2p/core'
 
 const sockets: Record<string, WebSocket> = {}
 const defaultRedundancy = 4
@@ -123,4 +123,4 @@ export const defaultRelayUrls = [
   'broker.hivemq.com:8884/mqtt'
 ].map(url => 'wss://' + url)
 
-export type * from '@trystero/core'
+export type * from '@trystero-p2p/core'

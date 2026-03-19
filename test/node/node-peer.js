@@ -15,7 +15,7 @@ const roomConfig = {
   rtcPolyfill: RTCPeerConnection
 }
 
-const {joinRoom} = await import(`@trystero/${strategy}`)
+const {joinRoom} = await import(`@trystero-p2p/${strategy}`)
 
 const room = joinRoom(roomConfig, roomId)
 

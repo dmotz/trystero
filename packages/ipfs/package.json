@@ -1,5 +1,5 @@
 {
-  "name": "@trystero/ipfs",
+  "name": "@trystero-p2p/ipfs",
   "version": "0.23.0-beta.1",
   "description": "IPFS strategy for Trystero",
   "keywords": [
@@ -32,7 +32,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@trystero/core": "workspace:*",
+    "@trystero-p2p/core": "workspace:*",
     "@waku/sdk": "^0.0.36"
   }
 }

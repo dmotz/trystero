@@ -1,14 +1,14 @@
 import chalk from 'chalk'
 import mqtt from 'mqtt'
 import WebSocket from 'ws'
-import {genId} from '@trystero/core'
-import {defaultRelayUrls as mqttRelays} from '@trystero/mqtt'
+import {genId} from '@trystero-p2p/core'
+import {defaultRelayUrls as mqttRelays} from '@trystero-p2p/mqtt'
 import {
   createEvent,
   defaultRelayUrls as nostrRelays,
   subscribe
-} from '@trystero/nostr'
-import {defaultRelayUrls as torrentRelays} from '@trystero/torrent'
+} from '@trystero-p2p/nostr'
+import {defaultRelayUrls as torrentRelays} from '@trystero-p2p/torrent'
 
 const timeLimitMs = 5_000
 

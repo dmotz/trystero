@@ -1,1 +1,1 @@
-export * from '@trystero/nostr'
+export * from '@trystero-p2p/nostr'

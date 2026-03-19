@@ -1,5 +1,5 @@
 {
-  "name": "@trystero/supabase",
+  "name": "@trystero-p2p/supabase",
   "version": "0.23.0-beta.1",
   "description": "Supabase strategy for Trystero",
   "keywords": [
@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.3",
-    "@trystero/core": "workspace:*"
+    "@trystero-p2p/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.5.0"

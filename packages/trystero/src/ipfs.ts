@@ -1,1 +1,1 @@
-export * from '@trystero/ipfs'
+export * from '@trystero-p2p/ipfs'

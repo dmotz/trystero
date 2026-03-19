@@ -20,7 +20,7 @@ const packageDepsConfig = {
 
 const browserBundleDepsConfig = {
   deps: {
-    alwaysBundle: [/^@trystero\//],
+    alwaysBundle: [/^@trystero-p2p\//],
     onlyBundle: false
   }
 }
@@ -48,7 +48,7 @@ const browserBundleConfigs = strategyNames.map((name, index) => ({
   minify: !testBuild,
   ...browserBundleDepsConfig,
   alias: {
-    '@trystero/core': coreSourcePath
+    '@trystero-p2p/core': coreSourcePath
   },
   clean: index === 0,
   ...dropDevLabelStatements
