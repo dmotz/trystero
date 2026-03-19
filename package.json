@@ -30,7 +30,8 @@
     "@supabase/supabase-js": "^2.93.3",
     "@waku/sdk": "^0.0.36",
     "firebase": "^12.8.0",
-    "mqtt": "^5.14.1"
+    "mqtt": "^5.14.1",
+    "msgpackr": "^1.11.9"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
