@@ -9,6 +9,34 @@ declare module 'trystero' {
 
   type DataPayload = JsonValue | Blob | ArrayBuffer | ArrayBufferView
 
+  type Rpc<T, R> = {
+    (peer: string, data: T): Promise<R>
+  }
+
+  type RpcPayload<T, R> =
+    | {
+        id: string
+        type: 'request'
+        payload: T
+      }
+    | {
+        id: string
+        type: 'response'
+        payload: R
+      }
+    | {
+        id: string
+        type: 'error'
+        error: string
+      }
+
+  type RpcDataPayload = DataPayload | Record<string, RpcDataPayload> | void
+
+  type MakeRpcOpts = {
+    timeout?: number
+    progress?: (p: number, peerId: string) => void
+  }
+
   type TargetPeers = string | string[] | null
 
   export interface BaseRoomConfig {
@@ -58,6 +86,12 @@ declare module 'trystero' {
     makeAction: <T extends DataPayload>(
       namespace: string
     ) => [ActionSender<T>, ActionReceiver<T>, ActionProgress]
+
+    makeRpc<T extends RpcDataPayload, R extends RpcDataPayload>(
+      name: string,
+      handler: (payload: T, peerId: string) => R | Promise<R>,
+      opt?: MakeRpcOpts
+    ): Rpc<T, R>
 
     ping: (id: string) => Promise<number>
 

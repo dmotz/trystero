@@ -13,6 +13,7 @@ import {
   noOp,
   toJson
 } from './utils.js'
+import {pack, unpack} from 'msgpackr'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
 const typeByteLimit = 12
@@ -29,6 +30,7 @@ const internalNs = ns => '@_' + ns
 export default (onPeer, onPeerLeave, onSelfLeave) => {
   const peerMap = {}
   const actions = {}
+  const rpcs = new Set()
   const actionsCache = {}
   const pendingTransmissions = {}
   const pendingPongs = {}
@@ -207,6 +209,107 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
     ])
   }
 
+  const makeRpc = (name, handler, opt = {}) => {
+    const timeout = opt.timeout ?? 10_000
+    if (rpcs.has(name)) {
+      throw mkErr(`Rpc with name (${name}) already defined`)
+    }
+
+    if (actions[name]) {
+      throw mkErr(`Action with name (${name}) already defined`)
+    }
+
+    rpcs.add(name)
+    const calls = new Map()
+
+    const [sendRpc, getRpc] = makeAction(name)
+
+    getRpc(async (data, peerId) => {
+      let decoded
+
+      try {
+        decoded = unpack(data)
+      } catch (err) {
+        console.error(
+          `RPC "${name}": failed to unpack message from ${peerId}:`,
+          err
+        )
+        return
+      }
+
+      if (
+        !decoded ||
+        !decoded.id ||
+        !['request', 'response', 'error'].includes(decoded.type)
+      ) {
+        console.error(
+          `RPC "${name}": malformed message from ${peerId}:`,
+          decoded
+        )
+        return
+      }
+
+      if (decoded.type === 'request') {
+        try {
+          const result = await handler(decoded.payload, peerId)
+
+          sendRpc(
+            pack({
+              id: decoded.id,
+              type: 'response',
+              payload: result
+            }),
+            peerId
+          )
+        } catch (e) {
+          sendRpc(
+            pack({
+              id: decoded.id,
+              type: 'error',
+              error: e.message || 'Unknown error occurred'
+            }),
+            peerId
+          )
+        }
+      } else {
+        const p = calls.get(decoded.id)
+        if (p) {
+          clearTimeout(p.timer)
+          if (decoded.type === 'error') {
+            p.promise.reject(new Error(decoded.error))
+          } else {
+            p.promise.resolve(decoded.payload)
+          }
+        }
+      }
+    })
+
+    return async (peerId, payload) => {
+      const id = crypto.randomUUID()
+      const packed = pack({id, type: 'request', payload})
+      sendRpc(packed, peerId, opt.progress)
+
+      const promise = Promise.withResolvers()
+      promise.promise.catch(() => {})
+      const timer = setTimeout(
+        () =>
+          promise.reject(
+            new Error(`RPC "${name}" timed out after ${opt.timeout}ms`)
+          ),
+        timeout
+      )
+
+      calls.set(id, {timer, promise})
+
+      try {
+        return await promise.promise
+      } finally {
+        calls.delete(id)
+        clearTimeout(timer)
+      }
+    }
+  }
+
   const handleData = (id, data) => {
     const buffer = new Uint8Array(data)
     const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex)).replaceAll(
@@ -331,6 +434,7 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
 
   return {
     makeAction,
+    makeRpc,
 
     leave,
 
