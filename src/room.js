@@ -268,10 +268,9 @@ export default (onPeer, onPeerLeave, onSelfLeave) => {
   const leave = async () => {
     await sendLeave('')
     await new Promise(res => setTimeout(res, 99))
-    entries(peerMap).forEach(([id, peer]) => {
-      peer.destroy()
-      delete peerMap[id]
-    })
+    // Use the same teardown path as peer exit so strategy-level cleanup
+    // (via onPeerLeave) is consistently triggered.
+    entries(peerMap).forEach(([id]) => exitPeer(id))
     onSelfLeave()
   }
 

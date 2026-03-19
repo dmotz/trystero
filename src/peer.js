@@ -26,20 +26,31 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
   }
 
   const waitForIceGathering = pc =>
-    Promise.race([
-      new Promise(res => {
-        const checkState = () => {
-          if (pc.iceGatheringState === 'complete') {
-            pc.removeEventListener(iceStateEvent, checkState)
-            res()
-          }
-        }
+    new Promise(resolve => {
+      let didResolve = false
+      let timeout
 
-        pc.addEventListener(iceStateEvent, checkState)
-        checkState()
-      }),
-      new Promise(res => setTimeout(res, iceTimeout))
-    ]).then(() => ({
+      const cleanup = () => {
+        if (didResolve) {
+          return
+        }
+        didResolve = true
+        pc.removeEventListener(iceStateEvent, checkState)
+        clearTimeout(timeout)
+        resolve()
+      }
+
+      const checkState = () => {
+        if (pc.iceGatheringState === 'complete') {
+          cleanup()
+        }
+      }
+
+      pc.addEventListener(iceStateEvent, checkState)
+      checkState()
+
+      timeout = setTimeout(cleanup, iceTimeout)
+    }).then(() => ({
       type: pc.localDescription.type,
       sdp: pc.localDescription.sdp.replace(/a=ice-options:trickle\s\n/g, '')
     }))
@@ -118,12 +129,18 @@ export default (initiator, {rtcConfig, rtcPolyfill, turnConfig}) => {
               return
             }
 
-            await all([
-              pc.setLocalDescription({type: 'rollback'}),
-              pc.setRemoteDescription(sdp)
-            ])
+            await pc.setLocalDescription({type: 'rollback'})
+            try {
+              await pc.setRemoteDescription(sdp)
+            } catch (err) {
+              handlers.error?.(err)
+            }
           } else {
-            await pc.setRemoteDescription(sdp)
+            try {
+              await pc.setRemoteDescription(sdp)
+            } catch (err) {
+              handlers.error?.(err)
+            }
           }
 
           await pc.setLocalDescription()
