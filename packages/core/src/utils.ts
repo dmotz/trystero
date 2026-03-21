@@ -22,6 +22,8 @@ export const {entries, fromEntries, keys, values} = Object
 
 export const noOp = (): void => {}
 
+export const candidateType = 'candidate'
+
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
 export const toErrorMessage = (reason: unknown, fallback: string): string => {

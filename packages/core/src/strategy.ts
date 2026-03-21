@@ -4,6 +4,7 @@ import room from './room'
 import {
   all,
   alloc,
+  candidateType,
   decodeBytes,
   encodeBytes,
   entries,
@@ -47,7 +48,6 @@ const offerIdSize = 12
 const disconnectedPeerGraceMs = 7_500
 const answeringTtlMs = 8_000
 const sharedPeerIdleMsDefault = 120_000
-const candidateType = 'candidate'
 const legacyCandidateKey = '__legacy__'
 const roomFrameVersion = 1
 

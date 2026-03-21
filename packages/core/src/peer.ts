@@ -1,4 +1,4 @@
-import {all, alloc, toError} from './utils'
+import {all, alloc, candidateType, toError} from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
@@ -6,7 +6,6 @@ const disconnectedCloseDelayMs = 5_000
 const iceStateEvent = 'icegatheringstatechange'
 const offerType = 'offer'
 const answerType = 'answer'
-const candidateType = 'candidate'
 const outOfRangePattern = /out of range/i
 
 type SdpDescription = {
