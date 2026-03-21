@@ -4,6 +4,7 @@ import {
   fromJson,
   genId,
   getRelays,
+  keys,
   libName,
   makeSocket,
   pauseRelayReconnection,
@@ -209,11 +210,8 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       offer.reclaim?.()
     }
 
-    const reclaimAllOutstandingOffers = (): void => {
-      entries(outstandingOffers).forEach(([offerId]) => {
-        reclaimOutstandingOffer(offerId)
-      })
-    }
+    const reclaimAllOutstandingOffers = (): void =>
+      keys(outstandingOffers).forEach(reclaimOutstandingOffer)
 
     const pruneOutstandingOffers = (): void => {
       const now = Date.now()
@@ -232,7 +230,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           {
             offer: data.offer,
             peerId: data.peer_id,
-            hasOutgoingOffer: entries(outstandingOffers).length > 0
+            hasOutgoingOffer: keys(outstandingOffers).length > 0
           },
           (_, signal) =>
             void send(client, rootTopic, {
@@ -267,7 +265,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 
       pruneOutstandingOffers()
 
-      const outstandingCount = entries(outstandingOffers).length
+      const outstandingCount = keys(outstandingOffers).length
       const missingOffers = Math.max(0, offerPoolSize - outstandingCount)
 
       if (missingOffers > 0) {
