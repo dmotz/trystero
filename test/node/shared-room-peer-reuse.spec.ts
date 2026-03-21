@@ -1,7 +1,8 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {createStrategy, encrypt, genKey} from '@trystero-p2p/core'
+import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import createStrategy from '../../packages/core/src/strategy.ts'
 
 type Subscriber = {
   rootTopic: string

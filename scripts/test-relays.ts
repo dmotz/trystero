@@ -1,7 +1,7 @@
 import chalk from 'chalk'
 import mqtt from 'mqtt'
 import WebSocket from 'ws'
-import {genId} from '@trystero-p2p/core'
+import {genId} from '../packages/core/src/utils.ts'
 import {defaultRelayUrls as mqttRelays} from '@trystero-p2p/mqtt'
 import {
   createEvent,
