@@ -79,18 +79,12 @@ export const getRelays = <TConfig extends BaseRoomConfig & RelayConfig>(
   defaults: string[],
   defaultN: number,
   deriveFromAppId = false
-): string[] => {
-  const relayUrls =
-    config.relayUrls ??
-    (deriveFromAppId ? shuffle(defaults, strToNum(config.appId)) : defaults)
-
-  return relayUrls.slice(
-    0,
-    config.relayUrls
-      ? config.relayUrls.length
-      : (config.relayRedundancy ?? defaultN)
-  )
-}
+): string[] =>
+  config.relayUrls ||
+  (deriveFromAppId
+    ? shuffle(defaults, strToNum(config.appId))
+    : defaults
+  ).slice(0, config.relayRedundancy ?? defaultN)
 
 export const toJson = JSON.stringify
 
