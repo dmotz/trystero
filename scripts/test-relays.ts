@@ -11,8 +11,31 @@ import {
 import {defaultRelayUrls as torrentRelays} from '@trystero-p2p/torrent'
 
 const timeLimitMs = 5_000
+const maxConcurrency = 10
 
 type RelayStrategy = 'mqtt' | 'nostr' | 'torrent'
+
+const pool = <T>(
+  tasks: (() => Promise<T>)[],
+  limit: number,
+  onProgress: (done: number, total: number) => void
+): Promise<T[]> => {
+  const results: T[] = new Array(tasks.length)
+  let next = 0
+  let done = 0
+
+  const run = async (): Promise<void> => {
+    while (next < tasks.length) {
+      const i = next++
+      results[i] = await tasks[i]()
+      onProgress(++done, tasks.length)
+    }
+  }
+
+  return Promise.all(
+    Array.from({length: Math.min(limit, tasks.length)}, () => run())
+  ).then(() => results)
+}
 
 const asString = (value: unknown, fallback = ''): string =>
   typeof value === 'string' ? value : fallback
@@ -69,8 +92,10 @@ const testMqttRelay = async (url: string): Promise<string> => {
 
   try {
     await new Promise<void>((resolve, reject) => {
-      timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
-      client.on('connect', () => resolve())
+      client.on('connect', () => {
+        timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
+        resolve()
+      })
       client.on('error', error => reject(error))
     })
 
@@ -96,9 +121,9 @@ const testSocketRelay = async (
 
   try {
     await new Promise<void>((resolve, reject) => {
-      timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
-
       socket.on('open', async () => {
+        timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
+
         if (strategy !== 'nostr') {
           resolve()
           return
@@ -164,10 +189,24 @@ const testRelay = (url: string, strategy: RelayStrategy): Promise<string> =>
 const testRelays = async (
   strategy: RelayStrategy,
   relays: string[]
-): Promise<[RelayStrategy, string[]]> => [
-  strategy,
-  await Promise.all(relays.map(url => testRelay(url, strategy)))
-]
+): Promise<[RelayStrategy, string[]]> => {
+  const label = strategy
+
+  const results = await pool(
+    relays.map(url => () => testRelay(url, strategy)),
+    maxConcurrency,
+    (done, total) =>
+      process.stdout.write(`\r${chalk.dim(`${done}/${total} ${label}...`)}`)
+  )
+
+  process.stdout.write('\r')
+
+  console.log(`${label}:                                            `)
+  console.log(results.join('\n'))
+  console.log('')
+
+  return [strategy, results]
+}
 
 const relayGroups: Record<RelayStrategy, string[]> = {
   nostr: nostrRelays,
@@ -175,16 +214,8 @@ const relayGroups: Record<RelayStrategy, string[]> = {
   torrent: torrentRelays
 }
 
-const results = await Promise.all(
-  Object.entries(relayGroups).map(([strategy, relays]) =>
-    testRelays(strategy as RelayStrategy, relays)
-  )
-)
-
-results.forEach(([strategy, lines]) => {
-  console.log(`${strategy.toUpperCase()}:`)
-  console.log(lines.join('\n'))
-  console.log('')
-})
+for (const [strategy, relays] of Object.entries(relayGroups)) {
+  await testRelays(strategy as RelayStrategy, relays)
+}
 
 process.exit(0)
