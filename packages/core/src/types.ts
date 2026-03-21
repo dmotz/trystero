@@ -222,3 +222,19 @@ export type SocketClient = {
   ready: Promise<SocketClient>
   send: (data: string) => void
 }
+
+export type RemoteTrackRef = {
+  track: MediaStreamTrack
+  stream: MediaStream
+}
+
+export type SharedMediaPeer = PeerHandle & {
+  __trysteroGetRemoteStreamByKey?: (key: string) => MediaStream | undefined
+  __trysteroSetRemoteStreamByKey?: (key: string, stream: MediaStream) => void
+  __trysteroGetRemoteTrackByKey?: (key: string) => RemoteTrackRef | undefined
+  __trysteroSetRemoteTrackByKey?: (
+    key: string,
+    track: MediaStreamTrack,
+    stream: MediaStream
+  ) => void
+}

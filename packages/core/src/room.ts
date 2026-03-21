@@ -29,6 +29,7 @@ import type {
   PeerHandle,
   PeerHandshake,
   Room,
+  SharedMediaPeer,
   TargetPeers
 } from './types'
 
@@ -136,22 +137,6 @@ type PendingMediaMeta = {
 type PendingPongWaiter = {
   resolve: () => void
   reject: (error: Error) => void
-}
-
-type RemoteTrackRef = {
-  track: MediaStreamTrack
-  stream: MediaStream
-}
-
-type SharedMediaCachePeer = PeerHandle & {
-  __trysteroGetRemoteStreamByKey?: (key: string) => MediaStream | undefined
-  __trysteroSetRemoteStreamByKey?: (key: string, stream: MediaStream) => void
-  __trysteroGetRemoteTrackByKey?: (key: string) => RemoteTrackRef | undefined
-  __trysteroSetRemoteTrackByKey?: (
-    key: string,
-    track: MediaStreamTrack,
-    stream: MediaStream
-  ) => void
 }
 
 const toByteArray = (value: ArrayBuffer | ArrayBufferView): Uint8Array =>
@@ -318,8 +303,8 @@ export default (
   const getStreamKey = makeKeyGetter(localStreamKeys)
   const getTrackKey = makeKeyGetter(localTrackKeys)
 
-  const getSharedMediaPeer = (id: string): SharedMediaCachePeer | null =>
-    (peerMap[id] as SharedMediaCachePeer | undefined) ?? null
+  const getSharedMediaPeer = (id: string): SharedMediaPeer | null =>
+    (peerMap[id] as SharedMediaPeer | undefined) ?? null
 
   const emitStream = (
     id: string,

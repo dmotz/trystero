@@ -33,6 +33,8 @@ import type {
   PeerHandshake,
   PeerHandlers,
   RelayConfig,
+  RemoteTrackRef,
+  SharedMediaPeer,
   Signal,
   StrategyAdapter
 } from './types'
@@ -50,11 +52,6 @@ const answeringTtlMs = 8_000
 const sharedPeerIdleMsDefault = 120_000
 const legacyCandidateKey = '__legacy__'
 const roomFrameVersion = 1
-
-type SharedRemoteTrackRef = {
-  track: MediaStreamTrack
-  stream: MediaStream
-}
 
 type SharedPeerBinding = {
   roomId: string
@@ -76,22 +73,9 @@ type SharedPeerState = {
   streamOwners: Map<MediaStream, Set<string>>
   trackOwners: Map<MediaStreamTrack, {stream: MediaStream; rooms: Set<string>}>
   remoteStreamsByKey: Map<string, MediaStream>
-  remoteTracksByKey: Map<string, SharedRemoteTrackRef>
+  remoteTracksByKey: Map<string, RemoteTrackRef>
   idleMs: number
   isClosing: boolean
-}
-
-type SharedMediaProxyPeer = PeerHandle & {
-  __trysteroGetRemoteStreamByKey?: (key: string) => MediaStream | undefined
-  __trysteroSetRemoteStreamByKey?: (key: string, stream: MediaStream) => void
-  __trysteroGetRemoteTrackByKey?: (
-    key: string
-  ) => SharedRemoteTrackRef | undefined
-  __trysteroSetRemoteTrackByKey?: (
-    key: string,
-    track: MediaStreamTrack,
-    stream: MediaStream
-  ) => void
 }
 
 type PeerState = {
@@ -529,7 +513,7 @@ export default <
         scheduleSharedIdleTimer(shared)
       }
 
-      const proxy: SharedMediaProxyPeer = {
+      const proxy: SharedMediaPeer = {
         created: shared.peer.created,
         get connection() {
           return shared.peer.connection
