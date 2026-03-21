@@ -25,6 +25,7 @@
     "sourceMap": true,
     "composite": true,
     "noEmitOnError": true,
-    "newLine": "lf"
+    "newLine": "lf",
+    "types": []
   }
 }
