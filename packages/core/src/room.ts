@@ -303,31 +303,20 @@ export default (
     })
   }
 
-  const getStreamKey = (stream: MediaStream): string => {
-    const existing = localStreamKeys.get(stream)
+  const makeKeyGetter = <K extends object>(map: WeakMap<K, string>) =>
+    (item: K): string => {
+      let key = map.get(item)
 
-    if (existing) {
-      return existing
+      if (!key) {
+        key = genId(20)
+        map.set(item, key)
+      }
+
+      return key
     }
 
-    const key = genId(20)
-    localStreamKeys.set(stream, key)
-
-    return key
-  }
-
-  const getTrackKey = (track: MediaStreamTrack): string => {
-    const existing = localTrackKeys.get(track)
-
-    if (existing) {
-      return existing
-    }
-
-    const key = genId(20)
-    localTrackKeys.set(track, key)
-
-    return key
-  }
+  const getStreamKey = makeKeyGetter(localStreamKeys)
+  const getTrackKey = makeKeyGetter(localTrackKeys)
 
   const getSharedMediaPeer = (id: string): SharedMediaCachePeer | null =>
     (peerMap[id] as SharedMediaCachePeer | undefined) ?? null
