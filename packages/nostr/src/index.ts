@@ -209,7 +209,6 @@ export const defaultRelayUrls = [
   'relay.artio.inf.unibe.ch',
   'relay.binaryrobot.com',
   'relay.bitcoindistrict.org',
-  'relay.contextvm.org',
   'relay.damus.io',
   'relay.degmods.com',
   'relay.fountain.fm',
