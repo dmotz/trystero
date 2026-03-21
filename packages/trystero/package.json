@@ -45,11 +45,6 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@trystero-p2p/firebase": "workspace:*",
-    "@trystero-p2p/ipfs": "workspace:*",
-    "@trystero-p2p/mqtt": "workspace:*",
-    "@trystero-p2p/nostr": "workspace:*",
-    "@trystero-p2p/supabase": "workspace:*",
-    "@trystero-p2p/torrent": "workspace:*"
+    "@trystero-p2p/nostr": "workspace:*"
   }
 }
