@@ -42,8 +42,7 @@ export const toError = (reason: unknown, fallback: string): Error =>
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
-export const encodeBytes = (txt: string): Uint8Array =>
-  new Uint8Array(encoder.encode(txt))
+export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
 
 export const decodeBytes = (
   buffer: ArrayBufferLike | ArrayBufferView
