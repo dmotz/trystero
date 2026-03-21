@@ -52,6 +52,7 @@ const answeringTtlMs = 8_000
 const sharedPeerIdleMsDefault = 120_000
 const legacyCandidateKey = '__legacy__'
 const roomFrameVersion = 1
+const overlapRoomPasswordErr = mkErr('incorrect password for overlapping room')
 
 type SharedPeerBinding = {
   roomId: string
@@ -1775,17 +1776,13 @@ export default <
           (data as {__trystero_pw?: unknown}).__trystero_pw !== 'response' ||
           typeof (data as {h?: unknown}).h !== 'string'
         ) {
-          throw new Error(
-            `incorrect password (${sharedPassword}) for overlapping room`
-          )
+          throw overlapRoomPasswordErr
         }
 
         const expected = await hashSharedPasswordChallenge(challenge)
 
         if ((data as {h: string}).h !== expected) {
-          throw new Error(
-            `incorrect password (${sharedPassword}) for overlapping room`
-          )
+          throw overlapRoomPasswordErr
         }
 
         return
@@ -1799,9 +1796,7 @@ export default <
         (data as {__trystero_pw?: unknown}).__trystero_pw !== 'challenge' ||
         typeof (data as {c?: unknown}).c !== 'string'
       ) {
-        throw new Error(
-          `incorrect password (${sharedPassword}) for overlapping room`
-        )
+        throw overlapRoomPasswordErr
       }
 
       await send({
