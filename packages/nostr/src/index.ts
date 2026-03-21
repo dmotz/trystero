@@ -181,7 +181,6 @@ export const defaultRelayUrls = [
   'nostr-01.yakihonne.com',
   'nostr-03.dorafactory.org',
   'nostr-relay.corb.net',
-  'nostr.cool110.xyz',
   'nostr.data.haus',
   'nostr.islandarea.net',
   'nostr.klabo.world',
