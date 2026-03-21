@@ -24,6 +24,14 @@ export const noOp = (): void => {}
 
 export const candidateType = 'candidate'
 
+export const resetTimer = (timer: number | null | undefined): null => {
+  if (timer !== null) {
+    clearTimeout(timer)
+  }
+
+  return null
+}
+
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
 export const toErrorMessage = (reason: unknown, fallback: string): string => {

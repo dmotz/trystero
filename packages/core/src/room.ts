@@ -12,6 +12,7 @@ import {
   libName,
   mkErr,
   noOp,
+  resetTimer,
   selfId,
   toError,
   toErrorMessage,
@@ -177,10 +178,7 @@ const waitForBufferedAmountLow = (
       channel.removeEventListener(channelCloseEvent, onCloseOrError)
       channel.removeEventListener(channelErrorEvent, onCloseOrError)
 
-      if (timeout) {
-        clearTimeout(timeout)
-      }
-
+      resetTimer(timeout)
       res(didDrain)
     }
 
@@ -288,7 +286,8 @@ export default (
     })
   }
 
-  const makeKeyGetter = <K extends object>(map: WeakMap<K, string>) =>
+  const makeKeyGetter =
+    <K extends object>(map: WeakMap<K, string>) =>
     (item: K): string => {
       let key = map.get(item)
 
@@ -343,12 +342,8 @@ export default (
     const err = toError(reason, 'peer disconnected')
 
     if (state) {
-      if (state.handshakeTimer) {
-        clearTimeout(state.handshakeTimer)
-      }
-
+      resetTimer(state.handshakeTimer)
       state.pendingHandshakePayloads.length = 0
-
       state.handshakeWaiters.splice(0).forEach(waiter => waiter.reject(err))
       delete peerStates[id]
     }
@@ -728,12 +723,7 @@ export default (
 
     state.isActive = true
     activePeerMap[id] = state.peer
-
-    if (state.handshakeTimer) {
-      clearTimeout(state.handshakeTimer)
-      state.handshakeTimer = null
-    }
-
+    state.handshakeTimer = resetTimer(state.handshakeTimer)
     listeners.onPeerJoin(id)
   }
 

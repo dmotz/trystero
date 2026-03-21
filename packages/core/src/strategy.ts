@@ -14,6 +14,7 @@ import {
   libName,
   mkErr,
   noOp,
+  resetTimer,
   selfId,
   toHex,
   toJson,
@@ -91,9 +92,9 @@ type PeerState = {
   }> | null
   offerAnswered: boolean
   offerRelays: unknown[]
-  offerSignalRelays: Array<((signal: Signal) => void) | undefined>
+  offerSignalRelays: Array<((signal: Signal) => void) | null>
   offerSignalBacklog: Signal[]
-  offerRelayTimers: Array<ReturnType<typeof setTimeout> | undefined>
+  offerRelayTimers: Array<ReturnType<typeof setTimeout> | null>
   offerExpiryTimer: ReturnType<typeof setTimeout> | null
   connectedPeer: PeerHandle | null
   connectedPeerUnhealthySinceMs: number | null
@@ -241,10 +242,7 @@ export default <
       isPeerStale(peer) ? 'stale' : 'live'
 
     const clearSharedIdleTimer = (shared: SharedPeerState): void => {
-      if (shared.idleTimer) {
-        clearTimeout(shared.idleTimer)
-        shared.idleTimer = null
-      }
+      shared.idleTimer = resetTimer(shared.idleTimer)
     }
 
     const pruneSharedRoomOwnership = (
@@ -678,7 +676,7 @@ export default <
       const timer = leasedOfferPeers.get(peer)
 
       if (timer) {
-        clearTimeout(timer)
+        resetTimer(timer)
         leasedOfferPeers.delete(peer)
       }
     }
@@ -727,7 +725,7 @@ export default <
         return
       }
 
-      clearTimeout(timer)
+      resetTimer(timer)
       leasedOfferPeers.delete(peer)
       recycleOfferPeer(peer)
     }
@@ -841,11 +839,7 @@ export default <
 
     const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
       if (state.answeringPeer === peer) {
-        if (state.answeringExpiryTimer) {
-          clearTimeout(state.answeringExpiryTimer)
-          state.answeringExpiryTimer = null
-        }
-
+        state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
         state.answeringPeer = null
         updateStatus(state)
       }
@@ -856,9 +850,7 @@ export default <
       peerId: string,
       peer: PeerHandle
     ): void => {
-      if (state.answeringExpiryTimer) {
-        clearTimeout(state.answeringExpiryTimer)
-      }
+      resetTimer(state.answeringExpiryTimer)
 
       state.answeringExpiryTimer = setTimeout(() => {
         const current = peerStates[peerId]
@@ -906,10 +898,9 @@ export default <
     }
 
     const clearOfferRelay = (state: PeerState, relayId: number): void => {
-      if (state.offerRelayTimers[relayId]) {
-        clearTimeout(state.offerRelayTimers[relayId])
-        state.offerRelayTimers[relayId] = undefined
-      }
+      state.offerRelayTimers[relayId] = resetTimer(
+        state.offerRelayTimers[relayId]
+      )
 
       if (state.offerRelays[relayId]) {
         state.offerRelays[relayId] = undefined
@@ -932,11 +923,7 @@ export default <
     const resetOfferState = (state: PeerState): void => {
       const previousOfferAnswered = state.offerAnswered
 
-      if (state.offerExpiryTimer) {
-        clearTimeout(state.offerExpiryTimer)
-        state.offerExpiryTimer = null
-      }
-
+      state.offerExpiryTimer = resetTimer(state.offerExpiryTimer)
       state.offerInitPromise = null
       state.offerRelays.forEach((_, relayId) => clearOfferRelay(state, relayId))
       state.offerRelays = []
@@ -966,9 +953,7 @@ export default <
       peerId: string,
       ttlMs = offerTtl
     ): void => {
-      if (state.offerExpiryTimer) {
-        clearTimeout(state.offerExpiryTimer)
-      }
+      resetTimer(state.offerExpiryTimer)
 
       const offerId = state.offerId
 
@@ -1046,9 +1031,7 @@ export default <
         scheduleOfferExpiry(state, peerId)
 
         return {peer, offer, offerId: state.offerId}
-      })().finally(() => {
-        state.offerInitPromise = null
-      })
+      })().finally(() => (state.offerInitPromise = null))
 
       return state.offerInitPromise
     }
@@ -1059,11 +1042,7 @@ export default <
     ): void => {
       const state = getState(peerId)
 
-      if (state.answeringExpiryTimer) {
-        clearTimeout(state.answeringExpiryTimer)
-        state.answeringExpiryTimer = null
-      }
-
+      state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
       state.answeringPeer = null
 
       const {proxy, isNew} = bindRoomToSharedPeer(peerId, shared, {
@@ -1400,10 +1379,9 @@ export default <
             return
           }
 
-          if (state.offerRelayTimers[relayId]) {
-            clearTimeout(state.offerRelayTimers[relayId])
-            state.offerRelayTimers[relayId] = undefined
-          }
+          state.offerRelayTimers[relayId] = resetTimer(
+            state.offerRelayTimers[relayId]
+          )
 
           state.offerRelays[relayId] = true
           updateStatus(state)
@@ -1848,10 +1826,7 @@ export default <
         onPeerConnect = noOp
 
         entries(peerStates).forEach(([peerId, state]) => {
-          if (state.answeringExpiryTimer) {
-            clearTimeout(state.answeringExpiryTimer)
-            state.answeringExpiryTimer = null
-          }
+          state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
 
           if (state.connectedPeer && !state.connectedPeer.isDead) {
             const shared = sharedPeerMap[peerId]
@@ -1879,7 +1854,7 @@ export default <
           }
         }
 
-        announceTimeouts.forEach(timeout => timeout && clearTimeout(timeout))
+        announceTimeouts.forEach(resetTimer)
         unsubFns.forEach(async f => {
           const cleanup = await f
           cleanup()
@@ -1901,7 +1876,7 @@ export default <
         pooledOfferPeers.clear()
 
         leasedOfferPeers.forEach((timeout, peer) => {
-          clearTimeout(timeout)
+          resetTimer(timeout)
           peer.destroy()
         })
         leasedOfferPeers.clear()

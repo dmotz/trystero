@@ -1,4 +1,4 @@
-import {all, alloc, candidateType, toError} from './utils'
+import {all, alloc, candidateType, resetTimer, toError} from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
@@ -41,15 +41,11 @@ export default (
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
   let dataChannel: RTCDataChannel | null = null
-  let disconnectedCloseTimer: ReturnType<typeof setTimeout> | null = null
+  let disconnectedCloseTimer: number | null = null
   let didEmitClose = false
 
-  const clearDisconnectedCloseTimer = (): void => {
-    if (disconnectedCloseTimer) {
-      clearTimeout(disconnectedCloseTimer)
-      disconnectedCloseTimer = null
-    }
-  }
+  const clearDisconnectedCloseTimer = (): null =>
+    (disconnectedCloseTimer = resetTimer(disconnectedCloseTimer))
 
   const emitClose = (): void => {
     if (didEmitClose) {
@@ -257,9 +253,7 @@ export default (
         })
       ])
     } finally {
-      if (timeout) {
-        clearTimeout(timeout)
-      }
+      resetTimer(timeout)
     }
 
     return localDescriptionSignal(peerConnection)
