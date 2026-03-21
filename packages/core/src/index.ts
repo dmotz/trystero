@@ -1,34 +1,24 @@
 export {default as createStrategy} from './strategy'
-export {default as initPeer, defaultIceServers} from './peer'
-export {default as createRoom} from './room'
-export {decrypt, encrypt, genKey, hashWith, sha1} from './crypto'
+export {hashWith, sha1} from './crypto'
 export {
   all,
-  alloc,
   decodeBytes,
   encodeBytes,
   entries,
-  fromEntries,
   fromJson,
   genId,
   getRelays,
-  isBrowser,
   keys,
   libName,
   makeSocket,
-  mkErr,
-  noOp,
   pauseRelayReconnection,
   resumeRelayReconnection,
   selfId,
-  shuffle,
   socketGetter,
   strToNum,
   toHex,
   toJson,
-  topicPath,
-  values,
-  watchOnline
+  values
 } from './utils'
 
 export type {
@@ -61,6 +51,8 @@ export type {
   StrategyAdapter,
   StrategyMessage,
   StrategyOnMessage,
+  RemoteTrackRef,
+  SharedMediaPeer,
   TargetPeers,
   TurnServerConfig
 } from './types'

@@ -1,5 +1,6 @@
 import {createLightNode, type LightNode} from '@waku/sdk'
 import {
+  all,
   createStrategy,
   decodeBytes,
   encodeBytes,
@@ -66,7 +67,7 @@ const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createStrategy({
       }
     })
 
-    await Promise.all(subscriptions.map(subscription => subscription.ready))
+    await all(subscriptions.map(subscription => subscription.ready))
 
     return () => {
       subscriptions.forEach(

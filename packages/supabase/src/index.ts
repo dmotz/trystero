@@ -4,6 +4,7 @@ import {
   type SupabaseClient
 } from '@supabase/supabase-js'
 import {
+  all,
   createStrategy,
   entries,
   keys,
@@ -181,7 +182,7 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
       )
     })
 
-    await Promise.all([selfEntry.ready, rootEntry.ready])
+    await all([selfEntry.ready, rootEntry.ready])
 
     return () => {
       removeSelfListener()
