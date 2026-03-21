@@ -35,7 +35,7 @@ import type {
 } from './types'
 
 const TypedArray = Object.getPrototypeOf(Uint8Array)
-const typeByteLimit = 12
+const typeByteLimit = 32
 const nonceByteLimit = 2
 const typeIndex = 0
 const nonceIndex = typeIndex + typeByteLimit
