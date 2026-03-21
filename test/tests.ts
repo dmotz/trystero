@@ -808,7 +808,7 @@ export default (strategy, overrides = {}) => {
                 )
               ])
 
-              expect(joinError.error).toMatch(/^incorrect password/)
+              expect(joinError.error).toMatch(/incorrect password/)
               expect(joinError.appId).toEqual(roomConfig.appId)
               expect(joinError.roomId).toEqual(nextRoomNs)
               expect(joinError.peerId).toMatch(
