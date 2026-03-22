@@ -63,7 +63,11 @@ class MockPeer {
 class LinkedPeer {
   created = Date.now()
   connection = {}
-  channel = {readyState: 'open', bufferedAmount: 0, bufferedAmountLowThreshold: 0}
+  channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    bufferedAmountLowThreshold: 0
+  }
   isDead = false
   handlers = {}
   offerPromise = Promise.resolve()
@@ -143,7 +147,7 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
     id => strategyPeerLeaves.push(id),
     () => {}
   )
-  const joinPromise = new Promise(resolve => roomRef.onPeerJoin(resolve))
+  const joinPromise = new Promise(roomRef.onPeerJoin)
 
   roomRef.onPeerLeave(id => roomPeerLeaves.push(id))
 
@@ -167,59 +171,53 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
   await roomRef.leave()
 })
 
-void test(
-  'Trystero: metadata is delivered for non-binary payloads and falsy values',
-  async () => {
-    const {roomA, roomB} = await createJoinedRooms()
+void test('Trystero: metadata is delivered for non-binary payloads and falsy values', async () => {
+  const {roomA, roomB} = await createJoinedRooms()
 
-    try {
-      const textReceived = new Promise(resolve =>
-        roomB
-          .makeAction('text-meta')[1]((payload, peerId, metadata) =>
-            resolve({payload, peerId, metadata})
-          )
+  try {
+    const textReceived = new Promise(resolve =>
+      roomB.makeAction('text-meta')[1]((payload, peerId, metadata) =>
+        resolve({payload, peerId, metadata})
       )
+    )
 
-      await roomA.makeAction('text-meta')[0]('hello', undefined, false)
+    await roomA.makeAction('text-meta')[0]('hello', undefined, false)
 
-      assert.deepEqual(await textReceived, {
-        payload: 'hello',
-        peerId: 'peer-a',
-        metadata: false
-      })
+    assert.deepEqual(await textReceived, {
+      payload: 'hello',
+      peerId: 'peer-a',
+      metadata: false
+    })
 
-      const jsonReceived = new Promise(resolve =>
-        roomB
-          .makeAction('json-meta')[1]((payload, peerId, metadata) =>
-            resolve({payload, peerId, metadata})
-          )
+    const jsonReceived = new Promise(resolve =>
+      roomB.makeAction('json-meta')[1]((payload, peerId, metadata) =>
+        resolve({payload, peerId, metadata})
       )
+    )
 
-      await roomA.makeAction('json-meta')[0]({kind: 'object'}, undefined, 0)
+    await roomA.makeAction('json-meta')[0]({kind: 'object'}, undefined, 0)
 
-      assert.deepEqual(await jsonReceived, {
-        payload: {kind: 'object'},
-        peerId: 'peer-a',
-        metadata: 0
-      })
+    assert.deepEqual(await jsonReceived, {
+      payload: {kind: 'object'},
+      peerId: 'peer-a',
+      metadata: 0
+    })
 
-      await roomA.makeAction('queued-meta')[0]('later', undefined, null)
-      await tick()
+    await roomA.makeAction('queued-meta')[0]('later', undefined, null)
+    await tick()
 
-      const queuedReceived = new Promise(resolve =>
-        roomB
-          .makeAction('queued-meta')[1]((payload, peerId, metadata) =>
-            resolve({payload, peerId, metadata})
-          )
+    const queuedReceived = new Promise(resolve =>
+      roomB.makeAction('queued-meta')[1]((payload, peerId, metadata) =>
+        resolve({payload, peerId, metadata})
       )
+    )
 
-      assert.deepEqual(await queuedReceived, {
-        payload: 'later',
-        peerId: 'peer-a',
-        metadata: null
-      })
-    } finally {
-      await Promise.all([roomA.leave(), roomB.leave()])
-    }
+    assert.deepEqual(await queuedReceived, {
+      payload: 'later',
+      peerId: 'peer-a',
+      metadata: null
+    })
+  } finally {
+    await Promise.all([roomA.leave(), roomB.leave()])
   }
-)
+})
