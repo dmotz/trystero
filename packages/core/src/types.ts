@@ -1,3 +1,6 @@
+import type {OfferPool} from './offer-pool'
+import type {SharedPeerManager} from './shared-peer'
+
 export type JsonPrimitive = null | string | number | boolean
 
 export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue}
@@ -237,4 +240,75 @@ export type SharedMediaPeer = PeerHandle & {
     track: MediaStreamTrack,
     stream: MediaStream
   ) => void
+}
+
+export type SharedPeerBinding = {
+  roomId: string
+  handlers: PeerHandlers
+  pendingData: ArrayBuffer[]
+  pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}>
+  detach: () => void
+  proxy: PeerHandle
+}
+
+export type SharedPeerState = {
+  appId: string
+  peerId: string
+  peer: PeerHandle
+  bindings: Record<string, SharedPeerBinding>
+  pendingDataByRoom: Map<string, ArrayBuffer[]>
+  idleTimer: ReturnType<typeof setTimeout> | null
+  controlRoomId: string | null
+  streamOwners: Map<MediaStream, Set<string>>
+  trackOwners: Map<MediaStreamTrack, {stream: MediaStream; rooms: Set<string>}>
+  remoteStreamsByKey: Map<string, MediaStream>
+  remoteTracksByKey: Map<string, RemoteTrackRef>
+  idleMs: number
+  isClosing: boolean
+}
+
+export type PeerState = {
+  status: 'idle' | 'offering' | 'answering' | 'connected'
+  offerPeer: PeerHandle | null
+  offerId: string | null
+  offerSdp: string | null
+  offerInitPromise: Promise<{
+    peer: PeerHandle
+    offer: string
+    offerId: string
+  }> | null
+  offerAnswered: boolean
+  offerRelays: unknown[]
+  offerSignalRelays: Array<((signal: Signal) => void) | null>
+  offerSignalBacklog: Signal[]
+  offerRelayTimers: Array<ReturnType<typeof setTimeout> | null>
+  offerExpiryTimer: ReturnType<typeof setTimeout> | null
+  connectedPeer: PeerHandle | null
+  connectedPeerUnhealthySinceMs: number | null
+  answeringExpiryTimer: ReturnType<typeof setTimeout> | null
+  answeringPeer: PeerHandle | null
+  pendingCandidates: Record<string, Signal[]>
+}
+
+export type SignalContext = {
+  appId: string
+  roomId: string
+  config: BaseRoomConfig
+  peerStates: Record<string, PeerState>
+  rootTopicPlaintext: string
+  rootTopicP: Promise<string>
+  selfTopicP: Promise<string>
+  toPlain: (signal: Signal) => Promise<Signal>
+  toCipher: (signal: Signal) => Promise<Signal>
+  isLeaving: () => boolean
+  onJoinError: JoinErrorHandler | undefined
+  sharedPeers: SharedPeerManager
+  offerPool: OfferPool
+  encryptOffer: (peer: PeerHandle) => Promise<string>
+  initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
+  connectPeer: (peer: PeerHandle, peerId: string, relayId: number) => void
+  disconnectPeer: (peer: PeerHandle, peerId: string) => void
+  attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
+  announceIntervals: number[]
+  announceIntervalMs: number
 }
