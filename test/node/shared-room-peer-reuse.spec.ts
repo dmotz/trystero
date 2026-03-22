@@ -96,7 +96,7 @@ class MockRTCPeerConnection {
   removeTrack() {}
 }
 
-class FakePeer {
+class MockPeer {
   created = Date.now()
   isDead = false
   destroyCount = 0
@@ -185,7 +185,7 @@ void test(
 
     const primaryRoom = joinRoom(config, roomA)
     let overlappingRoom = null
-    const fakePeer = new FakePeer()
+    const mockPeer = new MockPeer()
 
     try {
       await waitFor(() => subscribers.length >= 1)
@@ -203,7 +203,7 @@ void test(
         {
           peerId: remotePeerId,
           answer: encryptedAnswer,
-          peer: fakePeer
+          peer: mockPeer
         },
         () => {}
       )
@@ -237,21 +237,21 @@ void test(
       await overlappingRoom.leave()
       overlappingRoom = null
       assert.equal(
-        fakePeer.destroyCount,
+        mockPeer.destroyCount,
         0,
         'leaving one overlapping room must not close shared peer'
       )
 
       await primaryRoom.leave()
       assert.equal(
-        fakePeer.destroyCount,
+        mockPeer.destroyCount,
         0,
         'shared peer should remain open until idle timeout expires'
       )
 
       await wait(120)
       assert.equal(
-        fakePeer.destroyCount,
+        mockPeer.destroyCount,
         1,
         'shared peer should close after idle timeout once all rooms are gone'
       )
