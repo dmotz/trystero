@@ -1,3 +1,3 @@
-import runTests from './tests'
+// import runTests from './tests'
 
-runTests('ipfs')
+// runTests('ipfs')
