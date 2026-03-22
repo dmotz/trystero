@@ -149,8 +149,10 @@ const removeUnusedChannels = (client: SupabaseClient): void => {
   })
 }
 
+let client: SupabaseClient | null = null
+
 export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
-  init: config => createClient(config.appId, config.supabaseKey),
+  init: config => (client ||= createClient(config.appId, config.supabaseKey)),
 
   subscribe: async (client, rootTopic, selfTopic, onMessage) => {
     const handleMessage = (peerTopic: string, signal: string): void => {
