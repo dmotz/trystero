@@ -166,7 +166,7 @@ const runNodeTests = (
 
 runNodeTests('nostr', {timeout: 20_000})
 runNodeTests('mqtt', {timeout: 20_000})
-runNodeTests('torrent', {timeout: 20_000, skip: true})
-runNodeTests('ipfs', {timeout: 50_000, skip: true})
+runNodeTests('torrent', {timeout: 20_000})
 runNodeTests('firebase', {timeout: 20_000})
 runNodeTests('supabase', {timeout: 20_000})
+runNodeTests('ipfs', {timeout: 50_000, skip: true})
