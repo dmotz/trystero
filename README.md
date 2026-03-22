@@ -700,6 +700,11 @@ the same namespace will return the same room instance.
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
 
+  - `trickleIce` - **(optional)** Boolean controlling whether ICE candidates are
+    sent incrementally (`true`) or bundled with SDP (`false`). Default is
+    strategy-dependent: `true` for most strategies, `false` for BitTorrent and
+    IPFS unless explicitly set.
+
   - `turnConfig` - **(optional)** Specifies a custom list of TURN servers to use
     (see [Connection issues](#connection-issues) section). Each item in the list
     should correspond to an
