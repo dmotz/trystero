@@ -33,7 +33,7 @@
     "dist"
   ],
   "type": "module",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
     "./firebase": "./dist/firebase.mjs",
