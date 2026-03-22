@@ -692,9 +692,9 @@ the same namespace will return the same room instance.
     They must support secure WebSocket connections.
 
   - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
-    Integer specifying how many torrent trackers to connect to simultaneously in
-    case some fail. Passing a `relayUrls` option will cause this option to be
-    ignored as the entire list will be used.
+    Integer specifying how many relay endpoints to connect to simultaneously.
+    Passing a `relayUrls` option will cause this option to be ignored as the
+    entire list will be used.
 
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
