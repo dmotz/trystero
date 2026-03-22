@@ -2,6 +2,7 @@ export {default as createStrategy} from './strategy'
 export {hashWith, sha1} from './crypto'
 export {
   all,
+  createRelayManager,
   decodeBytes,
   encodeBytes,
   entries,

@@ -1,4 +1,5 @@
 import {
+  createRelayManager,
   createStrategy,
   entries,
   fromJson,
@@ -11,7 +12,6 @@ import {
   resumeRelayReconnection,
   selfId,
   sha1,
-  socketGetter,
   toJson,
   type BaseRoomConfig,
   type JoinRoom,
@@ -20,24 +20,15 @@ import {
   type SocketClient
 } from '@trystero-p2p/core'
 
-const clients: Record<string, SocketClient> = {}
+const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const topicToInfoHash: Record<string, string> = {}
 const infoHashToTopic: Record<string, string> = {}
-const announceIntervals: Record<
-  string,
-  Record<string, ReturnType<typeof setInterval>>
-> = {}
-const announceFns: Record<
-  string,
-  Record<string, () => void | Promise<void>>
-> = {}
-const subscriptionTokens: Record<string, Record<string, symbol>> = {}
+const announceIntervals = relayManager.scoped<ReturnType<typeof setInterval>>()
+const announceFns = relayManager.scoped<() => void | Promise<void>>()
+const subscriptionTokens = relayManager.scoped<symbol>()
 const trackerAnnounceMs: Record<string, number> = {}
 const handledSignals: Record<string, number> = {}
-const msgHandlers: Record<
-  string,
-  Record<string, ((data: TrackerMessage) => void) | undefined>
-> = {}
+const msgHandlers = relayManager.scoped<(data: TrackerMessage) => void>()
 const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 10
@@ -95,89 +86,88 @@ const warn = (url: string, msg: string, didFail = false): void =>
 const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
-      const client = makeSocket(rawUrl, rawData => {
-        const data = fromJson<TrackerMessage>(rawData)
-        const errMsg = data['failure reason']
-        const warnMsg = data['warning message']
-        const {interval} = data
-        const topic = data.info_hash
-          ? infoHashToTopic[data.info_hash]
-          : undefined
+      const client = relayManager.register(
+        rawUrl,
+        makeSocket(rawUrl, rawData => {
+          const data = fromJson<TrackerMessage>(rawData)
+          const errMsg = data['failure reason']
+          const warnMsg = data['warning message']
+          const {interval} = data
+          const topic = data.info_hash
+            ? infoHashToTopic[data.info_hash]
+            : undefined
 
-        if (errMsg) {
-          warn(client.url, errMsg, true)
-          return
-        }
-
-        if (warnMsg) {
-          warn(client.url, warnMsg)
-        }
-
-        if (
-          interval &&
-          interval * 1000 >
-            (trackerAnnounceMs[client.url] ?? defaultAnnounceMs) &&
-          topic &&
-          announceFns[client.url]?.[topic]
-        ) {
-          const nextInterval = Math.min(interval * 1000, maxAnnounceMs)
-          const relayIntervals = (announceIntervals[client.url] ??= {})
-          const relayFns = (announceFns[client.url] ??= {})
-
-          if (relayIntervals[topic]) {
-            clearInterval(relayIntervals[topic])
-          }
-          trackerAnnounceMs[client.url] = nextInterval
-          const relayFn = relayFns[topic]
-
-          if (relayFn) {
-            relayIntervals[topic] = setInterval(relayFn, nextInterval)
-          }
-        }
-
-        if ((data.offer || data.answer) && topic && data.offer_id) {
-          if (data.peer_id === selfId) {
+          if (errMsg) {
+            warn(client.url, errMsg, true)
             return
           }
 
-          const signalType = data.offer ? 'offer' : 'answer'
-          const signalKey = `${topic}:${signalType}:${data.offer_id}:${data.peer_id ?? ''}`
-          const nowMs = Date.now()
-          const lastHandledMs = handledSignals[signalKey]
+          if (warnMsg) {
+            warn(client.url, warnMsg)
+          }
 
           if (
-            typeof lastHandledMs === 'number' &&
-            nowMs - lastHandledMs < signalDedupeWindowMs
+            interval &&
+            interval * 1000 >
+              (trackerAnnounceMs[client.url] ?? defaultAnnounceMs) &&
+            topic &&
+            announceFns.forKey(rawUrl)[topic]
           ) {
-            return
+            const nextInterval = Math.min(interval * 1000, maxAnnounceMs)
+            const relayIntervals = announceIntervals.forKey(rawUrl)
+            const relayFns = announceFns.forKey(rawUrl)
+
+            if (relayIntervals[topic]) {
+              clearInterval(relayIntervals[topic])
+            }
+            trackerAnnounceMs[client.url] = nextInterval
+            const relayFn = relayFns[topic]
+
+            if (relayFn) {
+              relayIntervals[topic] = setInterval(() => {
+                void relayFn()
+              }, nextInterval)
+            }
           }
 
-          handledSignals[signalKey] = nowMs
-
-          entries(handledSignals).forEach(([key, handledAtMs]) => {
-            if (nowMs - handledAtMs > signalDedupeWindowMs * 6) {
-              delete handledSignals[key]
+          if ((data.offer || data.answer) && topic && data.offer_id) {
+            if (data.peer_id === selfId) {
+              return
             }
-          })
 
-          msgHandlers[client.url]?.[topic]?.(data)
-        }
-      })
+            const signalType = data.offer ? 'offer' : 'answer'
+            const signalKey = `${topic}:${signalType}:${data.offer_id}:${data.peer_id ?? ''}`
+            const nowMs = Date.now()
+            const lastHandledMs = handledSignals[signalKey]
 
-      const {url} = client
+            if (
+              typeof lastHandledMs === 'number' &&
+              nowMs - lastHandledMs < signalDedupeWindowMs
+            ) {
+              return
+            }
 
-      clients[url] = client
-      msgHandlers[url] = {}
+            handledSignals[signalKey] = nowMs
+
+            entries(handledSignals).forEach(([key, handledAtMs]) => {
+              if (nowMs - handledAtMs > signalDedupeWindowMs * 6) {
+                delete handledSignals[key]
+              }
+            })
+
+            msgHandlers.forKey(rawUrl)[topic]?.(data)
+          }
+        })
+      )
 
       return client.ready
     }),
 
   subscribe: (client, rootTopic, _, onMessage, getOffers) => {
-    const {url} = client
-    const handlers = (msgHandlers[url] ??= {})
-    const relayFns = (announceFns[url] ??= {})
-    const relayIntervals = (announceIntervals[url] ??= {})
-    const activeTokens = (subscriptionTokens[url] ??= {})
+    const handlers = msgHandlers.forRelay(client)
+    const relayFns = announceFns.forRelay(client)
+    const relayIntervals = announceIntervals.forRelay(client)
+    const activeTokens = subscriptionTokens.forRelay(client)
     const subscriptionToken = Symbol(rootTopic)
     const outstandingOffers: Record<string, OfferRecord & {createdAt: number}> =
       {}
@@ -288,9 +278,12 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       })
     }
 
-    trackerAnnounceMs[url] = defaultAnnounceMs
+    trackerAnnounceMs[client.url] = defaultAnnounceMs
     relayFns[rootTopic] = announce
-    relayIntervals[rootTopic] = setInterval(announce, trackerAnnounceMs[url])
+    relayIntervals[rootTopic] = setInterval(
+      announce,
+      trackerAnnounceMs[client.url]
+    )
     void announce()
 
     return () => {
@@ -334,7 +327,7 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = (
     callbacks
   )
 
-export const getRelaySockets = socketGetter(clients)
+export const getRelaySockets = relayManager.getSockets
 
 export {pauseRelayReconnection, resumeRelayReconnection, selfId}
 

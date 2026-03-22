@@ -1,5 +1,6 @@
 import mqtt from 'mqtt'
 import {
+  createRelayManager,
   createStrategy,
   getRelays,
   selfId,
@@ -9,32 +10,23 @@ import {
   type RelayConfig
 } from '@trystero-p2p/core'
 
-const sockets: Record<string, WebSocket> = {}
 const defaultRedundancy = 4
-const msgHandlers: Record<
-  string,
-  Record<string, ((topic: string, data: string) => void) | undefined>
-> = {}
-const subscriptionTokens: Record<string, Record<string, symbol>> = {}
-const subscriptionRefs: Record<string, Record<string, number>> = {}
+const relayManager = createRelayManager<mqtt.MqttClient>(
+  client =>
+    (client.stream as {socket?: WebSocket} | undefined)?.socket as
+      | WebSocket
+      | undefined
+)
+const msgHandlers = relayManager.scoped<(topic: string, data: string) => void>()
+const subscriptionTokens = relayManager.scoped<symbol>()
+const subscriptionRefs = relayManager.scoped<number>()
 export type MqttRoomConfig = BaseRoomConfig & RelayConfig
-
-const getClientId = (client: mqtt.MqttClient): string => {
-  const options = client.options as mqtt.IClientOptions & {
-    host?: string
-    path?: string
-  }
-  return `${options.host ?? ''}${options.path ?? ''}`
-}
 
 export const joinRoom: JoinRoom<MqttRoomConfig> = createStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
-      const client = mqtt.connect(url)
-      const clientId = getClientId(client)
-      const handlers = (msgHandlers[clientId] ??= {})
-
-      sockets[clientId] = client.stream.socket as WebSocket
+      const client = relayManager.register(url, mqtt.connect(url))
+      const handlers = msgHandlers.forRelay(client)
 
       client
         .on('message', (topic, buffer) =>
@@ -48,10 +40,9 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createStrategy({
     }),
 
   subscribe: (client, rootTopic, selfTopic, onMessage) => {
-    const clientId = getClientId(client)
-    const handlers = (msgHandlers[clientId] ??= {})
-    const tokens = (subscriptionTokens[clientId] ??= {})
-    const refs = (subscriptionRefs[clientId] ??= {})
+    const handlers = msgHandlers.forRelay(client)
+    const tokens = subscriptionTokens.forRelay(client)
+    const refs = subscriptionRefs.forRelay(client)
     const token = Symbol(`${rootTopic}|${selfTopic}`)
     const topicHandler = (topic: string, data: string): void => {
       void onMessage(topic, data, (peerTopic, signal) => {
@@ -111,7 +102,7 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createStrategy({
   }
 })
 
-export const getRelaySockets = (): Record<string, WebSocket> => ({...sockets})
+export const getRelaySockets = relayManager.getSockets
 
 export {selfId}
 

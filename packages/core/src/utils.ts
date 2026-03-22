@@ -182,6 +182,62 @@ export const socketGetter =
       entries(clientMap).map(([url, client]) => [url, client.socket])
     ) as Record<string, WebSocket>
 
+type RelayScopedStore<T, TRelay extends object> = {
+  forKey: (key: string) => Record<string, T>
+  forRelay: (relay: TRelay) => Record<string, T>
+}
+
+export const createRelayManager = <TRelay extends object>(
+  getSocket: (relay: TRelay) => WebSocket | undefined
+): {
+  register: (key: string, relay: TRelay) => TRelay
+  keyOf: (relay: TRelay) => string
+  scoped: <T>() => RelayScopedStore<T, TRelay>
+  getSockets: () => Record<string, WebSocket>
+} => {
+  const relays: Record<string, TRelay> = {}
+  const keysByRelay = new WeakMap<TRelay, string>()
+
+  const keyOf = (relay: TRelay): string => {
+    const key = keysByRelay.get(relay)
+
+    if (!key) {
+      throw mkErr('relay bookkeeping missing registration for relay client')
+    }
+
+    return key
+  }
+
+  const scoped = <T>(): RelayScopedStore<T, TRelay> => {
+    const store: Record<string, Record<string, T>> = {}
+    const forKey = (key: string): Record<string, T> => (store[key] ??= {})
+
+    return {
+      forKey,
+      forRelay: relay => forKey(keyOf(relay))
+    }
+  }
+
+  return {
+    register: (key, relay) => {
+      relays[key] = relay
+      keysByRelay.set(relay, key)
+
+      return relay
+    },
+    keyOf,
+    scoped,
+    getSockets: () =>
+      fromEntries(
+        entries(relays).flatMap(([key, relay]) => {
+          const socket = getSocket(relay)
+
+          return socket ? [[key, socket]] : []
+        })
+      ) as Record<string, WebSocket>
+  }
+}
+
 export const watchOnline = (): (() => void) => {
   if (isBrowser) {
     const controller = new AbortController()

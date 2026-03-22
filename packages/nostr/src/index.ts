@@ -1,5 +1,6 @@
 import {schnorr} from '@noble/secp256k1'
 import {
+  createRelayManager,
   createStrategy,
   fromJson,
   genId,
@@ -10,7 +11,6 @@ import {
   pauseRelayReconnection,
   resumeRelayReconnection,
   selfId,
-  socketGetter,
   strToNum,
   toHex,
   toJson,
@@ -20,7 +20,7 @@ import {
   type SocketClient
 } from '@trystero-p2p/core'
 
-const clients: Record<string, SocketClient> = {}
+const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const defaultRedundancy = 5
 const tag = 'x'
 const eventMsgType = 'EVENT'
@@ -96,31 +96,34 @@ const unsubscribe = (subId: string): string => {
 export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
-      const client = makeSocket(url, data => {
-        const [msgType, subId, payload, relayMsg] =
-          fromJson<[string, string, {content: string} | boolean, string]>(data)
+      const client = relayManager.register(
+        url,
+        makeSocket(url, data => {
+          const [msgType, subId, payload, relayMsg] =
+            fromJson<[string, string, {content: string} | boolean, string]>(
+              data
+            )
 
-        if (msgType !== eventMsgType) {
-          const prefix = `${libName}: relay failure from ${client.url} - `
+          if (msgType !== eventMsgType) {
+            const prefix = `${libName}: relay failure from ${client.url} - `
 
-          if (msgType === 'NOTICE') {
-            console.warn(prefix + subId)
-          } else if (msgType === 'OK' && !payload) {
-            console.warn(prefix + relayMsg)
+            if (msgType === 'NOTICE') {
+              console.warn(prefix + subId)
+            } else if (msgType === 'OK' && !payload) {
+              console.warn(prefix + relayMsg)
+            }
+
+            return
           }
 
-          return
-        }
-
-        if (payload && typeof payload === 'object' && 'content' in payload) {
-          msgHandlers[subId]?.(
-            subIdToTopic[subId] ?? '',
-            String((payload as {content: string}).content)
-          )
-        }
-      })
-
-      clients[url] = client
+          if (payload && typeof payload === 'object' && 'content' in payload) {
+            msgHandlers[subId]?.(
+              subIdToTopic[subId] ?? '',
+              String((payload as {content: string}).content)
+            )
+          }
+        })
+      )
 
       return client.ready
     }),
@@ -150,7 +153,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
     client.send(await createEvent(rootTopic, toJson({peerId: selfId})))
 })
 
-export const getRelaySockets = socketGetter(clients)
+export const getRelaySockets = relayManager.getSockets
 
 export {pauseRelayReconnection, resumeRelayReconnection, selfId}
 
