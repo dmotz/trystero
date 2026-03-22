@@ -92,10 +92,9 @@ const testMqttRelay = async (url: string): Promise<string> => {
 
   try {
     await new Promise<void>((resolve, reject) => {
-      client.on('connect', () => {
-        timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
-        resolve()
-      })
+      timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
+
+      client.on('connect', () => resolve())
       client.on('error', error => reject(error))
     })
 
@@ -121,9 +120,9 @@ const testSocketRelay = async (
 
   try {
     await new Promise<void>((resolve, reject) => {
-      socket.on('open', async () => {
-        timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
+      timeout = setTimeout(() => reject(new Error('timeout')), timeLimitMs)
 
+      socket.on('open', async () => {
         if (strategy !== 'nostr') {
           resolve()
           return
