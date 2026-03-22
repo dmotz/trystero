@@ -60,6 +60,78 @@ class MockPeer {
   replaceTrack() {}
 }
 
+class LinkedPeer {
+  created = Date.now()
+  connection = {}
+  channel = {readyState: 'open', bufferedAmount: 0, bufferedAmountLowThreshold: 0}
+  isDead = false
+  handlers = {}
+  offerPromise = Promise.resolve()
+  partner = null
+
+  async getOffer() {}
+
+  async signal() {}
+
+  sendData(data) {
+    this.partner?.handlers.data?.(data.slice().buffer)
+  }
+
+  destroy() {
+    if (this.isDead) {
+      return
+    }
+
+    this.isDead = true
+    this.handlers.close?.()
+  }
+
+  setHandlers(newHandlers) {
+    Object.assign(this.handlers, newHandlers)
+  }
+
+  addStream() {}
+  removeStream() {}
+  addTrack() {}
+  removeTrack() {}
+  replaceTrack() {}
+}
+
+const createJoinedRooms = async () => {
+  let registerPeerA = null
+  let registerPeerB = null
+  const roomA = room(
+    f => {
+      registerPeerA = f
+    },
+    () => {},
+    () => {}
+  )
+  const roomB = room(
+    f => {
+      registerPeerB = f
+    },
+    () => {},
+    () => {}
+  )
+  const joinA = new Promise(resolve => roomA.onPeerJoin(resolve))
+  const joinB = new Promise(resolve => roomB.onPeerJoin(resolve))
+  const peerA = new LinkedPeer()
+  const peerB = new LinkedPeer()
+
+  peerA.partner = peerB
+  peerB.partner = peerA
+
+  assert.ok(registerPeerA, 'expected first room to register its peer callback')
+  assert.ok(registerPeerB, 'expected second room to register its peer callback')
+  registerPeerA(peerA, 'peer-b')
+  registerPeerB(peerB, 'peer-a')
+
+  await Promise.all([joinA, joinB])
+
+  return {roomA, roomB}
+}
+
 void test('Trystero: remote leave packets fire peer-leave callbacks once', async () => {
   let registerPeer = null
   const strategyPeerLeaves = []
@@ -94,3 +166,60 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
 
   await roomRef.leave()
 })
+
+void test(
+  'Trystero: metadata is delivered for non-binary payloads and falsy values',
+  async () => {
+    const {roomA, roomB} = await createJoinedRooms()
+
+    try {
+      const textReceived = new Promise(resolve =>
+        roomB
+          .makeAction('text-meta')[1]((payload, peerId, metadata) =>
+            resolve({payload, peerId, metadata})
+          )
+      )
+
+      await roomA.makeAction('text-meta')[0]('hello', undefined, false)
+
+      assert.deepEqual(await textReceived, {
+        payload: 'hello',
+        peerId: 'peer-a',
+        metadata: false
+      })
+
+      const jsonReceived = new Promise(resolve =>
+        roomB
+          .makeAction('json-meta')[1]((payload, peerId, metadata) =>
+            resolve({payload, peerId, metadata})
+          )
+      )
+
+      await roomA.makeAction('json-meta')[0]({kind: 'object'}, undefined, 0)
+
+      assert.deepEqual(await jsonReceived, {
+        payload: {kind: 'object'},
+        peerId: 'peer-a',
+        metadata: 0
+      })
+
+      await roomA.makeAction('queued-meta')[0]('later', undefined, null)
+      await tick()
+
+      const queuedReceived = new Promise(resolve =>
+        roomB
+          .makeAction('queued-meta')[1]((payload, peerId, metadata) =>
+            resolve({payload, peerId, metadata})
+          )
+      )
+
+      assert.deepEqual(await queuedReceived, {
+        payload: 'later',
+        peerId: 'peer-a',
+        metadata: null
+      })
+    } finally {
+      await Promise.all([roomA.leave(), roomB.leave()])
+    }
+  }
+)

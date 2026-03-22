@@ -456,10 +456,6 @@ export default (
       },
 
       send: async (data, targets, meta, onProgress) => {
-        if (meta && typeof meta !== 'object') {
-          throw mkErr('action meta argument must be an object')
-        }
-
         const dataType = typeof data
 
         if (dataType === 'undefined') {
@@ -470,10 +466,7 @@ export default (
         const isBlob = data instanceof Blob
         const isBinary =
           isBlob || data instanceof ArrayBuffer || data instanceof TypedArray
-
-        if (meta && !isBinary) {
-          throw mkErr('action meta argument can only be used with binary data')
-        }
+        const hasMeta = meta !== undefined
 
         const buffer = isBinary
           ? toByteArray(
@@ -483,21 +476,21 @@ export default (
             )
           : encodeBytes(isJson ? toJson(data) : (data as string))
 
-        const metaEncoded = meta ? encodeBytes(toJson(meta)) : null
+        const metaEncoded = hasMeta ? encodeBytes(toJson(meta)) : null
 
         const chunkTotal =
-          Math.ceil(buffer.byteLength / chunkSize) + (meta ? 1 : 0) || 1
+          Math.ceil(buffer.byteLength / chunkSize) + (hasMeta ? 1 : 0) || 1
 
         const chunks = alloc(chunkTotal, (_, i) => {
           const isLast = i === chunkTotal - 1
-          const isMeta = Boolean(meta && i === 0)
+          const isMeta = Boolean(hasMeta && i === 0)
           const chunk = new Uint8Array(
             payloadIndex +
               (isMeta
                 ? (metaEncoded?.byteLength ?? 0)
                 : isLast
                   ? buffer.byteLength -
-                    chunkSize * (chunkTotal - (meta ? 2 : 1))
+                    chunkSize * (chunkTotal - (hasMeta ? 2 : 1))
                   : chunkSize)
           )
 
@@ -517,7 +510,7 @@ export default (
             progressIndex
           )
           chunk.set(
-            meta
+            hasMeta
               ? isMeta
                 ? (metaEncoded ?? new Uint8Array())
                 : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
@@ -662,11 +655,12 @@ export default (
       const decoded = isJson ? fromJson<JsonValue>(text) : text
 
       if (action) {
-        action.onComplete(decoded, id)
+        action.onComplete(decoded, id, target.meta)
       } else {
         ;(pendingActionPayloads[type] ??= []).push({
           payload: decoded,
-          peerId: id
+          peerId: id,
+          ...(target.meta === undefined ? {} : {metadata: target.meta})
         })
       }
     }
