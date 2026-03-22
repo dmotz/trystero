@@ -370,8 +370,8 @@ export default (
 
     const wasActive = Boolean(activePeerMap[id])
 
-    current.destroy()
     clearPeerState(id, reason)
+    current.destroy()
 
     if (wasActive) {
       listeners.onPeerLeave(id)
