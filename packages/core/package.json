@@ -1,0 +1,41 @@
+{
+  "name": "@trystero-p2p/core",
+  "version": "0.23.0",
+  "description": "Core primitives for Trystero strategy implementations",
+  "keywords": [
+    "bittorrent",
+    "chat",
+    "decentralized",
+    "firebase",
+    "ipfs",
+    "matchmaking",
+    "mqtt",
+    "nostr",
+    "p2p",
+    "pairing",
+    "peer to peer",
+    "react",
+    "realtime",
+    "serverless",
+    "signaling",
+    "supabase",
+    "torrent",
+    "webrtc",
+    "webtorrent"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Dan Motzenbecker",
+    "email": "dan@oxism.com",
+    "url": "https://oxism.com"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  }
+}

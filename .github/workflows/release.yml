@@ -1,0 +1,84 @@
+name: Publish packages and release bundles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages and browser bundles
+        run: pnpm build
+
+      - name: Read release version
+        id: version
+        run: |
+          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('packages/trystero/package.json', 'utf8')).version")"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check if version already exists on npm
+        id: npm
+        run: |
+          if npm view "trystero@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Publish all packages to npm
+        if: steps.npm.outputs.published == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm changeset:publish
+
+      - name: Check if GitHub release already exists
+        id: gh_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Create GitHub release with JS bundles
+        if: steps.gh_release.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/trystero-*.min.js
+            dist/trystero-*.min.js.map

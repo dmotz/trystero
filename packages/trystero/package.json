@@ -1,0 +1,50 @@
+{
+  "name": "trystero",
+  "version": "0.23.0",
+  "description": "Serverless peer-to-peer for the web",
+  "keywords": [
+    "bittorrent",
+    "chat",
+    "decentralized",
+    "firebase",
+    "ipfs",
+    "matchmaking",
+    "mqtt",
+    "nostr",
+    "p2p",
+    "pairing",
+    "peer to peer",
+    "react",
+    "realtime",
+    "serverless",
+    "signaling",
+    "supabase",
+    "torrent",
+    "webrtc",
+    "webtorrent"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Dan Motzenbecker",
+    "email": "dan@oxism.com",
+    "url": "https://oxism.com"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./firebase": "./dist/firebase.mjs",
+    "./ipfs": "./dist/ipfs.mjs",
+    "./mqtt": "./dist/mqtt.mjs",
+    "./nostr": "./dist/nostr.mjs",
+    "./supabase": "./dist/supabase.mjs",
+    "./torrent": "./dist/torrent.mjs",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@trystero-p2p/nostr": "workspace:*"
+  }
+}

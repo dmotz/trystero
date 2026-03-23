@@ -1,0 +1,38 @@
+{
+  "name": "@trystero-p2p/nostr",
+  "version": "0.23.0",
+  "description": "Nostr strategy for Trystero",
+  "keywords": [
+    "chat",
+    "decentralized",
+    "matchmaking",
+    "nostr",
+    "p2p",
+    "pairing",
+    "peer to peer",
+    "react",
+    "realtime",
+    "serverless",
+    "signaling",
+    "webrtc"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Dan Motzenbecker",
+    "email": "dan@oxism.com",
+    "url": "https://oxism.com"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@noble/secp256k1": "^3.0.0",
+    "@trystero-p2p/core": "workspace:*"
+  }
+}

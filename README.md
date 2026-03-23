@@ -2,20 +2,13 @@
 
 **Build instant multiplayer web apps, no server required**
 
-👉 **[TRY THE DEMO](https://oxism.com/trystero)** 👈
+👉 **[Try it live on trystero.dev](https://trystero.dev)** 👈
 
-Trystero manages a clandestine courier network that lets your application's
-users talk directly with one another, encrypted and without a server middleman.
+Trystero makes browsers discover each other and communicate directly. No
+accounts. No deploying infrastructure. Just import and connect.
 
-The net is full of open, decentralized communication channels: torrent trackers,
-IoT device brokers, boutique file protocols, and niche social networks.
-
-Trystero piggybacks on these networks to automatically establish secure,
-private, P2P connections between your app's users with no effort on your part.
-
-Peers can connect via
-[🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥 Firebase, or 🪐 IPFS](#strategy-comparison)
-– all using the same API.
+Peers can connect via 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥Firebase,
+or 🪐 IPFS – all using the same API.
 
 Besides making peer matching automatic, Trystero offers some nice abstractions
 on top of WebRTC:
@@ -26,7 +19,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
-- 🏭⚡ Runs server-side
+- 🏭⚡ Can run peers server-side on Node and Bun
 - ⚛️🪝 React hooks
 
 You can see what people are building with Trystero
@@ -47,17 +40,18 @@ You can see what people are building with Trystero
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
-  - [Connection issues](#connection-issues)
-  - [Running server-side (Node, Deno, Bun)](#running-server-side-node-deno-bun)
+  - [Troubleshooting connection issues](#troubleshooting-connection-issues)
+  - [Running server-side (Node, Bun)](#running-server-side-node-bun)
+  - [Write your own strategy](#write-your-own-strategy)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
-  - [`joinRoom(config, roomId, [onJoinError])`](#joinroomconfig-roomid-onjoinerror)
+  - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
   - [`selfId`](#selfid)
   - [`getRelaySockets()`](#getrelaysockets)
-  - [`getOccupants(config, roomId)`](#getoccupantsconfig-roomid)
-- [Strategy comparison](#strategy-comparison)
-  - [How to choose](#how-to-choose)
+  - [`pauseRelayReconnection()`](#pauserelayreconnection)
+  - [`resumeRelayReconnection()`](#resumerelayreconnection)
+- [Which strategy should I choose?](#which-strategy-should-i-choose)
 
 ---
 
@@ -82,19 +76,22 @@ The important point to remember is this:
 >
 > 👆
 
-You can [compare strategies here](#strategy-comparison).
+You can [compare strategies here](#which-strategy-should-i-choose).
 
 ## Get started
 
-You can install with npm (`npm i trystero`) and import like so:
+Install Trystero with your preferred package manager, then import it in your
+code:
+
+```sh
+npm i trystero
+```
 
 ```js
 import {joinRoom} from 'trystero'
 ```
 
-Or maybe you prefer a simple script tag? You can just import Trystero from a CDN
-or download and locally host a JS bundle from the
-[latest release](https://github.com/dmotz/trystero/releases/latest):
+No package manager? You can also use a CDN:
 
 ```html
 <script type="module">
@@ -102,19 +99,19 @@ or download and locally host a JS bundle from the
 </script>
 ```
 
-By default, the [Nostr strategy](#strategy-comparison) is used. To use a
-different one, just use a deep import like this:
+The default Trystero package runs on the Nostr network, but you can swap in any
+other stategy by changing which package you import:
 
 ```js
-import {joinRoom} from 'trystero/mqtt' // (trystero-mqtt.min.js with a local file)
+import {joinRoom} from '@trystero-p2p/mqtt'
 // or
-import {joinRoom} from 'trystero/torrent' // (trystero-torrent.min.js)
+import {joinRoom} from '@trystero-p2p/torrent'
 // or
-import {joinRoom} from 'trystero/supabase' // (trystero-supabase.min.js)
+import {joinRoom} from '@trystero-p2p/supabase'
 // or
-import {joinRoom} from 'trystero/firebase' // (trystero-firebase.min.js)
+import {joinRoom} from '@trystero-p2p/firebase'
 // or
-import {joinRoom} from 'trystero/ipfs' // (trystero-ipfs.min.js)
+import {joinRoom} from '@trystero-p2p/ipfs'
 ```
 
 Next, join the user to a room with an ID:
@@ -184,7 +181,7 @@ const stream = await navigator.mediaDevices.getUserMedia({
 room.addStream(stream)
 ```
 
-Send and subscribe to custom P2P actions:
+Send and subscribe to custom peer-to-peer actions:
 
 ```js
 const [sendDrink, getDrink] = room.makeAction('drink')
@@ -201,6 +198,14 @@ getDrink((data, peerId) =>
     `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${peerId}`
   )
 )
+```
+
+If you're using TypeScript, you can add a type hint to the action:
+
+```typescript
+type CursorMove = {x: number; y: number}
+
+const [sendCursor, getCursor] = room.makeAction<CursorMove>('cursor-move')
 ```
 
 You can also use actions to send binary data, like images:
@@ -480,7 +485,7 @@ export const useRoom = (roomConfig, roomId) => {
 }
 ```
 
-### Connection issues
+### Troubleshooting connection issues
 
 WebRTC is powerful but some networks simply don't allow direct P2P connections
 using it. If you find that certain user pairings aren't working in Trystero,
@@ -521,25 +526,104 @@ aren't able to connect directly to one another.
    )
    ```
 
-### Running server-side (Node, Deno, Bun)
+### Running server-side (Node, Bun)
 
-Trystero works wherever JS runs, including server-side like Node, Deno, or Bun.
-Why would you want to run something that helps you avoid servers on a server?
-One reason is if you want an always-on peer which can be useful for remembering
-the last state of data, broadcasting it to new users. Another reason might be to
-run peers that are lighter weight and don't need a full browser running, like an
-embedded device or Raspberry Pi.
+Trystero works outside browsers too, like in Node or Bun. Why would you want to
+run something that helps you avoid servers on a server? One reason is if you
+want an always-on peer which can be useful for remembering the last state of
+data, broadcasting it to new users. Another reason might be to run peers that
+are lighter weight and don't need a full browser running, like an embedded
+device or Raspberry Pi.
 
 Running server-side uses the same syntax as in the browser, but you need to
 import a polyfill for WebRTC support:
 
 ```js
 import {joinRoom} from 'trystero'
-import {RTCPeerConnection} from 'node-datachannel/polyfill'
+import {RTCPeerConnection} from 'werift'
 
 const room = joinRoom(
   {appId: 'your-app-id', rtcPolyfill: RTCPeerConnection},
   'your-room-name'
+)
+```
+
+### Write your own strategy
+
+If you want to provide your own signaling backend, you can build a custom
+strategy with `createStrategy`.
+
+The example below assumes a WebSocket relay that does simple pub/sub routing:
+
+- Client sends
+  `{"type": "subscribe" | "unsubscribe" | "publish", "topic", "payload"}`
+- Server broadcasts `{"topic", "payload"}` to subscribers of each topic
+
+```js
+import {createStrategy, selfId, toJson} from '@trystero-p2p/core'
+
+export const joinRoom = createStrategy({
+  // Define init as a function that returns a promise of your signaling client.
+  // Resolve the promise when your client is ready to send messages.
+  // You can also return an array of client promises for redundancy.
+  // In this case, the client is a single WebSocket.
+  init: config =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(config.relayUrl)
+      ws.addEventListener('open', () => resolve(ws), {once: true})
+      ws.addEventListener('error', reject, {once: true})
+    }),
+
+  // Subscribe takes 5 arguments:
+  // 1. One of the relay clients you defined in init.
+  // 2. rootTopic is the channel where peers in a room announce their presence.
+  // 3. selfTopic is the current peer's own channel where messages specific to
+  //    it should flow (i.e. offers and answers from external peers).
+  // 4. onMessage is a function that should be called when your relay client
+  // gets a message. Call it with the topic, data payload, and a callback
+  // function that takes another topic and payload.
+  // 5. getOffers is an optional helper for precomputed offers (only needed if
+  // the strategy needs to send offers in bulk, like torrents).
+  // It should return a cleanup function that unsubscribes
+  subscribe: (client, rootTopic, selfTopic, onMessage, _getOffers) => {
+    const topics = [rootTopic, selfTopic]
+    const onWsMessage = event => {
+      const {topic, payload} = JSON.parse(String(event.data))
+
+      if (!topics.includes(topic)) {
+        return
+      }
+
+      onMessage(topic, payload, (peerTopic, signal) =>
+        client.send(
+          toJson({type: 'publish', topic: peerTopic, payload: signal})
+        )
+      )
+    }
+
+    client.addEventListener('message', onWsMessage)
+    topics.forEach(topic => client.send(toJson({type: 'subscribe', topic})))
+
+    return () => {
+      topics.forEach(topic => client.send(toJson({type: 'unsubscribe', topic})))
+      client.removeEventListener('message', onWsMessage)
+    }
+  },
+
+  // announce takes a relay client and a rootTopic
+  announce: (client, rootTopic) =>
+    client.send(
+      toJson({
+        type: 'publish',
+        topic: rootTopic,
+        payload: toJson({peerId: selfId})
+      })
+    )
+})
+
+const room = joinRoom(
+  {appId: 'my-app-id', relayUrl: 'wss://my-relay.example'},
+  'my-room-id'
 )
 ```
 
@@ -589,7 +673,7 @@ known ahead of time.
 
 ## API
 
-### `joinRoom(config, roomId, [onJoinError])`
+### `joinRoom(config, roomId, [callbacks])`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events. Calling `joinRoom()` multiple times with
@@ -615,17 +699,23 @@ the same namespace will return the same room instance.
     They must support secure WebSocket connections.
 
   - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
-    Integer specifying how many torrent trackers to connect to simultaneously in
-    case some fail. Passing a `relayUrls` option will cause this option to be
-    ignored as the entire list will be used.
+    Integer specifying how many relay endpoints to connect to simultaneously.
+    Passing a `relayUrls` option will cause this option to be ignored as the
+    entire list will be used.
 
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
     for all peer connections.
 
+  - `trickleIce` - **(optional)** Boolean controlling whether ICE candidates are
+    sent incrementally (`true`) or bundled with SDP (`false`). Default is
+    strategy-dependent: `true` for most strategies, `false` for BitTorrent and
+    IPFS unless explicitly set.
+
   - `turnConfig` - **(optional)** Specifies a custom list of TURN servers to use
-    (see [Connection issues](#connection-issues) section). Each item in the list
-    should correspond to an
+    (see
+    [Troubleshooting connection issues](#troubleshooting-connection-issues)).
+    Each item in the list should correspond to an
     [ICE server config object](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection#iceservers).
     When passing a TURN config like this, Trystero's default STUN servers will
     also be used. To override this and use both custom STUN and TURN servers,
@@ -658,10 +748,55 @@ the same namespace will return the same room instance.
 
 - `roomId` - A string to namespace peers and events within a room.
 
-- `onJoinError(details)` - **(optional)** A callback function that will be
-  called if the room cannot be joined due to an incorrect password. `details` is
-  an object containing `appId`, `roomId`, `peerId`, and `error` describing the
-  error.
+- `callbacks` - **(optional)** Callback config object containing:
+  - `onJoinError(details)` - Called when room join fails due to an incorrect
+    password or when handshake admission fails (including timeout). `details` is
+    an object containing `appId`, `roomId`, `peerId`, and `error` describing the
+    failure.
+
+  - `onPeerHandshake(peerId, send, receive, isInitiator)` - Async predicate that
+    runs after the transport connects but before the peer becomes active.
+    Return/resolve to accept the peer, throw/reject to deny the peer.
+    - `peerId` - ID of the pending peer.
+    - `send(data, [metadata])` - Sends handshake payloads to the pending peer.
+    - `receive()` - Resolves to the next handshake message from the peer as
+      `{data, metadata}`.
+    - `isInitiator` - Deterministic role flag for avoiding protocol deadlocks.
+
+  - `handshakeTimeoutMs` - Timeout for pending handshakes in milliseconds
+    (`10000` by default). If exceeded, the peer is denied and `onJoinError` is
+    called.
+
+  During handshake, the peer remains pending and is not included in `getPeers()`
+  and does not trigger Trystero API events (`onPeerJoin`, action receivers,
+  stream/track callbacks). Non-handshake data received while pending is dropped.
+
+  Minimal handshake example:
+
+  ```js
+  import {joinRoom} from 'trystero'
+
+  const room = joinRoom({appId: 'my-app'}, 'secure-room', {
+    onPeerHandshake: async (_, send, receive, isInitiator) => {
+      if (isInitiator) {
+        await send({challenge: 'prove-you-know-the-secret'})
+        const {data} = await receive()
+
+        if (data?.response !== 'shared-secret') {
+          throw new Error('handshake rejected')
+        }
+      } else {
+        const {data} = await receive()
+
+        if (data?.challenge !== 'prove-you-know-the-secret') {
+          throw new Error('handshake rejected')
+        }
+
+        await send({response: 'shared-secret'})
+      }
+    }
+  })
+  ```
 
 Returns an object with the following methods:
 
@@ -731,10 +866,14 @@ Returns an object with the following methods:
   - `targetPeers` - **(optional)** If specified, the track is replaced only for
     the target peer ID (string) or list of peer IDs (array).
 
+  - `metadata` - **(optional)** Additional metadata (any serializable type) to
+    be sent with the replacement track.
+
 - ### `onPeerJoin(callback)`
 
   Registers a callback function that will be called when a peer joins the room.
   If called more than once, only the latest callback registered is ever called.
+  Existing active peers are immediately replayed to a newly registered callback.
   - `callback(peerId)` - Function to run whenever a peer joins, called with the
     peer's ID.
 
@@ -799,7 +938,7 @@ Returns an object with the following methods:
   Returns an array of three functions:
   1. #### Sender
      - Sends data to peers and returns a promise that resolves when all target
-       peers are finished receiving data.
+       peers are finished sending locally.
 
      - `(data, [targetPeers], [metadata], [onProgress])`
        - `data` - Any value to send (primitive, object, binary). Serialization
@@ -893,7 +1032,9 @@ failures.
 Example:
 
 ```js
-console.log(trystero.getRelaySockets())
+import {getRelaySockets} from '@trystero-p2p/torrent'
+
+console.log(getRelaySockets())
 // => Object {
 //  "wss://tracker.webtorrent.dev": WebSocket,
 //  "wss://tracker.openwebtorrent.com": WebSocket
@@ -909,58 +1050,21 @@ room config. Calling this function stops relay reconnection attempts until
 
 ### `resumeRelayReconnection()`
 
-**(🐦 Nostr, 🌊 BitTorrent, only)** Allows relay reconnection attempts to
-resume. (See `pauseRelayReconnection()` above).
+**(🐦 Nostr, 🌊 BitTorrent only)** Allows relay reconnection attempts to resume.
+(See `pauseRelayReconnection()` above).
 
-### `getOccupants(config, roomId)`
+## Which strategy should I choose?
 
-**(🔥 Firebase only)** Returns a promise that resolves to a list of user IDs
-present in the given namespace. This is useful for checking how many users are
-in a room without joining it.
+By default Trystero uses the Nostr network which is highly decentralized with
+hundreds of active relays running. This is a good choice if you're interested in
+decentralization and high redundancy. The other decentralized strategies are
+recommended in the order of MQTT, BitTorrent, and IPFS, based on robustness.
+These networks have far less relay redundancy than Nostr, but you might prefer
+them for other reasons. You can of course host your own relay server for any of
+these strategies.
 
-- `config` - A configuration object
-- `roomId` - A namespace string that you'd pass to `joinRoom()`.
-
-Example:
-
-```js
-console.log((await trystero.getOccupants(config, 'the_scope')).length)
-// => 3
-```
-
-## Strategy comparison
-
-|                   | one-time setup¹ | bundle size² |
-| ----------------- | --------------- | ------------ |
-| 🐦 **Nostr**      | none            | 8K           |
-| 📡 **MQTT**       | none            | 75K          |
-| 🌊 **BitTorrent** | none            | 5K           |
-| ⚡️ **Supabase**   | ~5 mins         | 28K          |
-| 🔥 **Firebase**   | ~5 mins         | 45K          |
-| 🪐 **IPFS**       | none            | 119K         |
-
-**¹** All strategies except Supabase and Firebase require zero setup. Supabase
-and Firebase are managed strategies which require setting up an account.
-
-**²** Calculated via Terser minification + Brotli compression.
-
-### How to choose
-
-Trysteroʼs unique advantage is that it requires zero backend setup and uses
-decentralized infrastructure in most cases. This allows for frictionless
-experimentation and no single point of failure. One potential drawback is that
-itʼs difficult to guarantee that the public infrastructure it uses will always
-be highly available, even with the redundancy techniques Trystero uses. While
-the other strategies are decentralized, the Supabase and Firebase strategies are
-a more managed approach with greater control and an SLA, which might be more
-appropriate for “production” apps.
-
-Trystero makes it trivial to switch between strategies — just change a single
-import line and quickly experiment:
-
-```js
-import {joinRoom} from 'trystero/[nostr|mqtt|torrent|supabase|firebase|ipfs]'
-```
+For a middleground between using public relays and self-hosting, the built-in
+Supabase and Firebase strategies are a good option.
 
 ---
 

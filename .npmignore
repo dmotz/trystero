@@ -4,7 +4,9 @@ scripts/
 test/
 test-results/
 .gitignore
-.prettierrc
-eslint.config.js
-playwright.config.js
-rollup.config.js
+.oxfmtrc.json
+.oxlintrc.json
+knip.json
+playwright.config.ts
+rolldown.config.ts
+_ignore
