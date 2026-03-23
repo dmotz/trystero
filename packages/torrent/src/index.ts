@@ -29,9 +29,16 @@ const subscriptionTokens = relayManager.scoped<symbol>()
 const trackerAnnounceMs: Record<string, number> = {}
 const handledSignals: Record<string, number> = {}
 const msgHandlers = relayManager.scoped<(data: TrackerMessage) => void>()
+const roomOutstandingOffers: Record<
+  string,
+  Record<string, OfferRecord & {createdAt: number}>
+> = {}
+const roomOfferGenerationPromises: Record<string, Promise<void> | undefined> =
+  {}
+const roomSubscriberCounts: Record<string, number> = {}
 const trackerAction = 'announce'
 const hashLimit = 20
-const offerPoolSize = 10
+const offerPoolSize = 3
 const defaultAnnounceMs = 10_000
 const maxAnnounceMs = 20_000
 const offerRetentionMs = 120_000
@@ -67,7 +74,7 @@ const send = async (
   client: SocketClient,
   topic: string,
   payload: Record<string, unknown>
-): Promise<void> => {
+): Promise<void> =>
   client.send(
     toJson({
       action: trackerAction,
@@ -76,12 +83,110 @@ const send = async (
       ...payload
     })
   )
-}
 
 const warn = (url: string, msg: string, didFail = false): void =>
   console.warn(
     `${libName}: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
   )
+
+const getRoomOutstandingOffers = (
+  rootTopic: string
+): Record<string, OfferRecord & {createdAt: number}> =>
+  (roomOutstandingOffers[rootTopic] ??= {})
+
+const deleteRoomOfferBookkeeping = (rootTopic: string): void => {
+  delete roomOutstandingOffers[rootTopic]
+  delete roomOfferGenerationPromises[rootTopic]
+}
+
+const claimOutstandingOffer = (
+  rootTopic: string,
+  offerId: string
+): OfferRecord | undefined => {
+  const outstandingOffers = roomOutstandingOffers[rootTopic]
+  const offer = outstandingOffers?.[offerId]
+
+  if (!offer) {
+    return
+  }
+
+  delete outstandingOffers[offerId]
+  offer.claim?.()
+
+  if (!keys(outstandingOffers).length && !roomSubscriberCounts[rootTopic]) {
+    deleteRoomOfferBookkeeping(rootTopic)
+  }
+
+  return offer
+}
+
+const reclaimOutstandingOffer = (rootTopic: string, offerId: string): void => {
+  const outstandingOffers = roomOutstandingOffers[rootTopic]
+  const offer = outstandingOffers?.[offerId]
+
+  if (!offer) {
+    return
+  }
+
+  delete outstandingOffers[offerId]
+  offer.reclaim?.()
+
+  if (!keys(outstandingOffers).length && !roomSubscriberCounts[rootTopic]) {
+    deleteRoomOfferBookkeeping(rootTopic)
+  }
+}
+
+const reclaimAllOutstandingOffers = (rootTopic: string): void => {
+  keys(getRoomOutstandingOffers(rootTopic)).forEach(offerId =>
+    reclaimOutstandingOffer(rootTopic, offerId)
+  )
+  deleteRoomOfferBookkeeping(rootTopic)
+}
+
+const pruneOutstandingOffers = (rootTopic: string): void => {
+  const now = Date.now()
+
+  entries(getRoomOutstandingOffers(rootTopic)).forEach(([offerId, offer]) => {
+    if (now - offer.createdAt > offerRetentionMs) {
+      reclaimOutstandingOffer(rootTopic, offerId)
+    }
+  })
+}
+
+const ensureOutstandingOffers = async (
+  rootTopic: string,
+  getOffers: (n: number) => Promise<OfferRecord[]>
+): Promise<Record<string, OfferRecord & {createdAt: number}>> => {
+  while (roomOfferGenerationPromises[rootTopic]) {
+    await roomOfferGenerationPromises[rootTopic]
+  }
+
+  const nextPromise = (async () => {
+    pruneOutstandingOffers(rootTopic)
+
+    const outstandingOffers = getRoomOutstandingOffers(rootTopic)
+    const outstandingCount = keys(outstandingOffers).length
+    const missingOffers = Math.max(0, offerPoolSize - outstandingCount)
+
+    if (missingOffers > 0) {
+      ;(await getOffers(missingOffers)).forEach(peerAndOffer => {
+        outstandingOffers[genId(hashLimit)] = {
+          ...peerAndOffer,
+          createdAt: Date.now()
+        }
+      })
+    }
+  })().finally(() => {
+    if (roomOfferGenerationPromises[rootTopic] === nextPromise) {
+      delete roomOfferGenerationPromises[rootTopic]
+    }
+  })
+
+  roomOfferGenerationPromises[rootTopic] = nextPromise
+  await nextPromise
+
+  return getRoomOutstandingOffers(rootTopic)
+}
 
 const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   init: config =>
@@ -169,49 +274,9 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     const relayIntervals = announceIntervals.forRelay(client)
     const activeTokens = subscriptionTokens.forRelay(client)
     const subscriptionToken = Symbol(rootTopic)
-    const outstandingOffers: Record<string, OfferRecord & {createdAt: number}> =
-      {}
 
     activeTokens[rootTopic] = subscriptionToken
-
-    const claimOutstandingOffer = (
-      offerId: string
-    ): OfferRecord | undefined => {
-      const offer = outstandingOffers[offerId]
-
-      if (!offer) {
-        return
-      }
-
-      delete outstandingOffers[offerId]
-      offer.claim?.()
-
-      return offer
-    }
-
-    const reclaimOutstandingOffer = (offerId: string): void => {
-      const offer = outstandingOffers[offerId]
-
-      if (!offer) {
-        return
-      }
-
-      delete outstandingOffers[offerId]
-      offer.reclaim?.()
-    }
-
-    const reclaimAllOutstandingOffers = (): void =>
-      keys(outstandingOffers).forEach(reclaimOutstandingOffer)
-
-    const pruneOutstandingOffers = (): void => {
-      const now = Date.now()
-
-      entries(outstandingOffers).forEach(([offerId, offer]) => {
-        if (now - offer.createdAt > offerRetentionMs) {
-          reclaimOutstandingOffer(offerId)
-        }
-      })
-    }
+    roomSubscriberCounts[rootTopic] = (roomSubscriberCounts[rootTopic] ?? 0) + 1
 
     const topicHandler = (data: TrackerMessage): void => {
       if (data.offer && data.peer_id && data.offer_id) {
@@ -220,7 +285,8 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           {
             offer: data.offer,
             peerId: data.peer_id,
-            hasOutgoingOffer: keys(outstandingOffers).length > 0
+            hasOutgoingOffer:
+              keys(getRoomOutstandingOffers(rootTopic)).length > 0
           },
           (_, signal) =>
             void send(client, rootTopic, {
@@ -230,7 +296,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
             })
         )
       } else if (data.answer && data.offer_id && data.peer_id) {
-        const offer = claimOutstandingOffer(data.offer_id)
+        const offer = claimOutstandingOffer(rootTopic, data.offer_id)
 
         if (offer) {
           void onMessage(
@@ -253,20 +319,10 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         return
       }
 
-      pruneOutstandingOffers()
-
-      const outstandingCount = keys(outstandingOffers).length
-      const missingOffers = Math.max(0, offerPoolSize - outstandingCount)
-
-      if (missingOffers > 0) {
-        ;(await getOffers(missingOffers)).forEach(peerAndOffer => {
-          outstandingOffers[genId(hashLimit)] = {
-            ...peerAndOffer,
-            createdAt: Date.now()
-          }
-        })
-      }
-
+      const outstandingOffers = await ensureOutstandingOffers(
+        rootTopic,
+        getOffers
+      )
       const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
         offer_id: id,
         offer
@@ -287,8 +343,19 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     void announce()
 
     return () => {
+      roomSubscriberCounts[rootTopic] = Math.max(
+        0,
+        (roomSubscriberCounts[rootTopic] ?? 1) - 1
+      )
+
+      if (!roomSubscriberCounts[rootTopic]) {
+        delete roomSubscriberCounts[rootTopic]
+      }
+
       if (activeTokens[rootTopic] !== subscriptionToken) {
-        reclaimAllOutstandingOffers()
+        if (!roomSubscriberCounts[rootTopic]) {
+          reclaimAllOutstandingOffers(rootTopic)
+        }
 
         return
       }
@@ -309,7 +376,9 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 
       delete activeTokens[rootTopic]
 
-      reclaimAllOutstandingOffers()
+      if (!roomSubscriberCounts[rootTopic]) {
+        reclaimAllOutstandingOffers(rootTopic)
+      }
     }
   },
 
@@ -322,7 +391,10 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = (
   callbacks
 ) =>
   joinRoomStrategy(
-    {...config, trickleIce: config.trickleIce ?? false},
+    {
+      ...config,
+      trickleIce: config.trickleIce ?? false
+    },
     roomId,
     callbacks
   )
