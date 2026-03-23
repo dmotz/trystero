@@ -4,3 +4,4 @@ test-results
 playwright-report
 *.tsbuildinfo
 _ignore
+knip.json
