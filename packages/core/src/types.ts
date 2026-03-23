@@ -244,8 +244,11 @@ export type SharedMediaPeer = PeerHandle & {
 
 export type SharedPeerBinding = {
   roomId: string
+  roomToken: string | null
+  roomTokenPromise: Promise<string>
   handlers: PeerHandlers
   pendingData: ArrayBuffer[]
+  pendingSendData: Uint8Array[]
   pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}>
   detach: () => void
   proxy: PeerHandle
@@ -256,7 +259,9 @@ export type SharedPeerState = {
   peerId: string
   peer: PeerHandle
   bindings: Record<string, SharedPeerBinding>
-  pendingDataByRoom: Map<string, ArrayBuffer[]>
+  bindingsByToken: Record<string, SharedPeerBinding>
+  pendingDataByToken: Map<string, ArrayBuffer[]>
+  remoteRoomTokens: Set<string>
   idleTimer: ReturnType<typeof setTimeout> | null
   controlRoomId: string | null
   streamOwners: Map<MediaStream, Set<string>>

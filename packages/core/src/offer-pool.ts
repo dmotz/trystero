@@ -2,7 +2,6 @@ import {all, alloc, noOp, resetTimer} from './utils'
 import type {OfferRecord, PeerHandle} from './types'
 
 export const offerTtl = 57_333
-export const offerRefreshAgeMs = offerTtl
 
 const offerLeaseTtlMs = 180_000
 const poolSize = 20

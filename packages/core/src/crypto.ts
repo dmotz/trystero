@@ -1,4 +1,4 @@
-import {decodeBytes, encodeBytes} from './utils'
+import {decodeBytes, encodeBytes, libName, toHex} from './utils'
 
 const algo = 'AES-GCM'
 const strToSha1: Record<string, string> = {}
@@ -39,6 +39,12 @@ export const genKey = async (
     false,
     ['encrypt', 'decrypt']
   )
+
+export const deriveRoomNamespace = async (
+  appId: string,
+  roomId: string
+): Promise<string> =>
+  toHex(await hashWith('SHA-256', `${libName}:${appId}:${roomId}`))
 
 const joinChar = '$'
 const ivJoinChar = ','

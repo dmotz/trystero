@@ -1,5 +1,5 @@
-import {decrypt, encrypt, genKey, sha1} from './crypto'
-import {OfferPool, offerRefreshAgeMs} from './offer-pool'
+import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
+import {OfferPool, offerTtl} from './offer-pool'
 import {createPasswordHandshake} from './handshake'
 import initPeer from './peer'
 import room from './room'
@@ -39,8 +39,14 @@ import type {
 } from './types'
 
 const announceIntervalMs = 5_333
-const announceWarmupIntervalsMs = [233, 533, 1_033] as const
-const sharedPeerIdleMsDefault = 120_333
+const announceWarmupIntervalsMs = [233, 533, 1_333] as const
+const sharedPeerIdleMsDefault = 123_333
+
+type RoomRegistration = {
+  roomToken: string | null
+  roomTokenPromise: Promise<string>
+  attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
+}
 
 export default <
   TRelay,
@@ -54,10 +60,112 @@ export default <
     string,
     Record<string, ReturnType<typeof room>>
   > = {}
+  const roomRegistrations: Record<string, Record<string, RoomRegistration>> = {}
+  const roomIdsByToken: Record<string, Record<string, string>> = {}
+  const roomPresenceHandlerCleanups: Record<string, () => void> = {}
   const sharedPeers = new SharedPeerManager()
 
   const hasActiveRooms = (): boolean =>
     values(occupiedRooms).some(rooms => keys(rooms).length > 0)
+
+  const getRoomRegistrations = (
+    appId: string
+  ): Record<string, RoomRegistration> => (roomRegistrations[appId] ??= {})
+
+  const getRoomIdsByToken = (appId: string): Record<string, string> =>
+    (roomIdsByToken[appId] ??= {})
+
+  const advertiseRoomPresence = (
+    shared: SharedPeerState,
+    roomToken: string,
+    isPresent: boolean
+  ): void => {
+    if (sharedPeers.getHealth(shared.peer) === 'live') {
+      sharedPeers.sendRoomPresence(shared, roomToken, isPresent)
+    }
+  }
+
+  const advertiseKnownRoomsToShared = (
+    appId: string,
+    shared: SharedPeerState
+  ): void => {
+    entries(roomRegistrations[appId] ?? {}).forEach(
+      ([roomId, registration]) => {
+        const {roomToken, roomTokenPromise} = registration
+
+        if (roomToken) {
+          advertiseRoomPresence(shared, roomToken, true)
+          return
+        }
+
+        void roomTokenPromise.then(token => {
+          if (roomRegistrations[appId]?.[roomId] !== registration) {
+            return
+          }
+
+          if (registration.roomToken !== token) {
+            return
+          }
+
+          if (
+            sharedPeers.get(appId, shared.peerId) !== shared ||
+            shared.isClosing
+          ) {
+            return
+          }
+
+          advertiseRoomPresence(shared, token, true)
+        })
+      }
+    )
+  }
+
+  const advertiseRoomPresenceToAll = (
+    appId: string,
+    roomToken: string,
+    isPresent: boolean
+  ): void =>
+    values(sharedPeers.getMap(appId)).forEach(shared =>
+      advertiseRoomPresence(shared, roomToken, isPresent)
+    )
+
+  const ensureRoomPresenceHandler = (appId: string): void => {
+    if (roomPresenceHandlerCleanups[appId]) {
+      return
+    }
+
+    roomPresenceHandlerCleanups[appId] = sharedPeers.setRoomPresenceHandler(
+      appId,
+      (peerId, roomToken, isPresent) => {
+        if (!isPresent) {
+          return
+        }
+
+        const shared = sharedPeers.get(appId, peerId)
+        const roomId = roomIdsByToken[appId]?.[roomToken]
+
+        if (!shared || !roomId) {
+          return
+        }
+
+        roomRegistrations[appId]?.[roomId]?.attachSharedPeerToRoom(
+          peerId,
+          shared
+        )
+      }
+    )
+  }
+
+  const cleanupRoomPresenceHandler = (appId: string): void => {
+    if (occupiedRooms[appId] && keys(occupiedRooms[appId]).length > 0) {
+      return
+    }
+
+    roomPresenceHandlerCleanups[appId]?.()
+    delete roomPresenceHandlerCleanups[appId]
+    delete roomRegistrations[appId]
+    delete roomIdsByToken[appId]
+  }
 
   let didInit = false
   let initPromises: Promise<TRelay>[] = []
@@ -97,10 +205,13 @@ export default <
       return occupiedRooms[appId][roomId]
     }
 
+    ensureRoomPresenceHandler(appId)
+
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
     const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
     const key = genKey(config.password ?? '', appId, roomId)
+    const roomNamespacePromise = deriveRoomNamespace(appId, roomId)
     const sharedPeerIdleMs =
       config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
 
@@ -124,7 +235,7 @@ export default <
 
     const encryptOffer = async (peer: PeerHandle): Promise<string> => {
       const plainOffer = await peer.getOffer(
-        Date.now() - peer.created > offerRefreshAgeMs
+        Date.now() - peer.created > offerTtl
       )
 
       if (!plainOffer || plainOffer.type !== 'offer') {
@@ -143,17 +254,22 @@ export default <
       state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
       state.answeringPeer = null
 
-      const {proxy, isNew} = sharedPeers.bind(appId, roomId, peerId, shared, {
-        onDetach: () => {
-          const current = ctx.peerStates[peerId]
+      const {proxy, isNew} = sharedPeers.bind(
+        roomId,
+        roomNamespacePromise,
+        shared,
+        {
+          onDetach: () => {
+            const current = ctx.peerStates[peerId]
 
-          if (current?.connectedPeer === shared.peer) {
-            current.connectedPeer = null
-            current.connectedPeerUnhealthySinceMs = null
-            updateStatus(current)
+            if (current?.connectedPeer === shared.peer) {
+              current.connectedPeer = null
+              current.connectedPeerUnhealthySinceMs = null
+              updateStatus(current)
+            }
           }
         }
-      })
+      )
 
       state.connectedPeer = shared.peer
       state.connectedPeerUnhealthySinceMs = null
@@ -213,11 +329,17 @@ export default <
         return
       }
 
+      const isNewShared = !shared
+
       shared ||= sharedPeers.register(appId, peerId, peer, sharedPeerIdleMs)
 
       DEV: log('peer connected:', peerId, _relayId)
 
       attachSharedPeerToRoom(peerId, shared)
+
+      if (isNewShared) {
+        advertiseKnownRoomsToShared(appId, shared)
+      }
     }
 
     const disconnectPeer = (peer: PeerHandle, peerId: string): void => {
@@ -353,7 +475,8 @@ export default <
 
     occupiedRooms[appId] ??= {}
 
-    return (occupiedRooms[appId][roomId] = room(
+    const appRoomRegistrations = getRoomRegistrations(appId)
+    const joinedRoom = room(
       f => (onPeerConnect = f),
       id => {
         if (didLeaveRoom) {
@@ -370,6 +493,25 @@ export default <
       () => {
         didLeaveRoom = true
         onPeerConnect = noOp
+
+        const registration = roomRegistrations[appId]?.[roomId]
+
+        if (registration?.roomToken) {
+          advertiseRoomPresenceToAll(appId, registration.roomToken, false)
+          delete roomIdsByToken[appId]?.[registration.roomToken]
+
+          if (roomIdsByToken[appId] && !keys(roomIdsByToken[appId]).length) {
+            delete roomIdsByToken[appId]
+          }
+        }
+
+        if (roomRegistrations[appId]) {
+          delete roomRegistrations[appId][roomId]
+
+          if (!keys(roomRegistrations[appId]).length) {
+            delete roomRegistrations[appId]
+          }
+        }
 
         entries(ctx.peerStates).forEach(([peerId, state]) => {
           state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
@@ -414,8 +556,39 @@ export default <
         pool.destroy()
         offerPool = null
         cleanupWatchOnline()
+        cleanupRoomPresenceHandler(appId)
       },
       roomOptions
-    ))
+    )
+
+    const roomRegistration: RoomRegistration = {
+      roomToken: null,
+      roomTokenPromise: roomNamespacePromise,
+      attachSharedPeerToRoom
+    }
+
+    appRoomRegistrations[roomId] = roomRegistration
+
+    void roomNamespacePromise.then(roomToken => {
+      if (
+        didLeaveRoom ||
+        roomRegistrations[appId]?.[roomId] !== roomRegistration
+      ) {
+        return
+      }
+
+      roomRegistration.roomToken = roomToken
+      getRoomIdsByToken(appId)[roomToken] = roomId
+
+      values(sharedPeerMap).forEach(shared => {
+        if (shared.remoteRoomTokens.has(roomToken)) {
+          attachSharedPeerToRoom(shared.peerId, shared)
+        }
+      })
+
+      advertiseRoomPresenceToAll(appId, roomToken, true)
+    })
+
+    return (occupiedRooms[appId][roomId] = joinedRoom)
   }
 }

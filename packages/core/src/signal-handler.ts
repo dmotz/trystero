@@ -21,10 +21,10 @@ import type {
   SignalContext
 } from './types'
 
-const offerPostAnswerTtlMs = 9_000
+const offerPostAnswerTtlMs = 23_333
 const offerIdSize = 12
-const disconnectedPeerGraceMs = 7_500
-const answeringTtlMs = 8_000
+const disconnectedPeerGraceMs = 7_533
+const answeringTtlMs = 23_333
 const legacyCandidateKey = '__legacy__'
 const offerRelayPlaceholder = 'offer-placeholder'
 
@@ -45,7 +45,7 @@ const publishCipheredSignalingMessage = (
   })
 }
 
-export const makeState = (): PeerState => ({
+const makeState = (): PeerState => ({
   status: 'idle',
   offerPeer: null,
   offerId: null,
@@ -81,7 +81,7 @@ export const updateStatus = (state: PeerState): void => {
   }
 }
 
-export const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
+const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
   if (state.answeringPeer === peer) {
     state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
     state.answeringPeer = null
@@ -756,15 +756,16 @@ export const createSignalHandler =
       return
     }
 
-    if (
-      shared &&
-      shared.bindings[ctx.roomId] &&
-      (offer || answer || candidate)
-    ) {
-      DEV: log(
-        'ignoring room signal because shared binding already exists:',
-        peerId
-      )
+    if (shared && (offer || answer || candidate)) {
+      if (shared.bindings[ctx.roomId]) {
+        DEV: log(
+          'ignoring room signal because shared binding already exists:',
+          peerId
+        )
+        return
+      }
+
+      ctx.attachSharedPeerToRoom(peerId, shared)
       return
     }
 

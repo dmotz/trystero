@@ -16,46 +16,85 @@ import type {
 } from './types'
 
 const roomFrameVersion = 1
+const roomPresenceFrameVersion = 2
 
-const wrapRoomFrame = (roomId: string, data: Uint8Array): Uint8Array => {
-  const roomBytes = encodeBytes(roomId)
-  const frame = new Uint8Array(3 + roomBytes.byteLength + data.byteLength)
+const wrapRoomFrame = (roomToken: string, data: Uint8Array): Uint8Array => {
+  const tokenBytes = encodeBytes(roomToken)
+  const frame = new Uint8Array(3 + tokenBytes.byteLength + data.byteLength)
 
   frame[0] = roomFrameVersion
-  frame[1] = (roomBytes.byteLength >>> 8) & 0xff
-  frame[2] = roomBytes.byteLength & 0xff
-  frame.set(roomBytes, 3)
-  frame.set(data, 3 + roomBytes.byteLength)
+  frame[1] = (tokenBytes.byteLength >>> 8) & 0xff
+  frame[2] = tokenBytes.byteLength & 0xff
+  frame.set(tokenBytes, 3)
+  frame.set(data, 3 + tokenBytes.byteLength)
 
   return frame
 }
 
-const unwrapRoomFrame = (
-  data: ArrayBuffer
-): {roomId: string; payload: ArrayBuffer} | null => {
+const wrapRoomPresenceFrame = (
+  roomToken: string,
+  isPresent: boolean
+): Uint8Array => {
+  const tokenBytes = encodeBytes(roomToken)
+  const frame = new Uint8Array(4 + tokenBytes.byteLength)
+
+  frame[0] = roomPresenceFrameVersion
+  frame[1] = Number(isPresent)
+  frame[2] = (tokenBytes.byteLength >>> 8) & 0xff
+  frame[3] = tokenBytes.byteLength & 0xff
+  frame.set(tokenBytes, 4)
+
+  return frame
+}
+
+type SharedFrame =
+  | {type: 'room'; roomToken: string; payload: ArrayBuffer}
+  | {type: 'presence'; roomToken: string; isPresent: boolean}
+
+const unwrapFrame = (data: ArrayBuffer): SharedFrame | null => {
   const buffer = new Uint8Array(data)
 
-  if (buffer.byteLength < 3 || buffer[0] !== roomFrameVersion) {
+  if (buffer.byteLength < 3) {
     return null
   }
 
-  const roomSize = ((buffer[1] ?? 0) << 8) | (buffer[2] ?? 0)
-  const headerSize = 3 + roomSize
+  if (buffer[0] === roomFrameVersion) {
+    const tokenSize = ((buffer[1] ?? 0) << 8) | (buffer[2] ?? 0)
+    const headerSize = 3 + tokenSize
 
-  if (roomSize <= 0 || buffer.byteLength < headerSize) {
+    if (tokenSize <= 0 || buffer.byteLength < headerSize) {
+      return null
+    }
+
+    const roomToken = decodeBytes(buffer.subarray(3, headerSize))
+    const payload = buffer.subarray(headerSize)
+
+    return {
+      type: 'room',
+      roomToken,
+      payload: payload.slice().buffer
+    }
+  }
+
+  if (buffer[0] !== roomPresenceFrameVersion || buffer.byteLength < 4) {
     return null
   }
 
-  const roomId = decodeBytes(buffer.subarray(3, headerSize))
-  const payload = buffer.subarray(headerSize)
+  const tokenSize = ((buffer[2] ?? 0) << 8) | (buffer[3] ?? 0)
+  const headerSize = 4 + tokenSize
+
+  if (tokenSize <= 0 || buffer.byteLength < headerSize) {
+    return null
+  }
 
   return {
-    roomId,
-    payload: payload.slice().buffer
+    type: 'presence',
+    roomToken: decodeBytes(buffer.subarray(4, headerSize)),
+    isPresent: buffer[1] === 1
   }
 }
 
-export const isPeerUnderlyingStale = (peer: PeerHandle): boolean => {
+const isPeerUnderlyingStale = (peer: PeerHandle): boolean => {
   const {connection, channel} = peer
 
   return (
@@ -87,6 +126,10 @@ export const getConnectedPeerHealth = (
 
 export class SharedPeerManager {
   private byApp: Record<string, Record<string, SharedPeerState>> = {}
+  private roomPresenceHandlers: Record<
+    string,
+    (peerId: string, roomToken: string, isPresent: boolean) => void
+  > = {}
 
   getMap(appId: string): Record<string, SharedPeerState> {
     return (this.byApp[appId] ??= {})
@@ -102,6 +145,31 @@ export class SharedPeerManager {
 
   getHealth(peer: PeerHandle): 'live' | 'stale' {
     return this.isPeerStale(peer) ? 'stale' : 'live'
+  }
+
+  setRoomPresenceHandler(
+    appId: string,
+    handler: (peerId: string, roomToken: string, isPresent: boolean) => void
+  ): () => void {
+    this.roomPresenceHandlers[appId] = handler
+
+    return (): void => {
+      if (this.roomPresenceHandlers[appId] === handler) {
+        delete this.roomPresenceHandlers[appId]
+      }
+    }
+  }
+
+  sendRoomPresence(
+    shared: SharedPeerState,
+    roomToken: string,
+    isPresent: boolean
+  ): void {
+    if (shared.isClosing || shared.peer.isDead) {
+      return
+    }
+
+    shared.peer.sendData(wrapRoomPresenceFrame(roomToken, isPresent))
   }
 
   clear(
@@ -125,18 +193,21 @@ export class SharedPeerManager {
 
     const bindings = values(shared.bindings)
     shared.bindings = {}
+    shared.bindingsByToken = {}
     shared.controlRoomId = null
     delete map![peerId]
 
     bindings.forEach(binding => {
       binding.handlers.close?.()
       binding.pendingData.length = 0
+      binding.pendingSendData.length = 0
       binding.pendingTracks.length = 0
     })
 
     shared.remoteStreamsByKey.clear()
     shared.remoteTracksByKey.clear()
-    shared.pendingDataByRoom.clear()
+    shared.pendingDataByToken.clear()
+    shared.remoteRoomTokens.clear()
 
     if (keys(map!).length === 0) {
       delete this.byApp[appId]
@@ -167,7 +238,9 @@ export class SharedPeerManager {
       peerId,
       peer,
       bindings: {},
-      pendingDataByRoom: new Map(),
+      bindingsByToken: {},
+      pendingDataByToken: new Map(),
+      remoteRoomTokens: new Set(),
       idleTimer: null,
       controlRoomId: null,
       streamOwners: new Map(),
@@ -194,9 +267,8 @@ export class SharedPeerManager {
   }
 
   bind(
-    appId: string,
     roomId: string,
-    peerId: string,
+    roomTokenPromise: Promise<string>,
     shared: SharedPeerState,
     {onDetach}: {onDetach: () => void}
   ): {proxy: PeerHandle; isNew: boolean} {
@@ -209,8 +281,11 @@ export class SharedPeerManager {
 
     const binding: SharedPeerBinding = {
       roomId,
+      roomToken: null,
+      roomTokenPromise,
       handlers: {},
       pendingData: [],
+      pendingSendData: [],
       pendingTracks: [],
       detach: noOp,
       proxy: {} as PeerHandle
@@ -223,6 +298,12 @@ export class SharedPeerManager {
 
       this.pruneRoomOwnership(shared, roomId)
       delete shared.bindings[roomId]
+      if (
+        binding.roomToken &&
+        shared.bindingsByToken[binding.roomToken] === binding
+      ) {
+        delete shared.bindingsByToken[binding.roomToken]
+      }
 
       if (shared.controlRoomId === roomId) {
         shared.controlRoomId = keys(shared.bindings)[0] ?? null
@@ -245,7 +326,14 @@ export class SharedPeerManager {
       },
       getOffer: (restartIce?: boolean) => shared.peer.getOffer(restartIce),
       signal: (sdp: Signal) => shared.peer.signal(sdp),
-      sendData: data => shared.peer.sendData(wrapRoomFrame(roomId, data)),
+      sendData: data => {
+        if (!binding.roomToken) {
+          binding.pendingSendData.push(data)
+          return
+        }
+
+        shared.peer.sendData(wrapRoomFrame(binding.roomToken, data))
+      },
       destroy: () => detachBinding(),
       setHandlers: newHandlers => {
         const {signal, ...rest} = newHandlers
@@ -349,12 +437,27 @@ export class SharedPeerManager {
     shared.controlRoomId ??= roomId
     shared.idleTimer = resetTimer(shared.idleTimer)
 
-    const pendingData = shared.pendingDataByRoom.get(roomId)
+    void roomTokenPromise.then(roomToken => {
+      if (shared.isClosing || shared.bindings[roomId] !== binding) {
+        return
+      }
 
-    if (pendingData?.length) {
-      binding.pendingData.push(...pendingData)
-      shared.pendingDataByRoom.delete(roomId)
-    }
+      binding.roomToken = roomToken
+      shared.bindingsByToken[roomToken] = binding
+
+      const pendingData = shared.pendingDataByToken.get(roomToken)
+
+      if (pendingData?.length) {
+        binding.pendingData.push(...pendingData)
+        shared.pendingDataByToken.delete(roomToken)
+      }
+
+      const pendingSendData = binding.pendingSendData.splice(0)
+      pendingSendData.forEach(payload =>
+        shared.peer.sendData(wrapRoomFrame(roomToken, payload))
+      )
+      this.flushBindingQueues(binding)
+    })
 
     return {proxy, isNew: true}
   }
@@ -440,18 +543,33 @@ export class SharedPeerManager {
   }
 
   private dispatchData(shared: SharedPeerState, data: ArrayBuffer): void {
-    const decoded = unwrapRoomFrame(data)
+    const decoded = unwrapFrame(data)
 
     if (!decoded) {
       return
     }
 
-    const binding = shared.bindings[decoded.roomId]
+    if (decoded.type === 'presence') {
+      if (decoded.isPresent) {
+        shared.remoteRoomTokens.add(decoded.roomToken)
+      } else {
+        shared.remoteRoomTokens.delete(decoded.roomToken)
+      }
+
+      this.roomPresenceHandlers[shared.appId]?.(
+        shared.peerId,
+        decoded.roomToken,
+        decoded.isPresent
+      )
+      return
+    }
+
+    const binding = shared.bindingsByToken[decoded.roomToken]
 
     if (!binding) {
-      const pending = shared.pendingDataByRoom.get(decoded.roomId) ?? []
+      const pending = shared.pendingDataByToken.get(decoded.roomToken) ?? []
       pending.push(decoded.payload)
-      shared.pendingDataByRoom.set(decoded.roomId, pending)
+      shared.pendingDataByToken.set(decoded.roomToken, pending)
       return
     }
 
