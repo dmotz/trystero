@@ -778,43 +778,41 @@ export default (strategy, overrides = {}) => {
               )
             ).toBe(selfId1)
 
-            if (strategy !== 'torrent') {
-              const nextRoomNs = roomNs + '2'
+            const nextRoomNs = roomNs + '2'
 
-              const joinError = await Promise.race([
-                page.evaluate(
+            const joinError = await Promise.race([
+              page.evaluate(
+                ([roomId, config]) =>
+                  new Promise(res =>
+                    window.trystero.joinRoom(config, roomId, {
+                      onJoinError: res
+                    })
+                  ),
+                [nextRoomNs, roomConfig]
+              ),
+
+              sleep(3333).then(() =>
+                page2.evaluate(
                   ([roomId, config]) =>
-                    new Promise(res =>
-                      window.trystero.joinRoom(config, roomId, {
-                        onJoinError: res
-                      })
+                    new Promise(
+                      res =>
+                        (window[roomId] = window.trystero.joinRoom(
+                          config,
+                          roomId,
+                          {onJoinError: res}
+                        ))
                     ),
-                  [nextRoomNs, roomConfig]
-                ),
-
-                sleep(3333).then(() =>
-                  page2.evaluate(
-                    ([roomId, config]) =>
-                      new Promise(
-                        res =>
-                          (window[roomId] = window.trystero.joinRoom(
-                            config,
-                            roomId,
-                            {onJoinError: res}
-                          ))
-                      ),
-                    [nextRoomNs, {...roomConfig, password: 'waste'}]
-                  )
+                  [nextRoomNs, {...roomConfig, password: 'waste'}]
                 )
-              ])
-
-              expect(joinError.error).toMatch(/incorrect password/)
-              expect(joinError.appId).toEqual(roomConfig.appId)
-              expect(joinError.roomId).toEqual(nextRoomNs)
-              expect(joinError.peerId).toMatch(
-                new RegExp(`^${selfId1}|${selfId2}`)
               )
-            }
+            ])
+
+            expect(joinError.error).toMatch(/incorrect password/)
+            expect(joinError.appId).toEqual(roomConfig.appId)
+            expect(joinError.roomId).toEqual(nextRoomNs)
+            expect(joinError.peerId).toMatch(
+              new RegExp(`^${selfId1}|${selfId2}`)
+            )
 
             await Promise.all([
               page.evaluate(leaveRoom, overlapRoomNs),
