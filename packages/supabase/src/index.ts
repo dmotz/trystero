@@ -193,13 +193,13 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
     }
   },
 
-  announce: (client, rootTopic) =>
+  announce: (client, rootTopic, _selfTopic, extra) =>
     getOrCreateChannel(client, rootTopic).ready.then(chan =>
       chan
         .send({
           type: events.broadcast,
           event: events.join,
-          payload: {peerId: selfId}
+          payload: {peerId: selfId, ...extra}
         })
         .then(() => undefined)
     )

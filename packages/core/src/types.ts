@@ -53,6 +53,7 @@ export type TurnServerConfig = {
 export type BaseRoomConfig = {
   appId: string
   password?: string
+  passive?: boolean
   trickleIce?: boolean
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
@@ -94,6 +95,7 @@ export type Room = {
   ) => [ActionSender<T>, ActionReceiver<T>, ActionProgress]
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
+  isPassive: () => boolean
   getPeers: () => Record<string, RTCPeerConnection>
   addStream: (
     stream: MediaStream,
@@ -209,7 +211,8 @@ export type StrategyAdapter<
   announce: (
     relay: TRelay,
     rootTopic: string,
-    selfTopic: string
+    selfTopic: string,
+    extraPayload?: Record<string, unknown>
   ) => MaybePromise<number | void>
 }
 
@@ -306,6 +309,8 @@ export type SignalContext = {
   toPlain: (signal: Signal) => Promise<Signal>
   toCipher: (signal: Signal) => Promise<Signal>
   isLeaving: () => boolean
+  isPassive: boolean
+  isActive: boolean
   onJoinError: JoinErrorHandler | undefined
   sharedPeers: SharedPeerManager
   offerPool: OfferPool
@@ -314,6 +319,8 @@ export type SignalContext = {
   connectPeer: (peer: PeerHandle, peerId: string, relayId: number) => void
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
   attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
+  checkDeactivate: () => void
   announceIntervals: number[]
   announceIntervalMs: number
+  requeueAnnounce?: () => void
 }

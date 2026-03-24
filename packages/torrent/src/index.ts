@@ -36,6 +36,7 @@ const roomOutstandingOffers: Record<
 const roomOfferGenerationPromises: Record<string, Promise<void> | undefined> =
   {}
 const roomSubscriberCounts: Record<string, number> = {}
+const activeTopics = new Set<string>()
 const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 3
@@ -319,6 +320,18 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         return
       }
 
+      // Passive peers that haven't activated announce as seeders (left: 0)
+      // with no offers. Trackers don't distribute seeders to other seeders,
+      // which naturally prevents passive-passive connections.
+      if (!activeTopics.has(rootTopic)) {
+        void send(client, rootTopic, {
+          left: 0,
+          numwant: offerPoolSize,
+          offers: []
+        })
+        return
+      }
+
       const outstandingOffers = await ensureOutstandingOffers(
         rootTopic,
         getOffers
@@ -355,6 +368,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       if (activeTokens[rootTopic] !== subscriptionToken) {
         if (!roomSubscriberCounts[rootTopic]) {
           reclaimAllOutstandingOffers(rootTopic)
+          activeTopics.delete(rootTopic)
         }
 
         return
@@ -375,6 +389,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       }
 
       delete activeTokens[rootTopic]
+      activeTopics.delete(rootTopic)
 
       if (!roomSubscriberCounts[rootTopic]) {
         reclaimAllOutstandingOffers(rootTopic)
@@ -382,7 +397,14 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     }
   },
 
-  announce: client => trackerAnnounceMs[client.url]
+  announce: (client, rootTopic) => {
+    // Mark this topic as active. The torrent strategy uses seeder mode
+    // (left: 0) for inactive passive peers instead of the passive flag in
+    // messages, since the tracker protocol is rigid. Topics start inactive
+    // (seeder mode); calling announce marks them active (sending offers).
+    activeTopics.add(rootTopic)
+    return trackerAnnounceMs[client.url]
+  }
 })
 
 export const joinRoom: JoinRoom<TorrentRoomConfig> = (

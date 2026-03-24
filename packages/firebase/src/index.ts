@@ -146,13 +146,13 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
     }
   },
 
-  announce: (rootRef, rootTopic, selfTopic) => {
+  announce: (rootRef, rootTopic, selfTopic, extra) => {
     const roomRef = child(rootRef, rootTopic)
     const roomKey = `${rootTopic}|${selfTopic}`
     const presenceRef =
       presenceRefs[roomKey] ?? (presenceRefs[roomKey] = push(roomRef))
 
-    void set(presenceRef, {[presencePath]: {peerId: selfId}})
+    void set(presenceRef, {[presencePath]: {peerId: selfId, ...extra}})
     void onDisconnect(presenceRef).remove()
   }
 })

@@ -76,8 +76,8 @@ const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createStrategy({
     }
   },
 
-  announce: (activeNode, rootTopic) =>
-    sendMessage(activeNode, rootTopic, toJson({peerId: selfId}))
+  announce: (activeNode, rootTopic, _selfTopic, extra) =>
+    sendMessage(activeNode, rootTopic, toJson({peerId: selfId, ...extra}))
 })
 
 export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>

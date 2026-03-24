@@ -97,8 +97,8 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createStrategy({
     }
   },
 
-  announce: (client, rootTopic) => {
-    client.publish(rootTopic, toJson({peerId: selfId}))
+  announce: (client, rootTopic, _selfTopic, extra) => {
+    client.publish(rootTopic, toJson({peerId: selfId, ...extra}))
   }
 })
 

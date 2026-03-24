@@ -352,6 +352,37 @@ export default <
       if (state?.connectedPeer === peer) {
         DEV: log('peer disconnected:', peerId)
         clearConnectedPeer(state, peerId, 'close-event')
+        checkDeactivate()
+      }
+    }
+
+    const isPassive = Boolean(config.passive)
+
+    const checkDeactivate = (): void => {
+      if (!isPassive || !ctx.isActive) {
+        return
+      }
+
+      let hasActiveWork = false
+
+      entries(ctx.peerStates).forEach(([peerId, state]) => {
+        const isActive =
+          state.connectedPeer ||
+          state.answeringPeer ||
+          state.offerPeer ||
+          state.offerRelays.some(Boolean)
+
+        if (isActive) {
+          hasActiveWork = true
+        } else if (state.status === 'idle') {
+          delete ctx.peerStates[peerId]
+        }
+      })
+
+      if (!hasActiveWork) {
+        ctx.isActive = false
+        announceTimeouts.forEach(resetTimer)
+        announceTimeouts.length = 0
       }
     }
 
@@ -366,6 +397,8 @@ export default <
       toPlain,
       toCipher,
       isLeaving: () => didLeaveRoom,
+      isPassive,
+      isActive: !isPassive,
       onJoinError,
       sharedPeers,
       offerPool: pool,
@@ -374,6 +407,7 @@ export default <
       connectPeer,
       disconnectPeer,
       attachSharedPeerToRoom,
+      checkDeactivate,
       announceIntervals: [],
       announceIntervalMs
     }
@@ -415,14 +449,18 @@ export default <
           return
         }
 
-        const ms = await announce(relay, rootTopic, selfTopic)
+        // Passive peers don't announce when inactive
+        if (!isPassive || ctx.isActive) {
+          const extra = isPassive ? {passive: true} : undefined
+          const ms = await announce(relay, rootTopic, selfTopic, extra)
 
-        if (didLeaveRoom) {
-          return
-        }
+          if (didLeaveRoom) {
+            return
+          }
 
-        if (typeof ms === 'number') {
-          ctx.announceIntervals[i] = ms
+          if (typeof ms === 'number') {
+            ctx.announceIntervals[i] = ms
+          }
         }
 
         const announceAttempt = announceAttemptCounts[i] ?? 0
@@ -437,6 +475,21 @@ export default <
         announceTimeouts[i] = setTimeout(() => {
           void queueAnnounce(relay, i)
         }, nextAnnounceDelayMs)
+      }
+
+      // Immediately restart announce loops (used when a passive peer activates)
+      ctx.requeueAnnounce = () => {
+        announceTimeouts.forEach(resetTimer)
+        announceTimeouts.length = 0
+
+        initPromises.forEach(async (relayP, i) => {
+          const relay = await relayP
+
+          if (relay && !didLeaveRoom) {
+            announceAttemptCounts[i] = 0
+            void queueAnnounce(relay, i)
+          }
+        })
       }
 
       unsubFns.forEach(async (didSub, i) => {
@@ -488,6 +541,7 @@ export default <
         if (state?.connectedPeer) {
           state.connectedPeer = null
           updateStatus(state)
+          checkDeactivate()
         }
       },
       () => {
@@ -588,6 +642,8 @@ export default <
 
       advertiseRoomPresenceToAll(appId, roomToken, true)
     })
+
+    joinedRoom.isPassive = () => isPassive
 
     return (occupiedRooms[appId][roomId] = joinedRoom)
   }

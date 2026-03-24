@@ -170,3 +170,94 @@ runNodeTests('torrent', {timeout: 20_000})
 runNodeTests('firebase', {timeout: 20_000})
 runNodeTests('supabase', {timeout: 20_000})
 runNodeTests('ipfs', {timeout: 50_000, skip: true})
+
+const runPassiveNodeTest = (
+  strategy: string,
+  options: {timeout?: number; skip?: boolean} = {}
+) => {
+  const {timeout = 120_000, skip = false} = options
+  const config = strategyConfigs[strategy] ?? {}
+  const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const appId = (config['appId'] as string) ?? `trystero-node-passive-${suffix}`
+  const roomId = `room-passive-${suffix}`
+  const baseRoomConfig = {
+    appId,
+    password: `p@ss1v3${Math.random()}`,
+    ...config
+  }
+
+  void test(
+    `Trystero: ${strategy} passive peer connects with active peer using node`,
+    {timeout, skip},
+    async () => {
+      // Start the passive responder first — it should stay dormant until
+      // the active initiator joins
+      const passiveResponder = startPeer({
+        role: 'responder',
+        strategy,
+        roomId,
+        roomConfig: {...baseRoomConfig, passive: true}
+      })
+
+      // Give the passive peer time to subscribe (but not announce)
+      await new Promise(res => setTimeout(res, 2_000))
+
+      const activeInitiator = startPeer({
+        role: 'initiator',
+        strategy,
+        roomId,
+        roomConfig: baseRoomConfig
+      })
+
+      const peers = [activeInitiator, passiveResponder]
+
+      try {
+        const results = (await Promise.allSettled(
+          peers.map(peer => peer.done)
+        )) as {
+          status: 'fulfilled' | 'rejected'
+          value?: {role: string; message: string}
+          reason?: {message: string}
+        }[]
+        const failures = results.filter(r => r.status === 'rejected')
+
+        if (failures.length) {
+          throw new Error(
+            failures
+              .map(failure =>
+                JSON.stringify(
+                  failure.status === 'rejected'
+                    ? (failure.reason?.message ?? failure.reason)
+                    : ''
+                )
+              )
+              .join('\n\n')
+          )
+        }
+
+        const [initiator, responder]: [
+          {role: string; message: string} | null,
+          {role: string; message: string} | null
+        ] = results.map(
+          result => result.status === 'fulfilled' && result.value
+        ) as [
+          {role: string; message: string} | null,
+          {role: string; message: string} | null
+        ]
+
+        assert.equal(initiator?.role, 'initiator')
+        assert.equal(initiator?.message, 'received pong')
+        assert.equal(responder?.role, 'responder')
+        assert.equal(responder?.message, 'received ping')
+      } finally {
+        for (const {child} of peers) {
+          child.kill('SIGTERM')
+        }
+      }
+    }
+  )
+}
+
+runPassiveNodeTest('torrent', {timeout: 60_000})
+runPassiveNodeTest('nostr', {timeout: 30_000})
+runPassiveNodeTest('mqtt', {timeout: 30_000})
