@@ -1095,6 +1095,8 @@ export default (
 
     onPeerStream: f => (listeners.onPeerStream = f),
 
-    onPeerTrack: f => (listeners.onPeerTrack = f)
+    onPeerTrack: f => (listeners.onPeerTrack = f),
+
+    isPassive: () => false
   }
 }

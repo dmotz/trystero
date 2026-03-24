@@ -188,6 +188,7 @@ const scheduleAnsweringExpiry = (
     DEV: log('answering timed out for', peerId, '- retrying on next offer')
     peer.destroy()
     clearAnswering(current, peer)
+    ctx.checkDeactivate()
   }, answeringTtlMs)
 }
 
@@ -234,6 +235,7 @@ const scheduleOfferExpiry = (
 
     DEV: log('offer expired for', peerId, '- resetting')
     resetOfferState(current, ctx.offerPool)
+    ctx.checkDeactivate()
   }, ttlMs)
 }
 
@@ -279,6 +281,7 @@ const ensureOffer = (
       }
 
       ctx.disconnectPeer(peer, peerId)
+      ctx.checkDeactivate()
     }
 
     peer.setHandlers({
@@ -385,7 +388,8 @@ const handleAnnouncement = async (
       sdp => ({
         peerId: selfId,
         offerId: offerInfo.offerId,
-        candidate: sdp
+        candidate: sdp,
+        ...(ctx.isPassive ? {passive: true} : {})
       }),
       () =>
         !state.connectedPeer &&
@@ -401,7 +405,8 @@ const handleAnnouncement = async (
     toJson({
       peerId: selfId,
       offerId: offerInfo.offerId,
-      offer: offerInfo.offer
+      offer: offerInfo.offer,
+      ...(ctx.isPassive ? {passive: true} : {})
     })
   )
 
@@ -447,6 +452,7 @@ const handleOffer = async (
   const onAnswerPeerClosedOrError = (): void => {
     clearAnswering(state, answerPeer)
     ctx.disconnectPeer(answerPeer, peerId)
+    ctx.checkDeactivate()
   }
 
   answerPeer.setHandlers({
@@ -515,6 +521,10 @@ const handleOffer = async (
 
           if (offerId) {
             payloadToSend['offerId'] = offerId
+          }
+
+          if (ctx.isPassive) {
+            payloadToSend['passive'] = true
           }
 
           return payloadToSend
@@ -646,6 +656,7 @@ const prunePendingOffer = (
 
   if (state.offerRelays[relayId]) {
     clearOfferRelay(state, relayId)
+    ctx.checkDeactivate()
   }
 }
 
@@ -674,8 +685,28 @@ export const createSignalHandler =
     const offerId = payload['offerId'] as string | undefined
     const peer = payload['peer'] as PeerHandle | undefined
     const hasOutgoingOfferHint = payload['hasOutgoingOffer'] === true
+    const remoteIsPassive = payload['passive'] === true
 
     if (peerId === selfId) {
+      return
+    }
+
+    // Passive mode: ignore messages from other passive peers to prevent
+    // passive-passive connections that would cause zombie swarms
+    if (ctx.isPassive && remoteIsPassive) {
+      return
+    }
+
+    // Passive mode: activate when receiving an announcement or offer from a
+    // non-passive peer. Exclude answers and candidates since they are
+    // continuations of existing negotiations, not new peer discovery.
+    if (ctx.isPassive && !ctx.isActive && !answer && !candidate) {
+      ctx.isActive = true
+      ctx.requeueAnnounce?.()
+    }
+
+    // Skip processing if still passive and inactive
+    if (ctx.isPassive && !ctx.isActive) {
       return
     }
 

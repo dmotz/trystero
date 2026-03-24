@@ -149,8 +149,8 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
     }
   },
 
-  announce: async (client, rootTopic) =>
-    client.send(await createEvent(rootTopic, toJson({peerId: selfId})))
+  announce: async (client, rootTopic, _selfTopic, extra) =>
+    client.send(await createEvent(rootTopic, toJson({peerId: selfId, ...extra})))
 })
 
 export const getRelaySockets = relayManager.getSockets
