@@ -36,10 +36,12 @@ const roomOutstandingOffers: Record<
 const roomOfferGenerationPromises: Record<string, Promise<void> | undefined> =
   {}
 const roomSubscriberCounts: Record<string, number> = {}
+const activeTopics = new Set<string>()
 const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 3
 const defaultAnnounceMs = 10_000
+const dormantAnnounceMs = 120_000
 const maxAnnounceMs = 20_000
 const offerRetentionMs = 120_000
 const signalDedupeWindowMs = 4_000
@@ -319,6 +321,18 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         return
       }
 
+      // Passive peers that haven't activated announce as seeders (left: 0)
+      // with no offers. Trackers don't distribute seeders to other seeders,
+      // which naturally prevents passive-passive connections.
+      if (!activeTopics.has(rootTopic)) {
+        void send(client, rootTopic, {
+          left: 0,
+          numwant: offerPoolSize,
+          offers: []
+        })
+        return
+      }
+
       const outstandingOffers = await ensureOutstandingOffers(
         rootTopic,
         getOffers
@@ -336,10 +350,14 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 
     trackerAnnounceMs[client.url] = defaultAnnounceMs
     relayFns[rootTopic] = announce
-    relayIntervals[rootTopic] = setInterval(
-      announce,
-      trackerAnnounceMs[client.url]
-    )
+
+    // Use a longer interval for dormant passive rooms to reduce tracker load.
+    // The announce adapter restarts at active frequency on activation.
+    const initialInterval = activeTopics.has(rootTopic)
+      ? trackerAnnounceMs[client.url]
+      : dormantAnnounceMs
+
+    relayIntervals[rootTopic] = setInterval(announce, initialInterval)
     void announce()
 
     return () => {
@@ -355,6 +373,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       if (activeTokens[rootTopic] !== subscriptionToken) {
         if (!roomSubscriberCounts[rootTopic]) {
           reclaimAllOutstandingOffers(rootTopic)
+          activeTopics.delete(rootTopic)
         }
 
         return
@@ -375,6 +394,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       }
 
       delete activeTokens[rootTopic]
+      activeTopics.delete(rootTopic)
 
       if (!roomSubscriberCounts[rootTopic]) {
         reclaimAllOutstandingOffers(rootTopic)
@@ -382,7 +402,29 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     }
   },
 
-  announce: client => trackerAnnounceMs[client.url]
+  announce: (client, rootTopic) => {
+    // Mark this topic as active. The torrent strategy uses seeder mode
+    // (left: 0) for inactive passive peers instead of the passive flag in
+    // messages, since the tracker protocol is rigid. Topics start inactive
+    // (seeder mode); calling announce marks them active (sending offers).
+    activeTopics.add(rootTopic)
+
+    // Restart the announce interval at active frequency since it may have
+    // been running at the slower dormant rate
+    const relayIntervals = announceIntervals.forRelay(client)
+    const relayFns = announceFns.forRelay(client)
+    const fn = relayFns[rootTopic]
+
+    if (fn && relayIntervals[rootTopic]) {
+      clearInterval(relayIntervals[rootTopic])
+      relayIntervals[rootTopic] = setInterval(() => {
+        void fn()
+      }, trackerAnnounceMs[client.url])
+      void fn()
+    }
+
+    return trackerAnnounceMs[client.url]
+  }
 })
 
 export const joinRoom: JoinRoom<TorrentRoomConfig> = (

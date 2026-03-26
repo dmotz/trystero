@@ -155,6 +155,24 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
   init: config => (client ||= createClient(config.appId, config.supabaseKey)),
 
   subscribe: async (client, rootTopic, selfTopic, onMessage) => {
+    // Defer selfTopic channel creation until the room detects activity.
+    // Each Supabase channel counts as a connection against plan limits,
+    // so dormant passive rooms avoid creating channels they don't need.
+    let selfEntry: ChannelEntry | null = null
+    let removeSelfListener: (() => void) | null = null
+
+    const ensureSelfChannel = (): void => {
+      if (selfEntry) return
+      selfEntry = getOrCreateChannel(client, selfTopic)
+      removeSelfListener = addListener(selfEntry, events.sdp, payload => {
+        void onMessage(
+          selfTopic,
+          payload as Record<string, unknown>,
+          handleMessage
+        )
+      })
+    }
+
     const handleMessage = (peerTopic: string, signal: string): void => {
       const entry = getOrCreateChannel(client, peerTopic)
 
@@ -167,16 +185,9 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
       })
     }
 
-    const selfEntry = getOrCreateChannel(client, selfTopic)
     const rootEntry = getOrCreateChannel(client, rootTopic)
-    const removeSelfListener = addListener(selfEntry, events.sdp, payload => {
-      void onMessage(
-        selfTopic,
-        payload as Record<string, unknown>,
-        handleMessage
-      )
-    })
     const removeRootListener = addListener(rootEntry, events.join, payload => {
+      ensureSelfChannel()
       void onMessage(
         rootTopic,
         payload as Record<string, unknown>,
@@ -184,22 +195,22 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
       )
     })
 
-    await all([selfEntry.ready, rootEntry.ready])
+    await rootEntry.ready
 
     return () => {
-      removeSelfListener()
+      removeSelfListener?.()
       removeRootListener()
       removeUnusedChannels(client)
     }
   },
 
-  announce: (client, rootTopic) =>
+  announce: (client, rootTopic, _selfTopic, extra) =>
     getOrCreateChannel(client, rootTopic).ready.then(chan =>
       chan
         .send({
           type: events.broadcast,
           event: events.join,
-          payload: {peerId: selfId}
+          payload: {peerId: selfId, ...extra}
         })
         .then(() => undefined)
     )
