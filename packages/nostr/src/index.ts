@@ -93,6 +93,83 @@ const unsubscribe = (subId: string): string => {
   return toJson(['CLOSE', subId])
 }
 
+// Batched subscription management — groups all topic subscriptions per relay
+// into a single REQ to stay within relay subscription limits (typically 10-20).
+type TopicHandler = (topic: string, data: string) => void
+
+type BatchState = {
+  subId: string
+  topics: Map<string, TopicHandler>
+  since: number
+  updateTimer: ReturnType<typeof setTimeout> | null
+}
+
+const batchers: Record<string, BatchState> = {}
+
+const batchAdd = (
+  client: SocketClient,
+  topic: string,
+  handler: TopicHandler
+): void => {
+  const batcher = (batchers[client.url] ??= {
+    subId: genId(64),
+    topics: new Map(),
+    since: now(),
+    updateTimer: null
+  })
+
+  batcher.topics.set(topic, handler)
+  scheduleBatchFlush(client, batcher)
+}
+
+const batchRemove = (client: SocketClient, topic: string): void => {
+  const batcher = batchers[client.url]
+  if (!batcher) return
+
+  batcher.topics.delete(topic)
+
+  if (batcher.topics.size === 0) {
+    if (batcher.updateTimer !== null) {
+      clearTimeout(batcher.updateTimer)
+      batcher.updateTimer = null
+    }
+    client.send(toJson(['CLOSE', batcher.subId]))
+    delete batchers[client.url]
+  } else {
+    scheduleBatchFlush(client, batcher)
+  }
+}
+
+const scheduleBatchFlush = (
+  client: SocketClient,
+  batcher: BatchState
+): void => {
+  if (batcher.updateTimer !== null) return
+  batcher.updateTimer = setTimeout(() => {
+    batcher.updateTimer = null
+    flushBatch(client)
+  }, 0)
+}
+
+const flushBatch = (client: SocketClient): void => {
+  const batcher = batchers[client.url]
+  if (!batcher || batcher.topics.size === 0) return
+
+  const topics = [...batcher.topics.keys()]
+
+  client.send(
+    toJson([
+      'REQ',
+      batcher.subId,
+      {
+        kinds: topics.map(topicToKind),
+        since: batcher.since,
+        ['#' + tag]: topics
+      }
+    ])
+  )
+}
+
 export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
@@ -100,9 +177,14 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
         url,
         makeSocket(url, data => {
           const [msgType, subId, payload, relayMsg] =
-            fromJson<[string, string, {content: string} | boolean, string]>(
-              data
-            )
+            fromJson<
+              [
+                string,
+                string,
+                {content: string; tags?: string[][]} | boolean,
+                string
+              ]
+            >(data)
 
           if (msgType !== eventMsgType) {
             const prefix = `${libName}: relay failure from ${client.url} - `
@@ -117,10 +199,23 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
           }
 
           if (payload && typeof payload === 'object' && 'content' in payload) {
-            msgHandlers[subId]?.(
-              subIdToTopic[subId] ?? '',
-              String((payload as {content: string}).content)
-            )
+            const content = String(payload.content)
+
+            // Individual subscription handler (for exported subscribe() users)
+            const handler = msgHandlers[subId]
+            if (handler) {
+              handler(subIdToTopic[subId] ?? '', content)
+              return
+            }
+
+            // Batched subscription — route by topic extracted from event tags
+            const batcher = batchers[url]
+            if (batcher?.subId === subId && payload.tags) {
+              const topicTag = payload.tags.find(t => t[0] === tag)
+              if (topicTag?.[1]) {
+                batcher.topics.get(topicTag[1])?.(topicTag[1], content)
+              }
+            }
           }
         })
       )
@@ -129,23 +224,18 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
     }),
 
   subscribe: (client, rootTopic, selfTopic, onMessage) => {
-    const rootSubId = genId(64)
-    const selfSubId = genId(64)
-
-    msgHandlers[rootSubId] = msgHandlers[selfSubId] = (topic, data) => {
+    const handler: TopicHandler = (topic, data) => {
       void onMessage(topic, data, async (peerTopic, signal) => {
         client.send(await createEvent(peerTopic, signal))
       })
     }
 
-    client.send(subscribe(rootSubId, rootTopic))
-    client.send(subscribe(selfSubId, selfTopic))
+    batchAdd(client, rootTopic, handler)
+    batchAdd(client, selfTopic, handler)
 
     return () => {
-      client.send(unsubscribe(rootSubId))
-      client.send(unsubscribe(selfSubId))
-      delete msgHandlers[rootSubId]
-      delete msgHandlers[selfSubId]
+      batchRemove(client, rootTopic)
+      batchRemove(client, selfTopic)
     }
   },
 

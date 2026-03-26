@@ -41,6 +41,7 @@ const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 3
 const defaultAnnounceMs = 10_000
+const dormantAnnounceMs = 120_000
 const maxAnnounceMs = 20_000
 const offerRetentionMs = 120_000
 const signalDedupeWindowMs = 4_000
@@ -349,10 +350,14 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 
     trackerAnnounceMs[client.url] = defaultAnnounceMs
     relayFns[rootTopic] = announce
-    relayIntervals[rootTopic] = setInterval(
-      announce,
-      trackerAnnounceMs[client.url]
-    )
+
+    // Use a longer interval for dormant passive rooms to reduce tracker load.
+    // The announce adapter restarts at active frequency on activation.
+    const initialInterval = activeTopics.has(rootTopic)
+      ? trackerAnnounceMs[client.url]
+      : dormantAnnounceMs
+
+    relayIntervals[rootTopic] = setInterval(announce, initialInterval)
     void announce()
 
     return () => {
@@ -403,6 +408,21 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     // messages, since the tracker protocol is rigid. Topics start inactive
     // (seeder mode); calling announce marks them active (sending offers).
     activeTopics.add(rootTopic)
+
+    // Restart the announce interval at active frequency since it may have
+    // been running at the slower dormant rate
+    const relayIntervals = announceIntervals.forRelay(client)
+    const relayFns = announceFns.forRelay(client)
+    const fn = relayFns[rootTopic]
+
+    if (fn && relayIntervals[rootTopic]) {
+      clearInterval(relayIntervals[rootTopic])
+      relayIntervals[rootTopic] = setInterval(() => {
+        void fn()
+      }, trackerAnnounceMs[client.url])
+      void fn()
+    }
+
     return trackerAnnounceMs[client.url]
   }
 })
