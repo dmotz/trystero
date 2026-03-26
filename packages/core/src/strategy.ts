@@ -46,6 +46,7 @@ type RoomRegistration = {
   roomToken: string | null
   roomTokenPromise: Promise<string>
   attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
+  shouldAdvertise: () => boolean
 }
 
 export default <
@@ -91,6 +92,12 @@ export default <
   ): void => {
     entries(roomRegistrations[appId] ?? {}).forEach(
       ([roomId, registration]) => {
+        // Skip inactive passive rooms to avoid flooding the data channel
+        // with presence frames for rooms the peer is unlikely to share
+        if (!registration.shouldAdvertise()) {
+          return
+        }
+
         const {roomToken, roomTokenPromise} = registration
 
         if (roomToken) {
@@ -111,6 +118,10 @@ export default <
             sharedPeers.get(appId, shared.peerId) !== shared ||
             shared.isClosing
           ) {
+            return
+          }
+
+          if (!registration.shouldAdvertise()) {
             return
           }
 
@@ -416,12 +427,18 @@ export default <
 
     if (!didInit) {
       const initRes = init(config)
-      pool.warmup()
       initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(value =>
         Promise.resolve(value)
       )
       didInit = true
       cleanupWatchOnline = config.manualRelayReconnection ? noOp : watchOnline()
+    }
+
+    // Defer offer pool warmup until a non-passive room needs it. Passive
+    // rooms create peers on demand via pool.checkout() when they activate,
+    // so pre-allocating 20 RTCPeerConnections would be wasted work.
+    if (!isPassive && !pool.isActive) {
+      pool.warmup()
     }
 
     ctx.announceIntervals = initPromises.map(() => announceIntervalMs)
@@ -481,6 +498,16 @@ export default <
       ctx.requeueAnnounce = () => {
         announceTimeouts.forEach(resetTimer)
         announceTimeouts.length = 0
+
+        // Warmup pool on first activation if no non-passive room triggered it
+        if (!pool.isActive) {
+          pool.warmup()
+        }
+
+        // Advertise room presence now that this passive room is active
+        if (roomRegistration.roomToken) {
+          advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, true)
+        }
 
         initPromises.forEach(async (relayP, i) => {
           const relay = await relayP
@@ -618,7 +645,8 @@ export default <
     const roomRegistration: RoomRegistration = {
       roomToken: null,
       roomTokenPromise: roomNamespacePromise,
-      attachSharedPeerToRoom
+      attachSharedPeerToRoom,
+      shouldAdvertise: () => !isPassive || ctx.isActive
     }
 
     appRoomRegistrations[roomId] = roomRegistration
@@ -640,7 +668,11 @@ export default <
         }
       })
 
-      advertiseRoomPresenceToAll(appId, roomToken, true)
+      // Skip initial presence broadcast for inactive passive rooms.
+      // Presence is advertised when the room activates instead.
+      if (!isPassive || ctx.isActive) {
+        advertiseRoomPresenceToAll(appId, roomToken, true)
+      }
     })
 
     joinedRoom.isPassive = () => isPassive

@@ -1020,10 +1020,11 @@ void test(
 
       const sub = subscribers[0]
 
-      // Activate the passive peer with an announcement
+      // Activate the passive peer with an announcement.
+      // Use a peerId > selfId (hex) so this peer leads the offer.
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: 'active-peer-1'},
+        {peerId: 'zzzz-active-peer'},
         (_topic, signal) => {
           signalPayloads.push(signal)
         }
