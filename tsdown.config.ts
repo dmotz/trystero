@@ -12,6 +12,7 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const empty = resolve('scripts/empty.ts')
 const packageDepsConfig = {
   deps: {
     skipNodeModulesBundle: true
@@ -48,7 +49,9 @@ const browserBundleConfigs = strategyNames.map((name, index) => ({
   minify: !testBuild,
   ...browserBundleDepsConfig,
   alias: {
-    '@trystero-p2p/core': coreSourcePath
+    '@trystero-p2p/core': coreSourcePath,
+    crypto: empty,
+    'node:crypto': empty
   },
   clean: index === 0,
   ...dropDevLabelStatements
