@@ -50,6 +50,14 @@ export type TurnServerConfig = {
   credentialType?: string
 }
 
+export type RoomStrategy = {
+  init: (
+    room: Room,
+    selfId: string,
+    config: BaseRoomConfig
+  ) => void | (() => void)
+}
+
 export type BaseRoomConfig = {
   appId: string
   password?: string
@@ -57,6 +65,7 @@ export type BaseRoomConfig = {
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
   turnConfig?: TurnServerConfig[]
+  strategies?: RoomStrategy[]
   _test_only_mdnsHostFallbackToLoopback?: boolean
   _test_only_sharedPeerIdleMs?: number
 }
@@ -127,6 +136,10 @@ export type Room = {
       metadata?: JsonValue
     ) => void
   ) => void
+}
+
+export type InternalRoom = Room & {
+  _injectPeer: (peer: PeerHandle, peerId: string) => void
 }
 
 export type SessionSignal = {

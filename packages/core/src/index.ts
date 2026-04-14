@@ -1,4 +1,5 @@
 export {default as createStrategy} from './strategy'
+export {PeerAssistedConnectivity} from './strategies/peer-assisted'
 export {hashWith, sha1} from './crypto'
 export {
   all,
@@ -46,6 +47,7 @@ export type {
   ProgressHandler,
   RelayConfig,
   Room,
+  RoomStrategy,
   Signal,
   SignalPeer,
   SocketClient,

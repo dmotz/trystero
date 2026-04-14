@@ -26,6 +26,7 @@ import type {
   HandshakePayload,
   HandshakeReceiver,
   HandshakeSender,
+  InternalRoom,
   JsonValue,
   PeerHandle,
   PeerHandshake,
@@ -211,7 +212,7 @@ export default (
     onHandshakeError,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs
   }: RoomOptions = {}
-): Room => {
+): InternalRoom => {
   const peerMap: Record<string, PeerHandle> = {}
   const activePeerMap: Record<string, PeerHandle> = {}
   const peerStates: Record<string, PendingPeerState> = {}
@@ -931,7 +932,7 @@ export default (
     maybeActivatePeer(id)
   })
 
-  onPeer((peer, id) => {
+  const registerPeer = (peer: PeerHandle, id: string): void => {
     const existingPeer = peerMap[id]
 
     if (existingPeer) {
@@ -997,7 +998,9 @@ export default (
     })
 
     startPeerHandshake(id, peer)
-  })
+  }
+
+  onPeer(registerPeer)
 
   if (isBrowser) {
     unregisterBeforeUnloadCleanup = registerBeforeUnloadCleanup(() =>
@@ -1009,6 +1012,8 @@ export default (
     makeAction,
 
     leave,
+
+    _injectPeer: registerPeer,
 
     ping: async id => {
       if (!activePeerMap[id]) {
@@ -1087,11 +1092,19 @@ export default (
       ),
 
     onPeerJoin: f => {
-      listeners.onPeerJoin = f
+      const prev = listeners.onPeerJoin
+      listeners.onPeerJoin = prev === noOp
+        ? f
+        : id => { prev(id); f(id) }
       keys(activePeerMap).forEach(peerId => f(peerId))
     },
 
-    onPeerLeave: f => (listeners.onPeerLeave = f),
+    onPeerLeave: f => {
+      const prev = listeners.onPeerLeave
+      listeners.onPeerLeave = prev === noOp
+        ? f
+        : id => { prev(id); f(id) }
+    },
 
     onPeerStream: f => (listeners.onPeerStream = f),
 
