@@ -158,10 +158,6 @@ export const getRelaySockets = relayManager.getSockets
 export {pauseRelayReconnection, resumeRelayReconnection, selfId}
 
 export const defaultRelayUrls = [
-  'aaa-api.freefrom.space/v1/ws',
-  'antiprimal.net/hot',
-  'api.freefrom.space/v1/ws',
-  'bagus.my/nostrrelay/0',
   'basspistol.org',
   'bucket.coracle.social',
   'chorus.almostmachines.dev',
@@ -181,8 +177,6 @@ export const defaultRelayUrls = [
   'nostr-relay.corb.net',
   'nostr.data.haus',
   'nostr.islandarea.net',
-  'nostr.l484.com',
-  'nostr.red5d.dev',
   'nostr.robosats.org',
   'nostr.sathoarder.com',
   'nostr.self-determined.de',
@@ -210,7 +204,6 @@ export const defaultRelayUrls = [
   'relay.nostrdice.com',
   'relay.notoshi.win',
   'relay.orangepill.ovh',
-  'relay.satlantis.io',
   'relay.sigit.io',
   'relay02.lnfi.network',
   'relay2.angor.io',
