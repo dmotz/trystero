@@ -177,7 +177,6 @@ export const defaultRelayUrls = [
   'nostr-relay.corb.net',
   'nostr.data.haus',
   'nostr.islandarea.net',
-  'nostr.robosats.org',
   'nostr.sathoarder.com',
   'nostr.self-determined.de',
   'nostr.tac.lol',
