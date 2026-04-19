@@ -16,10 +16,10 @@ export const strategyConfigs: Record<string, StrategyConfig> = {
   torrent: {
     relayRedundancy: Math.min(defaultRelayRedundancy, torrentRelays.length)
   },
-  ipfs: {},
   firebase: {appId: 'trystero-94db3.firebaseio.com'},
   supabase: {
     appId: 'https://swhajnendtrtanrqufqg.supabase.co',
     supabaseKey: 'sb_publishable_Bimr4WAzoSgyXK70-dS2PQ_rkvLGGlc'
-  }
+  },
+  ipfs: {}
 }
