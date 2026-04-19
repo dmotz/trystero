@@ -163,7 +163,6 @@ export const defaultRelayUrls = [
   'chorus.almostmachines.dev',
   'chorus.pjv.me',
   'communities.nos.social',
-  'freelay.sovbit.host',
   'ftp.halifax.rwth-aachen.de/nostr',
   'hol.is',
   'hornetstorage.net/relay',
