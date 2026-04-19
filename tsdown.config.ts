@@ -36,28 +36,7 @@ const dropDevLabelStatements = testBuild
       }
     }
 
-const browserBundleConfigs = strategyNames.map((name, index) => ({
-  workspace: false as const,
-  entry: {
-    [`trystero-${name}.min`]: `packages/${name}/src/index.ts`
-  },
-  outDir: 'dist',
-  dts: false,
-  format: 'es' as const,
-  platform: 'browser' as const,
-  sourcemap: true,
-  minify: !testBuild,
-  ...browserBundleDepsConfig,
-  alias: {
-    '@trystero-p2p/core': coreSourcePath,
-    crypto: empty,
-    'node:crypto': empty
-  },
-  clean: index === 0,
-  ...dropDevLabelStatements
-}))
-
-const buildAllConfigs = [
+export default [
   {
     workspace: {
       include: ['packages/*'],
@@ -95,7 +74,24 @@ const buildAllConfigs = [
     attw: ci,
     ...dropDevLabelStatements
   },
-  ...browserBundleConfigs
+  ...strategyNames.map((name, index) => ({
+    workspace: false as const,
+    entry: {
+      [`trystero-${name}.min`]: `packages/${name}/src/index.ts`
+    },
+    outDir: 'dist',
+    dts: false,
+    format: 'es' as const,
+    platform: 'browser' as const,
+    sourcemap: true,
+    minify: !testBuild,
+    ...browserBundleDepsConfig,
+    alias: {
+      '@trystero-p2p/core': coreSourcePath,
+      crypto: empty,
+      'node:crypto': empty
+    },
+    clean: index === 0,
+    ...dropDevLabelStatements
+  }))
 ]
-
-export default testBuild ? browserBundleConfigs : buildAllConfigs
