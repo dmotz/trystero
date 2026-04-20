@@ -48,8 +48,14 @@ const defaultRedundancy = 3
 export type TorrentRoomConfig = BaseRoomConfig & RelayConfig
 
 type TrackerMessage = {
-  offer?: unknown
-  answer?: unknown
+  offer?: {
+    type: 'offer'
+    sdp: string
+  }
+  answer?: {
+    type: 'answer'
+    sdp: string
+  }
   offer_id?: string
   peer_id?: string
   info_hash?: string
@@ -283,14 +289,17 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         void onMessage(
           rootTopic,
           {
-            offer: data.offer,
+            offer: data.offer.sdp,
             peerId: data.peer_id,
             hasOutgoingOffer:
               keys(getRoomOutstandingOffers(rootTopic)).length > 0
           },
           (_, signal) =>
             void send(client, rootTopic, {
-              answer: fromJson<Record<string, unknown>>(signal)['answer'],
+              answer: {
+                type: 'answer',
+                sdp: fromJson<{answer: string}>(signal).answer
+              },
               offer_id: data.offer_id,
               to_peer_id: data.peer_id
             })
@@ -302,7 +311,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           void onMessage(
             rootTopic,
             {
-              answer: data.answer,
+              answer: data.answer.sdp,
               peerId: data.peer_id,
               peer: offer.peer
             },
@@ -325,7 +334,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       )
       const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
         offer_id: id,
-        offer
+        offer: {type: 'offer', sdp: offer}
       }))
 
       void send(client, rootTopic, {
