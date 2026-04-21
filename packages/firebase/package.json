@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/firebase",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "Firebase strategy for Trystero",
   "keywords": [
     "chat",
