@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
+import {selfId} from '../../packages/core/src/utils.ts'
 
 type Subscriber = {
   rootTopic: string
@@ -347,6 +348,111 @@ void test(
     } finally {
       await appARoom.leave().catch(() => {})
       await appBRoom.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'higher-ID peer replies with own announcement to lower-ID peer selfTopic',
+  {timeout: 5_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+    const appId = `reply-announce-${Date.now()}`
+    const lowerPeerId =
+      String.fromCharCode(selfId.charCodeAt(0) - 1) + selfId.slice(1)
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {}
+    })
+
+    const room = joinRoom(
+      {appId, rtcPolyfill: MockRTCPeerConnection},
+      'reply-room'
+    )
+
+    try {
+      await waitFor(() => subscribers.length >= 1)
+      const sub = subscribers[0]
+
+      const signalCalls: {topic: string; signal: string}[] = []
+
+      await sub.onMessage(
+        sub.rootTopic,
+        {peerId: lowerPeerId},
+        (topic, signal) => signalCalls.push({topic, signal})
+      )
+
+      await wait(50)
+
+      assert.equal(signalCalls.length, 1, 'should reply to lower-ID peer')
+
+      const payload = JSON.parse(signalCalls[0].signal)
+      assert.equal(payload.peerId, selfId, 'reply should contain our peerId')
+      assert.ok(
+        !payload.offer && !payload.answer && !payload.candidate,
+        'reply should only contain peerId, not SDP fields.'
+      )
+    } finally {
+      await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'lower-ID peer does not reply to announcement from higher-ID peer',
+  {timeout: 5_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+    const appId = `no-reply-${Date.now()}`
+    const higherPeerId =
+      String.fromCharCode(selfId.charCodeAt(0) + 1) + selfId.slice(1)
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {}
+    })
+
+    const room = joinRoom(
+      {appId, rtcPolyfill: MockRTCPeerConnection},
+      'no-reply-room'
+    )
+
+    try {
+      await waitFor(() => subscribers.length >= 1)
+      const sub = subscribers[0]
+
+      const replyCalls: string[] = []
+
+      await sub.onMessage(
+        sub.rootTopic,
+        {peerId: higherPeerId},
+        (_topic, signal) => {
+          const parsed = JSON.parse(signal)
+
+          if (!parsed.offer && !parsed.answer && !parsed.candidate) {
+            replyCalls.push(signal)
+          }
+        }
+      )
+
+      await wait(50)
+
+      assert.equal(
+        replyCalls.length,
+        0,
+        'lower-ID peer should not reply.'
+      )
+    } finally {
+      await room.leave().catch(() => {})
     }
   }
 )
