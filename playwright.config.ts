@@ -15,7 +15,7 @@ process.env['TRYSTERO_TEST_PORT'] = String(testPort)
 
 export default {
   timeout: 53_333,
-  reporter: [['list'], ['./test/connection-timing-reporter.js']],
+  reporter: [['list'], ['./test/connection-timing-reporter.ts']],
   use: {
     ignoreHTTPSErrors: true,
     headless: true,
