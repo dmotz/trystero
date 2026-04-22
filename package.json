@@ -48,7 +48,8 @@
     "format:write": "oxfmt .",
     "find-proxy": "jiti scripts/find-proxy.ts",
     "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "publish": "pnpm build && pnpm copy-readmes-for-publish && pnpm -r publish --no-git-checks --access public"
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
