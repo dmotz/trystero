@@ -37,9 +37,12 @@ export default (strategy, overrides = {}) => {
       }
 
       const scriptUrl = `../dist/trystero-${strategy}.min.js`
-      const context2 = await browser.newContext(
-        proxy ? {proxy: {server: 'http://' + proxy, bypass: 'localhost'}} : {}
-      )
+      const context2 = await browser.newContext({
+        ignoreHTTPSErrors: true,
+        ...(proxy
+          ? {proxy: {server: 'http://' + proxy, bypass: 'localhost'}}
+          : {})
+      })
       const page2 = await context2.newPage()
 
       await attachPageLogging({

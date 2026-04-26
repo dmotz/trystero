@@ -4,6 +4,10 @@ import {dirname, join} from 'node:path'
 import {createInterface} from 'node:readline'
 import test from 'node:test'
 import {fileURLToPath} from 'node:url'
+import {
+  createWsRelayServer,
+  type WsRelayServer
+} from '@trystero-p2p/ws-relay/server'
 import {strategyConfigs} from '../strategy-configs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -15,6 +19,18 @@ const parseJson = (value: string) => {
     return JSON.parse(value)
   } catch {
     return null
+  }
+}
+
+const waitForSubscriptions = async (relays: WsRelayServer[]): Promise<void> => {
+  const started = Date.now()
+
+  while (relays.some(relay => relay.getSubscriberCount() === 0)) {
+    if (Date.now() - started > 5_000) {
+      assert.fail('timed out waiting for subscriptions on every relay')
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 50))
   }
 }
 
@@ -112,12 +128,57 @@ const runNodeTests = (
     `Trystero: ${strategy} connects peers using node`,
     {timeout, skip},
     async () => {
+      const relays =
+        strategy === 'ws-relay'
+          ? [createWsRelayServer({port: 0}), createWsRelayServer({port: 0})]
+          : []
+
+      await Promise.all(relays.map(relay => relay.ready))
+
+      const testRoomConfig =
+        strategy === 'ws-relay'
+          ? {
+              ...roomConfig,
+              relayUrls: relays.map(relay => {
+                const address = relay.address()
+
+                assert.ok(address && typeof address === 'object')
+
+                return `ws://localhost:${address.port}`
+              })
+            }
+          : roomConfig
+
       const peers = [
-        startPeer({role: 'initiator', strategy, roomId, roomConfig}),
-        startPeer({role: 'responder', strategy, roomId, roomConfig})
+        startPeer({
+          role: 'initiator',
+          strategy,
+          roomId,
+          roomConfig: testRoomConfig
+        }),
+        startPeer({
+          role: 'responder',
+          strategy,
+          roomId,
+          roomConfig: testRoomConfig
+        })
       ]
 
       try {
+        if (strategy === 'ws-relay') {
+          try {
+            await waitForSubscriptions(relays)
+          } catch (err) {
+            for (const {child} of peers) {
+              child.kill('SIGTERM')
+            }
+
+            await Promise.allSettled(peers.map(peer => peer.done))
+
+            throw err
+          }
+        }
+
         const results = (await Promise.allSettled(
           peers.map(peer => peer.done)
         )) as {
@@ -159,6 +220,8 @@ const runNodeTests = (
         for (const {child} of peers) {
           child.kill('SIGTERM')
         }
+
+        await Promise.all(relays.map(relay => relay.close()))
       }
     }
   )
@@ -169,4 +232,5 @@ runNodeTests('mqtt', {timeout: 20_000})
 runNodeTests('torrent', {timeout: 20_000})
 runNodeTests('firebase', {timeout: 20_000})
 runNodeTests('supabase', {timeout: 20_000})
+runNodeTests('ws-relay', {timeout: 20_000})
 runNodeTests('ipfs', {timeout: 50_000, skip: true})

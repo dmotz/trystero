@@ -3,6 +3,9 @@ import {defaultRelayUrls as nostrRelays} from '@trystero-p2p/nostr'
 import {defaultRelayUrls as torrentRelays} from '@trystero-p2p/torrent'
 
 const defaultRelayRedundancy = 4
+const wsRelayUrls = (process.env['TRYSTERO_WS_RELAY_URLS'] ?? '')
+  .split(',')
+  .filter(Boolean)
 
 export type StrategyConfig = Record<string, unknown>
 
@@ -16,6 +19,7 @@ export const strategyConfigs: Record<string, StrategyConfig> = {
   torrent: {
     relayRedundancy: Math.min(defaultRelayRedundancy, torrentRelays.length)
   },
+  'ws-relay': {relayUrls: wsRelayUrls},
   firebase: {appId: 'trystero-94db3.firebaseio.com'},
   supabase: {
     appId: 'https://swhajnendtrtanrqufqg.supabase.co',
