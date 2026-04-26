@@ -8,7 +8,7 @@ Trystero makes browsers discover each other and communicate directly. No
 accounts. No deploying infrastructure. Just import and connect.
 
 Peers can connect via 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥Firebase,
-or 🪐 IPFS – all using the same API.
+🪐 IPFS, or a 🔌 self-hosted WebSocket relay – all using the same API.
 
 Besides making peer matching automatic, Trystero offers some nice abstractions
 on top of WebRTC:
@@ -42,6 +42,7 @@ You can see what people are building with Trystero
   - [React hooks](#react-hooks)
   - [Troubleshooting connection issues](#troubleshooting-connection-issues)
   - [Running server-side (Node, Bun)](#running-server-side-node-bun)
+  - [Self-hosted WebSocket relay](#self-hosted-websocket-relay)
   - [Write your own strategy](#write-your-own-strategy)
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
@@ -64,8 +65,9 @@ To establish a direct peer-to-peer connection with WebRTC, a signalling channel
 is needed to exchange peer information
 ([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
 this involves running your own matchmaking server but Trystero abstracts this
-away for you and offers multiple "serverless" strategies for connecting peers
-(currently BitTorrent, Nostr, MQTT, Supabase, Firebase, and IPFS).
+away for you and offers multiple strategies for connecting peers (currently
+BitTorrent, Nostr, MQTT, Supabase, Firebase, IPFS, and self-hosted WebSocket
+relay).
 
 The important point to remember is this:
 
@@ -112,6 +114,8 @@ import {joinRoom} from '@trystero-p2p/supabase'
 import {joinRoom} from '@trystero-p2p/firebase'
 // or
 import {joinRoom} from '@trystero-p2p/ipfs'
+// or
+import {joinRoom} from '@trystero-p2p/ws-relay'
 ```
 
 Next, join the user to a room with an ID:
@@ -548,6 +552,34 @@ const room = joinRoom(
 )
 ```
 
+### Self-hosted WebSocket relay
+
+If you want a tiny relay that you control, use the WebSocket relay package.
+Start the relay on Node or Bun:
+
+```js
+import {createWsRelayServer} from '@trystero-p2p/ws-relay/server'
+
+createWsRelayServer({port: 8080})
+```
+
+Then in the browser:
+
+```js
+import {joinRoom} from '@trystero-p2p/ws-relay'
+
+const room = joinRoom(
+  {
+    appId: 'app-id',
+    relayUrls: ['wss://localhost:8080']
+  },
+  'room-id'
+)
+```
+
+The `relayUrls` config option is required for this strategy because there are no
+public default servers. You can pass multiple.
+
 ### Write your own strategy
 
 If you want to provide your own signaling backend, you can build a custom
@@ -559,6 +591,9 @@ The example below assumes a WebSocket relay that does simple pub/sub routing:
   `{"type": "subscribe" | "unsubscribe" | "publish", "topic", "payload"}`
 - Server broadcasts `{"topic", "payload"}` to subscribers of each topic
 
+This is just to show you how it works; if you want a simple self-hosted
+solution, use the `ws-relay` package explained above.
+
 ```js
 import {createStrategy, selfId, toJson} from '@trystero-p2p/core'
 
@@ -569,7 +604,7 @@ export const joinRoom = createStrategy({
   // In this case, the client is a single WebSocket.
   init: config =>
     new Promise((resolve, reject) => {
-      const ws = new WebSocket(config.relayUrl)
+      const ws = new WebSocket(config.relayUrls[0])
       ws.addEventListener('open', () => resolve(ws), {once: true})
       ws.addEventListener('error', reject, {once: true})
     }),
@@ -622,7 +657,7 @@ export const joinRoom = createStrategy({
 })
 
 const room = joinRoom(
-  {appId: 'my-app-id', relayUrl: 'wss://my-relay.example'},
+  {appId: 'my-app-id', relayUrls: ['wss://my-relay.example']},
   'my-room-id'
 )
 ```
@@ -693,15 +728,16 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
-  - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
-    list of URLs for the strategy to use to bootstrap P2P connections. These
-    would be BitTorrent trackers, Nostr relays, and MQTT brokers, respectively.
-    They must support secure WebSocket connections.
+  - `relayUrls` - **(optional for 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT; required for
+    🔌 WebSocket relay)** Custom list of URLs for the strategy to use to
+    bootstrap P2P connections. These would be BitTorrent trackers, Nostr relays,
+    MQTT brokers, and WebSocket relays, respectively. They must support secure
+    WebSocket connections.
 
   - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
-    Integer specifying how many relay endpoints to connect to simultaneously.
-    Passing a `relayUrls` option will cause this option to be ignored as the
-    entire list will be used.
+    Integer specifying how many default relay endpoints to connect to
+    simultaneously. Passing a `relayUrls` option will cause this option to be
+    ignored as the entire list will be used.
 
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
@@ -1024,10 +1060,10 @@ rooms.
 
 ### `getRelaySockets()`
 
-**(🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Returns an object of relay URL keys
-mapped to their WebSocket connections. This can be useful for determining the
-state of the user's connection to the relays and handling any connection
-failures.
+**(🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, 🔌 WebSocket relay only)** Returns an
+object of relay URL keys mapped to their WebSocket connections. This can be
+useful for determining the state of the user's connection to the relays and
+handling any connection failures.
 
 Example:
 
