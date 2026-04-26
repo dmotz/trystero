@@ -59,6 +59,7 @@
     "@trystero-p2p/nostr": "workspace:*",
     "@trystero-p2p/supabase": "workspace:*",
     "@trystero-p2p/torrent": "workspace:*",
+    "@trystero-p2p/ws-relay": "workspace:*",
     "trystero": "workspace:*"
   },
   "devDependencies": {

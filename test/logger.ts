@@ -20,7 +20,8 @@ export const emojis = {
   torrent: '🌊',
   supabase: '⚡️',
   firebase: '🔥',
-  ipfs: '🪐'
+  ipfs: '🪐',
+  'ws-relay': '🔌'
 }
 
 export const shortBrowsers = {

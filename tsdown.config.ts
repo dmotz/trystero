@@ -8,7 +8,8 @@ const strategyNames = [
   'mqtt',
   'nostr',
   'supabase',
-  'torrent'
+  'torrent',
+  'ws-relay'
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
@@ -46,6 +47,21 @@ export default [
     dts: true,
     unbundle: true,
     sourcemap: true,
+    exports: true,
+    ...packageDepsConfig,
+    publint: ci,
+    attw: ci,
+    ...dropDevLabelStatements
+  },
+  {
+    workspace: {
+      include: ['packages/ws-relay']
+    },
+    entry: {server: 'src/server.ts'},
+    dts: true,
+    unbundle: true,
+    sourcemap: true,
+    clean: false,
     exports: true,
     ...packageDepsConfig,
     publint: ci,
