@@ -31,7 +31,6 @@ import type {
   JoinRoomCallbacks,
   JoinRoomConfig,
   PeerHandle,
-  RelayConfig,
   SharedPeerState,
   Signal,
   SignalContext,
@@ -48,10 +47,7 @@ type RoomRegistration = {
   attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
 }
 
-export default <
-  TRelay,
-  TConfig extends BaseRoomConfig & RelayConfig = JoinRoomConfig
->({
+export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
   subscribe,
   announce
@@ -387,7 +383,9 @@ export default <
         Promise.resolve(value)
       )
       didInit = true
-      cleanupWatchOnline = config.manualRelayReconnection ? noOp : watchOnline()
+      cleanupWatchOnline = config.relayConfig?.manualReconnection
+        ? noOp
+        : watchOnline()
     }
 
     ctx.announceIntervals = initPromises.map(() => announceIntervalMs)

@@ -15,6 +15,7 @@ import {
   createStrategy,
   libName,
   selfId,
+  type BaseRelayConfig,
   type BaseRoomConfig,
   type JoinRoom
 } from '@trystero-p2p/core'
@@ -25,24 +26,32 @@ const dbs: Record<string, ReturnType<typeof getDatabase>> = {}
 const presenceRefs: Record<string, DatabaseReference> = {}
 const subscriptionTokens: Record<string, symbol> = {}
 
-export type FirebaseRoomConfig = BaseRoomConfig & {
+export type FirebaseRelayConfig = BaseRelayConfig & {
   firebaseApp?: FirebaseApp
-  rootPath?: string
+  firebasePath?: string
+}
+
+export type FirebaseRoomConfig = BaseRoomConfig & {
+  relayConfig?: FirebaseRelayConfig
 }
 
 const getPath = (...xs: string[]): string => xs.join('/')
 
 const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> =>
-  config.firebaseApp
-    ? (dbs[config.firebaseApp.options.databaseURL ?? config.appId] ??=
-        getDatabase(config.firebaseApp))
+  config.relayConfig?.firebaseApp
+    ? (dbs[
+        config.relayConfig.firebaseApp.options.databaseURL ?? config.appId
+      ] ??= getDatabase(config.relayConfig.firebaseApp))
     : (dbs[config.appId] ??= getDatabase(
         initializeApp({databaseURL: config.appId})
       ))
 
 export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
   init: config =>
-    ref(initDb(config), String(config.rootPath ?? defaultRootPath)),
+    ref(
+      initDb(config),
+      String(config.relayConfig?.firebasePath ?? defaultRootPath)
+    ),
 
   subscribe: (rootRef, rootTopic, selfTopic, onMessage) => {
     const roomRef = child(rootRef, rootTopic)

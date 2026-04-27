@@ -531,7 +531,7 @@ void test(
     }
     const appBConfig = {
       appId: `app-b-${Date.now()}`,
-      relayUrls: ['wss://ignored-for-second-app.example'],
+      relayConfig: {urls: ['wss://ignored-for-second-app.example']},
       rtcPolyfill: MockRTCPeerConnection
     }
 
