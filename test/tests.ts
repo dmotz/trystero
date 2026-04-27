@@ -71,7 +71,7 @@ export default (strategy, overrides = {}) => {
 
       const relayConfig = {
         ...(isRelayStrategy ? {redundancy} : {}),
-        ...(config.relayConfig ?? {})
+        ...config.relayConfig
       }
       const roomConfig = {
         appId: `trystero-test-${Math.random()}`,
