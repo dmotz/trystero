@@ -205,7 +205,9 @@ export class SharedPeerManager {
     })
 
     shared.remoteStreamsByKey.clear()
+    shared.remoteStreamsById.clear()
     shared.remoteTracksByKey.clear()
+    shared.remoteTracksById.clear()
     shared.pendingDataByToken.clear()
     shared.remoteRoomTokens.clear()
 
@@ -246,7 +248,9 @@ export class SharedPeerManager {
       streamOwners: new Map(),
       trackOwners: new Map(),
       remoteStreamsByKey: new Map(),
+      remoteStreamsById: new Map(),
       remoteTracksByKey: new Map(),
+      remoteTracksById: new Map(),
       idleMs,
       isClosing: false
     }
@@ -426,9 +430,15 @@ export class SharedPeerManager {
       __trysteroGetRemoteStreamByKey: key => shared.remoteStreamsByKey.get(key),
       __trysteroSetRemoteStreamByKey: (key, stream) =>
         void shared.remoteStreamsByKey.set(key, stream),
+      __trysteroGetRemoteStreamById: id => shared.remoteStreamsById.get(id),
+      __trysteroSetRemoteStreamById: (id, stream) =>
+        void shared.remoteStreamsById.set(id, stream),
       __trysteroGetRemoteTrackByKey: key => shared.remoteTracksByKey.get(key),
       __trysteroSetRemoteTrackByKey: (key, track, stream) =>
-        void shared.remoteTracksByKey.set(key, {track, stream})
+        void shared.remoteTracksByKey.set(key, {track, stream}),
+      __trysteroGetRemoteTrackById: id => shared.remoteTracksById.get(id),
+      __trysteroSetRemoteTrackById: (id, track, stream) =>
+        void shared.remoteTracksById.set(id, {track, stream})
     }
 
     binding.proxy = proxy

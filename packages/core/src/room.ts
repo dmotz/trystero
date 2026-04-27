@@ -128,11 +128,15 @@ type RoomOptions = {
 type InternalMediaMeta = {
   k: string
   m?: JsonValue
+  s?: string
+  t?: string
 }
 
 type PendingMediaMeta = {
   key: string
   metadata?: JsonValue
+  streamId?: string
+  trackId?: string
 }
 
 type PendingPongWaiter = {
@@ -268,17 +272,19 @@ export default (
       return [Promise.resolve(f(id, peer))]
     })
 
-  const applyMediaOp = <T extends InternalMediaMeta>(
+  const applyMediaOp = (
     targets: TargetPeers,
     key: string,
     metadata: JsonValue | undefined,
-    sendMeta: ActionSender<T>,
-    op: (peer: PeerHandle) => void
+    sendMeta: ActionSender<InternalMediaMeta>,
+    op: (peer: PeerHandle) => void,
+    mediaIds: Partial<InternalMediaMeta> = {}
   ): Promise<void>[] => {
     const payload = {
       k: key,
+      ...mediaIds,
       ...(metadata === undefined ? {} : {m: metadata})
-    } as T
+    }
 
     return iterate(targets, async (id, peer) => {
       await sendMeta(payload, id)
@@ -316,6 +322,11 @@ export default (
     }
 
     getSharedMediaPeer(id)?.__trysteroSetRemoteStreamByKey?.(key, stream)
+
+    if (typeof stream.id === 'string') {
+      getSharedMediaPeer(id)?.__trysteroSetRemoteStreamById?.(stream.id, stream)
+    }
+
     listeners.onPeerStream(stream, id, metadata)
   }
 
@@ -331,6 +342,19 @@ export default (
     }
 
     getSharedMediaPeer(id)?.__trysteroSetRemoteTrackByKey?.(key, track, stream)
+
+    if (typeof stream.id === 'string') {
+      getSharedMediaPeer(id)?.__trysteroSetRemoteStreamById?.(stream.id, stream)
+    }
+
+    if (typeof track.id === 'string') {
+      getSharedMediaPeer(id)?.__trysteroSetRemoteTrackById?.(
+        track.id,
+        track,
+        stream
+      )
+    }
+
     listeners.onPeerTrack(track, stream, id, metadata)
   }
 
@@ -825,6 +849,12 @@ export default (
     ) {
       return {
         key: (value as {k: string}).k,
+        ...(typeof (value as {s?: unknown}).s === 'string'
+          ? {streamId: (value as {s: string}).s}
+          : {}),
+        ...(typeof (value as {t?: unknown}).t === 'string'
+          ? {trackId: (value as {t: string}).t}
+          : {}),
         ...(Object.hasOwn(value as object, 'm')
           ? {metadata: (value as {m?: JsonValue}).m}
           : {})
@@ -866,15 +896,19 @@ export default (
       return
     }
 
-    ;(pendingStreamMetas[id] ??= []).push(parsed)
-
-    const cached = getSharedMediaPeer(id)?.__trysteroGetRemoteStreamByKey?.(
-      parsed.key
-    )
+    const sharedPeer = getSharedMediaPeer(id)
+    const cached =
+      sharedPeer?.__trysteroGetRemoteStreamByKey?.(parsed.key) ??
+      (parsed.streamId
+        ? sharedPeer?.__trysteroGetRemoteStreamById?.(parsed.streamId)
+        : undefined)
 
     if (cached) {
       emitStream(id, parsed.key, cached, parsed.metadata)
+      return
     }
+
+    ;(pendingStreamMetas[id] ??= []).push(parsed)
   })
 
   getTrackMeta((meta, id) => {
@@ -888,15 +922,19 @@ export default (
       return
     }
 
-    ;(pendingTrackMetas[id] ??= []).push(parsed)
-
-    const cached = getSharedMediaPeer(id)?.__trysteroGetRemoteTrackByKey?.(
-      parsed.key
-    )
+    const sharedPeer = getSharedMediaPeer(id)
+    const cached =
+      sharedPeer?.__trysteroGetRemoteTrackByKey?.(parsed.key) ??
+      (parsed.trackId
+        ? sharedPeer?.__trysteroGetRemoteTrackById?.(parsed.trackId)
+        : undefined)
 
     if (cached) {
       emitTrack(id, parsed.key, cached.track, cached.stream, parsed.metadata)
+      return
     }
+
+    ;(pendingTrackMetas[id] ??= []).push(parsed)
   })
 
   getLeave((_, id) => exitPeer(id, undefined, mkErr('peer left room')))
@@ -1064,8 +1102,13 @@ export default (
       ) as Record<string, RTCPeerConnection>,
 
     addStream: (stream, targets, meta) =>
-      applyMediaOp(targets, getStreamKey(stream), meta, sendStreamMeta, peer =>
-        peer.addStream(stream)
+      applyMediaOp(
+        targets,
+        getStreamKey(stream),
+        meta,
+        sendStreamMeta,
+        peer => peer.addStream(stream),
+        {s: stream.id}
       ),
 
     removeStream: (stream, targets) => {
@@ -1073,8 +1116,13 @@ export default (
     },
 
     addTrack: (track, stream, targets, meta) =>
-      applyMediaOp(targets, getTrackKey(track), meta, sendTrackMeta, peer =>
-        peer.addTrack(track, stream)
+      applyMediaOp(
+        targets,
+        getTrackKey(track),
+        meta,
+        sendTrackMeta,
+        peer => peer.addTrack(track, stream),
+        {s: stream.id, t: track.id}
       ),
 
     removeTrack: (track, targets) => {
@@ -1082,8 +1130,13 @@ export default (
     },
 
     replaceTrack: (oldTrack, newTrack, targets, meta) =>
-      applyMediaOp(targets, getTrackKey(newTrack), meta, sendTrackMeta, peer =>
-        peer.replaceTrack(oldTrack, newTrack)
+      applyMediaOp(
+        targets,
+        getTrackKey(newTrack),
+        meta,
+        sendTrackMeta,
+        peer => peer.replaceTrack(oldTrack, newTrack),
+        {t: oldTrack.id}
       ),
 
     onPeerJoin: f => {
