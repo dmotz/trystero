@@ -82,17 +82,19 @@ export const shuffle = <T>(xs: readonly T[], seed: number): T[] => {
   return a
 }
 
-export const getRelays = <TConfig extends BaseRoomConfig & RelayConfig>(
+export const getRelays = <
+  TConfig extends BaseRoomConfig & {relayConfig?: RelayConfig}
+>(
   config: TConfig,
   defaults: string[],
   defaultN: number,
   deriveFromAppId = false
 ): string[] =>
-  config.relayUrls ||
+  config.relayConfig?.urls ||
   (deriveFromAppId
     ? shuffle(defaults, strToNum(config.appId))
     : defaults
-  ).slice(0, config.relayRedundancy ?? defaultN)
+  ).slice(0, config.relayConfig?.redundancy ?? defaultN)
 
 export const toJson = JSON.stringify
 

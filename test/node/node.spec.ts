@@ -118,7 +118,7 @@ const runNodeTests = (
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
   const appId = (config['appId'] as string) ?? `trystero-node-${suffix}`
   const roomId = `room-${suffix}`
-  const roomConfig = {
+  const roomConfig: Record<string, unknown> = {
     appId,
     password: `03d1p@M@@s${Math.random()}`,
     ...config
@@ -139,13 +139,16 @@ const runNodeTests = (
         strategy === 'ws-relay'
           ? {
               ...roomConfig,
-              relayUrls: relays.map(relay => {
-                const address = relay.address()
+              relayConfig: {
+                ...(roomConfig['relayConfig'] as Record<string, unknown>),
+                urls: relays.map(relay => {
+                  const address = relay.address()
 
-                assert.ok(address && typeof address === 'object')
+                  assert.ok(address && typeof address === 'object')
 
-                return `ws://localhost:${address.port}`
-              })
+                  return `ws://localhost:${address.port}`
+                })
+              }
             }
           : roomConfig
 

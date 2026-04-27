@@ -26,6 +26,7 @@ export type {
   ActionProgress,
   ActionReceiver,
   ActionSender,
+  BaseRelayConfig,
   BaseRoomConfig,
   DataPayload,
   HandshakePayload,

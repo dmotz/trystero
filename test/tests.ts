@@ -62,22 +62,26 @@ export default (strategy, overrides = {}) => {
       const isRelayStrategy =
         strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
 
-      const relayRedundancy = isRelayStrategy
+      const redundancy = isRelayStrategy
         ? Math.min(
             defaultRelayRedundancy,
             await page.evaluate(() => window.trystero.defaultRelayUrls.length)
           )
         : 0
 
+      const relayConfig = {
+        ...(isRelayStrategy ? {redundancy} : {}),
+        ...(config.relayConfig ?? {})
+      }
       const roomConfig = {
         appId: `trystero-test-${Math.random()}`,
         password: '03d1p@M@@s' + Math.random(),
-        ...(isRelayStrategy ? {relayRedundancy} : {}),
         ...(useTestOnlyMdnsFallback &&
         (browserName === 'webkit' || browserName === 'firefox')
           ? {_test_only_mdnsHostFallbackToLoopback: true}
           : {}),
-        ...config
+        ...config,
+        ...(isRelayStrategy || config.relayConfig ? {relayConfig} : {})
       }
 
       const getSelfId = () => window.trystero.selfId
@@ -537,7 +541,7 @@ export default (strategy, overrides = {}) => {
               await page.evaluate(
                 () => Object.keys(window.trystero.getRelaySockets()).length
               )
-            ).toEqual(relayRedundancy)
+            ).toEqual(redundancy)
 
             expect(
               await page.evaluate(() =>

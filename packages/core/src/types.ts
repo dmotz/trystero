@@ -50,9 +50,19 @@ export type TurnServerConfig = {
   credentialType?: string
 }
 
+export type BaseRelayConfig = {
+  manualReconnection?: boolean
+}
+
+export type RelayConfig = BaseRelayConfig & {
+  urls?: string[]
+  redundancy?: number
+}
+
 export type BaseRoomConfig = {
   appId: string
   password?: string
+  relayConfig?: BaseRelayConfig
   trickleIce?: boolean
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
@@ -61,13 +71,9 @@ export type BaseRoomConfig = {
   _test_only_sharedPeerIdleMs?: number
 }
 
-export type RelayConfig = {
-  relayUrls?: string[]
-  relayRedundancy?: number
-  manualRelayReconnection?: boolean
+export type JoinRoomConfig = BaseRoomConfig & {
+  relayConfig?: RelayConfig
 }
-
-export type JoinRoomConfig = BaseRoomConfig & RelayConfig
 
 export type ProgressHandler = (
   percent: number,

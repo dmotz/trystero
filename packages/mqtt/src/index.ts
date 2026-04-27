@@ -5,9 +5,8 @@ import {
   getRelays,
   selfId,
   toJson,
-  type BaseRoomConfig,
   type JoinRoom,
-  type RelayConfig
+  type JoinRoomConfig
 } from '@trystero-p2p/core'
 
 const defaultRedundancy = 4
@@ -20,7 +19,7 @@ const relayManager = createRelayManager<mqtt.MqttClient>(
 const msgHandlers = relayManager.scoped<(topic: string, data: string) => void>()
 const subscriptionTokens = relayManager.scoped<symbol>()
 const subscriptionRefs = relayManager.scoped<number>()
-export type MqttRoomConfig = BaseRoomConfig & RelayConfig
+export type MqttRoomConfig = JoinRoomConfig
 
 export const joinRoom: JoinRoom<MqttRoomConfig> = createStrategy({
   init: config =>

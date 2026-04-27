@@ -17,10 +17,13 @@ const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const msgHandlers =
   relayManager.scoped<Set<(topic: string, data: StrategyMessage) => void>>()
 
-export type WsRelayRoomConfig = BaseRoomConfig &
-  Omit<RelayConfig, 'relayUrls' | 'relayRedundancy'> & {
-    relayUrls: string[]
-  }
+export type WsRelayConfig = Omit<RelayConfig, 'urls' | 'redundancy'> & {
+  urls: string[]
+}
+
+export type WsRelayRoomConfig = BaseRoomConfig & {
+  relayConfig: WsRelayConfig
+}
 
 export type WsRelayClientMessage =
   | {type: 'subscribe'; topic: string}
@@ -72,7 +75,7 @@ const unsubscribe = (topic: string): WsRelayClientMessage => ({
 
 export const joinRoom: JoinRoom<WsRelayRoomConfig> = createStrategy({
   init: config =>
-    config.relayUrls.map(url => {
+    config.relayConfig.urls.map(url => {
       const client = relayManager.register(
         url,
         makeSocket(url, data => {

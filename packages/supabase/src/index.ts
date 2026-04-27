@@ -10,6 +10,7 @@ import {
   keys,
   selfId,
   values,
+  type BaseRelayConfig,
   type BaseRoomConfig,
   type JoinRoom
 } from '@trystero-p2p/core'
@@ -20,8 +21,12 @@ const events = {
   sdp: 'sdp'
 } as const
 
-export type SupabaseRoomConfig = BaseRoomConfig & {
+export type SupabaseRelayConfig = BaseRelayConfig & {
   supabaseKey: string
+}
+
+export type SupabaseRoomConfig = BaseRoomConfig & {
+  relayConfig: SupabaseRelayConfig
 }
 
 type ChannelCache = {
@@ -152,7 +157,8 @@ const removeUnusedChannels = (client: SupabaseClient): void => {
 let client: SupabaseClient | null = null
 
 export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
-  init: config => (client ||= createClient(config.appId, config.supabaseKey)),
+  init: config =>
+    (client ||= createClient(config.appId, config.relayConfig.supabaseKey)),
 
   subscribe: async (client, rootTopic, selfTopic, onMessage) => {
     const handleMessage = (peerTopic: string, signal: string): void => {

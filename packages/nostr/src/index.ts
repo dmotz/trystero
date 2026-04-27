@@ -14,9 +14,8 @@ import {
   strToNum,
   toHex,
   toJson,
-  type BaseRoomConfig,
   type JoinRoom,
-  type RelayConfig,
+  type JoinRoomConfig,
   type SocketClient
 } from '@trystero-p2p/core'
 
@@ -33,7 +32,7 @@ const msgHandlers: Record<
 > = {}
 const kindCache: Record<string, number> = {}
 
-export type NostrRoomConfig = BaseRoomConfig & RelayConfig
+export type NostrRoomConfig = JoinRoomConfig
 
 const now = (): number => Math.floor(Date.now() / 1000)
 

@@ -571,14 +571,16 @@ import {joinRoom} from '@trystero-p2p/ws-relay'
 const room = joinRoom(
   {
     appId: 'app-id',
-    relayUrls: ['wss://localhost:8080']
+    relayConfig: {
+      urls: ['wss://localhost:8080']
+    }
   },
   'room-id'
 )
 ```
 
-The `relayUrls` config option is required for this strategy because there are no
-public default servers. You can pass multiple.
+The `relayConfig.urls` config option is required for this strategy because there
+are no public default servers. You can pass multiple.
 
 ### Write your own strategy
 
@@ -604,7 +606,7 @@ export const joinRoom = createStrategy({
   // In this case, the client is a single WebSocket.
   init: config =>
     new Promise((resolve, reject) => {
-      const ws = new WebSocket(config.relayUrls[0])
+      const ws = new WebSocket(config.relayConfig.urls[0])
       ws.addEventListener('open', () => resolve(ws), {once: true})
       ws.addEventListener('error', reject, {once: true})
     }),
@@ -657,7 +659,7 @@ export const joinRoom = createStrategy({
 })
 
 const room = joinRoom(
-  {appId: 'my-app-id', relayUrls: ['wss://my-relay.example']},
+  {appId: 'my-app-id', relayConfig: {urls: ['wss://my-relay.example']}},
   'my-room-id'
 )
 ```
@@ -669,7 +671,8 @@ To use the Supabase strategy:
 1. Create a [Supabase](https://supabase.com) project or use an existing one
 2. On the dashboard, go to Project Settings -> API
 3. Copy the Project URL and set that as the `appId` in the Trystero config, copy
-   the `anon public` API key and set it as `supabaseKey` in the Trystero config
+   the `anon public` API key and set it as `relayConfig.supabaseKey` in the
+   Trystero config
 
 ### Firebase setup
 
@@ -719,8 +722,8 @@ the same namespace will return the same room instance.
     Supabase, this should be set to your project URL (see
     [Supabase setup instructions](#supabase-setup)). If using Firebase, this
     should be the `databaseURL` from your Firebase config (also see
-    `firebaseApp` below for an alternative way of configuring the Firebase
-    strategy).
+    `relayConfig.firebaseApp` below for an alternative way of configuring the
+    Firebase strategy).
 
   - `password` - **(optional)** A string to encrypt session descriptions via
     AES-GCM as they are passed through the peering medium. If not set, session
@@ -728,16 +731,38 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
-  - `relayUrls` - **(optional for 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT; required for
-    🔌 WebSocket relay)** Custom list of URLs for the strategy to use to
-    bootstrap P2P connections. These would be BitTorrent trackers, Nostr relays,
-    MQTT brokers, and WebSocket relays, respectively. They must support secure
-    WebSocket connections.
+  - `relayConfig` - **(optional unless required by your chosen strategy)**
+    Object containing strategy-specific relay settings:
+    - `urls` - **(optional for 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT; required for 🔌
+      WebSocket relay)** Custom list of URLs for the strategy to use to
+      bootstrap P2P connections. These would be BitTorrent trackers, Nostr
+      relays, MQTT brokers, and WebSocket relays, respectively. They must
+      support secure WebSocket connections.
 
-  - `relayRedundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
-    Integer specifying how many default relay endpoints to connect to
-    simultaneously. Passing a `relayUrls` option will cause this option to be
-    ignored as the entire list will be used.
+    - `redundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
+      Integer specifying how many default relay endpoints to connect to
+      simultaneously. Passing a `urls` option will cause this option to be
+      ignored as the entire list will be used.
+
+    - `manualReconnection` - **(optional, 🐦 Nostr and 🌊 BitTorrent only)**
+      Boolean (default: `false`) that when set to `true` disables automatically
+      pausing and resuming reconnection attempts when the browser goes offline
+      and comes back online. This is useful if you want to manage this behavior
+      yourself.
+
+    - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
+      `anon public` API key.
+
+    - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
+      initialized Firebase app instance instead of an `appId`. Normally Trystero
+      will initialize a Firebase app based on the `appId` but this will fail if
+      you've already initialized it for use elsewhere.
+
+    - `firebasePath` - **(optional, 🔥 Firebase only)** String specifying path
+      where Trystero writes its matchmaking data in your database
+      (`'__trystero__'` by default). Changing this is useful if you want to run
+      multiple apps using the same database and don't want to worry about
+      namespace collisions.
 
   - `rtcConfig` - **(optional)** Specifies a custom
     [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
@@ -762,25 +787,6 @@ the same namespace will return the same room instance.
     [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection)-compatible
     constructor. This is useful for running outside of a browser, such as in
     Node (still experimental).
-
-  - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
-    `anon public` API key.
-
-  - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
-    initialized Firebase app instance instead of an `appId`. Normally Trystero
-    will initialize a Firebase app based on the `appId` but this will fail if
-    you've already initialized it for use elsewhere.
-
-  - `rootPath` - **(optional, 🔥 Firebase only)** String specifying path where
-    Trystero writes its matchmaking data in your database (`'__trystero__'` by
-    default). Changing this is useful if you want to run multiple apps using the
-    same database and don't want to worry about namespace collisions.
-
-  - `manualRelayReconnection` - **(optional, 🐦 Nostr and 🌊 BitTorrent only)**
-    Boolean (default: `false`) that when set to `true` disables automatically
-    pausing and resuming reconnection attempts when the browser goes offline and
-    comes back online. This is useful if you want to manage this behavior
-    yourself.
 
 - `roomId` - A string to namespace peers and events within a room.
 
@@ -1080,9 +1086,9 @@ console.log(getRelaySockets())
 ### `pauseRelayReconnection()`
 
 **(🐦 Nostr, 🌊 BitTorrent only)** Normally Trystero will try to automatically
-reconnect to relay sockets unless `manualRelayReconnection: true` is set in the
-room config. Calling this function stops relay reconnection attempts until
-`resumeRelayReconnection()` is called.
+reconnect to relay sockets unless `relayConfig.manualReconnection: true` is set
+in the room config. Calling this function stops relay reconnection attempts
+until `resumeRelayReconnection()` is called.
 
 ### `resumeRelayReconnection()`
 

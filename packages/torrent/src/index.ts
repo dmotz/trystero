@@ -13,10 +13,9 @@ import {
   selfId,
   sha1,
   toJson,
-  type BaseRoomConfig,
   type JoinRoom,
+  type JoinRoomConfig,
   type OfferRecord,
-  type RelayConfig,
   type SocketClient
 } from '@trystero-p2p/core'
 
@@ -45,7 +44,7 @@ const offerRetentionMs = 120_000
 const signalDedupeWindowMs = 4_000
 const defaultRedundancy = 3
 
-export type TorrentRoomConfig = BaseRoomConfig & RelayConfig
+export type TorrentRoomConfig = JoinRoomConfig
 
 type TrackerMessage = {
   offer?: {
