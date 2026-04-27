@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/ws-relay",
-  "version": "0.23.1",
+  "version": "0.24.0",
   "description": "Self-hosted WebSocket relay strategy for Trystero",
   "keywords": [
     "chat",

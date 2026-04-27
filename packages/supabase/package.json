@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/supabase",
-  "version": "0.23.1",
+  "version": "0.24.0",
   "description": "Supabase strategy for Trystero",
   "keywords": [
     "chat",

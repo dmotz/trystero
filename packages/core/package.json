@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/core",
-  "version": "0.23.1",
+  "version": "0.24.0",
   "description": "Core primitives for Trystero strategy implementations",
   "keywords": [
     "bittorrent",

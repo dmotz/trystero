@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/nostr",
-  "version": "0.23.1",
+  "version": "0.24.0",
   "description": "Nostr strategy for Trystero",
   "keywords": [
     "chat",
