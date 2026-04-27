@@ -1,7 +1,15 @@
 {
-  "plugins": ["typescript"],
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "builtin": true
+  },
   "rules": {
     "array-callback-return": "error",
+    "arrow-body-style": ["error", "as-needed"],
     "curly": "error",
     "eqeqeq": "error",
     "no-duplicate-imports": "error",
@@ -12,12 +20,10 @@
     "no-self-compare": "error",
     "no-template-curly-in-string": "error",
     "no-throw-literal": "error",
-    "no-unused-expressions": "error",
-    "no-unused-vars": "error",
     "no-var": "error",
-    "prefer-arrow-callback": "error",
     "prefer-const": "error",
     "prefer-rest-params": "error",
-    "prefer-spread": "error"
+    "prefer-spread": "error",
+    "unicorn/no-new-array": "off"
   }
 }
