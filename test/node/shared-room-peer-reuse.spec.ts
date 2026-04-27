@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import createRoom from '../../packages/core/src/room.ts'
+import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {selfId} from '../../packages/core/src/utils.ts'
 
@@ -143,6 +145,102 @@ class MockPeer {
   replaceTrack() {}
 }
 
+class LinkedMediaPeer {
+  created = Date.now()
+  isDead = false
+  handlers = {}
+  offerPromise = Promise.resolve()
+  partner = null
+  addStreamCalls = 0
+  connection = {
+    connectionState: 'connected',
+    iceConnectionState: 'connected',
+    getSenders: () => []
+  }
+  channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    bufferedAmountLowThreshold: 0
+  }
+  remoteStreams = new Map()
+
+  async getOffer() {}
+
+  async signal() {}
+
+  sendData(data) {
+    this.partner?.handlers.data?.(data.slice().buffer)
+  }
+
+  destroy() {
+    if (this.isDead) {
+      return
+    }
+
+    this.isDead = true
+    this.connection.connectionState = 'closed'
+    this.connection.iceConnectionState = 'closed'
+    this.handlers.close?.()
+  }
+
+  setHandlers(newHandlers) {
+    Object.assign(this.handlers, newHandlers)
+  }
+
+  ensureRemoteTrack(track, stream) {
+    let streamEntry = this.remoteStreams.get(stream.id)
+
+    if (!streamEntry) {
+      const tracksById = new Map()
+      const remoteStream = {
+        id: stream.id,
+        getTracks: () => Array.from(tracksById.values())
+      }
+
+      streamEntry = {stream: remoteStream, tracksById}
+      this.remoteStreams.set(stream.id, streamEntry)
+    }
+
+    const existingTrack = streamEntry.tracksById.get(track.id)
+
+    if (existingTrack) {
+      return {stream: streamEntry.stream, track: existingTrack, isNew: false}
+    }
+
+    const remoteTrack = {id: track.id}
+    streamEntry.tracksById.set(track.id, remoteTrack)
+
+    return {stream: streamEntry.stream, track: remoteTrack, isNew: true}
+  }
+
+  addStream(stream) {
+    this.addStreamCalls += 1
+
+    stream.getTracks().forEach(track => {
+      const remote = this.partner?.ensureRemoteTrack(track, stream)
+
+      if (remote?.isNew) {
+        this.partner.handlers.track?.(remote.track, remote.stream)
+      }
+    })
+  }
+
+  removeStream() {}
+
+  addTrack(track, stream) {
+    const remote = this.partner?.ensureRemoteTrack(track, stream)
+
+    if (remote?.isNew) {
+      this.partner.handlers.track?.(remote.track, remote.stream)
+    }
+
+    return {}
+  }
+
+  removeTrack() {}
+  replaceTrack() {}
+}
+
 const wait = (ms: number) => new Promise(res => setTimeout(res, ms))
 const waitFor = async (
   check: () => boolean,
@@ -157,6 +255,67 @@ const waitFor = async (
 
     await wait(10)
   }
+}
+
+const withTimeout = (promise, ms = 500) =>
+  Promise.race([
+    promise,
+    wait(ms).then(() => {
+      throw new Error('timed out waiting for result')
+    })
+  ])
+
+const createSharedMediaRooms = async (
+  managerA,
+  managerB,
+  sharedA,
+  sharedB,
+  roomId
+) => {
+  let registerPeerA = null
+  let registerPeerB = null
+  const roomA = createRoom(
+    f => {
+      registerPeerA = f
+    },
+    () => {},
+    () => {}
+  )
+  const roomB = createRoom(
+    f => {
+      registerPeerB = f
+    },
+    () => {},
+    () => {}
+  )
+  const joinA = new Promise(resolve => roomA.onPeerJoin(resolve))
+  const joinB = new Promise(resolve => roomB.onPeerJoin(resolve))
+  const token = `${roomId}-token`
+  const {proxy: proxyA} = managerA.bind(
+    roomId,
+    Promise.resolve(token),
+    sharedA,
+    {
+      onDetach: () => {}
+    }
+  )
+  const {proxy: proxyB} = managerB.bind(
+    roomId,
+    Promise.resolve(token),
+    sharedB,
+    {
+      onDetach: () => {}
+    }
+  )
+
+  assert.ok(registerPeerA, 'expected first room to register its peer callback')
+  assert.ok(registerPeerB, 'expected second room to register its peer callback')
+  registerPeerA(proxyA, 'peer-b')
+  registerPeerB(proxyB, 'peer-a')
+
+  await Promise.all([joinA, joinB])
+
+  return {roomA, roomB}
 }
 
 void test(
@@ -259,6 +418,89 @@ void test(
     } finally {
       await overlappingRoom?.leave().catch(() => {})
       await primaryRoom.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: shared peer re-emits cached remote streams in later rooms',
+  {timeout: 10_000},
+  async () => {
+    const appId = `shared-media-reuse-${Date.now()}`
+    const managerA = new SharedPeerManager()
+    const managerB = new SharedPeerManager()
+    const peerA = new LinkedMediaPeer()
+    const peerB = new LinkedMediaPeer()
+    const localTrack = {id: 'camera-track'}
+    const localStream = {id: 'camera-stream', getTracks: () => [localTrack]}
+    let firstRooms = null
+    let secondRooms = null
+
+    peerA.partner = peerB
+    peerB.partner = peerA
+
+    const sharedA = managerA.register(appId, 'peer-b', peerA, 60_000)
+    const sharedB = managerB.register(appId, 'peer-a', peerB, 60_000)
+
+    try {
+      firstRooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'media-room-a'
+      )
+
+      const firstStream = new Promise(resolve =>
+        firstRooms.roomB.onPeerStream((stream, peerId, metadata) =>
+          resolve({streamId: stream.id, peerId, metadata})
+        )
+      )
+
+      await Promise.all(
+        firstRooms.roomA.addStream(localStream, 'peer-b', {phase: 'first'})
+      )
+
+      assert.deepEqual(await withTimeout(firstStream), {
+        streamId: 'camera-stream',
+        peerId: 'peer-a',
+        metadata: {phase: 'first'}
+      })
+
+      await Promise.all([firstRooms.roomA.leave(), firstRooms.roomB.leave()])
+      firstRooms = null
+
+      secondRooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'media-room-b'
+      )
+
+      const secondStream = new Promise(resolve =>
+        secondRooms.roomB.onPeerStream((stream, peerId, metadata) =>
+          resolve({streamId: stream.id, peerId, metadata})
+        )
+      )
+
+      await Promise.all(
+        secondRooms.roomA.addStream(localStream, 'peer-b', {phase: 'second'})
+      )
+
+      assert.deepEqual(await withTimeout(secondStream), {
+        streamId: 'camera-stream',
+        peerId: 'peer-a',
+        metadata: {phase: 'second'}
+      })
+      assert.equal(peerA.addStreamCalls, 2)
+    } finally {
+      await firstRooms?.roomA.leave().catch(() => {})
+      await firstRooms?.roomB.leave().catch(() => {})
+      await secondRooms?.roomA.leave().catch(() => {})
+      await secondRooms?.roomB.leave().catch(() => {})
+      managerA.clear(appId, 'peer-b', {destroyPeer: true})
+      managerB.clear(appId, 'peer-a', {destroyPeer: true})
     }
   }
 )
@@ -446,11 +688,7 @@ void test(
 
       await wait(50)
 
-      assert.equal(
-        replyCalls.length,
-        0,
-        'lower-ID peer should not reply.'
-      )
+      assert.equal(replyCalls.length, 0, 'lower-ID peer should not reply.')
     } finally {
       await room.leave().catch(() => {})
     }
