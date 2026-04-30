@@ -142,21 +142,20 @@ Supabase, it should be your project URL.
 Listen for peers joining the room:
 
 ```js
-room.onPeerJoin(peerId => console.log(`${peerId} joined`))
+room.onPeerJoin = peerId => console.log(`${peerId} joined`)
 ```
 
 Listen for peers leaving the room:
 
 ```js
-room.onPeerLeave(peerId => console.log(`${peerId} left`))
+room.onPeerLeave = peerId => console.log(`${peerId} left`)
 ```
 
 Listen for peers sending their audio/video streams:
 
 ```js
-room.onPeerStream(
-  (stream, peerId) => (peerElements[peerId].video.srcObject = stream)
-)
+room.onPeerStream = (stream, peerId) =>
+  (peerElements[peerId].video.srcObject = stream)
 ```
 
 To unsubscribe from events, leave the room:
@@ -188,20 +187,33 @@ room.addStream(stream)
 Send and subscribe to custom peer-to-peer actions:
 
 ```js
-const [sendDrink, getDrink] = room.makeAction('drink')
+const drink = room.makeAction('drink')
 
 // buy drink for a friend
-sendDrink({drink: 'negroni', withIce: true}, friendId)
+drink.send({drink: 'negroni', withIce: true}, {target: friendId})
 
-// buy round for the house (second argument omitted)
-sendDrink({drink: 'mezcal', withIce: false})
+// buy round for the house
+drink.send({drink: 'mezcal', withIce: false})
 
 // listen for drinks sent to you
-getDrink((data, peerId) =>
+drink.onMessage = (data, {peerId}) =>
   console.log(
     `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${peerId}`
   )
-)
+```
+
+Actions can also use request/response semantics:
+
+```js
+const isEven = room.makeAction('is-even', {
+  kind: 'request',
+  onRequest: n => n % 2 === 0
+})
+
+const result = await isEven.request(42, {
+  target: friendId,
+  timeoutMs: 1000
+})
 ```
 
 If you're using TypeScript, you can add a type hint to the action:
@@ -209,42 +221,40 @@ If you're using TypeScript, you can add a type hint to the action:
 ```typescript
 type CursorMove = {x: number; y: number}
 
-const [sendCursor, getCursor] = room.makeAction<CursorMove>('cursor-move')
+const cursor = room.makeAction<CursorMove>('cursor-move')
 ```
 
 You can also use actions to send binary data, like images:
 
 ```js
-const [sendPic, getPic] = room.makeAction('pic')
+const pic = room.makeAction('pic')
 
 // blobs are automatically handled, as are any form of TypedArray
-canvas.toBlob(blob => sendPic(blob))
+canvas.toBlob(blob => pic.send(blob))
 
 // binary data is received as raw ArrayBuffers so your handling code should
 // interpret it in a way that makes sense
-getPic(
-  (data, peerId) => (imgs[peerId].src = URL.createObjectURL(new Blob([data])))
-)
+pic.onMessage = (data, {peerId}) =>
+  (imgs[peerId].src = URL.createObjectURL(new Blob([data])))
 ```
 
 Let's say we want users to be able to name themselves:
 
 ```js
 const idsToNames = {}
-const [sendName, getName] = room.makeAction('name')
+const name = room.makeAction('name')
 
 // tell new peers your name when they connect
-room.onPeerJoin(peerId => sendName('Oedipa', peerId))
+room.onPeerJoin = peerId => name.send('Oedipa', {target: peerId})
 
 // listen for peers naming themselves
-getName((name, peerId) => (idsToNames[peerId] = name))
+name.onMessage = (value, {peerId}) => (idsToNames[peerId] = value)
 
 // tell all peers at once when your name changes
-nameInput.addEventListener('change', e => sendName(e.target.value))
+nameInput.addEventListener('change', e => name.send(e.target.value))
 
-room.onPeerLeave(peerId =>
+room.onPeerLeave = peerId =>
   console.log(`${idsToNames[peerId] || 'a weird stranger'} left`)
-)
 ```
 
 > Actions are smart and handle serialization and chunking for you behind the
@@ -270,10 +280,10 @@ const selfStream = await navigator.mediaDevices.getUserMedia({
 room.addStream(selfStream)
 
 // send stream to peers who join later
-room.onPeerJoin(peerId => room.addStream(selfStream, peerId))
+room.onPeerJoin = peerId => room.addStream(selfStream, {target: peerId})
 
 // handle streams from other peers
-room.onPeerStream((stream, peerId) => {
+room.onPeerStream = (stream, peerId) => {
   // create an audio instance and set the incoming stream
   const audio = new Audio()
   audio.srcObject = stream
@@ -282,7 +292,7 @@ room.onPeerStream((stream, peerId) => {
   // add the audio to peerAudios object if you want to address it for something
   // later (volume, etc.)
   peerAudios[peerId] = audio
-})
+}
 ```
 
 Doing the same with video is similar, just be sure to add incoming streams to
@@ -292,7 +302,7 @@ video elements in the DOM:
 const peerVideos = {}
 const videoContainer = document.getElementById('videos')
 
-room.onPeerStream((stream, peerId) => {
+room.onPeerStream = (stream, peerId) => {
   let video = peerVideos[peerId]
 
   // if this peer hasn't sent a stream before, create a video element
@@ -306,7 +316,7 @@ room.onPeerStream((stream, peerId) => {
 
   video.srcObject = stream
   peerVideos[peerId] = video
-})
+}
 ```
 
 ## Advanced
@@ -319,18 +329,17 @@ interpreted. Instead of manually adding metadata bytes to the buffer you can
 simply pass a metadata argument in the sender action for your binary payload:
 
 ```js
-const [sendFile, getFile] = room.makeAction('file')
+const file = room.makeAction('file')
 
-getFile((data, peerId, metadata) =>
+file.onMessage = (data, {peerId, metadata}) =>
   console.log(
     `got a file (${metadata.name}) from ${peerId} with type ${metadata.type}`,
     data
   )
-)
 
-// to send metadata, pass a third argument
-// to broadcast to the whole room, set the second peer ID argument to null
-sendFile(buffer, null, {name: 'The Courierʼs Tragedy', type: 'application/pdf'})
+file.send(buffer, {
+  metadata: {name: 'The Courierʼs Tragedy', type: 'application/pdf'}
+})
 ```
 
 ### Action promises
@@ -340,7 +349,7 @@ sending. You can optionally use this to indicate to the user when a large
 transfer is done.
 
 ```js
-await sendFile(amplePayload)
+await file.send(amplePayload)
 console.log('done sending to all peers')
 ```
 
@@ -352,30 +361,22 @@ a progress bar to the sender for large transfers. The callback is called with a
 percentage value between 0 and 1 and the receiving peer's ID:
 
 ```js
-sendFile(
-  payload,
-  // notice the peer target argument for any action sender can be a single peer
-  // ID, an array of IDs, or null (meaning send to all peers in the room)
-  [peerIdA, peerIdB, peerIdC],
-  // metadata, which can also be null if you're only interested in the
-  // progress handler
-  {filename: 'paranoids.flac'},
-  // assuming each peer has a loading bar added to the DOM, its value is
-  // updated here
-  (percent, peerId) => (loadingBars[peerId].value = percent)
-)
+file.send(payload, {
+  target: [peerIdA, peerIdB, peerIdC],
+  metadata: {filename: 'paranoids.flac'},
+  onProgress: (percent, {peerId}) => (loadingBars[peerId].value = percent)
+})
 ```
 
 Similarly you can listen for progress events as a receiver like this:
 
 ```js
-const [sendFile, getFile, onFileProgress] = room.makeAction('file')
+const file = room.makeAction('file')
 
-onFileProgress((percent, peerId, metadata) =>
+file.onReceiveProgress = (percent, {peerId, metadata}) =>
   console.log(
     `${percent * 100}% done receiving ${metadata.filename} from ${peerId}`
   )
-)
 ```
 
 Notice that any metadata is sent with progress events so you can show the
@@ -422,23 +423,22 @@ const trysteroConfig = {appId: 'thurn-und-taxis'}
 
 export default function App({roomId}) {
   const room = joinRoom(trysteroConfig, roomId)
-  const [sendColor, getColor] = room.makeAction('color')
+  const colorAction = room.makeAction('color')
   const [myColor, setMyColor] = useState('#c0ffee')
   const [peerColors, setPeerColors] = useState({})
 
   // whenever new peers join the room, send my color to them:
-  room.onPeerJoin(peer => sendColor(myColor, peer))
+  room.onPeerJoin = peer => colorAction.send(myColor, {target: peer})
 
   // listen for peers sending their colors and update the state accordingly:
-  getColor((color, peer) =>
-    setPeerColors(peerColors => ({...peerColors, [peer]: color}))
-  )
+  colorAction.onMessage = (color, {peerId}) =>
+    setPeerColors(peerColors => ({...peerColors, [peerId]: color}))
 
   const updateColor = e => {
     const {value} = e.target
 
     // when updating my own color, broadcast it to all peers:
-    sendColor(value)
+    colorAction.send(value)
     setMyColor(value)
   }
 
@@ -853,96 +853,96 @@ Returns an object with the following methods:
   for the peers present in room (not including the local user). The keys of this
   object are the respective peers' IDs.
 
-- ### `addStream(stream, [targetPeers], [metadata])`
+- ### `addStream(stream, [options])`
 
   Broadcasts media stream to other peers.
   - `stream` - A `MediaStream` with audio and/or video to send to peers in the
     room.
 
-  - `targetPeers` - **(optional)** If specified, the stream is sent only to the
-    target peer ID (string) or list of peer IDs (array).
+  - `options.target` - **(optional)** If specified, the stream is sent only to
+    the target peer ID (string) or list of peer IDs (array). Passing `null` or
+    omitting this option sends to all peers in the room.
 
-  - `metadata` - **(optional)** Additional metadata (any serializable type) to
-    be sent with the stream. This is useful when sending multiple streams so
-    recipients know which is which (e.g. a webcam versus a screen capture). If
-    you want to broadcast a stream to all peers in the room with a metadata
-    argument, pass `null` as the second argument.
+  - `options.metadata` - **(optional)** Additional metadata (any serializable
+    type) to be sent with the stream. This is useful when sending multiple
+    streams so recipients know which is which (e.g. a webcam versus a screen
+    capture).
 
-- ### `removeStream(stream, [targetPeers])`
+- ### `removeStream(stream, [options])`
 
   Stops sending previously sent media stream to other peers.
   - `stream` - A previously sent `MediaStream` to stop sending.
 
-  - `targetPeers` - **(optional)** If specified, the stream is removed only from
-    the target peer ID (string) or list of peer IDs (array).
+  - `options.target` - **(optional)** If specified, the stream is removed only
+    from the target peer ID (string) or list of peer IDs (array).
 
-- ### `addTrack(track, stream, [targetPeers], [metadata])`
+- ### `addTrack(track, stream, [options])`
 
   Adds a new media track to a stream.
   - `track` - A `MediaStreamTrack` to add to an existing stream.
 
   - `stream` - The target `MediaStream` to attach the new track to.
 
-  - `targetPeers` - **(optional)** If specified, the track is sent only to the
-    target peer ID (string) or list of peer IDs (array).
+  - `options.target` - **(optional)** If specified, the track is sent only to
+    the target peer ID (string) or list of peer IDs (array).
 
-  - `metadata` - **(optional)** Additional metadata (any serializable type) to
-    be sent with the track. See `metadata` notes for `addStream()` above for
-    more details.
+  - `options.metadata` - **(optional)** Additional metadata (any serializable
+    type) to be sent with the track. See `metadata` notes for `addStream()`
+    above for more details.
 
-- ### `removeTrack(track, [targetPeers])`
+- ### `removeTrack(track, [options])`
 
   Removes a media track.
   - `track` - The `MediaStreamTrack` to remove.
 
-  - `targetPeers` - **(optional)** If specified, the track is removed only from
-    the target peer ID (string) or list of peer IDs (array).
+  - `options.target` - **(optional)** If specified, the track is removed only
+    from the target peer ID (string) or list of peer IDs (array).
 
-- ### `replaceTrack(oldTrack, newTrack, [targetPeers], [metadata])`
+- ### `replaceTrack(oldTrack, newTrack, [options])`
 
   Replaces a media track with a new one.
   - `oldTrack` - The `MediaStreamTrack` to remove.
 
   - `newTrack` - A `MediaStreamTrack` to attach.
 
-  - `targetPeers` - **(optional)** If specified, the track is replaced only for
-    the target peer ID (string) or list of peer IDs (array).
+  - `options.target` - **(optional)** If specified, the track is replaced only
+    for the target peer ID (string) or list of peer IDs (array).
 
-  - `metadata` - **(optional)** Additional metadata (any serializable type) to
-    be sent with the replacement track.
+  - `options.metadata` - **(optional)** Additional metadata (any serializable
+    type) to be sent with the replacement track.
 
-- ### `onPeerJoin(callback)`
+- ### `onPeerJoin`
 
-  Registers a callback function that will be called when a peer joins the room.
-  If called more than once, only the latest callback registered is ever called.
-  Existing active peers are immediately replayed to a newly registered callback.
+  A callback property that will be called when a peer joins the room. Assigning
+  a new function replaces the previous handler; assigning `null` clears it.
+  Existing active peers are immediately replayed to a newly assigned handler.
   - `callback(peerId)` - Function to run whenever a peer joins, called with the
     peer's ID.
 
   Example:
 
   ```js
-  onPeerJoin(peerId => console.log(`${peerId} joined`))
+  room.onPeerJoin = peerId => console.log(`${peerId} joined`)
   ```
 
-- ### `onPeerLeave(callback)`
+- ### `onPeerLeave`
 
-  Registers a callback function that will be called when a peer leaves the room.
-  If called more than once, only the latest callback registered is ever called.
+  A callback property that will be called when a peer leaves the room. Assigning
+  a new function replaces the previous handler; assigning `null` clears it.
   - `callback(peerId)` - Function to run whenever a peer leaves, called with the
     peer's ID.
 
   Example:
 
   ```js
-  onPeerLeave(peerId => console.log(`${peerId} left`))
+  room.onPeerLeave = peerId => console.log(`${peerId} left`)
   ```
 
-- ### `onPeerStream(callback)`
+- ### `onPeerStream`
 
-  Registers a callback function that will be called when a peer sends a media
-  stream. If called more than once, only the latest callback registered is ever
-  called.
+  A callback property that will be called when a peer sends a media stream.
+  Assigning a new function replaces the previous handler; assigning `null`
+  clears it.
   - `callback(stream, peerId, metadata)` - Function to run whenever a peer sends
     a media stream, called with the the peer's stream, ID, and optional metadata
     (see `addStream()` above for details).
@@ -950,16 +950,15 @@ Returns an object with the following methods:
   Example:
 
   ```js
-  onPeerStream((stream, peerId) =>
+  room.onPeerStream = (stream, peerId) =>
     console.log(`got stream from ${peerId}`, stream)
-  )
   ```
 
-- ### `onPeerTrack(callback)`
+- ### `onPeerTrack`
 
-  Registers a callback function that will be called when a peer sends a media
-  track. If called more than once, only the latest callback registered is ever
-  called.
+  A callback property that will be called when a peer sends a media track.
+  Assigning a new function replaces the previous handler; assigning `null`
+  clears it.
   - `callback(track, stream, peerId, metadata)` - Function to run whenever a
     peer sends a media track, called with the the peer's track, attached stream,
     ID, and optional metadata (see `addTrack()` above for details).
@@ -967,78 +966,48 @@ Returns an object with the following methods:
   Example:
 
   ```js
-  onPeerTrack((track, stream, peerId) =>
+  room.onPeerTrack = (track, stream, peerId) =>
     console.log(`got track from ${peerId}`, track)
-  )
   ```
 
-- ### `makeAction(actionId)`
+- ### `makeAction(actionId, [config])`
 
   Listen for and send custom data actions.
   - `actionId` - A string to register this action consistently among all peers.
 
-  Returns an array of three functions:
-  1. #### Sender
-     - Sends data to peers and returns a promise that resolves when all target
-       peers are finished sending locally.
+  If `config.kind` is omitted, the action is a one-way message action. Passing
+  `kind: 'request'` creates a request/response action.
 
-     - `(data, [targetPeers], [metadata], [onProgress])`
-       - `data` - Any value to send (primitive, object, binary). Serialization
-         and chunking is handled automatically. Binary data (e.g. `Blob`,
-         `TypedArray`) is received by other peer as an agnostic `ArrayBuffer`.
+  Message actions expose:
+  - `send(data, [options])` - Sends data to peers and resolves when local
+    sending is complete.
+  - `onMessage` - Nullable callback property for received messages.
+  - `onReceiveProgress` - Nullable callback property for inbound progress.
 
-       - `targetPeers` - **(optional)** Either a peer ID (string), an array of
-         peer IDs, or `null` (indicating to send to all peers in the room).
+  Request actions expose:
+  - `request(data, options)` - Sends to one peer and resolves with its response.
+  - `requestMany(data, options)` - Sends to many peers and resolves with
+    peer-labeled settled results.
+  - `onRequest` - Nullable callback property that returns the response.
+  - `onReceiveProgress` - Nullable callback property for inbound progress.
 
-       - `metadata` - **(optional)** If the data is binary, you can send an
-         optional metadata object describing it (see
-         [Binary metadata](#binary-metadata)).
-
-       - `onProgress` - **(optional)** A callback function that will be called
-         as every chunk for every peer is transmitted. The function will be
-         called with a value between 0 and 1 and a peer ID. See
-         [Progress updates](#progress-updates) for an example.
-
-  2. #### Receiver
-     - Registers a callback function that runs when data for this action is
-       received from other peers.
-
-     - `(data, peerId, metadata)`
-       - `data` - The value transmitted by the sending peer. Deserialization is
-         handled automatically, i.e. a number will be received as a number, an
-         object as an object, etc.
-
-       - `peerId` - The ID string of the sending peer.
-
-       - `metadata` - **(optional)** Optional metadata object supplied by the
-         sender if `data` is binary, e.g. a filename.
-
-  3. #### Progress handler
-     - Registers a callback function that runs when partial data is received
-       from peers. You can use this for tracking large binary transfers. See
-       [Progress updates](#progress-updates) for an example.
-
-     - `(percent, peerId, metadata)`
-       - `percent` - A number between 0 and 1 indicating the percentage complete
-         of the transfer.
-
-       - `peerId` - The ID string of the sending peer.
-
-       - `metadata` - **(optional)** Optional metadata object supplied by the
-         sender.
+  Send options use `target`, `metadata`, `onProgress`, and `signal`. Request
+  options use `target`, `metadata`, `timeoutMs`, `onProgress`, and `signal`.
+  `requestMany()` uses `targets` plus optional `onResult` for each peer result
+  as it arrives.
 
   Example:
 
   ```js
-  const [sendCursor, getCursor] = room.makeAction('cursormove')
+  const cursor = room.makeAction('cursormove')
 
-  window.addEventListener('mousemove', e => sendCursor([e.clientX, e.clientY]))
+  window.addEventListener('mousemove', e => cursor.send([e.clientX, e.clientY]))
 
-  getCursor(([x, y], peerId) => {
+  cursor.onMessage = ([x, y], {peerId}) => {
     const peerCursor = cursorMap[peerId]
     peerCursor.style.left = x + 'px'
     peerCursor.style.top = y + 'px'
-  })
+  }
   ```
 
 - ### `ping(peerId)`
@@ -1051,12 +1020,11 @@ Returns an object with the following methods:
 
   ```js
   // log round-trip time every 2 seconds
-  room.onPeerJoin(peerId =>
+  room.onPeerJoin = peerId =>
     setInterval(
       async () => console.log(`took ${await room.ping(peerId)}ms`),
       2000
     )
-  )
   ```
 
 ### `selfId`

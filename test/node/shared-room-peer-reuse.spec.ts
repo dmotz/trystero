@@ -288,8 +288,8 @@ const createSharedMediaRooms = async (
     () => {},
     () => {}
   )
-  const joinA = new Promise(resolve => roomA.onPeerJoin(resolve))
-  const joinB = new Promise(resolve => roomB.onPeerJoin(resolve))
+  const joinA = new Promise(resolve => (roomA.onPeerJoin = resolve))
+  const joinB = new Promise(resolve => (roomB.onPeerJoin = resolve))
   const token = `${roomId}-token`
   const {proxy: proxyA} = managerA.bind(
     roomId,
@@ -451,14 +451,16 @@ void test(
         'media-room-a'
       )
 
-      const firstStream = new Promise(resolve =>
-        firstRooms.roomB.onPeerStream((stream, peerId, metadata) =>
+      const firstStream = new Promise(resolve => {
+        firstRooms.roomB.onPeerStream = (stream, peerId, metadata) =>
           resolve({streamId: stream.id, peerId, metadata})
-        )
-      )
+      })
 
       await Promise.all(
-        firstRooms.roomA.addStream(localStream, 'peer-b', {phase: 'first'})
+        firstRooms.roomA.addStream(localStream, {
+          target: 'peer-b',
+          metadata: {phase: 'first'}
+        })
       )
 
       assert.deepEqual(await withTimeout(firstStream), {
@@ -478,14 +480,16 @@ void test(
         'media-room-b'
       )
 
-      const secondStream = new Promise(resolve =>
-        secondRooms.roomB.onPeerStream((stream, peerId, metadata) =>
+      const secondStream = new Promise(resolve => {
+        secondRooms.roomB.onPeerStream = (stream, peerId, metadata) =>
           resolve({streamId: stream.id, peerId, metadata})
-        )
-      )
+      })
 
       await Promise.all(
-        secondRooms.roomA.addStream(localStream, 'peer-b', {phase: 'second'})
+        secondRooms.roomA.addStream(localStream, {
+          target: 'peer-b',
+          metadata: {phase: 'second'}
+        })
       )
 
       assert.deepEqual(await withTimeout(secondStream), {

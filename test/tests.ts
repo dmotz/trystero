@@ -96,7 +96,7 @@ export default (strategy, overrides = {}) => {
         const joinStreamSwitchRoom = ([roomId, config]) => {
           window[roomId] = window.trystero.joinRoom(config, roomId)
 
-          return new Promise(res => window[roomId].onPeerJoin(res))
+          return new Promise(res => (window[roomId].onPeerJoin = res))
         }
 
         const addStreamAndWait = ([roomId, phase]) =>
@@ -106,7 +106,7 @@ export default (strategy, overrides = {}) => {
               10_000
             )
 
-            window[roomId].onPeerStream((stream, peerId, meta) => {
+            window[roomId].onPeerStream = (stream, peerId, meta) => {
               clearTimeout(timeout)
               res({
                 peerId,
@@ -114,7 +114,7 @@ export default (strategy, overrides = {}) => {
                 streamType: stream.constructor.name,
                 trackCount: stream.getTracks().length
               })
-            })
+            }
 
             setTimeout(async () => {
               window.__streamSwitchLocalStream ??=
@@ -124,11 +124,10 @@ export default (strategy, overrides = {}) => {
                 })
 
               const peerId = Object.keys(window[roomId].getPeers())[0]
-              window[roomId].addStream(
-                window.__streamSwitchLocalStream,
-                peerId,
-                {phase}
-              )
+              window[roomId].addStream(window.__streamSwitchLocalStream, {
+                target: peerId,
+                metadata: {phase}
+              })
             }, 333)
           })
 
@@ -224,18 +223,19 @@ export default (strategy, overrides = {}) => {
           const joinRoom = ([roomId, config, payload]) => {
             window[roomId] = window.trystero.joinRoom(config, roomId)
 
-            const [sendEager, getEager] = window[roomId].makeAction('eager')
+            const eagerAction = window[roomId].makeAction('eager')
 
             let didSend = false
 
             return new Promise(res => {
-              getEager((...args) => res(args))
-              window[roomId].onPeerJoin(peerId => {
+              eagerAction.onMessage = (payload, ctx) =>
+                res([payload, ctx.peerId, ctx.metadata])
+              window[roomId].onPeerJoin = peerId => {
                 if (!didSend) {
-                  sendEager(payload, peerId)
+                  eagerAction.send(payload, {target: peerId})
                   didSend = true
                 }
-              })
+              }
             })
           }
 
@@ -267,16 +267,15 @@ export default (strategy, overrides = {}) => {
           if (browserName !== 'webkit') {
             const onPeerStream = ([roomId, streamMeta]) =>
               new Promise(res => {
-                window[roomId].onPeerStream((stream, peerId, meta) =>
+                window[roomId].onPeerStream = (stream, peerId, meta) =>
                   res({peerId, meta, streamType: stream.constructor.name})
-                )
 
                 setTimeout(async () => {
                   const stream = await navigator.mediaDevices.getUserMedia({
                     audio: true,
                     video: true
                   })
-                  window[roomId].addStream(stream, null, streamMeta)
+                  window[roomId].addStream(stream, {metadata: streamMeta})
                 }, 999)
               })
 
@@ -301,26 +300,22 @@ export default (strategy, overrides = {}) => {
 
             const onPeerTrack = ([roomId, streamMeta]) =>
               new Promise(res => {
-                window[roomId].onPeerTrack((track, stream, peerId, meta) =>
+                window[roomId].onPeerTrack = (track, stream, peerId, meta) =>
                   res({
                     peerId,
                     meta,
                     streamType: stream.constructor.name,
                     trackType: track.constructor.name
                   })
-                )
 
                 setTimeout(async () => {
                   const stream = await navigator.mediaDevices.getUserMedia({
                     audio: true,
                     video: true
                   })
-                  window[roomId].addTrack(
-                    stream.getTracks()[0],
-                    stream,
-                    null,
-                    streamMeta
-                  )
+                  window[roomId].addTrack(stream.getTracks()[0], stream, {
+                    metadata: streamMeta
+                  })
                 }, 999)
               })
 
@@ -368,12 +363,11 @@ export default (strategy, overrides = {}) => {
           expect(concurrentPingB).toBeLessThan(1000)
 
           const makeAction = ([roomId, message]) => {
-            const [sendMessage, getMessage] =
-              window[roomId].makeAction('message')
+            const messageAction = window[roomId].makeAction('message')
 
             return new Promise(res => {
-              getMessage(res)
-              setTimeout(() => sendMessage(message), 333)
+              messageAction.onMessage = res
+              setTimeout(() => messageAction.send(message), 333)
             })
           }
 
@@ -407,6 +401,126 @@ export default (strategy, overrides = {}) => {
             )
           ).toBe(true)
 
+          const setupRequestActions = roomId => {
+            window[roomId].makeAction('is-even', {
+              kind: 'request',
+              onRequest: n => n % 2 === 0
+            })
+
+            window[roomId].makeAction('request-rejects', {
+              kind: 'request',
+              onRequest: () => {
+                throw new Error('request denied')
+              }
+            })
+
+            window[roomId].makeAction('late-request', {kind: 'request'})
+
+            window[roomId].makeAction('slow-request', {
+              kind: 'request',
+              onRequest: async value => {
+                await new Promise(res => setTimeout(res, 100))
+                return value
+              }
+            })
+          }
+
+          await Promise.all([
+            page.evaluate(setupRequestActions, roomNs),
+            page2.evaluate(setupRequestActions, roomNs)
+          ])
+
+          const requestIsEven = ([roomId, peerId, value]) =>
+            window[roomId]
+              .makeAction('is-even', {kind: 'request'})
+              .request(value, {target: peerId, timeoutMs: 1000})
+
+          expect(
+            await page.evaluate(requestIsEven, [roomNs, peer2Id, 42])
+          ).toEqual(true)
+          expect(
+            await page2.evaluate(requestIsEven, [roomNs, peer1Id, 41])
+          ).toEqual(false)
+
+          const requestRejects = ([roomId, peerId]) =>
+            window[roomId]
+              .makeAction('request-rejects', {kind: 'request'})
+              .request('please', {target: peerId, timeoutMs: 1000})
+              .then(
+                () => 'resolved',
+                err => String(err?.message ?? err)
+              )
+
+          expect(
+            await page.evaluate(requestRejects, [roomNs, peer2Id])
+          ).toMatch(/request denied/)
+
+          const requestLate = ([roomId, peerId]) =>
+            window[roomId]
+              .makeAction('late-request', {kind: 'request'})
+              .request('hello', {target: peerId, timeoutMs: 1000})
+
+          const lateRequest = page.evaluate(requestLate, [roomNs, peer2Id])
+
+          await sleep(50)
+          await page2.evaluate(roomId => {
+            window[roomId].makeAction('late-request', {
+              kind: 'request'
+            }).onRequest = () => 'hello back'
+          }, roomNs)
+
+          expect(await lateRequest).toEqual('hello back')
+
+          const requestMany = ([roomId, peerId]) => {
+            const seen = []
+
+            return window[roomId]
+              .makeAction('is-even', {kind: 'request'})
+              .requestMany(8, {
+                targets: ['missing-peer', peerId],
+                timeoutMs: 1000,
+                onResult: result => seen.push(result.status)
+              })
+              .then(results => ({
+                seen: seen.sort((a, b) => a.localeCompare(b)),
+                results: results.map(({peerId, status, value}) => ({
+                  peerId,
+                  status,
+                  value
+                }))
+              }))
+          }
+
+          const many = await page.evaluate(requestMany, [roomNs, peer2Id])
+
+          expect(many.results).toEqual([
+            {peerId: 'missing-peer', status: 'disconnected'},
+            {peerId: peer2Id, status: 'fulfilled', value: true}
+          ])
+          expect(many.seen).toEqual(['disconnected', 'fulfilled'])
+
+          const abortRequest = ([roomId, peerId]) => {
+            const controller = new AbortController()
+            const result = window[roomId]
+              .makeAction('slow-request', {kind: 'request'})
+              .request('later', {
+                target: peerId,
+                signal: controller.signal
+              })
+              .then(
+                () => 'resolved',
+                err => err?.name
+              )
+
+            controller.abort()
+
+            return result
+          }
+
+          expect(await page.evaluate(abortRequest, [roomNs, peer2Id])).toEqual(
+            'AbortError'
+          )
+
           if (roomNum === 0) {
             const isolatedRoomA = roomNs + '-isolation-a'
             const isolatedRoomB = roomNs + '-isolation-b'
@@ -417,18 +531,18 @@ export default (strategy, overrides = {}) => {
               window[roomA] = roomARef
               window[roomB] = roomBRef
 
-              const [sendSharedA, getSharedA] = roomARef.makeAction('shared')
-              const [sendSharedB, getSharedB] = roomBRef.makeAction('shared')
+              const sharedA = roomARef.makeAction('shared')
+              const sharedB = roomBRef.makeAction('shared')
 
               return Promise.all([
-                new Promise(res => roomARef.onPeerJoin(res)),
-                new Promise(res => roomBRef.onPeerJoin(res))
+                new Promise(res => (roomARef.onPeerJoin = res)),
+                new Promise(res => (roomBRef.onPeerJoin = res))
               ]).then(([peerA, peerB]) =>
                 Promise.all([
-                  new Promise(res => getSharedA(res)),
-                  new Promise(res => getSharedB(res)),
-                  sendSharedA({room: roomA, from: label}, peerA),
-                  sendSharedB({room: roomB, from: label}, peerB)
+                  new Promise(res => (sharedA.onMessage = res)),
+                  new Promise(res => (sharedB.onMessage = res)),
+                  sharedA.send({room: roomA, from: label}, {target: peerA}),
+                  sharedB.send({room: roomB, from: label}, {target: peerB})
                 ]).then(([receivedA, receivedB]) => ({receivedA, receivedB}))
               )
             }
@@ -466,37 +580,36 @@ export default (strategy, overrides = {}) => {
           }
 
           const makeBinaryAction = ([roomId, message, metadata]) => {
-            const [sendBinary, getBinary, onProgress] =
-              window[roomId].makeAction('binary')
+            const binaryAction = window[roomId].makeAction('binary')
 
             let senderPercent = 0
             let receiverPercent = 0
             let senderCallCount = 0
             let receiverCallCount = 0
 
-            onProgress(p => {
+            binaryAction.onReceiveProgress = p => {
               receiverPercent = p
               receiverCallCount++
-            })
+            }
 
             return Promise.all([
-              new Promise(res =>
-                getBinary((payload, _, receivedMeta) =>
+              new Promise(res => {
+                binaryAction.onMessage = (payload, {metadata: receivedMeta}) =>
                   res([
                     new TextDecoder().decode(payload).slice(-message.length),
                     receivedMeta
                   ])
-                )
-              ),
+              }),
 
               new Promise(res => setTimeout(res, 1233)).then(() =>
-                sendBinary(
+                binaryAction.send(
                   new TextEncoder().encode(message.repeat(50000)),
-                  null,
-                  metadata,
-                  p => {
-                    senderPercent = p
-                    senderCallCount++
+                  {
+                    metadata,
+                    onProgress: p => {
+                      senderPercent = p
+                      senderCallCount++
+                    }
                   }
                 )
               )
@@ -642,26 +755,26 @@ export default (strategy, overrides = {}) => {
 
               window[roomId] = room
 
-              const [sendEarly, getEarly] = room.makeAction('hsearly')
-              const [sendPost, getPost] = room.makeAction('hspost')
+              const earlyAction = room.makeAction('hsearly')
+              const postAction = room.makeAction('hspost')
 
-              window[sendPostKey] = sendPost
+              window[sendPostKey] = payload => postAction.send(payload)
 
-              getEarly(() => state.earlyReceived++)
+              earlyAction.onMessage = () => state.earlyReceived++
 
-              getPost((payload, peerId) => {
+              postAction.onMessage = (payload, {peerId}) => {
                 resolvePost?.([payload, peerId])
                 resolvePost = null
-              })
+              }
 
-              room.onPeerJoin(peerId => {
+              room.onPeerJoin = peerId => {
                 state.joinCount++
                 state.joinAt = Date.now()
                 resolveJoin?.(peerId)
                 resolveJoin = null
-              })
+              }
 
-              setTimeout(() => sendEarly('early-message'), 100)
+              setTimeout(() => earlyAction.send('early-message'), 100)
             }
 
             const readHandshakeState = roomId => {
@@ -777,7 +890,7 @@ export default (strategy, overrides = {}) => {
                 })
 
                 window[roomId] = room
-                room.onPeerJoin(() => state.joinCount++)
+                room.onPeerJoin = () => state.joinCount++
 
                 const start = Date.now()
                 const waitForError = () => {
@@ -842,9 +955,9 @@ export default (strategy, overrides = {}) => {
           }
 
           const disableAutoPong = roomId => {
-            const [, onPing] = window[roomId].makeAction('@_ping')
+            const pingAction = window[roomId].makeAction('@_ping')
 
-            onPing(() => {})
+            pingAction.onMessage = () => {}
           }
 
           const pendingPing = ([roomId, id]) =>
@@ -861,14 +974,14 @@ export default (strategy, overrides = {}) => {
           const disconnectedPing = page.evaluate(pendingPing, [roomNs, peer2Id])
 
           const peer1onLeaveId = page.evaluate(
-            roomId => new Promise(window[roomId].onPeerLeave),
+            roomId => new Promise(res => (window[roomId].onPeerLeave = res)),
             roomNs
           )
 
           const overlapRoomNs = roomNs + '-overlap'
           const joinOverlapRoom = ([roomId, config]) => {
             window[roomId] = window.trystero.joinRoom(config, roomId)
-            return new Promise(res => window[roomId].onPeerJoin(res))
+            return new Promise(res => (window[roomId].onPeerJoin = res))
           }
 
           const [overlapPeer1, overlapPeer2] = await Promise.all([
@@ -900,7 +1013,7 @@ export default (strategy, overrides = {}) => {
             await page2.evaluate(
               ([roomId, config]) => {
                 window[roomId] = window.trystero.joinRoom(config, roomId)
-                return new Promise(res => window[roomId].onPeerJoin(res))
+                return new Promise(res => (window[roomId].onPeerJoin = res))
               },
               [roomNs, roomConfig]
             )

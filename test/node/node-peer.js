@@ -19,8 +19,8 @@ const {joinRoom} = await import(`@trystero-p2p/${strategy}`)
 
 const room = joinRoom(roomConfig, roomId)
 
-const [sendPing, getPing] = room.makeAction('ping')
-const [sendPong, getPong] = room.makeAction('pong')
+const ping = room.makeAction('ping')
+const pong = room.makeAction('pong')
 
 let sentPing = false
 let finished = false
@@ -51,19 +51,19 @@ const timeout = setTimeout(() => {
   void done('failure', 'timed out waiting for peer communication')
 }, 60_000)
 
-room.onPeerJoin(peerId => {
+room.onPeerJoin = peerId => {
   if (role !== 'initiator' || sentPing) {
     return
   }
 
   sentPing = true
   const send = () =>
-    void sendPing('hello-from-initiator', peerId).catch(() => {})
+    void ping.send('hello-from-initiator', {target: peerId}).catch(() => {})
   send()
   pingTimer = setInterval(send, 1_500)
-})
+}
 
-getPing((payload, peerId) => {
+ping.onMessage = (payload, {peerId}) => {
   if (role !== 'responder') {
     return
   }
@@ -73,12 +73,13 @@ getPing((payload, peerId) => {
     return
   }
 
-  void sendPong('pong-from-responder', peerId)
+  void pong
+    .send('pong-from-responder', {target: peerId})
     .then(() => done('success', 'received ping'))
     .catch(() => done('failure', 'failed sending pong'))
-})
+}
 
-getPong(payload => {
+pong.onMessage = payload => {
   if (role !== 'initiator') {
     return
   }
@@ -93,4 +94,4 @@ getPong(payload => {
   }
 
   void done('success', 'received pong')
-})
+}

@@ -7,7 +7,9 @@ export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue}
 
 export type DataPayload = JsonValue | Blob | ArrayBuffer | ArrayBufferView
 
-export type TargetPeers = string | string[] | null | undefined
+export type PeerTarget = string | string[] | null
+
+export type TargetPeers = PeerTarget | undefined
 
 export type JoinError = {
   error: string
@@ -81,58 +83,140 @@ export type ProgressHandler = (
   metadata?: JsonValue
 ) => void
 
-export type ActionSender<T extends DataPayload = DataPayload> = (
-  data: T,
-  targetPeers?: TargetPeers,
-  metadata?: JsonValue,
-  progress?: ProgressHandler
-) => Promise<void[]>
+export type ActionProgressContext = {
+  peerId: string
+  metadata?: JsonValue
+}
 
-export type ActionReceiver<T extends DataPayload = DataPayload> = (
-  receiver: (data: T, peerId: string, metadata?: JsonValue) => void
+export type ActionProgressHandler = (
+  progress: number,
+  context: ActionProgressContext
 ) => void
 
-export type ActionProgress = (progressHandler: ProgressHandler) => void
+export type MessageContext = {
+  peerId: string
+  metadata?: JsonValue
+}
+
+export type RequestContext = {
+  peerId: string
+  metadata?: JsonValue
+  signal: AbortSignal
+}
+
+export type PeerResult<R extends DataPayload = DataPayload> =
+  | {peerId: string; status: 'fulfilled'; value: R}
+  | {peerId: string; status: 'timeout'}
+  | {peerId: string; status: 'rejected'; error: Error}
+  | {peerId: string; status: 'disconnected'}
+
+export type SendOptions = {
+  target?: PeerTarget
+  metadata?: JsonValue
+  onProgress?: ActionProgressHandler
+  signal?: AbortSignal
+}
+
+export type RequestOptions = {
+  target: string
+  metadata?: JsonValue
+  timeoutMs?: number
+  onProgress?: ActionProgressHandler
+  signal?: AbortSignal
+}
+
+export type RequestManyOptions<R extends DataPayload = DataPayload> = {
+  targets: string[]
+  metadata?: JsonValue
+  timeoutMs?: number
+  onProgress?: ActionProgressHandler
+  onResult?: (result: PeerResult<R>) => void
+  signal?: AbortSignal
+}
+
+export type MessageAction<T extends DataPayload = DataPayload> = {
+  send: (data: T, options?: SendOptions) => Promise<void>
+  onMessage: ((data: T, context: MessageContext) => void | Promise<void>) | null
+  onReceiveProgress: ActionProgressHandler | null
+}
+
+export type RequestAction<
+  T extends DataPayload = DataPayload,
+  R extends DataPayload = DataPayload
+> = {
+  request: (data: T, options: RequestOptions) => Promise<R>
+  requestMany: (
+    data: T,
+    options: RequestManyOptions<R>
+  ) => Promise<PeerResult<R>[]>
+  onRequest: ((data: T, context: RequestContext) => R | Promise<R>) | null
+  onReceiveProgress: ActionProgressHandler | null
+}
+
+export type MessageActionConfig<T extends DataPayload = DataPayload> = {
+  kind?: 'message'
+  onMessage?: (data: T, context: MessageContext) => void | Promise<void>
+  onReceiveProgress?: ActionProgressHandler
+}
+
+export type RequestActionConfig<
+  T extends DataPayload = DataPayload,
+  R extends DataPayload = DataPayload
+> = {
+  kind: 'request'
+  onRequest?: (data: T, context: RequestContext) => R | Promise<R>
+  onReceiveProgress?: ActionProgressHandler
+}
+
+export type AddMediaOptions = {
+  target?: PeerTarget
+  metadata?: JsonValue
+}
+
+export type RemoveMediaOptions = {
+  target?: PeerTarget
+}
 
 export type Room = {
-  makeAction: <T extends DataPayload = DataPayload>(
-    namespace: string
-  ) => [ActionSender<T>, ActionReceiver<T>, ActionProgress]
+  makeAction: {
+    <T extends DataPayload = DataPayload>(
+      namespace: string,
+      config?: MessageActionConfig<T>
+    ): MessageAction<T>
+    <T extends DataPayload = DataPayload, R extends DataPayload = DataPayload>(
+      namespace: string,
+      config: RequestActionConfig<T, R>
+    ): RequestAction<T, R>
+  }
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
   getPeers: () => Record<string, RTCPeerConnection>
-  addStream: (
-    stream: MediaStream,
-    targetPeers?: TargetPeers,
-    metadata?: JsonValue
-  ) => Promise<void>[]
-  removeStream: (stream: MediaStream, targetPeers?: TargetPeers) => void
+  addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
+  removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
   addTrack: (
     track: MediaStreamTrack,
     stream: MediaStream,
-    targetPeers?: TargetPeers,
-    metadata?: JsonValue
+    options?: AddMediaOptions
   ) => Promise<void>[]
-  removeTrack: (track: MediaStreamTrack, targetPeers?: TargetPeers) => void
+  removeTrack: (track: MediaStreamTrack, options?: RemoveMediaOptions) => void
   replaceTrack: (
     oldTrack: MediaStreamTrack,
     newTrack: MediaStreamTrack,
-    targetPeers?: TargetPeers,
-    metadata?: JsonValue
+    options?: AddMediaOptions
   ) => Promise<void>[]
-  onPeerJoin: (fn: (peerId: string) => void) => void
-  onPeerLeave: (fn: (peerId: string) => void) => void
-  onPeerStream: (
-    fn: (stream: MediaStream, peerId: string, metadata?: JsonValue) => void
-  ) => void
-  onPeerTrack: (
-    fn: (
-      track: MediaStreamTrack,
-      stream: MediaStream,
-      peerId: string,
-      metadata?: JsonValue
-    ) => void
-  ) => void
+  onPeerJoin: ((peerId: string) => void) | null
+  onPeerLeave: ((peerId: string) => void) | null
+  onPeerStream:
+    | ((stream: MediaStream, peerId: string, metadata?: JsonValue) => void)
+    | null
+  onPeerTrack:
+    | ((
+        track: MediaStreamTrack,
+        stream: MediaStream,
+        peerId: string,
+        metadata?: JsonValue
+      ) => void)
+    | null
 }
 
 export type SessionSignal = {
