@@ -383,6 +383,13 @@ void test(
 
       await sub.onMessage(sub.rootTopic, {passive: false}, () => {})
       await sub.onMessage('wrong-topic', {peerId: 'active-peer'}, () => {})
+      await sub.onMessage('not json', 'not-json', () => {})
+      await sub.onMessage(sub.rootTopic, null, () => {})
+      await sub.onMessage(
+        sub.rootTopic,
+        {peerId: 'active-peer', offer: {sdp: 'not-a-string'}},
+        () => {}
+      )
       await wait(300)
 
       assert.equal(

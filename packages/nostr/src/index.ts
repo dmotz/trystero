@@ -32,6 +32,7 @@ const msgHandlers: Record<
   ((topic: string, data: string) => void) | undefined
 > = {}
 const kindCache: Record<string, number> = {}
+const maxTopicsPerSubscription = 250
 
 export type NostrRoomConfig = BaseRoomConfig & RelayConfig
 
@@ -93,12 +94,12 @@ const unsubscribe = (subId: string): string => {
   return toJson(['CLOSE', subId])
 }
 
-// Batched subscription management — groups all topic subscriptions per relay
-// into a single REQ to stay within relay subscription limits (typically 10-20).
+// Batched subscription management — groups topic subscriptions per relay into
+// bounded REQ filters to stay within relay subscription and filter-size limits.
 type TopicHandler = (topic: string, data: string) => void
 
 type BatchState = {
-  subId: string
+  subIds: string[]
   topics: Map<string, TopicHandler>
   since: number
   updateTimer: ReturnType<typeof setTimeout> | null
@@ -112,7 +113,7 @@ const batchAdd = (
   handler: TopicHandler
 ): void => {
   const batcher = (batchers[client.url] ??= {
-    subId: genId(64),
+    subIds: [],
     topics: new Map(),
     since: now(),
     updateTimer: null
@@ -133,7 +134,7 @@ const batchRemove = (client: SocketClient, topic: string): void => {
       clearTimeout(batcher.updateTimer)
       batcher.updateTimer = null
     }
-    client.send(toJson(['CLOSE', batcher.subId]))
+    batcher.subIds.forEach(subId => client.send(toJson(['CLOSE', subId])))
     delete batchers[client.url]
   } else {
     scheduleBatchFlush(client, batcher)
@@ -156,18 +157,35 @@ const flushBatch = (client: SocketClient): void => {
   if (!batcher || batcher.topics.size === 0) return
 
   const topics = [...batcher.topics.keys()]
+  const chunks: string[][] = []
 
-  client.send(
-    toJson([
-      'REQ',
-      batcher.subId,
-      {
-        kinds: topics.map(topicToKind),
-        since: batcher.since,
-        ['#' + tag]: topics
-      }
-    ])
-  )
+  for (let i = 0; i < topics.length; i += maxTopicsPerSubscription) {
+    chunks.push(topics.slice(i, i + maxTopicsPerSubscription))
+  }
+
+  while (batcher.subIds.length > chunks.length) {
+    const subId = batcher.subIds.pop()
+
+    if (subId) {
+      client.send(toJson(['CLOSE', subId]))
+    }
+  }
+
+  chunks.forEach((chunk, i) => {
+    const subId = (batcher.subIds[i] ??= genId(64))
+
+    client.send(
+      toJson([
+        'REQ',
+        subId,
+        {
+          kinds: [...new Set(chunk.map(topicToKind))],
+          since: batcher.since,
+          ['#' + tag]: chunk
+        }
+      ])
+    )
+  })
 }
 
 export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
@@ -210,7 +228,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
 
             // Batched subscription — route by topic extracted from event tags
             const batcher = batchers[url]
-            if (batcher?.subId === subId && payload.tags) {
+            if (batcher?.subIds.includes(subId) && payload.tags) {
               const topicTag = payload.tags.find(t => t[0] === tag)
               if (topicTag?.[1]) {
                 batcher.topics.get(topicTag[1])?.(topicTag[1], content)
