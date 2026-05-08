@@ -50,10 +50,20 @@ export type TurnServerConfig = {
   credentialType?: string
 }
 
+export type BaseRelayConfig = {
+  manualReconnection?: boolean
+}
+
+export type RelayConfig = BaseRelayConfig & {
+  urls?: string[]
+  redundancy?: number
+}
+
 export type BaseRoomConfig = {
   appId: string
   password?: string
   passive?: boolean
+  relayConfig?: BaseRelayConfig
   trickleIce?: boolean
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
@@ -62,13 +72,9 @@ export type BaseRoomConfig = {
   _test_only_sharedPeerIdleMs?: number
 }
 
-export type RelayConfig = {
-  relayUrls?: string[]
-  relayRedundancy?: number
-  manualRelayReconnection?: boolean
+export type JoinRoomConfig = BaseRoomConfig & {
+  relayConfig?: RelayConfig
 }
-
-export type JoinRoomConfig = BaseRoomConfig & RelayConfig
 
 export type ProgressHandler = (
   percent: number,
@@ -242,9 +248,17 @@ export type RemoteTrackRef = {
 export type SharedMediaPeer = PeerHandle & {
   __trysteroGetRemoteStreamByKey?: (key: string) => MediaStream | undefined
   __trysteroSetRemoteStreamByKey?: (key: string, stream: MediaStream) => void
+  __trysteroGetRemoteStreamById?: (id: string) => MediaStream | undefined
+  __trysteroSetRemoteStreamById?: (id: string, stream: MediaStream) => void
   __trysteroGetRemoteTrackByKey?: (key: string) => RemoteTrackRef | undefined
   __trysteroSetRemoteTrackByKey?: (
     key: string,
+    track: MediaStreamTrack,
+    stream: MediaStream
+  ) => void
+  __trysteroGetRemoteTrackById?: (id: string) => RemoteTrackRef | undefined
+  __trysteroSetRemoteTrackById?: (
+    id: string,
     track: MediaStreamTrack,
     stream: MediaStream
   ) => void
@@ -275,7 +289,9 @@ export type SharedPeerState = {
   streamOwners: Map<MediaStream, Set<string>>
   trackOwners: Map<MediaStreamTrack, {stream: MediaStream; rooms: Set<string>}>
   remoteStreamsByKey: Map<string, MediaStream>
+  remoteStreamsById: Map<string, MediaStream>
   remoteTracksByKey: Map<string, RemoteTrackRef>
+  remoteTracksById: Map<string, RemoteTrackRef>
   idleMs: number
   isClosing: boolean
 }

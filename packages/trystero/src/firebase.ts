@@ -1,3 +1,3 @@
-import {deprecateTrysteroSubpath} from './deprecate-subpath.js'
+import deprecate from './deprecate'
 
-deprecateTrysteroSubpath('firebase', '@trystero-p2p/firebase')
+deprecate('firebase', '@trystero-p2p/firebase')

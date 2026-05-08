@@ -1,3 +1,3 @@
-import {deprecateTrysteroSubpath} from './deprecate-subpath.js'
+import deprecate from './deprecate'
 
-deprecateTrysteroSubpath('ipfs', '@trystero-p2p/ipfs')
+deprecate('ipfs', '@trystero-p2p/ipfs')

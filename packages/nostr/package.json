@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/nostr",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "description": "Nostr strategy for Trystero",
   "keywords": [
     "chat",
@@ -32,7 +32,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@noble/secp256k1": "^3.0.0",
+    "@noble/secp256k1": "^3.1.0",
     "@trystero-p2p/core": "workspace:*"
   }
 }

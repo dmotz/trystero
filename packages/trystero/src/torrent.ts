@@ -1,3 +1,3 @@
-import {deprecateTrysteroSubpath} from './deprecate-subpath.js'
+import deprecate from './deprecate'
 
-deprecateTrysteroSubpath('torrent', '@trystero-p2p/torrent')
+deprecate('torrent', '@trystero-p2p/torrent')

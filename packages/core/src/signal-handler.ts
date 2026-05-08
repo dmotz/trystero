@@ -805,6 +805,12 @@ export const createSignalHandler =
       }
 
       if (!shouldLeadOffer && !announcePeerState.offerPeer) {
+        const peerSelfTopic = await sha1(
+          topicPath(ctx.rootTopicPlaintext, peerId)
+        )
+        if (!ctx.isLeaving() && !announcePeerState.connectedPeer) {
+          signalPeer(peerSelfTopic, toJson({peerId: selfId}))
+        }
         return
       }
 

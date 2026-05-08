@@ -10,3 +10,4 @@ knip.json
 playwright.config.ts
 rolldown.config.ts
 _ignore
+pnpm-lock.yaml

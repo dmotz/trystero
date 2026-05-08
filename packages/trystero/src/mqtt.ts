@@ -1,3 +1,3 @@
-import {deprecateTrysteroSubpath} from './deprecate-subpath.js'
+import deprecate from './deprecate'
 
-deprecateTrysteroSubpath('mqtt', '@trystero-p2p/mqtt')
+deprecate('mqtt', '@trystero-p2p/mqtt')

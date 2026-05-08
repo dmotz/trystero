@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/firebase",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "description": "Firebase strategy for Trystero",
   "keywords": [
     "chat",
@@ -33,6 +33,6 @@
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
-    "firebase": "^12.11.0"
+    "firebase": "^12.12.1"
   }
 }

@@ -1,7 +1,9 @@
 node_modules
 dist
+packages/*/README.md
 test-results
 playwright-report
 *.tsbuildinfo
 _ignore
 knip.json
+pnpm-lock.yaml

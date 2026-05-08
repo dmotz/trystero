@@ -14,6 +14,7 @@
     {"path": "./packages/ipfs"},
     {"path": "./packages/supabase"},
     {"path": "./packages/firebase"},
+    {"path": "./packages/ws-relay"},
     {"path": "./packages/trystero"}
   ]
 }

@@ -8,10 +8,12 @@ const strategyNames = [
   'mqtt',
   'nostr',
   'supabase',
-  'torrent'
+  'torrent',
+  'ws-relay'
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const empty = resolve('scripts/empty.ts')
 const packageDepsConfig = {
   deps: {
     skipNodeModulesBundle: true
@@ -35,26 +37,7 @@ const dropDevLabelStatements = testBuild
       }
     }
 
-const browserBundleConfigs = strategyNames.map((name, index) => ({
-  workspace: false as const,
-  entry: {
-    [`trystero-${name}.min`]: `packages/${name}/src/index.ts`
-  },
-  outDir: 'dist',
-  dts: false,
-  format: 'es' as const,
-  platform: 'browser' as const,
-  sourcemap: true,
-  minify: !testBuild,
-  ...browserBundleDepsConfig,
-  alias: {
-    '@trystero-p2p/core': coreSourcePath
-  },
-  clean: index === 0,
-  ...dropDevLabelStatements
-}))
-
-const buildAllConfigs = [
+export default [
   {
     workspace: {
       include: ['packages/*'],
@@ -64,6 +47,21 @@ const buildAllConfigs = [
     dts: true,
     unbundle: true,
     sourcemap: true,
+    exports: true,
+    ...packageDepsConfig,
+    publint: ci,
+    attw: ci,
+    ...dropDevLabelStatements
+  },
+  {
+    workspace: {
+      include: ['packages/ws-relay']
+    },
+    entry: {server: 'src/server.ts'},
+    dts: true,
+    unbundle: true,
+    sourcemap: true,
+    clean: false,
     exports: true,
     ...packageDepsConfig,
     publint: ci,
@@ -92,7 +90,24 @@ const buildAllConfigs = [
     attw: ci,
     ...dropDevLabelStatements
   },
-  ...browserBundleConfigs
+  ...strategyNames.map((name, index) => ({
+    workspace: false as const,
+    entry: {
+      [`trystero-${name}.min`]: `packages/${name}/src/index.ts`
+    },
+    outDir: 'dist',
+    dts: false,
+    format: 'es' as const,
+    platform: 'browser' as const,
+    sourcemap: true,
+    minify: !testBuild,
+    ...browserBundleDepsConfig,
+    alias: {
+      '@trystero-p2p/core': coreSourcePath,
+      crypto: empty,
+      'node:crypto': empty
+    },
+    clean: index === 0,
+    ...dropDevLabelStatements
+  }))
 ]
-
-export default testBuild ? browserBundleConfigs : buildAllConfigs

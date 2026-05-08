@@ -14,9 +14,8 @@ import {
   strToNum,
   toHex,
   toJson,
-  type BaseRoomConfig,
   type JoinRoom,
-  type RelayConfig,
+  type JoinRoomConfig,
   type SocketClient
 } from '@trystero-p2p/core'
 
@@ -34,7 +33,7 @@ const msgHandlers: Record<
 const kindCache: Record<string, number> = {}
 const maxTopicsPerSubscription = 250
 
-export type NostrRoomConfig = BaseRoomConfig & RelayConfig
+export type NostrRoomConfig = JoinRoomConfig
 
 const now = (): number => Math.floor(Date.now() / 1000)
 
@@ -268,24 +267,15 @@ export const getRelaySockets = relayManager.getSockets
 export {pauseRelayReconnection, resumeRelayReconnection, selfId}
 
 export const defaultRelayUrls = [
-  'aaa-api.freefrom.space/v1/ws',
-  'antiprimal.net/hot',
-  'api.freefrom.space/v1/ws',
-  'bagus.my/nostrrelay/0',
   'basspistol.org',
-  'bcast.seutoba.com.br',
   'bucket.coracle.social',
   'chorus.almostmachines.dev',
   'chorus.pjv.me',
   'communities.nos.social',
-  'freelay.sovbit.host',
   'ftp.halifax.rwth-aachen.de/nostr',
   'hol.is',
   'hornetstorage.net/relay',
   'inbox.mycelium.social',
-  'inner.sebastix.social',
-  'kanagrovv-pyramid.kozow.com',
-  'khatru.nostrver.se',
   'koru.bitcointxoko.org',
   'librerelay.aaroniumii.com',
   'nos.lol',
@@ -295,17 +285,10 @@ export const defaultRelayUrls = [
   'nostr-relay.corb.net',
   'nostr.data.haus',
   'nostr.islandarea.net',
-  'nostr.klabo.world',
-  'nostr.l484.com',
-  'nostr.red5d.dev',
-  'nostr.robosats.org',
   'nostr.sathoarder.com',
   'nostr.self-determined.de',
-  'nostr.tac.lol',
   'nostr.tegila.com.br',
   'nostr.vulpem.com',
-  'nostrue.com',
-  'orly.musiquay.org',
   'payments.u4er.net/nostr',
   'purplerelay.com',
   'relay-can.zombi.cloudrodion.com',
@@ -314,30 +297,19 @@ export const defaultRelayUrls = [
   'relay.angor.io',
   'relay.artio.inf.unibe.ch',
   'relay.binaryrobot.com',
-  'relay.bitcoindistrict.org',
   'relay.damus.io',
-  'relay.degmods.com',
-  'relay.fountain.fm',
   'relay.froth.zone',
-  'relay.guggero.org',
-  'relay.kcbitcoiners.com',
   'relay.libernet.app',
   'relay.lnau.net',
-  'relay.lumina.rocks',
   'relay.mostr.pub',
   'relay.mostro.network',
-  'relay.nosto.re',
   'relay.nostr.place',
   'relay.nostrdice.com',
   'relay.notoshi.win',
-  'relay.nuts.cash',
   'relay.orangepill.ovh',
-  'relay.satlantis.io',
   'relay.sigit.io',
-  'relay.toastr.net',
   'relay02.lnfi.network',
   'relay2.angor.io',
-  'santo.iguanatech.net',
   'schnorr.me',
   'slick.mjex.me',
   'social.amanah.eblessing.co',

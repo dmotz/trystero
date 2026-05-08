@@ -31,7 +31,6 @@ import type {
   JoinRoomCallbacks,
   JoinRoomConfig,
   PeerHandle,
-  RelayConfig,
   SharedPeerState,
   Signal,
   SignalContext,
@@ -50,10 +49,7 @@ type RoomRegistration = {
   shouldAdvertise: () => boolean
 }
 
-export default <
-  TRelay,
-  TConfig extends BaseRoomConfig & RelayConfig = JoinRoomConfig
->({
+export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
   subscribe,
   announce,
@@ -443,7 +439,9 @@ export default <
         Promise.resolve(value)
       )
       didInit = true
-      cleanupWatchOnline = config.manualRelayReconnection ? noOp : watchOnline()
+      cleanupWatchOnline = config.relayConfig?.manualReconnection
+        ? noOp
+        : watchOnline()
     }
 
     // Defer offer pool warmup until a non-passive room needs it. Passive

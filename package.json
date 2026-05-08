@@ -1,6 +1,6 @@
 {
   "name": "trystero-monorepo",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "private": true,
   "keywords": [
     "bittorrent",
@@ -34,7 +34,8 @@
     "build:test": "TEST_BUILD=1 tsdown",
     "changeset": "changeset",
     "changeset:version": "changeset version",
-    "changeset:publish": "changeset publish",
+    "copy-readmes-for-publish": "jiti scripts/copy-readmes.ts",
+    "changeset:publish": "pnpm copy-readmes-for-publish && changeset publish",
     "test": "pnpm run build:test && playwright test ./test",
     "test:node": "pnpm run build && node --import jiti/register --test 'test/node/*.spec.ts'",
     "test:bun": "pnpm run build && bun test test/node/*.spec.ts",
@@ -47,7 +48,8 @@
     "format:write": "oxfmt .",
     "find-proxy": "jiti scripts/find-proxy.ts",
     "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "publish": "pnpm login && pnpm build && pnpm copy-readmes-for-publish && pnpm -r publish --no-git-checks --access public"
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
@@ -57,27 +59,28 @@
     "@trystero-p2p/nostr": "workspace:*",
     "@trystero-p2p/supabase": "workspace:*",
     "@trystero-p2p/torrent": "workspace:*",
+    "@trystero-p2p/ws-relay": "workspace:*",
     "trystero": "workspace:*"
   },
   "devDependencies": {
     "@arethetypeswrong/core": "^0.18.2",
-    "@changesets/cli": "^2.30.0",
-    "@playwright/test": "^1.58.2",
-    "@types/node": "^25.5.0",
+    "@changesets/cli": "^2.31.0",
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^25.6.0",
     "@types/ws": "^8.18.1",
     "chalk": "^5.6.2",
     "jiti": "^2.6.1",
-    "mqtt": "^5.15.0",
-    "oxfmt": "^0.41.0",
-    "oxlint": "^1.56.0",
-    "oxlint-tsgolint": "^0.17.1",
-    "playwright": "^1.58.2",
+    "mqtt": "^5.15.1",
+    "oxfmt": "^0.47.0",
+    "oxlint": "^1.62.0",
+    "oxlint-tsgolint": "^0.22.1",
+    "playwright": "^1.59.1",
     "publint": "^0.3.18",
     "serve": "^14.2.6",
     "source-map": "^0.7.6",
-    "tsdown": "^0.21.4",
-    "typescript": "^5.9.3",
-    "werift": "^0.22.9",
+    "tsdown": "^0.21.10",
+    "typescript": "^6.0.3",
+    "werift": "^0.23.0",
     "ws": "^8.20.0"
   },
   "packageManager": "pnpm@10.4.0"

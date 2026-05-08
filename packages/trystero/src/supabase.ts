@@ -1,3 +1,3 @@
-import {deprecateTrysteroSubpath} from './deprecate-subpath.js'
+import deprecate from './deprecate'
 
-deprecateTrysteroSubpath('supabase', '@trystero-p2p/supabase')
+deprecate('supabase', '@trystero-p2p/supabase')

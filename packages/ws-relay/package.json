@@ -1,7 +1,7 @@
 {
-  "name": "@trystero-p2p/supabase",
+  "name": "@trystero-p2p/ws-relay",
   "version": "0.24.0",
-  "description": "Supabase strategy for Trystero",
+  "description": "Self-hosted WebSocket relay strategy for Trystero",
   "keywords": [
     "chat",
     "decentralized",
@@ -9,12 +9,12 @@
     "p2p",
     "pairing",
     "peer to peer",
-    "react",
-    "realtime",
-    "serverless",
+    "pubsub",
+    "relay",
+    "self-hosted",
     "signaling",
-    "supabase",
-    "webrtc"
+    "webrtc",
+    "websocket"
   ],
   "license": "MIT",
   "author": {
@@ -29,13 +29,12 @@
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
+    "./server": "./dist/server.mjs",
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.105.0",
-    "@trystero-p2p/core": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^25.6.0"
+    "@trystero-p2p/core": "workspace:*",
+    "@types/ws": "^8.18.1",
+    "ws": "^8.20.0"
   }
 }

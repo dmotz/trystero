@@ -70,7 +70,7 @@ void test(
             {
               appId,
               passive: true,
-              relayUrls: ['wss://nostr-batch.test']
+              relayConfig: {urls: ['wss://nostr-batch.test']}
             },
             `room-${i}`
           )
