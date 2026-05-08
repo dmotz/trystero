@@ -424,6 +424,22 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     }
 
     return trackerAnnounceMs[client.url]
+  },
+
+  deactivate: (client, rootTopic) => {
+    activeTopics.delete(rootTopic)
+
+    const relayIntervals = announceIntervals.forRelay(client)
+    const relayFns = announceFns.forRelay(client)
+    const fn = relayFns[rootTopic]
+
+    if (fn && relayIntervals[rootTopic]) {
+      clearInterval(relayIntervals[rootTopic])
+      relayIntervals[rootTopic] = setInterval(() => {
+        void fn()
+      }, dormantAnnounceMs)
+      void fn()
+    }
   }
 })
 

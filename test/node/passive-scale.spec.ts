@@ -183,7 +183,8 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection,
+      _test_only_sharedPeerIdleMs: 60
     }
 
     const memBefore = process.memoryUsage()
@@ -206,7 +207,9 @@ void test(
     // Allow subscriptions to settle
     await wait(500)
 
-    console.log(`  ready time: ${readyTimeMs.toFixed(0)}ms for ${roomCount} rooms`)
+    console.log(
+      `  ready time: ${readyTimeMs.toFixed(0)}ms for ${roomCount} rooms`
+    )
     console.log(`  heap growth: ${heapGrowthMb.toFixed(1)}MB`)
     console.log(`  subscriptions: ${subscribeCount}`)
     console.log(`  announces: ${announceCount}`)
@@ -244,9 +247,7 @@ void test(
     )
 
     // Clean up
-    for (const room of rooms) {
-      await room.leave().catch(() => {})
-    }
+    await Promise.all(rooms.map(room => room.leave().catch(() => {})))
   }
 )
 
@@ -279,7 +280,8 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: CountingRTCPeerConnection
+      rtcPolyfill: CountingRTCPeerConnection,
+      _test_only_sharedPeerIdleMs: 60
     }
 
     const rooms = []
@@ -293,11 +295,7 @@ void test(
 
     // Activate room-0 and connect a mock peer
     const sub0 = subscribers[0]
-    await sub0.onMessage(
-      sub0.rootTopic,
-      {peerId: 'active-peer'},
-      () => {}
-    )
+    await sub0.onMessage(sub0.rootTopic, {peerId: 'active-peer'}, () => {})
 
     const mockPeer = new MockPeer()
     const encryptedAnswer = await encrypt(
@@ -320,11 +318,7 @@ void test(
     // rather than creating new ones.
     for (let i = 1; i < roomCount; i++) {
       const sub = subscribers[i]
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
     }
 
     await wait(500)
@@ -354,9 +348,7 @@ void test(
     )
 
     // Clean up
-    for (const room of rooms) {
-      await room.leave().catch(() => {})
-    }
+    await Promise.all(rooms.map(room => room.leave().catch(() => {})))
   }
 )
 
@@ -386,7 +378,8 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection,
+      _test_only_sharedPeerIdleMs: 60
     }
 
     const rooms = []
@@ -398,11 +391,7 @@ void test(
 
     // Activate only room-0 by sending it an announcement
     const sub0 = subscribers[0]
-    await sub0.onMessage(
-      sub0.rootTopic,
-      {peerId: 'active-peer'},
-      () => {}
-    )
+    await sub0.onMessage(sub0.rootTopic, {peerId: 'active-peer'}, () => {})
 
     await waitFor(() => announcePayloads.size > 0, 5_000)
     await wait(300)
@@ -424,9 +413,7 @@ void test(
     )
 
     // Clean up
-    for (const room of rooms) {
-      await room.leave().catch(() => {})
-    }
+    await Promise.all(rooms.map(room => room.leave().catch(() => {})))
   }
 )
 
@@ -454,7 +441,8 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection,
+      _test_only_sharedPeerIdleMs: 60
     }
 
     const rooms = []
@@ -480,7 +468,9 @@ void test(
     const memAfterLeave = process.memoryUsage().heapUsed
     const freedMb = (memBeforeLeave - memAfterLeave) / (1024 * 1024)
 
-    console.log(`  leave time: ${leaveTimeMs.toFixed(0)}ms for ${roomCount} rooms`)
+    console.log(
+      `  leave time: ${leaveTimeMs.toFixed(0)}ms for ${roomCount} rooms`
+    )
     console.log(`  memory freed: ${freedMb.toFixed(1)}MB`)
     console.log(`  unsub calls: ${unsubCalls.length}`)
 

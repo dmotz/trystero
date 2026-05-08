@@ -214,6 +214,11 @@ export type StrategyAdapter<
     selfTopic: string,
     extraPayload?: Record<string, unknown>
   ) => MaybePromise<number | void>
+  deactivate?: (
+    relay: TRelay,
+    rootTopic: string,
+    selfTopic: string
+  ) => MaybePromise<void>
 }
 
 export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (

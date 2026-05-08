@@ -693,6 +693,14 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
+  - `passive` - **(optional)** Boolean for backup or relay peers that should
+    listen for active peers without announcing themselves while a room is
+    dormant. Passive peers activate only after hearing a non-passive peer and
+    include a passive flag in their signaling so passive peers do not connect to
+    each other. For BitTorrent, dormant passive rooms announce as seeders
+    (`left: 0`) without offers, which avoids passive-to-passive discovery while
+    keeping tracker load low.
+
   - `relayUrls` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)** Custom
     list of URLs for the strategy to use to bootstrap P2P connections. These
     would be BitTorrent trackers, Nostr relays, and MQTT brokers, respectively.
@@ -810,6 +818,10 @@ Returns an object with the following methods:
   [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
   for the peers present in room (not including the local user). The keys of this
   object are the respective peers' IDs.
+
+- ### `isPassive()`
+
+  Returns whether the room was joined with `passive: true`.
 
 - ### `addStream(stream, [targetPeers], [metadata])`
 

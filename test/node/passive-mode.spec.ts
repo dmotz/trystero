@@ -2,7 +2,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
-import {selfId} from '../../packages/core/src/utils.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 type Subscriber = {
@@ -197,11 +196,7 @@ void test(
         0,
         'passive peer should not announce while inactive'
       )
-      assert.equal(
-        room.isPassive(),
-        true,
-        'isPassive() should return true'
-      )
+      assert.equal(room.isPassive(), true, 'isPassive() should return true')
     } finally {
       await room.leave().catch(() => {})
     }
@@ -238,10 +233,7 @@ void test(
       await waitFor(() => subscribers.length >= 1)
       await waitFor(() => announceCount > 0)
 
-      assert.ok(
-        announceCount > 0,
-        'non-passive peer should announce'
-      )
+      assert.ok(announceCount > 0, 'non-passive peer should announce')
       assert.equal(
         room.isPassive(),
         false,
@@ -289,11 +281,7 @@ void test(
       const sub = subscribers[0]
 
       // Simulate an announcement from a non-passive active peer
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-1'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-1'}, () => {})
 
       // After activation, the passive peer should start announcing
       await waitFor(() => announceCount > 0, 5_000)
@@ -362,7 +350,7 @@ void test(
 )
 
 void test(
-  'Trystero: passive peer deactivates after active peer disconnects',
+  'Trystero: passive peer ignores malformed and wrong-topic discovery messages',
   {timeout: 10_000},
   async () => {
     let announceCount = 0
@@ -376,6 +364,57 @@ void test(
       },
       announce: () => {
         announceCount++
+      }
+    })
+
+    const appId = `passive-ignore-invalid-${Date.now()}`
+    const config = {
+      appId,
+      passive: true,
+      rtcPolyfill: MockRTCPeerConnection
+    }
+
+    const room = joinRoom(config, 'test-room')
+
+    try {
+      await waitFor(() => subscribers.length >= 1)
+
+      const sub = subscribers[0]
+
+      await sub.onMessage(sub.rootTopic, {passive: false}, () => {})
+      await sub.onMessage('wrong-topic', {peerId: 'active-peer'}, () => {})
+      await wait(300)
+
+      assert.equal(
+        announceCount,
+        0,
+        'invalid discovery messages should not activate a passive peer'
+      )
+    } finally {
+      await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: passive peer deactivates after active peer disconnects',
+  {timeout: 10_000},
+  async () => {
+    let announceCount = 0
+    let deactivateCount = 0
+    const subscribers: Subscriber[] = []
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {
+        announceCount++
+      },
+      deactivate: () => {
+        deactivateCount++
       }
     })
 
@@ -395,14 +434,13 @@ void test(
       const mockPeer = new MockPeer()
 
       // Step 1: Activate by receiving an announcement from a non-passive peer
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
 
       await waitFor(() => announceCount > 0, 5_000)
-      assert.ok(announceCount > 0, 'passive peer should be active after announcement')
+      assert.ok(
+        announceCount > 0,
+        'passive peer should be active after announcement'
+      )
 
       // Step 2: Establish connection via answer with mockPeer
       const encryptedAnswer = await encrypt(
@@ -437,6 +475,10 @@ void test(
         announceCount,
         announceCountAfterWait,
         'passive peer should stop announcing after last connection drops'
+      )
+      assert.ok(
+        deactivateCount > 0,
+        'passive deactivation should notify the strategy'
       )
     } finally {
       await room.leave().catch(() => {})
@@ -477,11 +519,7 @@ void test(
       const sub = subscribers[0]
 
       // Activate the passive peer
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-1'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-1'}, () => {})
 
       await waitFor(() => announcePayloads.length > 0, 5_000)
 
@@ -620,11 +658,7 @@ void test(
       const mockPeer = new MockPeer()
 
       // Step 1: Activate by receiving an announcement from a non-passive peer
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
 
       await waitFor(() => announceCount > 0, 5_000)
 
@@ -660,11 +694,7 @@ void test(
       )
 
       // Step 4: Reactivate via new active peer announcement
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-2'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-2'}, () => {})
 
       await waitFor(() => announceCount > countAfterDeactivation, 5_000)
 
@@ -891,11 +921,7 @@ void test(
       const mockPeerB = new MockPeer()
 
       // Activate
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-a'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-a'}, () => {})
 
       await waitFor(() => announceCount > 0, 5_000)
 
@@ -1082,11 +1108,7 @@ void test(
       const mockPeer = new MockPeer()
 
       // Activate
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer'},
-        () => {}
-      )
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
 
       await waitFor(() => announceCount > 0, 5_000)
 

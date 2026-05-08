@@ -40,6 +40,7 @@ import type {
 
 const announceIntervalMs = 5_333
 const announceWarmupIntervalsMs = [233, 533, 1_333] as const
+const passiveActivationGraceMs = 7_533
 const sharedPeerIdleMsDefault = 123_333
 
 type RoomRegistration = {
@@ -55,7 +56,8 @@ export default <
 >({
   init,
   subscribe,
-  announce
+  announce,
+  deactivate
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
   const occupiedRooms: Record<
     string,
@@ -368,6 +370,9 @@ export default <
     }
 
     const isPassive = Boolean(config.passive)
+    let roomRegistration: RoomRegistration | null = null
+    let passiveActivationTimeout: ReturnType<typeof setTimeout> | undefined
+    let deactivateRelayAnnouncements = noOp
 
     const checkDeactivate = (): void => {
       if (!isPassive || !ctx.isActive) {
@@ -380,6 +385,7 @@ export default <
         const isActive =
           state.connectedPeer ||
           state.answeringPeer ||
+          state.offerInitPromise ||
           state.offerPeer ||
           state.offerRelays.some(Boolean)
 
@@ -392,8 +398,14 @@ export default <
 
       if (!hasActiveWork) {
         ctx.isActive = false
+        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
         announceTimeouts.forEach(resetTimer)
         announceTimeouts.length = 0
+        deactivateRelayAnnouncements()
+
+        if (roomRegistration?.roomToken) {
+          advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, false)
+        }
       }
     }
 
@@ -466,18 +478,19 @@ export default <
           return
         }
 
-        // Passive peers don't announce when inactive
-        if (!isPassive || ctx.isActive) {
-          const extra = isPassive ? {passive: true} : undefined
-          const ms = await announce(relay, rootTopic, selfTopic, extra)
+        if (isPassive && !ctx.isActive) {
+          return
+        }
 
-          if (didLeaveRoom) {
-            return
-          }
+        const extra = isPassive ? {passive: true} : undefined
+        const ms = await announce(relay, rootTopic, selfTopic, extra)
 
-          if (typeof ms === 'number') {
-            ctx.announceIntervals[i] = ms
-          }
+        if (didLeaveRoom || (isPassive && !ctx.isActive)) {
+          return
+        }
+
+        if (typeof ms === 'number') {
+          ctx.announceIntervals[i] = ms
         }
 
         const announceAttempt = announceAttemptCounts[i] ?? 0
@@ -494,10 +507,25 @@ export default <
         }, nextAnnounceDelayMs)
       }
 
+      deactivateRelayAnnouncements = () => {
+        if (!deactivate) {
+          return
+        }
+
+        initPromises.forEach(async relayP => {
+          const relay = await relayP
+
+          if (!didLeaveRoom) {
+            void deactivate(relay, rootTopic, selfTopic)
+          }
+        })
+      }
+
       // Immediately restart announce loops (used when a passive peer activates)
       ctx.requeueAnnounce = () => {
         announceTimeouts.forEach(resetTimer)
         announceTimeouts.length = 0
+        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
 
         // Warmup pool on first activation if no non-passive room triggered it
         if (!pool.isActive) {
@@ -505,9 +533,14 @@ export default <
         }
 
         // Advertise room presence now that this passive room is active
-        if (roomRegistration.roomToken) {
+        if (roomRegistration?.roomToken) {
           advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, true)
         }
+
+        passiveActivationTimeout = setTimeout(
+          checkDeactivate,
+          passiveActivationGraceMs
+        )
 
         initPromises.forEach(async (relayP, i) => {
           const relay = await relayP
@@ -624,6 +657,7 @@ export default <
         }
 
         announceTimeouts.forEach(resetTimer)
+        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
         unsubFns.forEach(async f => {
           const cleanup = await f
           cleanup()
@@ -642,7 +676,7 @@ export default <
       roomOptions
     )
 
-    const roomRegistration: RoomRegistration = {
+    roomRegistration = {
       roomToken: null,
       roomTokenPromise: roomNamespacePromise,
       attachSharedPeerToRoom,
@@ -652,14 +686,17 @@ export default <
     appRoomRegistrations[roomId] = roomRegistration
 
     void roomNamespacePromise.then(roomToken => {
+      const registration = roomRegistration
+
       if (
+        !registration ||
         didLeaveRoom ||
-        roomRegistrations[appId]?.[roomId] !== roomRegistration
+        roomRegistrations[appId]?.[roomId] !== registration
       ) {
         return
       }
 
-      roomRegistration.roomToken = roomToken
+      registration.roomToken = roomToken
       getRoomIdsByToken(appId)[roomToken] = roomId
 
       values(sharedPeerMap).forEach(shared => {

@@ -687,7 +687,17 @@ export const createSignalHandler =
     const hasOutgoingOfferHint = payload['hasOutgoingOffer'] === true
     const remoteIsPassive = payload['passive'] === true
 
-    if (peerId === selfId) {
+    if (!peerId || peerId === selfId) {
+      return
+    }
+
+    const [rootTopic, selfTopic] = await all([ctx.rootTopicP, ctx.selfTopicP])
+
+    if (ctx.isLeaving()) {
+      return
+    }
+
+    if (topic !== rootTopic && topic !== selfTopic) {
       return
     }
 
@@ -771,20 +781,6 @@ export const createSignalHandler =
 
       announcePeerState.offerRelays[relayId] = offerRelayPlaceholder
       updateStatus(announcePeerState)
-    }
-
-    const [rootTopic, selfTopic] = await all([ctx.rootTopicP, ctx.selfTopicP])
-
-    if (ctx.isLeaving()) {
-      return
-    }
-
-    if (topic !== rootTopic && topic !== selfTopic) {
-      if (isAnnouncement) {
-        clearOfferRelayIfPlaceholder(ctx.peerStates[peerId], relayId)
-      }
-
-      return
     }
 
     if (shared && (offer || answer || candidate)) {
