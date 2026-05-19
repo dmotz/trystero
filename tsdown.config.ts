@@ -22,7 +22,7 @@ const packageDepsConfig = {
 
 const browserBundleDepsConfig = {
   deps: {
-    alwaysBundle: [/^@trystero-p2p\//],
+    alwaysBundle: [/^@trystero-p2p\//, /^effect$/],
     onlyBundle: false
   }
 }

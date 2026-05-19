@@ -60,6 +60,7 @@
     "@trystero-p2p/supabase": "workspace:*",
     "@trystero-p2p/torrent": "workspace:*",
     "@trystero-p2p/ws-relay": "workspace:*",
+    "effect": "4.0.0-beta.68",
     "trystero": "workspace:*"
   },
   "devDependencies": {
