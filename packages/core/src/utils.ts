@@ -135,14 +135,18 @@ export const resumeRelayReconnection = (): void => {
 
 export const makeSocket = (
   url: string,
-  onMessage: (data: string) => void
+  onMessage: (data: string) => void,
+  onReconnect?: () => void
 ): SocketClient => {
   const client = {} as SocketClient
+  let isReconnect = false
 
   const init = (): void => {
     const socket = new WebSocket(url)
 
     socket.onclose = () => {
+      isReconnect = true
+
       if (reconnectionLockingPromise) {
         void reconnectionLockingPromise.then(init)
         return
@@ -161,6 +165,10 @@ export const makeSocket = (
         (socket.onopen = () => {
           res(client)
           socketRetryPeriods[url] = defaultRetryMs
+
+          if (isReconnect) {
+            onReconnect?.()
+          }
         })
     )
 
