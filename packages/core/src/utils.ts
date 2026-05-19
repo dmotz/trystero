@@ -1,6 +1,6 @@
 import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
 
-const {floor, random, sin} = Math
+const {floor, min, random, sin} = Math
 
 export const libName = 'Trystero'
 
@@ -112,6 +112,7 @@ export const strToNum = (
 ): number => str.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % limit
 
 const defaultRetryMs = 3333
+const maxRetryMs = 60_000
 const socketRetryPeriods: Record<string, number> = {}
 
 let reconnectionLockingPromise: Promise<void> | null = null
@@ -147,9 +148,9 @@ export const makeSocket = (
         return
       }
 
-      socketRetryPeriods[url] ??= defaultRetryMs
-      setTimeout(init, socketRetryPeriods[url])
-      socketRetryPeriods[url] *= 2
+      const period = (socketRetryPeriods[url] ??= defaultRetryMs)
+      setTimeout(init, random() * period)
+      socketRetryPeriods[url] = min(period * 2, maxRetryMs)
     }
 
     socket.onmessage = e => onMessage(String(e.data))
