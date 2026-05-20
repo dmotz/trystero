@@ -321,23 +321,28 @@ export type RemoteTrackRef = {
   stream: MediaStream
 }
 
-export type SharedMediaPeer = PeerHandle & {
-  __trysteroGetRemoteStreamByKey?: (key: string) => MediaStream | undefined
-  __trysteroSetRemoteStreamByKey?: (key: string, stream: MediaStream) => void
-  __trysteroGetRemoteStreamById?: (id: string) => MediaStream | undefined
-  __trysteroSetRemoteStreamById?: (id: string, stream: MediaStream) => void
-  __trysteroGetRemoteTrackByKey?: (key: string) => RemoteTrackRef | undefined
-  __trysteroSetRemoteTrackByKey?: (
+export type MediaIdentityCache = {
+  getStreamKey: (stream: MediaStream) => string
+  getTrackKey: (track: MediaStreamTrack) => string
+  rememberRemoteStream: (
+    key: string,
+    stream: MediaStream,
+    streamId?: string
+  ) => void
+  getRemoteStream: (key: string, streamId?: string) => MediaStream | undefined
+  rememberRemoteTrack: (
     key: string,
     track: MediaStreamTrack,
-    stream: MediaStream
+    stream: MediaStream,
+    trackId?: string,
+    streamId?: string
   ) => void
-  __trysteroGetRemoteTrackById?: (id: string) => RemoteTrackRef | undefined
-  __trysteroSetRemoteTrackById?: (
-    id: string,
-    track: MediaStreamTrack,
-    stream: MediaStream
-  ) => void
+  getRemoteTrack: (key: string, trackId?: string) => RemoteTrackRef | undefined
+  clearRemote: () => void
+}
+
+export type SharedMediaPeer = PeerHandle & {
+  __trysteroMedia?: MediaIdentityCache
 }
 
 export type SharedPeerBinding = {
@@ -364,10 +369,7 @@ export type SharedPeerState = {
   controlRoomId: string | null
   streamOwners: Map<MediaStream, Set<string>>
   trackOwners: Map<MediaStreamTrack, {stream: MediaStream; rooms: Set<string>}>
-  remoteStreamsByKey: Map<string, MediaStream>
-  remoteStreamsById: Map<string, MediaStream>
-  remoteTracksByKey: Map<string, RemoteTrackRef>
-  remoteTracksById: Map<string, RemoteTrackRef>
+  media: MediaIdentityCache
   idleMs: number
   isClosing: boolean
 }
