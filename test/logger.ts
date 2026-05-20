@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url'
 import {dirname, join} from 'node:path'
 import chalk from 'chalk'
 import {SourceMapConsumer} from 'source-map'
+import {recordDiagnosticLog} from './diagnostic-log'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -32,6 +33,13 @@ export const shortBrowsers = {
 
 const logPrefix = (strategy, browser, pageN) =>
   `${emojis[strategy]} ${colorize[pageN - 1](strategy)} ${shortBrowsers[browser]}${pageN}:`
+
+const recordPageLog = (strategy, browser, pageN, values, suffix) => {
+  recordDiagnosticLog('log', logPrefix(strategy, browser, pageN), [
+    ...values,
+    suffix
+  ])
+}
 
 const onConsole = (strategy, browser, pageN) => async msg => {
   const values = []
@@ -65,11 +73,10 @@ const onConsole = (strategy, browser, pageN) => async msg => {
     ? originalLoc.url.split('src/').pop()
     : originalLoc.url.split('/').pop()
 
-  console.log(
-    logPrefix(strategy, browser, pageN),
-    ...logValues,
-    `(${sourceFile}${sourceLocation})`
-  )
+  const suffix = `(${sourceFile}${sourceLocation})`
+
+  console.log(logPrefix(strategy, browser, pageN), ...logValues, suffix)
+  recordPageLog(strategy, browser, pageN, logValues, suffix)
 }
 
 const resolveSourceMapLocation = async (url, lineNumber, columnNumber) => {
@@ -224,6 +231,7 @@ const createCdpConsoleHandler = (strategy, browser, pageN) => async event => {
 
   if (!callFrame) {
     console.log(logPrefix(strategy, browser, pageN), ...logValues, '@?:?')
+    recordPageLog(strategy, browser, pageN, logValues, '@?:?')
     return
   }
 
@@ -238,15 +246,18 @@ const createCdpConsoleHandler = (strategy, browser, pageN) => async event => {
     ? originalLoc.url.split('src/').pop()
     : originalLoc.url.split('/').pop()
 
-  console.log(
-    logPrefix(strategy, browser, pageN),
-    ...logValues,
-    `(${sourceFile}${sourceLocation})`
-  )
+  const suffix = `(${sourceFile}${sourceLocation})`
+
+  console.log(logPrefix(strategy, browser, pageN), ...logValues, suffix)
+  recordPageLog(strategy, browser, pageN, logValues, suffix)
 }
 
-const onError = (strategy, browser, pageN) => err =>
+const onError = (strategy, browser, pageN) => err => {
   console.log('❌', logPrefix(strategy, browser, pageN), err)
+  recordDiagnosticLog('error', `❌ ${logPrefix(strategy, browser, pageN)}`, [
+    err
+  ])
+}
 
 export const attachPageLogging = async ({strategy, browserName, pages}) => {
   let useCdp = false

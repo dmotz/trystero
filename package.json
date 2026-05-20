@@ -37,7 +37,7 @@
     "copy-readmes-for-publish": "jiti scripts/copy-readmes.ts",
     "changeset:publish": "pnpm copy-readmes-for-publish && changeset publish",
     "test": "pnpm run build:test && playwright test ./test",
-    "test:node": "pnpm run build && node --import jiti/register --test 'test/node/*.spec.ts'",
+    "test:node": "pnpm run build && node --import jiti/register --import ./test/node/diagnostic-summary.ts --test 'test/node/*.spec.ts'",
     "test:bun": "pnpm run build && bun test test/node/*.spec.ts",
     "test:ice": "pnpm run build && jiti scripts/test-ice.ts",
     "test:proxy": "PROXY=$(jiti scripts/find-proxy.ts) pnpm test",

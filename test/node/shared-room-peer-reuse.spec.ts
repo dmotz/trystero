@@ -1,11 +1,20 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {selfId} from '../../packages/core/src/utils.ts'
+import {
+  linkPeers,
+  LinkedMediaPeer,
+  MockPeer,
+  MockRTCPeerConnection,
+  wait,
+  waitFor,
+  withTimeout
+} from './peer-harness.ts'
 
 type Subscriber = {
   rootTopic: string
@@ -16,254 +25,6 @@ type Subscriber = {
     signalPeer: (peerTopic: string, signal: string) => void
   ) => Promise<void> | void
 }
-
-class MockDataChannel {
-  readyState = 'connecting'
-  binaryType = 'arraybuffer'
-  bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
-
-  close() {
-    this.readyState = 'closed'
-    this.onclose?.()
-  }
-
-  send() {}
-}
-
-class MockRTCPeerConnection {
-  iceGatheringState = 'complete'
-  connectionState = 'new'
-  iceConnectionState = 'new'
-  signalingState = 'stable'
-  localDescription = null
-  onnegotiationneeded = null
-  onconnectionstatechange = null
-  ontrack = null
-  ondatachannel = null
-  listeners = {}
-
-  createDataChannel() {
-    return new MockDataChannel()
-  }
-
-  addEventListener(event, fn) {
-    ;(this.listeners[event] ??= new Set()).add(fn)
-  }
-
-  removeEventListener(event, fn) {
-    this.listeners[event]?.delete(fn)
-  }
-
-  restartIce() {}
-
-  async createOffer() {
-    return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
-  }
-
-  async setLocalDescription(description) {
-    if (description?.type === 'rollback') {
-      this.signalingState = 'stable'
-      return
-    }
-
-    const nextDescription = description ?? (await this.createOffer())
-    this.localDescription = nextDescription
-    this.signalingState =
-      nextDescription.type === 'offer' ? 'have-local-offer' : 'stable'
-
-    this.listeners['icegatheringstatechange']?.forEach(listener => listener())
-  }
-
-  async setRemoteDescription() {
-    this.signalingState = 'stable'
-  }
-
-  close() {
-    this.connectionState = 'closed'
-    this.iceConnectionState = 'closed'
-    this.onconnectionstatechange?.()
-  }
-
-  getSenders() {
-    return []
-  }
-
-  addTrack() {
-    return {}
-  }
-
-  removeTrack() {}
-}
-
-class MockPeer {
-  created = Date.now()
-  isDead = false
-  destroyCount = 0
-  handlers = {}
-  offerPromise = Promise.resolve()
-  connection = {
-    connectionState: 'connected',
-    iceConnectionState: 'connected',
-    getSenders: () => []
-  }
-  channel = {readyState: 'open'}
-
-  async getOffer() {}
-
-  async signal() {
-    this.handlers.connect?.()
-  }
-
-  sendData() {}
-
-  destroy() {
-    if (this.isDead) {
-      return
-    }
-
-    this.isDead = true
-    this.destroyCount += 1
-    this.connection.connectionState = 'closed'
-    this.connection.iceConnectionState = 'closed'
-    this.handlers.close?.()
-  }
-
-  setHandlers(newHandlers) {
-    Object.assign(this.handlers, newHandlers)
-  }
-
-  addStream() {}
-  removeStream() {}
-  addTrack() {
-    return {}
-  }
-  removeTrack() {}
-  replaceTrack() {}
-}
-
-class LinkedMediaPeer {
-  created = Date.now()
-  isDead = false
-  handlers = {}
-  offerPromise = Promise.resolve()
-  partner = null
-  addStreamCalls = 0
-  connection = {
-    connectionState: 'connected',
-    iceConnectionState: 'connected',
-    getSenders: () => []
-  }
-  channel = {
-    readyState: 'open',
-    bufferedAmount: 0,
-    bufferedAmountLowThreshold: 0
-  }
-  remoteStreams = new Map()
-
-  async getOffer() {}
-
-  async signal() {}
-
-  sendData(data) {
-    this.partner?.handlers.data?.(data.slice().buffer)
-  }
-
-  destroy() {
-    if (this.isDead) {
-      return
-    }
-
-    this.isDead = true
-    this.connection.connectionState = 'closed'
-    this.connection.iceConnectionState = 'closed'
-    this.handlers.close?.()
-  }
-
-  setHandlers(newHandlers) {
-    Object.assign(this.handlers, newHandlers)
-  }
-
-  ensureRemoteTrack(track, stream) {
-    let streamEntry = this.remoteStreams.get(stream.id)
-
-    if (!streamEntry) {
-      const tracksById = new Map()
-      const remoteStream = {
-        id: stream.id,
-        getTracks: () => Array.from(tracksById.values())
-      }
-
-      streamEntry = {stream: remoteStream, tracksById}
-      this.remoteStreams.set(stream.id, streamEntry)
-    }
-
-    const existingTrack = streamEntry.tracksById.get(track.id)
-
-    if (existingTrack) {
-      return {stream: streamEntry.stream, track: existingTrack, isNew: false}
-    }
-
-    const remoteTrack = {id: track.id}
-    streamEntry.tracksById.set(track.id, remoteTrack)
-
-    return {stream: streamEntry.stream, track: remoteTrack, isNew: true}
-  }
-
-  addStream(stream) {
-    this.addStreamCalls += 1
-
-    stream.getTracks().forEach(track => {
-      const remote = this.partner?.ensureRemoteTrack(track, stream)
-
-      if (remote?.isNew) {
-        this.partner.handlers.track?.(remote.track, remote.stream)
-      }
-    })
-  }
-
-  removeStream() {}
-
-  addTrack(track, stream) {
-    const remote = this.partner?.ensureRemoteTrack(track, stream)
-
-    if (remote?.isNew) {
-      this.partner.handlers.track?.(remote.track, remote.stream)
-    }
-
-    return {}
-  }
-
-  removeTrack() {}
-  replaceTrack() {}
-}
-
-const wait = (ms: number) => new Promise(res => setTimeout(res, ms))
-const waitFor = async (
-  check: () => boolean,
-  timeoutMs = 2_000
-): Promise<void> => {
-  const start = Date.now()
-
-  while (!check()) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error('timed out waiting for condition')
-    }
-
-    await wait(10)
-  }
-}
-
-const withTimeout = (promise, ms = 500) =>
-  Promise.race([
-    promise,
-    wait(ms).then(() => {
-      throw new Error('timed out waiting for result')
-    })
-  ])
 
 const createSharedMediaRooms = async (
   managerA,
@@ -429,15 +190,14 @@ void test(
     const appId = `shared-media-reuse-${Date.now()}`
     const managerA = new SharedPeerManager()
     const managerB = new SharedPeerManager()
-    const peerA = new LinkedMediaPeer()
-    const peerB = new LinkedMediaPeer()
+    const {peerA, peerB} = linkPeers(
+      new LinkedMediaPeer(),
+      new LinkedMediaPeer()
+    )
     const localTrack = {id: 'camera-track'}
     const localStream = {id: 'camera-stream', getTracks: () => [localTrack]}
     let firstRooms = null
     let secondRooms = null
-
-    peerA.partner = peerB
-    peerB.partner = peerA
 
     const sharedA = managerA.register(appId, 'peer-b', peerA, 60_000)
     const sharedB = managerB.register(appId, 'peer-a', peerB, 60_000)
@@ -498,6 +258,93 @@ void test(
         metadata: {phase: 'second'}
       })
       assert.equal(peerA.addStreamCalls, 2)
+    } finally {
+      await firstRooms?.roomA.leave().catch(() => {})
+      await firstRooms?.roomB.leave().catch(() => {})
+      await secondRooms?.roomA.leave().catch(() => {})
+      await secondRooms?.roomB.leave().catch(() => {})
+      managerA.clear(appId, 'peer-b', {destroyPeer: true})
+      managerB.clear(appId, 'peer-a', {destroyPeer: true})
+    }
+  }
+)
+
+void test(
+  'Trystero: shared peer re-emits cached remote tracks in later rooms',
+  {timeout: 10_000},
+  async () => {
+    const appId = `shared-track-reuse-${Date.now()}`
+    const managerA = new SharedPeerManager()
+    const managerB = new SharedPeerManager()
+    const {peerA, peerB} = linkPeers(
+      new LinkedMediaPeer(),
+      new LinkedMediaPeer()
+    )
+    const localTrack = {id: 'microphone-track'}
+    const localStream = {id: 'microphone-stream', getTracks: () => [localTrack]}
+    let firstRooms = null
+    let secondRooms = null
+
+    const sharedA = managerA.register(appId, 'peer-b', peerA, 60_000)
+    const sharedB = managerB.register(appId, 'peer-a', peerB, 60_000)
+
+    try {
+      firstRooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'track-room-a'
+      )
+
+      const firstTrack = new Promise(resolve => {
+        firstRooms.roomB.onPeerTrack = (track, stream, peerId, metadata) =>
+          resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
+      })
+
+      await Promise.all(
+        firstRooms.roomA.addTrack(localTrack, localStream, {
+          target: 'peer-b',
+          metadata: {phase: 'first'}
+        })
+      )
+
+      assert.deepEqual(await withTimeout(firstTrack), {
+        trackId: 'microphone-track',
+        streamId: 'microphone-stream',
+        peerId: 'peer-a',
+        metadata: {phase: 'first'}
+      })
+
+      await Promise.all([firstRooms.roomA.leave(), firstRooms.roomB.leave()])
+      firstRooms = null
+
+      secondRooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'track-room-b'
+      )
+
+      const secondTrack = new Promise(resolve => {
+        secondRooms.roomB.onPeerTrack = (track, stream, peerId, metadata) =>
+          resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
+      })
+
+      await Promise.all(
+        secondRooms.roomA.addTrack(localTrack, localStream, {
+          target: 'peer-b',
+          metadata: {phase: 'second'}
+        })
+      )
+
+      assert.deepEqual(await withTimeout(secondTrack), {
+        trackId: 'microphone-track',
+        streamId: 'microphone-stream',
+        peerId: 'peer-a',
+        metadata: {phase: 'second'}
+      })
     } finally {
       await firstRooms?.roomA.leave().catch(() => {})
       await firstRooms?.roomB.leave().catch(() => {})

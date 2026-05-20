@@ -1,68 +1,18 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
-
-const tick = () => new Promise(res => setTimeout(res, 0))
-
-class LinkedPeer {
-  created = Date.now()
-  isDead = false
-  handlers = {}
-  offerPromise = Promise.resolve()
-  partner = null
-  lastSentData = null
-  connection = {
-    connectionState: 'connected',
-    iceConnectionState: 'connected',
-    getSenders: () => []
-  }
-  channel = {readyState: 'open'}
-
-  async getOffer() {}
-
-  async signal() {}
-
-  sendData(data) {
-    this.lastSentData = data.slice().buffer
-    this.partner?.handlers.data?.(data.slice().buffer)
-  }
-
-  destroy() {
-    if (this.isDead) {
-      return
-    }
-
-    this.isDead = true
-    this.handlers.close?.()
-  }
-
-  setHandlers(newHandlers) {
-    Object.assign(this.handlers, newHandlers)
-  }
-
-  addStream() {}
-  removeStream() {}
-  addTrack() {
-    return {}
-  }
-  removeTrack() {}
-  replaceTrack() {}
-}
+import {LinkedPeer, linkPeers, tick} from './peer-harness.ts'
 
 void test('Trystero: shared peer room presence uses opaque tokens and routes buffered data by token', async () => {
   const managerA = new SharedPeerManager()
   const managerB = new SharedPeerManager()
-  const peerA = new LinkedPeer()
-  const peerB = new LinkedPeer()
+  const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
   const decoder = new TextDecoder()
   const roomId = 'super-secret-room'
   const roomToken = 'opaque-room-token'
   const presenceEvents = []
   const receivedPayloads = []
-
-  peerA.partner = peerB
-  peerB.partner = peerA
 
   const sharedA = managerA.register('app-id', 'peer-b', peerA, 60_000)
   const sharedB = managerB.register('app-id', 'peer-a', peerB, 60_000)
