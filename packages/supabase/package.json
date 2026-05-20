@@ -32,10 +32,10 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.105.0",
+    "@supabase/supabase-js": "^2.106.1",
     "@trystero-p2p/core": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0"
+    "@types/node": "^25.9.1"
   }
 }
