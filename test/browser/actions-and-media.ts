@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {expect} from '@playwright/test'
 import {concurrentRooms, withStrategyBrowserPair} from './harness'
 import {getPeerId, joinEagerRoom, ping} from './room-helpers'
@@ -493,14 +492,18 @@ const verifyBinaryPayloads = async ({
           }
         })
       )
-    ]).then(([[payload, meta]]) => [
-      payload,
-      meta,
-      senderPercent,
-      senderCallCount,
-      receiverPercent,
-      receiverCallCount
-    ])
+    ]).then(([received]) => {
+      const [payload, meta] = received as [string, unknown]
+
+      return [
+        payload,
+        meta,
+        senderPercent,
+        senderCallCount,
+        receiverPercent,
+        receiverCallCount
+      ]
+    })
   }
 
   const mockMeta = {foo: 'bar', baz: 'qux'}

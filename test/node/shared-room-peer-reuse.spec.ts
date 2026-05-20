@@ -1,10 +1,14 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from './test.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createStrategy from '../../packages/core/src/strategy.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {selfId} from '../../packages/core/src/utils.ts'
 import {
   linkPeers,
@@ -100,7 +104,7 @@ void test(
 
     const config = {
       appId,
-      rtcPolyfill: MockRTCPeerConnection,
+      rtcPolyfill: MockRTCPeerConnection as any,
       _test_only_sharedPeerIdleMs: 60
     }
 
@@ -199,8 +203,8 @@ void test(
     let firstRooms = null
     let secondRooms = null
 
-    const sharedA = managerA.register(appId, 'peer-b', peerA, 60_000)
-    const sharedB = managerB.register(appId, 'peer-a', peerB, 60_000)
+    const sharedA = managerA.register(appId, 'peer-b', peerA as any, 60_000)
+    const sharedB = managerB.register(appId, 'peer-a', peerB as any, 60_000)
 
     try {
       firstRooms = await createSharedMediaRooms(
@@ -285,8 +289,8 @@ void test(
     let firstRooms = null
     let secondRooms = null
 
-    const sharedA = managerA.register(appId, 'peer-b', peerA, 60_000)
-    const sharedB = managerB.register(appId, 'peer-a', peerB, 60_000)
+    const sharedA = managerA.register(appId, 'peer-b', peerA as any, 60_000)
+    const sharedB = managerB.register(appId, 'peer-a', peerB as any, 60_000)
 
     try {
       firstRooms = await createSharedMediaRooms(
@@ -378,12 +382,12 @@ void test(
     const roomId = 'shared-room'
     const appAConfig = {
       appId: `app-a-${Date.now()}`,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
     const appBConfig = {
       appId: `app-b-${Date.now()}`,
       relayConfig: {urls: ['wss://ignored-for-second-app.example']},
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const appARoom = joinRoom(appAConfig, roomId)
@@ -464,7 +468,7 @@ void test(
     })
 
     const room = joinRoom(
-      {appId, rtcPolyfill: MockRTCPeerConnection},
+      {appId, rtcPolyfill: MockRTCPeerConnection as any},
       'reply-room'
     )
 
@@ -515,7 +519,7 @@ void test(
     })
 
     const room = joinRoom(
-      {appId, rtcPolyfill: MockRTCPeerConnection},
+      {appId, rtcPolyfill: MockRTCPeerConnection as any},
       'no-reply-room'
     )
 

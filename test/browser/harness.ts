@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {expect, test} from '@playwright/test'
 import {attachPageLogging, emojis, shortBrowsers} from '../logger'
 import {strategyConfigs} from '../strategy-configs'
@@ -21,7 +20,7 @@ export const withStrategyBrowserPair = (
   overrides,
   name,
   fn,
-  options = {}
+  options: {skip?: (ctx: {browserName: string; strategy: string}) => boolean} = {}
 ) => {
   const config = {...strategyConfigs[strategy], ...overrides}
 

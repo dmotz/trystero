@@ -1,6 +1,6 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from './test.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import room from '../../packages/core/src/room.ts'
 import {
   createJoinedRooms,
@@ -30,11 +30,11 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
   registerPeer(peer, 'remote-peer')
 
   await tick()
-  peer.handlers.data?.(encodeInternalAction('@_hsready'))
+  peer.handlers.data?.(encodeInternalAction('@_hsready') as any)
 
   assert.equal(await joinPromise, 'remote-peer')
 
-  peer.handlers.data?.(encodeInternalAction('@_leave'))
+  peer.handlers.data?.(encodeInternalAction('@_leave') as any)
   await tick()
 
   assert.equal(peer.destroyCount, 1)
@@ -125,7 +125,10 @@ void test('Trystero: action creation uses action objects', async () => {
       requestAction
     )
     assert.throws(
-      () => roomRef.makeAction('bad-request', {onRequest: () => true}),
+      () =>
+        roomRef.makeAction('bad-request', {
+          onRequest: () => true
+        } as any),
       /kind: "request"/
     )
     assert.throws(() => roomRef.makeAction('question'), /cannot be redefined/)
@@ -154,7 +157,7 @@ void test('Trystero: room callback properties replace and clear handlers', async
 
     registerPeer(peer, 'remote-peer')
     await tick()
-    peer.handlers.data?.(encodeInternalAction('@_hsready'))
+    peer.handlers.data?.(encodeInternalAction('@_hsready') as any)
     await tick()
 
     assert.deepEqual(joined, ['second:remote-peer'])
@@ -174,7 +177,7 @@ void test('Trystero: request actions resolve, reject, buffer briefly, and fan ou
     const isEvenA = roomA.makeAction('is-even', {kind: 'request'})
     roomB.makeAction('is-even', {
       kind: 'request',
-      onRequest: value => value % 2 === 0
+      onRequest: value => (value as number) % 2 === 0
     })
 
     assert.equal(await isEvenA.request(4, {target: 'peer-b'}), true)
@@ -231,7 +234,7 @@ void test('Trystero: request actions resolve, reject, buffer briefly, and fan ou
       many.map(result => result.status),
       ['disconnected', 'fulfilled']
     )
-    assert.equal(many[1].value, true)
+    assert.equal((many[1] as {value: boolean}).value, true)
     assert.deepEqual(
       fanoutResults
         .map(result => result.status)
@@ -265,7 +268,7 @@ void test('Trystero: request actions reject on abort and ignore late responses',
 
     await assert.rejects(
       () => pending,
-      error => error.name === 'AbortError'
+      error => (error as Error).name === 'AbortError'
     )
     await new Promise(res => setTimeout(res, 80))
   } finally {

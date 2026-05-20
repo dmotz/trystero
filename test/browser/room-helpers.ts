@@ -1,4 +1,3 @@
-// @ts-nocheck
 export const joinEagerRoom = ([roomId, config, payload]) => {
   window[roomId] = window.trystero.joinRoom(config, roomId)
 

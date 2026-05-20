@@ -1,6 +1,6 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from './test.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import {LinkedPeer, linkPeers, tick} from './peer-harness.ts'
 
@@ -14,8 +14,8 @@ void test('Trystero: shared peer room presence uses opaque tokens and routes buf
   const presenceEvents = []
   const receivedPayloads = []
 
-  const sharedA = managerA.register('app-id', 'peer-b', peerA, 60_000)
-  const sharedB = managerB.register('app-id', 'peer-a', peerB, 60_000)
+  const sharedA = managerA.register('app-id', 'peer-b', peerA as any, 60_000)
+  const sharedB = managerB.register('app-id', 'peer-a', peerB as any, 60_000)
 
   managerB.setRoomPresenceHandler(
     'app-id',

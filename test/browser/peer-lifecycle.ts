@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {expect} from '@playwright/test'
 import {sleep, withStrategyBrowserPair} from './harness'
 import {

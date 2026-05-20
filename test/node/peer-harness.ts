@@ -1,6 +1,13 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
+
+type PeerHandlers = Record<string, (...args: any[]) => void>
+type TestMediaTrack = {id: string}
+type TestMediaStream = {
+  id: string
+  getTracks: () => TestMediaTrack[]
+}
 
 const internalTypeByteLimit = 32
 const internalNonceIndex = internalTypeByteLimit
@@ -137,7 +144,7 @@ export class MockPeer {
   created = Date.now()
   isDead = false
   destroyCount = 0
-  handlers = {}
+  handlers: PeerHandlers = {}
   offerPromise = Promise.resolve()
   connection = {
     connectionState: 'connected',
@@ -182,9 +189,9 @@ export class MockPeer {
 export class LinkedPeer {
   created = Date.now()
   isDead = false
-  handlers = {}
+  handlers: PeerHandlers = {}
   offerPromise = Promise.resolve()
-  partner = null
+  partner: LinkedPeer | null = null
   lastSentData = null
   connection = {
     connectionState: 'connected',
@@ -221,9 +228,9 @@ export class LinkedPeer {
     Object.assign(this.handlers, newHandlers)
   }
 
-  addStream() {}
+  addStream(_stream?: TestMediaStream) {}
   removeStream() {}
-  addTrack() {
+  addTrack(_track?: TestMediaTrack, _stream?: TestMediaStream) {
     return {}
   }
   removeTrack() {}
@@ -232,9 +239,12 @@ export class LinkedPeer {
 
 export class LinkedMediaPeer extends LinkedPeer {
   addStreamCalls = 0
-  remoteStreams = new Map()
+  remoteStreams = new Map<
+    string,
+    {stream: TestMediaStream; tracksById: Map<string, TestMediaTrack>}
+  >()
 
-  ensureRemoteTrack(track, stream) {
+  ensureRemoteTrack(track: TestMediaTrack, stream: TestMediaStream) {
     let streamEntry = this.remoteStreams.get(stream.id)
 
     if (!streamEntry) {
@@ -260,23 +270,29 @@ export class LinkedMediaPeer extends LinkedPeer {
     return {stream: streamEntry.stream, track: remoteTrack, isNew: true}
   }
 
-  addStream(stream) {
+  addStream(stream: TestMediaStream) {
     this.addStreamCalls += 1
 
     stream.getTracks().forEach(track => {
-      const remote = this.partner?.ensureRemoteTrack(track, stream)
+      const remote = (this.partner as LinkedMediaPeer | null)?.ensureRemoteTrack(
+        track,
+        stream
+      )
 
       if (remote?.isNew) {
-        this.partner.handlers.track?.(remote.track, remote.stream)
+        this.partner?.handlers.track?.(remote.track, remote.stream)
       }
     })
   }
 
-  addTrack(track, stream) {
-    const remote = this.partner?.ensureRemoteTrack(track, stream)
+  addTrack(track: TestMediaTrack, stream: TestMediaStream) {
+    const remote = (this.partner as LinkedMediaPeer | null)?.ensureRemoteTrack(
+      track,
+      stream
+    )
 
     if (remote?.isNew) {
-      this.partner.handlers.track?.(remote.track, remote.stream)
+      this.partner?.handlers.track?.(remote.track, remote.stream)
     }
 
     return {}

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {expect} from '@playwright/test'
 import {withStrategyBrowserPair} from './harness'
 
@@ -49,7 +48,7 @@ export const registerMediaSwitchTests = (strategy, overrides) =>
       const leaveStreamSwitchRoom = roomId => window[roomId]?.leave()
       const cleanupStreamSwitchRoom = async roomId => {
         Object.values(window[roomId]?.getPeers() ?? {}).forEach(connection =>
-          connection.close()
+          (connection as RTCPeerConnection).close()
         )
 
         await window[roomId]?.leave()
