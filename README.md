@@ -216,6 +216,34 @@ const result = await isEven.request(42, {
 })
 ```
 
+To ask multiple peers at once, use `requestMany()`. It resolves with a
+peer-labeled result for every target, while `onResult` lets you react as each
+peer answers:
+
+```js
+const availability = room.makeAction('availability', {
+  kind: 'request',
+  onRequest: ({date}) => calendar.isFree(date)
+})
+
+const results = await availability.requestMany(
+  {date: '2026-05-04'},
+  {
+    targets: teammateIds,
+    timeoutMs: 1000,
+    onResult: result => {
+      if (result.status === 'fulfilled') {
+        updateAvailabilityBadge(result.peerId, result.value)
+      }
+    }
+  }
+)
+
+const freePeers = results
+  .filter(result => result.status === 'fulfilled' && result.value)
+  .map(result => result.peerId)
+```
+
 If you're using TypeScript, you can add a type hint to the action:
 
 ```typescript
