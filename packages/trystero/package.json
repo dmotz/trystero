@@ -1,7 +1,7 @@
 {
   "name": "trystero",
   "version": "0.24.0",
-  "description": "Serverless peer-to-peer for the web",
+  "description": "Simple, serverless WebRTC",
   "keywords": [
     "bittorrent",
     "chat",
@@ -20,6 +20,7 @@
     "signaling",
     "supabase",
     "torrent",
+    "trystero",
     "webrtc",
     "webtorrent"
   ],

@@ -1,7 +1,7 @@
 {
   "name": "@trystero-p2p/core",
   "version": "0.24.0",
-  "description": "Core primitives for Trystero strategy implementations",
+  "description": "Simple, serverless WebRTC",
   "keywords": [
     "bittorrent",
     "chat",

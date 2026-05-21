@@ -1,16 +1,12 @@
 {
   "name": "@trystero-p2p/mqtt",
   "version": "0.24.0",
-  "description": "MQTT strategy for Trystero",
+  "description": "Simple, serverless WebRTC (via MQTT)",
   "keywords": [
-    "bittorrent",
     "chat",
     "decentralized",
-    "firebase",
-    "ipfs",
     "matchmaking",
     "mqtt",
-    "nostr",
     "p2p",
     "pairing",
     "peer to peer",
@@ -18,10 +14,8 @@
     "realtime",
     "serverless",
     "signaling",
-    "supabase",
-    "torrent",
-    "webrtc",
-    "webtorrent"
+    "trystero",
+    "webrtc"
   ],
   "license": "MIT",
   "author": {
