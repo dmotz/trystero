@@ -820,9 +820,12 @@ the same namespace will return the same room instance.
 
 - `callbacks` - **(optional)** Callback config object containing:
   - `onJoinError(details)` - Called when room join fails due to an incorrect
-    password or when handshake admission fails (including timeout). `details` is
-    an object containing `appId`, `roomId`, `peerId`, and `error` describing the
-    failure.
+    password, when handshake admission fails (including timeout), or when peers
+    exchange SDP but WebRTC still cannot establish a direct connection. This
+    last case usually means TURN servers are needed or misconfigured (see
+    [Troubleshooting connection issues](#troubleshooting-connection-issues)).
+    `details` is an object containing `appId`, `roomId`, `peerId`, and `error`
+    describing the failure.
 
   - `onPeerHandshake(peerId, send, receive, isInitiator)` - Async predicate that
     runs after the transport connects but before the peer becomes active.

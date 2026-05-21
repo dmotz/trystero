@@ -394,6 +394,8 @@ export type PeerState = {
   connectedPeerUnhealthySinceMs: number | null
   answeringExpiryTimer: ReturnType<typeof setTimeout> | null
   answeringPeer: PeerHandle | null
+  answerSent: boolean
+  connectionErrorReported: boolean
   pendingCandidates: Record<string, Signal[]>
 }
 
