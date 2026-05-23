@@ -28,6 +28,10 @@ const subscriptionTokens = relayManager.scoped<symbol>()
 const trackerAnnounceMs: Record<string, number> = {}
 const handledSignals: Record<string, number> = {}
 const msgHandlers = relayManager.scoped<(data: TrackerMessage) => void>()
+const topicStates = relayManager.scoped<{
+  announce: () => void | Promise<void>
+  isActive: boolean
+}>()
 const roomOutstandingOffers: Record<
   string,
   Record<string, OfferRecord & {createdAt: number}>
@@ -39,6 +43,7 @@ const trackerAction = 'announce'
 const hashLimit = 20
 const offerPoolSize = 3
 const defaultAnnounceMs = 10_000
+const dormantAnnounceMs = 120_000
 const maxAnnounceMs = 20_000
 const offerRetentionMs = 120_000
 const signalDedupeWindowMs = 4_000
@@ -273,11 +278,12 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       return client.ready
     }),
 
-  subscribe: (client, rootTopic, _, onMessage, getOffers) => {
+  subscribe: (client, rootTopic, _, onMessage, getOffers, context) => {
     const handlers = msgHandlers.forRelay(client)
     const relayFns = announceFns.forRelay(client)
     const relayIntervals = announceIntervals.forRelay(client)
     const activeTokens = subscriptionTokens.forRelay(client)
+    const states = topicStates.forRelay(client)
     const subscriptionToken = Symbol(rootTopic)
 
     activeTokens[rootTopic] = subscriptionToken
@@ -322,32 +328,50 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 
     handlers[rootTopic] = topicHandler
 
-    const announce = async (): Promise<void> => {
-      if (activeTokens[rootTopic] !== subscriptionToken) {
-        return
-      }
+    const topicState: {
+      announce: () => void | Promise<void>
+      isActive: boolean
+    } = {
+      announce: async () => {
+        if (activeTokens[rootTopic] !== subscriptionToken) {
+          return
+        }
 
-      const outstandingOffers = await ensureOutstandingOffers(
-        rootTopic,
-        getOffers
-      )
-      const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
-        offer_id: id,
-        offer: {type: 'offer', sdp: offer}
-      }))
+        if (!topicState.isActive) {
+          void send(client, rootTopic, {
+            left: 0,
+            numwant: offerPoolSize,
+            offers: []
+          })
+          return
+        }
 
-      void send(client, rootTopic, {
-        numwant: offerPoolSize,
-        offers
-      })
+        const outstandingOffers = await ensureOutstandingOffers(
+          rootTopic,
+          getOffers
+        )
+        const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
+          offer_id: id,
+          offer: {type: 'offer', sdp: offer}
+        }))
+
+        void send(client, rootTopic, {
+          numwant: offerPoolSize,
+          offers
+        })
+      },
+      isActive: !context?.isPassive
     }
 
     trackerAnnounceMs[client.url] = defaultAnnounceMs
+    const {announce} = topicState
     relayFns[rootTopic] = announce
-    relayIntervals[rootTopic] = setInterval(
-      announce,
-      trackerAnnounceMs[client.url]
-    )
+    states[rootTopic] = topicState
+    const initialInterval = topicState.isActive
+      ? trackerAnnounceMs[client.url]
+      : dormantAnnounceMs
+
+    relayIntervals[rootTopic] = setInterval(announce, initialInterval)
     void announce()
 
     return () => {
@@ -363,6 +387,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       if (activeTokens[rootTopic] !== subscriptionToken) {
         if (!roomSubscriberCounts[rootTopic]) {
           reclaimAllOutstandingOffers(rootTopic)
+          delete states[rootTopic]
         }
 
         return
@@ -384,13 +409,57 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 
       delete activeTokens[rootTopic]
 
+      if (states[rootTopic] === topicState) {
+        delete states[rootTopic]
+      }
+
       if (!roomSubscriberCounts[rootTopic]) {
         reclaimAllOutstandingOffers(rootTopic)
       }
     }
   },
 
-  announce: client => trackerAnnounceMs[client.url]
+  announce: (client, rootTopic) => {
+    const state = topicStates.forRelay(client)[rootTopic]
+    const relayIntervals = announceIntervals.forRelay(client)
+    const relayFns = announceFns.forRelay(client)
+    const fn = relayFns[rootTopic]
+
+    if (state) {
+      state.isActive = true
+    }
+
+    if (fn && relayIntervals[rootTopic]) {
+      clearInterval(relayIntervals[rootTopic])
+      relayIntervals[rootTopic] = setInterval(() => {
+        void fn()
+      }, trackerAnnounceMs[client.url])
+      void fn()
+    }
+
+    return trackerAnnounceMs[client.url]
+  },
+
+  deactivate: (client, rootTopic) => {
+    const state = topicStates.forRelay(client)[rootTopic]
+    const relayIntervals = announceIntervals.forRelay(client)
+    const relayFns = announceFns.forRelay(client)
+    const fn = relayFns[rootTopic]
+
+    if (state) {
+      state.isActive = false
+    }
+
+    reclaimAllOutstandingOffers(rootTopic)
+
+    if (fn && relayIntervals[rootTopic]) {
+      clearInterval(relayIntervals[rootTopic])
+      relayIntervals[rootTopic] = setInterval(() => {
+        void fn()
+      }, dormantAnnounceMs)
+      void fn()
+    }
+  }
 })
 
 export const joinRoom: JoinRoom<TorrentRoomConfig> = (

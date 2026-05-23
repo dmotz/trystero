@@ -28,6 +28,38 @@ const disconnectedPeerGraceMs = 7_533
 const answeringTtlMs = 23_333
 const legacyCandidateKey = '__legacy__'
 const offerRelayPlaceholder = 'offer-placeholder'
+const signalKeys = ['offer', 'answer', 'candidate'] as const
+
+const toPayload = (msg: unknown): Record<string, unknown> | null => {
+  if (typeof msg === 'string') {
+    try {
+      const parsed = fromJson<unknown>(msg)
+
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  return msg && typeof msg === 'object'
+    ? (msg as Record<string, unknown>)
+    : null
+}
+
+const getString = (
+  payload: Record<string, unknown>,
+  key: string
+): string | undefined =>
+  typeof payload[key] === 'string' && payload[key] ? payload[key] : undefined
+
+const hasInvalidSignalField = (payload: Record<string, unknown>): boolean =>
+  signalKeys.some(
+    key =>
+      key in payload &&
+      (typeof payload[key] !== 'string' || payload[key] === '')
+  )
 
 const publishCipheredSignalingMessage = (
   ctx: SignalContext,
@@ -237,6 +269,7 @@ const scheduleAnsweringExpiry = (
     }
     peer.destroy()
     clearAnswering(current, peer)
+    ctx.checkDeactivate()
   }, answeringTtlMs)
 }
 
@@ -287,6 +320,7 @@ const scheduleOfferExpiry = (
       reportSdpExchangeConnectionFailure(ctx, current, peerId)
     }
     resetOfferState(current, ctx.offerPool)
+    ctx.checkDeactivate()
   }, ttlMs)
 }
 
@@ -336,6 +370,7 @@ const ensureOffer = (
       }
 
       ctx.disconnectPeer(peer, peerId)
+      ctx.checkDeactivate()
     }
 
     peer.setHandlers({
@@ -442,7 +477,8 @@ const handleAnnouncement = async (
       sdp => ({
         peerId: selfId,
         offerId: offerInfo.offerId,
-        candidate: sdp
+        candidate: sdp,
+        ...(ctx.isPassive ? {passive: true} : {})
       }),
       () =>
         !state.connectedPeer &&
@@ -458,7 +494,8 @@ const handleAnnouncement = async (
     toJson({
       peerId: selfId,
       offerId: offerInfo.offerId,
-      offer: offerInfo.offer
+      offer: offerInfo.offer,
+      ...(ctx.isPassive ? {passive: true} : {})
     })
   )
 
@@ -513,6 +550,7 @@ const handleOffer = async (
     }
     clearAnswering(state, answerPeer)
     ctx.disconnectPeer(answerPeer, peerId)
+    ctx.checkDeactivate()
   }
 
   answerPeer.setHandlers({
@@ -582,6 +620,10 @@ const handleOffer = async (
 
           if (offerId) {
             payloadToSend['offerId'] = offerId
+          }
+
+          if (ctx.isPassive) {
+            payloadToSend['passive'] = true
           }
 
           return payloadToSend
@@ -713,6 +755,7 @@ const prunePendingOffer = (
 
   if (state.offerRelays[relayId]) {
     clearOfferRelay(state, relayId)
+    ctx.checkDeactivate()
   }
 }
 
@@ -728,21 +771,45 @@ export const createSignalHandler =
       return
     }
 
-    const payload =
-      typeof msg === 'string'
-        ? fromJson<Record<string, unknown>>(msg)
-        : (msg as Record<string, unknown>)
+    const payload = toPayload(msg)
 
-    const peerId =
-      typeof payload['peerId'] === 'string' ? payload['peerId'] : ''
-    const offer = payload['offer'] as string | undefined
-    const answer = payload['answer'] as string | undefined
-    const candidate = payload['candidate'] as string | undefined
-    const offerId = payload['offerId'] as string | undefined
+    if (!payload || hasInvalidSignalField(payload)) {
+      return
+    }
+
+    const peerId = getString(payload, 'peerId') ?? ''
+    const offer = getString(payload, 'offer')
+    const answer = getString(payload, 'answer')
+    const candidate = getString(payload, 'candidate')
+    const offerId = getString(payload, 'offerId')
     const peer = payload['peer'] as PeerHandle | undefined
     const hasOutgoingOfferHint = payload['hasOutgoingOffer'] === true
+    const remoteIsPassive = payload['passive'] === true
 
-    if (peerId === selfId) {
+    if (!peerId || peerId === selfId) {
+      return
+    }
+
+    const [rootTopic, selfTopic] = await all([ctx.rootTopicP, ctx.selfTopicP])
+
+    if (ctx.isLeaving()) {
+      return
+    }
+
+    if (topic !== rootTopic && topic !== selfTopic) {
+      return
+    }
+
+    if (ctx.isPassive && remoteIsPassive) {
+      return
+    }
+
+    if (ctx.isPassive && !ctx.isActive && !answer && !candidate) {
+      ctx.isActive = true
+      ctx.requeueAnnounce?.()
+    }
+
+    if (ctx.isPassive && !ctx.isActive) {
       return
     }
 
@@ -784,16 +851,6 @@ export const createSignalHandler =
     }
 
     const isAnnouncement = Boolean(peerId && !offer && !answer && !candidate)
-
-    const [rootTopic, selfTopic] = await all([ctx.rootTopicP, ctx.selfTopicP])
-
-    if (ctx.isLeaving()) {
-      return
-    }
-
-    if (topic !== rootTopic && topic !== selfTopic) {
-      return
-    }
 
     if (isAnnouncement && !shared) {
       const announcePeerState = getState(ctx.peerStates, peerId)

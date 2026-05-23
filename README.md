@@ -613,7 +613,9 @@ are no public default servers. You can pass multiple.
 ### Write your own strategy
 
 If you want to provide your own signaling backend, you can build a custom
-strategy with `createStrategy`.
+strategy with `createTopicStrategy`. This is the recommended helper for simple
+pub/sub relays because Trystero handles room lifecycle details like passive
+mode, announce scheduling, and peer-specific signaling topics.
 
 The example below assumes a WebSocket relay that does simple pub/sub routing:
 
@@ -625,9 +627,9 @@ This is just to show you how it works; if you want a simple self-hosted
 solution, use the `ws-relay` package explained above.
 
 ```js
-import {createStrategy, selfId, toJson} from '@trystero-p2p/core'
+import {createTopicStrategy, toJson} from '@trystero-p2p/core'
 
-export const joinRoom = createStrategy({
+export const joinRoom = createTopicStrategy({
   // Define init as a function that returns a promise of your signaling client.
   // Resolve the promise when your client is ready to send messages.
   // You can also return an array of client promises for redundancy.
@@ -639,49 +641,34 @@ export const joinRoom = createStrategy({
       ws.addEventListener('error', reject, {once: true})
     }),
 
-  // Subscribe takes 5 arguments:
-  // 1. One of the relay clients you defined in init.
-  // 2. rootTopic is the channel where peers in a room announce their presence.
-  // 3. selfTopic is the current peer's own channel where messages specific to
-  //    it should flow (i.e. offers and answers from external peers).
-  // 4. onMessage is a function that should be called when your relay client
-  // gets a message. Call it with the topic, data payload, and a callback
-  // function that takes another topic and payload.
-  // 5. getOffers is an optional helper for precomputed offers (only needed if
-  // the strategy needs to send offers in bulk, like torrents).
-  // It should return a cleanup function that unsubscribes
-  subscribe: (client, rootTopic, selfTopic, onMessage, _getOffers) => {
-    const topics = [rootTopic, selfTopic]
+  // Subscribe to one topic. Trystero decides which topics are needed and when.
+  subscribeTopic: (client, topic, onMessage) => {
     const onWsMessage = event => {
-      const {topic, payload} = JSON.parse(String(event.data))
+      const message = JSON.parse(String(event.data))
 
-      if (!topics.includes(topic)) {
+      if (message.topic !== topic) {
         return
       }
 
-      onMessage(topic, payload, (peerTopic, signal) =>
-        client.send(
-          toJson({type: 'publish', topic: peerTopic, payload: signal})
-        )
-      )
+      onMessage(message.topic, message.payload)
     }
 
     client.addEventListener('message', onWsMessage)
-    topics.forEach(topic => client.send(toJson({type: 'subscribe', topic})))
+    client.send(toJson({type: 'subscribe', topic}))
 
     return () => {
-      topics.forEach(topic => client.send(toJson({type: 'unsubscribe', topic})))
+      client.send(toJson({type: 'unsubscribe', topic}))
       client.removeEventListener('message', onWsMessage)
     }
   },
 
-  // announce takes a relay client and a rootTopic
-  announce: (client, rootTopic) =>
+  // Publish a payload to one topic.
+  publishTopic: (client, topic, payload) =>
     client.send(
       toJson({
         type: 'publish',
-        topic: rootTopic,
-        payload: toJson({peerId: selfId})
+        topic,
+        payload
       })
     )
 })
@@ -691,6 +678,9 @@ const room = joinRoom(
   'my-room-id'
 )
 ```
+
+For non-pub/sub signaling protocols, such as trackers that exchange offers in
+bulk, `createStrategy` is available as a lower-level advanced API.
 
 ### Supabase setup
 
@@ -758,6 +748,14 @@ the same namespace will return the same room instance.
     descriptions will be encrypted with a key derived from the app ID and room
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
+
+  - `passive` - **(optional)** Boolean for backup or relay peers that should
+    listen for active peers without announcing themselves while a room is
+    dormant. Passive peers activate only after hearing a non-passive peer and
+    include a passive flag in their signaling so passive peers do not connect to
+    each other. For BitTorrent, dormant passive rooms announce as seeders
+    (`left: 0`) without offers, which avoids passive-to-passive discovery while
+    keeping tracker load low.
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
     Object containing strategy-specific relay settings:
@@ -883,6 +881,10 @@ Returns an object with the following methods:
   [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
   for the peers present in room (not including the local user). The keys of this
   object are the respective peers' IDs.
+
+- ### `isPassive()`
+
+  Returns whether the room was joined with `passive: true`.
 
 - ### `addStream(stream, [options])`
 

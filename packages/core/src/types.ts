@@ -64,6 +64,7 @@ export type RelayConfig = BaseRelayConfig & {
 export type BaseRoomConfig = {
   appId: string
   password?: string
+  passive?: boolean
   relayConfig?: BaseRelayConfig
   trickleIce?: boolean
   rtcConfig?: RTCConfiguration
@@ -190,6 +191,7 @@ export type Room = {
   }
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
+  isPassive: () => boolean
   getPeers: () => Record<string, RTCPeerConnection>
   addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
@@ -275,6 +277,29 @@ export type StrategyOnMessage = (
   signalPeer: SignalPeer
 ) => void | Promise<void>
 
+export type StrategyContext<TConfig extends BaseRoomConfig = JoinRoomConfig> = {
+  config: TConfig
+  appId: string
+  roomId: string
+  isPassive: boolean
+}
+
+export type TopicSubscriptionContext = {
+  kind: 'root' | 'self'
+  appId: string
+  roomId: string
+  rootTopic: string
+  selfTopic: string
+}
+
+export type TopicPublishContext = {
+  kind: 'announce' | 'signal'
+  appId: string
+  roomId: string
+  rootTopic: string
+  selfTopic: string
+}
+
 export type OfferRecord = {
   peer: PeerHandle
   offer: string
@@ -294,13 +319,46 @@ export type StrategyAdapter<
     rootTopic: string,
     selfTopic: string,
     onMessage: StrategyOnMessage,
-    getOffers: (n: number) => Promise<OfferRecord[]>
+    getOffers: (n: number) => Promise<OfferRecord[]>,
+    context?: StrategyContext<TConfig>
   ) => MaybePromise<() => void>
   announce: (
     relay: TRelay,
     rootTopic: string,
-    selfTopic: string
+    selfTopic: string,
+    extraPayload?: Record<string, unknown>,
+    context?: StrategyContext<TConfig>
   ) => MaybePromise<number | void>
+  deactivate?: (
+    relay: TRelay,
+    rootTopic: string,
+    selfTopic: string,
+    context?: StrategyContext<TConfig>
+  ) => MaybePromise<void>
+}
+
+export type TopicStrategyAdapter<
+  TRelay,
+  TConfig extends BaseRoomConfig = JoinRoomConfig
+> = {
+  init: (config: TConfig) => MaybePromise<TRelay> | Array<MaybePromise<TRelay>>
+  subscribeTopic: (
+    relay: TRelay,
+    topic: string,
+    onMessage: (topic: string, msg: StrategyMessage) => void | Promise<void>,
+    context: TopicSubscriptionContext
+  ) => MaybePromise<() => void>
+  publishTopic: (
+    relay: TRelay,
+    topic: string,
+    msg: StrategyMessage,
+    context: TopicPublishContext
+  ) => MaybePromise<void>
+  unpublishTopic?: (
+    relay: TRelay,
+    topic: string,
+    context: TopicPublishContext
+  ) => MaybePromise<void>
 }
 
 export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (
@@ -410,6 +468,8 @@ export type SignalContext = {
   toPlain: (signal: Signal) => Promise<Signal>
   toCipher: (signal: Signal) => Promise<Signal>
   isLeaving: () => boolean
+  isPassive: boolean
+  isActive: boolean
   onJoinError: JoinErrorHandler | undefined
   sharedPeers: SharedPeerManager
   offerPool: OfferPool
@@ -418,6 +478,8 @@ export type SignalContext = {
   connectPeer: (peer: PeerHandle, peerId: string, relayId: number) => void
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
   attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
+  checkDeactivate: () => void
   announceIntervals: number[]
   announceIntervalMs: number
+  requeueAnnounce?: () => void
 }

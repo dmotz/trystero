@@ -274,10 +274,9 @@ export class LinkedMediaPeer extends LinkedPeer {
     this.addStreamCalls += 1
 
     stream.getTracks().forEach(track => {
-      const remote = (this.partner as LinkedMediaPeer | null)?.ensureRemoteTrack(
-        track,
-        stream
-      )
+      const remote = (
+        this.partner as LinkedMediaPeer | null
+      )?.ensureRemoteTrack(track, stream)
 
       if (remote?.isNew) {
         this.partner?.handlers.track?.(remote.track, remote.stream)

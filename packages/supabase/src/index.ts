@@ -4,9 +4,9 @@ import {
   type SupabaseClient
 } from '@supabase/supabase-js'
 import {
-  all,
-  createStrategy,
+  createTopicStrategy,
   entries,
+  fromJson,
   keys,
   selfId,
   values,
@@ -156,56 +156,38 @@ const removeUnusedChannels = (client: SupabaseClient): void => {
 
 let client: SupabaseClient | null = null
 
-export const joinRoom: JoinRoom<SupabaseRoomConfig> = createStrategy({
+export const joinRoom: JoinRoom<SupabaseRoomConfig> = createTopicStrategy({
   init: config =>
     (client ||= createClient(config.appId, config.relayConfig.supabaseKey)),
 
-  subscribe: async (client, rootTopic, selfTopic, onMessage) => {
-    const handleMessage = (peerTopic: string, signal: string): void => {
-      const entry = getOrCreateChannel(client, peerTopic)
+  subscribeTopic: async (client, topic, onMessage, {kind}) => {
+    const entry = getOrCreateChannel(client, topic)
+    const removeListener = addListener(
+      entry,
+      kind === 'root' ? events.join : events.sdp,
+      payload => {
+        void onMessage(topic, payload as Record<string, unknown>)
+      }
+    )
 
-      void entry.ready.then(chan => {
-        void chan.send({
-          type: events.broadcast,
-          event: events.sdp,
-          payload: signal
-        })
-      })
-    }
-
-    const selfEntry = getOrCreateChannel(client, selfTopic)
-    const rootEntry = getOrCreateChannel(client, rootTopic)
-    const removeSelfListener = addListener(selfEntry, events.sdp, payload => {
-      void onMessage(
-        selfTopic,
-        payload as Record<string, unknown>,
-        handleMessage
-      )
-    })
-    const removeRootListener = addListener(rootEntry, events.join, payload => {
-      void onMessage(
-        rootTopic,
-        payload as Record<string, unknown>,
-        handleMessage
-      )
-    })
-
-    await all([selfEntry.ready, rootEntry.ready])
+    await entry.ready
 
     return () => {
-      removeSelfListener()
-      removeRootListener()
+      removeListener()
       removeUnusedChannels(client)
     }
   },
 
-  announce: (client, rootTopic) =>
-    getOrCreateChannel(client, rootTopic).ready.then(chan =>
+  publishTopic: (client, topic, msg, {kind}) =>
+    getOrCreateChannel(client, topic).ready.then(chan =>
       chan
         .send({
           type: events.broadcast,
-          event: events.join,
-          payload: {peerId: selfId}
+          event: kind === 'announce' ? events.join : events.sdp,
+          payload:
+            kind === 'announce' && typeof msg === 'string'
+              ? fromJson<Record<string, unknown>>(msg)
+              : msg
         })
         .then(() => undefined)
     )

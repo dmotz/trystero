@@ -1,7 +1,7 @@
 import {schnorr} from '@noble/secp256k1'
 import {
   createRelayManager,
-  createStrategy,
+  createTopicStrategy,
   fromJson,
   genId,
   getRelays,
@@ -31,6 +31,7 @@ const msgHandlers: Record<
   ((topic: string, data: string) => void) | undefined
 > = {}
 const kindCache: Record<string, number> = {}
+const maxTopicsPerSubscription = 250
 
 export type NostrRoomConfig = JoinRoomConfig
 
@@ -87,21 +88,122 @@ export const subscribe = (subId: string, topic: string): string => {
   ])
 }
 
-const unsubscribe = (subId: string): string => {
-  delete subIdToTopic[subId]
-  return toJson(['CLOSE', subId])
+type TopicHandler = (topic: string, data: string) => void
+
+type BatchState = {
+  subIds: string[]
+  topics: Map<string, TopicHandler>
+  updateTimer: ReturnType<typeof setTimeout> | null
 }
 
-export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
+const batchers: Record<string, BatchState> = {}
+
+const batchAdd = (
+  client: SocketClient,
+  topic: string,
+  handler: TopicHandler
+): void => {
+  const batcher = (batchers[client.url] ??= {
+    subIds: [],
+    topics: new Map(),
+    updateTimer: null
+  })
+
+  batcher.topics.set(topic, handler)
+  scheduleBatchFlush(client, batcher)
+}
+
+const batchRemove = (client: SocketClient, topic: string): void => {
+  const batcher = batchers[client.url]
+
+  if (!batcher) {
+    return
+  }
+
+  batcher.topics.delete(topic)
+
+  if (batcher.topics.size === 0) {
+    if (batcher.updateTimer !== null) {
+      clearTimeout(batcher.updateTimer)
+      batcher.updateTimer = null
+    }
+
+    batcher.subIds.forEach(subId => client.send(toJson(['CLOSE', subId])))
+    delete batchers[client.url]
+  } else {
+    scheduleBatchFlush(client, batcher)
+  }
+}
+
+const scheduleBatchFlush = (
+  client: SocketClient,
+  batcher: BatchState
+): void => {
+  if (batcher.updateTimer !== null) {
+    return
+  }
+
+  batcher.updateTimer = setTimeout(() => {
+    batcher.updateTimer = null
+    flushBatch(client)
+  }, 0)
+}
+
+const flushBatch = (client: SocketClient): void => {
+  const batcher = batchers[client.url]
+
+  if (!batcher || batcher.topics.size === 0) {
+    return
+  }
+
+  const topics = [...batcher.topics.keys()]
+  const chunks: string[][] = []
+  const since = now()
+
+  for (let i = 0; i < topics.length; i += maxTopicsPerSubscription) {
+    chunks.push(topics.slice(i, i + maxTopicsPerSubscription))
+  }
+
+  while (batcher.subIds.length > chunks.length) {
+    const subId = batcher.subIds.pop()
+
+    if (subId) {
+      client.send(toJson(['CLOSE', subId]))
+    }
+  }
+
+  chunks.forEach((chunk, i) => {
+    const subId = (batcher.subIds[i] ??= genId(64))
+
+    client.send(
+      toJson([
+        'REQ',
+        subId,
+        {
+          kinds: [...new Set(chunk.map(topicToKind))],
+          since,
+          ['#' + tag]: chunk
+        }
+      ])
+    )
+  })
+}
+
+export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
       const client = relayManager.register(
         url,
         makeSocket(url, data => {
           const [msgType, subId, payload, relayMsg] =
-            fromJson<[string, string, {content: string} | boolean, string]>(
-              data
-            )
+            fromJson<
+              [
+                string,
+                string,
+                {content: string; tags?: string[][]} | boolean,
+                string
+              ]
+            >(data)
 
           if (msgType !== eventMsgType) {
             const prefix = `${libName}: relay failure from ${client.url} - `
@@ -116,10 +218,23 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
           }
 
           if (payload && typeof payload === 'object' && 'content' in payload) {
-            msgHandlers[subId]?.(
-              subIdToTopic[subId] ?? '',
-              String((payload as {content: string}).content)
-            )
+            const {content} = payload
+            const handler = msgHandlers[subId]
+
+            if (handler) {
+              handler(subIdToTopic[subId] ?? '', content)
+              return
+            }
+
+            const batcher = batchers[client.url]
+
+            if (batcher?.subIds.includes(subId) && payload.tags) {
+              const topicTag = payload.tags.find(t => t[0] === tag)
+
+              if (topicTag?.[1]) {
+                batcher.topics.get(topicTag[1])?.(topicTag[1], content)
+              }
+            }
           }
         })
       )
@@ -127,29 +242,20 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
       return client.ready
     }),
 
-  subscribe: (client, rootTopic, selfTopic, onMessage) => {
-    const rootSubId = genId(64)
-    const selfSubId = genId(64)
+  subscribeTopic: (client, topic, onMessage) => {
+    const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
 
-    msgHandlers[rootSubId] = msgHandlers[selfSubId] = (topic, data) => {
-      void onMessage(topic, data, async (peerTopic, signal) => {
-        client.send(await createEvent(peerTopic, signal))
-      })
-    }
-
-    client.send(subscribe(rootSubId, rootTopic))
-    client.send(subscribe(selfSubId, selfTopic))
+    batchAdd(client, topic, handler)
 
     return () => {
-      client.send(unsubscribe(rootSubId))
-      client.send(unsubscribe(selfSubId))
-      delete msgHandlers[rootSubId]
-      delete msgHandlers[selfSubId]
+      batchRemove(client, topic)
     }
   },
 
-  announce: async (client, rootTopic) =>
-    client.send(await createEvent(rootTopic, toJson({peerId: selfId})))
+  publishTopic: async (client, topic, msg) =>
+    client.send(
+      await createEvent(topic, typeof msg === 'string' ? msg : toJson(msg))
+    )
 })
 
 export const getRelaySockets = relayManager.getSockets

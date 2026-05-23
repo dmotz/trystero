@@ -1,4 +1,5 @@
 export {default as createStrategy} from './strategy'
+export {default as createTopicStrategy} from './topic-strategy'
 export {hashWith, sha1} from './crypto'
 export {
   all,
@@ -62,8 +63,12 @@ export type {
   SignalPeer,
   SocketClient,
   StrategyAdapter,
+  StrategyContext,
   StrategyMessage,
   StrategyOnMessage,
+  TopicPublishContext,
+  TopicStrategyAdapter,
+  TopicSubscriptionContext,
   RemoteTrackRef,
   SharedMediaPeer,
   TargetPeers,

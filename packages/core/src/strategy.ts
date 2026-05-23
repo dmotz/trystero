@@ -34,23 +34,27 @@ import type {
   SharedPeerState,
   Signal,
   SignalContext,
+  StrategyContext,
   StrategyAdapter
 } from './types'
 
 const announceIntervalMs = 5_333
 const announceWarmupIntervalsMs = [233, 533, 1_333] as const
+const passiveActivationGraceMs = 7_533
 const sharedPeerIdleMsDefault = 123_333
 
 type RoomRegistration = {
   roomToken: string | null
   roomTokenPromise: Promise<string>
   attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
+  shouldAdvertise: () => boolean
 }
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
   subscribe,
-  announce
+  announce,
+  deactivate
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
   const occupiedRooms: Record<
     string,
@@ -87,6 +91,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   ): void => {
     entries(roomRegistrations[appId] ?? {}).forEach(
       ([roomId, registration]) => {
+        if (!registration.shouldAdvertise()) {
+          return
+        }
+
         const {roomToken, roomTokenPromise} = registration
 
         if (roomToken) {
@@ -107,6 +115,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             sharedPeers.get(appId, shared.peerId) !== shared ||
             shared.isClosing
           ) {
+            return
+          }
+
+          if (!registration.shouldAdvertise()) {
             return
           }
 
@@ -348,6 +360,50 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       if (state?.connectedPeer === peer) {
         DEV: log('peer disconnected:', peerId)
         clearConnectedPeer(state, peerId, 'close-event')
+        checkDeactivate()
+      }
+    }
+
+    const isPassive = Boolean(config.passive)
+    let roomRegistration: RoomRegistration | null = null
+    let passiveActivationTimeout:
+      | ReturnType<typeof setTimeout>
+      | null
+      | undefined
+    let deactivateRelayAnnouncements = noOp
+
+    const checkDeactivate = (): void => {
+      if (!isPassive || !ctx.isActive) {
+        return
+      }
+
+      let hasActiveWork = false
+
+      entries(ctx.peerStates).forEach(([peerId, state]) => {
+        const isActive =
+          state.connectedPeer ||
+          state.answeringPeer ||
+          state.offerInitPromise ||
+          state.offerPeer ||
+          state.offerRelays.some(Boolean)
+
+        if (isActive) {
+          hasActiveWork = true
+        } else if (state.status === 'idle') {
+          delete ctx.peerStates[peerId]
+        }
+      })
+
+      if (!hasActiveWork) {
+        ctx.isActive = false
+        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+        announceTimeouts.forEach(resetTimer)
+        announceTimeouts.length = 0
+        deactivateRelayAnnouncements()
+
+        if (roomRegistration?.roomToken) {
+          advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, false)
+        }
       }
     }
 
@@ -362,6 +418,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       toPlain,
       toCipher,
       isLeaving: () => didLeaveRoom,
+      isPassive,
+      isActive: !isPassive,
       onJoinError,
       sharedPeers,
       offerPool: pool,
@@ -370,15 +428,21 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       connectPeer,
       disconnectPeer,
       attachSharedPeerToRoom,
+      checkDeactivate,
       announceIntervals: [],
       announceIntervalMs
+    }
+    const strategyContext: StrategyContext<TConfig> = {
+      config,
+      appId,
+      roomId,
+      isPassive
     }
 
     const handleMessage = createSignalHandler(ctx)
 
     if (!didInit) {
       const initRes = init(config)
-      pool.warmup()
       initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(value =>
         Promise.resolve(value)
       )
@@ -386,6 +450,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       cleanupWatchOnline = config.relayConfig?.manualReconnection
         ? noOp
         : watchOnline()
+    }
+
+    if (!isPassive && !pool.isActive) {
+      pool.warmup()
     }
 
     ctx.announceIntervals = initPromises.map(() => announceIntervalMs)
@@ -399,7 +467,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         await rootTopicP,
         await selfTopicP,
         handleMessage(i),
-        n => pool.getOffers(n, encryptOffer)
+        n => pool.getOffers(n, encryptOffer),
+        strategyContext
       )
     )
 
@@ -413,9 +482,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           return
         }
 
-        const ms = await announce(relay, rootTopic, selfTopic)
+        if (isPassive && !ctx.isActive) {
+          return
+        }
 
-        if (didLeaveRoom) {
+        const extra = isPassive ? {passive: true} : undefined
+        const ms = await announce(
+          relay,
+          rootTopic,
+          selfTopic,
+          extra,
+          strategyContext
+        )
+
+        if (didLeaveRoom || (isPassive && !ctx.isActive)) {
           return
         }
 
@@ -437,6 +517,48 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }, nextAnnounceDelayMs)
       }
 
+      deactivateRelayAnnouncements = () => {
+        if (!deactivate) {
+          return
+        }
+
+        initPromises.forEach(async relayP => {
+          const relay = await relayP
+
+          if (!didLeaveRoom) {
+            void deactivate(relay, rootTopic, selfTopic, strategyContext)
+          }
+        })
+      }
+
+      ctx.requeueAnnounce = () => {
+        announceTimeouts.forEach(resetTimer)
+        announceTimeouts.length = 0
+        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+
+        if (!pool.isActive) {
+          pool.warmup()
+        }
+
+        if (roomRegistration?.roomToken) {
+          advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, true)
+        }
+
+        passiveActivationTimeout = setTimeout(
+          checkDeactivate,
+          passiveActivationGraceMs
+        )
+
+        initPromises.forEach(async (relayP, i) => {
+          const relay = await relayP
+
+          if (relay && !didLeaveRoom) {
+            announceAttemptCounts[i] = 0
+            void queueAnnounce(relay, i)
+          }
+        })
+      }
+
       unsubFns.forEach(async (didSub, i) => {
         await didSub
 
@@ -446,7 +568,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
         const relay = await initPromises[i]
 
-        if (relay && !didLeaveRoom) {
+        if (relay && !didLeaveRoom && (!isPassive || ctx.isActive)) {
           void queueAnnounce(relay, i)
         }
       })
@@ -462,6 +584,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         ? {onPeerHandshake: composedPeerHandshake}
         : {}),
       ...(handshakeTimeoutMs === undefined ? {} : {handshakeTimeoutMs}),
+      isPassive,
       onHandshakeError: (peerId: string, error: string) =>
         onJoinError?.({
           error: error.replace(/^handshake failed: /, ''),
@@ -486,6 +609,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         if (state?.connectedPeer) {
           state.connectedPeer = null
           updateStatus(state)
+          checkDeactivate()
         }
       },
       () => {
@@ -541,6 +665,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
 
         announceTimeouts.forEach(resetTimer)
+        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
         unsubFns.forEach(async f => {
           const cleanup = await f
           cleanup()
@@ -559,23 +684,27 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       roomOptions
     )
 
-    const roomRegistration: RoomRegistration = {
+    roomRegistration = {
       roomToken: null,
       roomTokenPromise: roomNamespacePromise,
-      attachSharedPeerToRoom
+      attachSharedPeerToRoom,
+      shouldAdvertise: () => !isPassive || ctx.isActive
     }
 
     appRoomRegistrations[roomId] = roomRegistration
 
     void roomNamespacePromise.then(roomToken => {
+      const registration = roomRegistration
+
       if (
+        !registration ||
         didLeaveRoom ||
-        roomRegistrations[appId]?.[roomId] !== roomRegistration
+        roomRegistrations[appId]?.[roomId] !== registration
       ) {
         return
       }
 
-      roomRegistration.roomToken = roomToken
+      registration.roomToken = roomToken
       getRoomIdsByToken(appId)[roomToken] = roomId
 
       values(sharedPeerMap).forEach(shared => {
@@ -584,7 +713,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
       })
 
-      advertiseRoomPresenceToAll(appId, roomToken, true)
+      if (!isPassive || ctx.isActive) {
+        advertiseRoomPresenceToAll(appId, roomToken, true)
+      }
     })
 
     return (occupiedRooms[appId][roomId] = joinedRoom)
