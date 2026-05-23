@@ -1,3 +1,6 @@
+import {rmSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import {devices} from '@playwright/test'
 
 const minPort = 10_000
@@ -9,7 +12,12 @@ const testPort =
   configuredPort <= 65_535
     ? configuredPort
     : Math.floor(Math.random() * (maxPort - minPort + 1)) + minPort
+
 const testUrl = `https://localhost:${testPort}/test`
+const defaultCompletionLogPath = join(
+  tmpdir(),
+  `trystero-test-completions-${process.cwd().replaceAll(/\W/g, '_')}.jsonl`
+)
 const randomPort = (except: number[] = []): number => {
   let port = testPort
 
@@ -37,6 +45,19 @@ process.env['TRYSTERO_WS_RELAY_PORTS'] = wsRelayPorts.join(',')
 process.env['TRYSTERO_WS_RELAY_URLS'] = wsRelayPorts
   .map(port => `wss://localhost:${port}`)
   .join(',')
+process.env['TRYSTERO_DIAGNOSTIC_LOG_PATH'] ??= join(
+  tmpdir(),
+  `trystero-diagnostics-${process.pid}-${Date.now()}.jsonl`
+)
+process.env['TRYSTERO_TEST_COMPLETION_LOG_PATH'] ??= join(
+  tmpdir(),
+  `trystero-test-completions-${process.pid}-${Date.now()}.jsonl`
+)
+if (!process.env['TEST_WORKER_INDEX']) {
+  rmSync(process.env['TRYSTERO_DIAGNOSTIC_LOG_PATH'], {force: true})
+  rmSync(process.env['TRYSTERO_TEST_COMPLETION_LOG_PATH'], {force: true})
+  rmSync(defaultCompletionLogPath, {force: true})
+}
 
 export default {
   timeout: 53_333,

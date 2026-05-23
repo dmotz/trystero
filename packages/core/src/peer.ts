@@ -4,6 +4,7 @@ import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 const iceTimeout = 15_000
 const disconnectedCloseDelayMs = 5_000
 const iceStateEvent = 'icegatheringstatechange'
+const iceConnectionStateEvent = 'iceconnectionstatechange'
 const offerType = 'offer'
 const answerType = 'answer'
 const outOfRangePattern = /out of range/i
@@ -335,21 +336,40 @@ export default (
       sdp: JSON.stringify(candidatePayload)
     })
   }
-  pc.onconnectionstatechange = () => {
+  const handleConnectionStateChange = () => {
+    if (
+      pc.connectionState === 'failed' ||
+      pc.connectionState === 'closed' ||
+      pc.iceConnectionState === 'failed' ||
+      pc.iceConnectionState === 'closed'
+    ) {
+      emitClose()
+      return
+    }
+
     if (
       pc.connectionState === 'connected' ||
-      pc.connectionState === 'connecting'
+      pc.connectionState === 'connecting' ||
+      pc.iceConnectionState === 'connected' ||
+      pc.iceConnectionState === 'completed' ||
+      pc.iceConnectionState === 'checking'
     ) {
       clearDisconnectedCloseTimer()
       return
     }
 
-    if (pc.connectionState === 'disconnected') {
+    if (
+      pc.connectionState === 'disconnected' ||
+      pc.iceConnectionState === 'disconnected'
+    ) {
       if (!disconnectedCloseTimer) {
         disconnectedCloseTimer = setTimeout(() => {
           disconnectedCloseTimer = null
 
-          if (pc.connectionState === 'disconnected') {
+          if (
+            pc.connectionState === 'disconnected' ||
+            pc.iceConnectionState === 'disconnected'
+          ) {
             emitClose()
           }
         }, disconnectedCloseDelayMs)
@@ -357,11 +377,10 @@ export default (
 
       return
     }
-
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-      emitClose()
-    }
   }
+
+  pc.onconnectionstatechange = handleConnectionStateChange
+  pc.addEventListener(iceConnectionStateEvent, handleConnectionStateChange)
 
   pc.ontrack = e => {
     const stream = e.streams[0]

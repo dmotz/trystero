@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import {spawn} from 'node:child_process'
 import {dirname, join} from 'node:path'
 import {createInterface} from 'node:readline'
-import test from 'node:test'
+import test from './test.ts'
 import {fileURLToPath} from 'node:url'
 import {
   createWsRelayServer,

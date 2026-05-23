@@ -1,7 +1,7 @@
 {
   "name": "@trystero-p2p/ws-relay",
   "version": "0.24.0",
-  "description": "Self-hosted WebSocket relay strategy for Trystero",
+  "description": "Simple, serverless WebRTC (via WebSocket)",
   "keywords": [
     "chat",
     "decentralized",
@@ -13,6 +13,7 @@
     "relay",
     "self-hosted",
     "signaling",
+    "trystero",
     "webrtc",
     "websocket"
   ],
@@ -35,6 +36,6 @@
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
     "@types/ws": "^8.18.1",
-    "ws": "^8.20.0"
+    "ws": "^8.20.1"
   }
 }
