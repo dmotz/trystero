@@ -60,7 +60,7 @@ void test(
     MockWebSocket.sockets.length = 0
 
     const appId = `nostr-batch-${Date.now()}`
-    const roomCount = 126
+    const roomCount = 251
     const rooms = []
 
     try {
@@ -86,9 +86,9 @@ void test(
       const socket = MockWebSocket.sockets[0]
       const reqs = socket.sent.filter(msg => msg[0] === 'REQ')
 
-      assert.equal(reqs.length, 2, '252 topics should be split into 2 REQs')
+      assert.equal(reqs.length, 2, '251 topics should be split into 2 REQs')
       assert.equal(reqs[0][2]['#x'].length, 250)
-      assert.equal(reqs[1][2]['#x'].length, 2)
+      assert.equal(reqs[1][2]['#x'].length, 1)
       assert.equal(
         Math.max(...reqs.map(req => req[2]['#x'].length)),
         250,

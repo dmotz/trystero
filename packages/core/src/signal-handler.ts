@@ -28,7 +28,6 @@ const disconnectedPeerGraceMs = 7_533
 const answeringTtlMs = 23_333
 const legacyCandidateKey = '__legacy__'
 const offerRelayPlaceholder = 'offer-placeholder'
-
 const signalKeys = ['offer', 'answer', 'candidate'] as const
 
 const toPayload = (msg: unknown): Record<string, unknown> | null => {
@@ -801,21 +800,15 @@ export const createSignalHandler =
       return
     }
 
-    // Passive mode: ignore messages from other passive peers to prevent
-    // passive-passive connections that would cause zombie swarms
     if (ctx.isPassive && remoteIsPassive) {
       return
     }
 
-    // Passive mode: activate when receiving an announcement or offer from a
-    // non-passive peer. Exclude answers and candidates since they are
-    // continuations of existing negotiations, not new peer discovery.
     if (ctx.isPassive && !ctx.isActive && !answer && !candidate) {
       ctx.isActive = true
       ctx.requeueAnnounce?.()
     }
 
-    // Skip processing if still passive and inactive
     if (ctx.isPassive && !ctx.isActive) {
       return
     }

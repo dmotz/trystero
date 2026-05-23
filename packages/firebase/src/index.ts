@@ -12,12 +12,14 @@ import {
   type DatabaseReference
 } from 'firebase/database'
 import {
-  createStrategy,
+  createTopicStrategy,
+  fromJson,
   libName,
   selfId,
   type BaseRelayConfig,
   type BaseRoomConfig,
-  type JoinRoom
+  type JoinRoom,
+  type StrategyMessage
 } from '@trystero-p2p/core'
 
 const presencePath = '_'
@@ -36,6 +38,8 @@ export type FirebaseRoomConfig = BaseRoomConfig & {
 }
 
 const getPath = (...xs: string[]): string => xs.join('/')
+const roomKey = (rootTopic: string, selfTopic: string): string =>
+  `${rootTopic}|${selfTopic}`
 
 const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> =>
   config.relayConfig?.firebaseApp
@@ -46,71 +50,59 @@ const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> =>
         initializeApp({databaseURL: config.appId})
       ))
 
-export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
+export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
   init: config =>
-    ref(
-      initDb(config),
-      String(config.relayConfig?.firebasePath ?? defaultRootPath)
-    ),
+    ref(initDb(config), config.relayConfig?.firebasePath ?? defaultRootPath),
 
-  subscribe: (rootRef, rootTopic, selfTopic, onMessage) => {
+  subscribeTopic: (rootRef, topic, onMessage, context) => {
+    const {rootTopic, selfTopic, kind} = context
     const roomRef = child(rootRef, rootTopic)
-    const selfRef = child(roomRef, selfTopic)
-    const peerSignals: Record<string, Record<string, boolean>> = {}
+    const key = roomKey(rootTopic, selfTopic)
+    const subscriptionToken = (subscriptionTokens[key] ??= Symbol(key))
     const unsubFns: Array<() => void> = []
-    const roomKey = `${rootTopic}|${selfTopic}`
-    const subscriptionToken = Symbol(roomKey)
-    const pendingRoomOwners: Array<Record<string, unknown>> = []
 
-    subscriptionTokens[roomKey] = subscriptionToken
+    if (kind === 'self') {
+      const selfRef = child(roomRef, selfTopic)
+      const peerSignals: Record<string, Record<string, boolean>> = {}
 
-    // Defer the selfRef listener until the room detects a peer. Each
-    // Firebase listener creates a server-side subscription, so dormant
-    // passive rooms avoid the selfRef + nested per-peer listeners until
-    // they are actually needed.
-    // Note: Firebase listeners on roomRef (2 per room) cannot be batched
-    // across rooms — this is an architectural limit of Realtime Database.
-    let didSetUpSelfListener = false
+      const selfCleanup = onChildAdded(selfRef, data => {
+        const peerId = data.key
 
-    const ensureSelfListener = (): void => {
-      if (didSetUpSelfListener) return
-      didSetUpSelfListener = true
+        if (!peerId || peerId === presencePath) {
+          return
+        }
 
-      unsubFns.push(
-        onChildAdded(selfRef, data => {
-          const peerId = data.key
+        unsubFns.push(
+          onChildAdded(data.ref, nestedData => {
+            peerSignals[peerId] ??= {}
 
-          if (!peerId || peerId === presencePath) {
-            return
-          }
+            if (nestedData.key && nestedData.key in peerSignals[peerId]) {
+              return
+            }
 
-          unsubFns.push(
-            onChildAdded(data.ref, nestedData => {
-              peerSignals[peerId] ??= {}
+            if (nestedData.key) {
+              peerSignals[peerId][nestedData.key] = true
+            }
 
-              if (nestedData.key && nestedData.key in peerSignals[peerId]) {
-                return
-              }
+            void onMessage(topic, nestedData.val() as StrategyMessage)
+            void remove(nestedData.ref)
+          })
+        )
+      })
 
-              if (nestedData.key) {
-                peerSignals[peerId][nestedData.key] = true
-              }
+      return () => {
+        selfCleanup()
+        unsubFns.forEach(unsub => unsub())
 
-              void onMessage(
-                selfTopic,
-                nestedData.val() as Record<string, unknown>,
-                handleMessage
-              )
-              void remove(nestedData.ref)
-            })
-          )
-        })
-      )
+        if (subscriptionTokens[key] === subscriptionToken) {
+          void remove(selfRef)
+        }
+      }
     }
 
-    const processRoomEntry = (
-      value: Record<string, {peerId: string}> | null
-    ): void => {
+    const pendingRoomOwners: StrategyMessage[] = []
+
+    const processRoomEntry = (value: Record<string, unknown> | null): void => {
       const owner = value?.[presencePath]
 
       if (!owner) {
@@ -122,15 +114,7 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
         return
       }
 
-      ensureSelfListener()
-      void onMessage(rootTopic, owner as Record<string, unknown>, handleMessage)
-    }
-
-    const handleMessage = (peerTopic: string, signal: string): void => {
-      const signalRef = push(child(roomRef, getPath(peerTopic, selfId)))
-
-      void onDisconnect(signalRef).remove()
-      void set(signalRef, signal)
+      void onMessage(topic, owner as StrategyMessage)
     }
 
     let didSyncRoom = false
@@ -141,8 +125,7 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
         () => {
           didSyncRoom = true
           pendingRoomOwners.forEach(owner => {
-            ensureSelfListener()
-            void onMessage(rootTopic, owner, handleMessage)
+            void onMessage(topic, owner)
           })
           pendingRoomOwners.length = 0
         },
@@ -150,36 +133,55 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createStrategy({
       ),
 
       onChildAdded(roomRef, data => {
-        processRoomEntry(data.val() as Record<string, {peerId: string}> | null)
+        processRoomEntry(data.val() as Record<string, unknown> | null)
       })
     )
 
     return () => {
       unsubFns.forEach(unsub => unsub())
 
-      if (subscriptionTokens[roomKey] !== subscriptionToken) {
+      if (subscriptionTokens[key] !== subscriptionToken) {
         return
       }
 
-      void remove(selfRef)
-
-      if (presenceRefs[roomKey]) {
-        void remove(presenceRefs[roomKey])
-        delete presenceRefs[roomKey]
+      if (presenceRefs[key]) {
+        void remove(presenceRefs[key])
+        delete presenceRefs[key]
       }
 
-      delete subscriptionTokens[roomKey]
+      delete subscriptionTokens[key]
     }
   },
 
-  announce: (rootRef, rootTopic, selfTopic, extra) => {
+  publishTopic: (rootRef, topic, msg, {kind, rootTopic, selfTopic}) => {
     const roomRef = child(rootRef, rootTopic)
-    const roomKey = `${rootTopic}|${selfTopic}`
-    const presenceRef =
-      presenceRefs[roomKey] ?? (presenceRefs[roomKey] = push(roomRef))
+    const key = roomKey(rootTopic, selfTopic)
 
-    void set(presenceRef, {[presencePath]: {peerId: selfId, ...extra}})
-    void onDisconnect(presenceRef).remove()
+    if (kind === 'announce') {
+      const presenceRef =
+        presenceRefs[key] ?? (presenceRefs[key] = push(roomRef))
+
+      void set(presenceRef, {
+        [presencePath]:
+          typeof msg === 'string' ? fromJson<Record<string, unknown>>(msg) : msg
+      })
+      void onDisconnect(presenceRef).remove()
+      return
+    }
+
+    const signalRef = push(child(roomRef, getPath(topic, selfId)))
+
+    void onDisconnect(signalRef).remove()
+    void set(signalRef, msg)
+  },
+
+  unpublishTopic: (rootRef, _topic, {rootTopic, selfTopic}) => {
+    const key = roomKey(rootTopic, selfTopic)
+
+    if (presenceRefs[key]) {
+      void remove(presenceRefs[key])
+      delete presenceRefs[key]
+    }
   }
 })
 

@@ -34,6 +34,7 @@ import type {
   SharedPeerState,
   Signal,
   SignalContext,
+  StrategyContext,
   StrategyAdapter
 } from './types'
 
@@ -90,8 +91,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   ): void => {
     entries(roomRegistrations[appId] ?? {}).forEach(
       ([roomId, registration]) => {
-        // Skip inactive passive rooms to avoid flooding the data channel
-        // with presence frames for rooms the peer is unlikely to share
         if (!registration.shouldAdvertise()) {
           return
         }
@@ -367,7 +366,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const isPassive = Boolean(config.passive)
     let roomRegistration: RoomRegistration | null = null
-    let passiveActivationTimeout: ReturnType<typeof setTimeout> | undefined
+    let passiveActivationTimeout:
+      | ReturnType<typeof setTimeout>
+      | null
+      | undefined
     let deactivateRelayAnnouncements = noOp
 
     const checkDeactivate = (): void => {
@@ -430,6 +432,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       announceIntervals: [],
       announceIntervalMs
     }
+    const strategyContext: StrategyContext<TConfig> = {
+      config,
+      appId,
+      roomId,
+      isPassive
+    }
 
     const handleMessage = createSignalHandler(ctx)
 
@@ -444,9 +452,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         : watchOnline()
     }
 
-    // Defer offer pool warmup until a non-passive room needs it. Passive
-    // rooms create peers on demand via pool.checkout() when they activate,
-    // so pre-allocating 20 RTCPeerConnections would be wasted work.
     if (!isPassive && !pool.isActive) {
       pool.warmup()
     }
@@ -462,7 +467,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         await rootTopicP,
         await selfTopicP,
         handleMessage(i),
-        n => pool.getOffers(n, encryptOffer)
+        n => pool.getOffers(n, encryptOffer),
+        strategyContext
       )
     )
 
@@ -481,7 +487,13 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
 
         const extra = isPassive ? {passive: true} : undefined
-        const ms = await announce(relay, rootTopic, selfTopic, extra)
+        const ms = await announce(
+          relay,
+          rootTopic,
+          selfTopic,
+          extra,
+          strategyContext
+        )
 
         if (didLeaveRoom || (isPassive && !ctx.isActive)) {
           return
@@ -514,23 +526,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           const relay = await relayP
 
           if (!didLeaveRoom) {
-            void deactivate(relay, rootTopic, selfTopic)
+            void deactivate(relay, rootTopic, selfTopic, strategyContext)
           }
         })
       }
 
-      // Immediately restart announce loops (used when a passive peer activates)
       ctx.requeueAnnounce = () => {
         announceTimeouts.forEach(resetTimer)
         announceTimeouts.length = 0
         passiveActivationTimeout = resetTimer(passiveActivationTimeout)
 
-        // Warmup pool on first activation if no non-passive room triggered it
         if (!pool.isActive) {
           pool.warmup()
         }
 
-        // Advertise room presence now that this passive room is active
         if (roomRegistration?.roomToken) {
           advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, true)
         }
@@ -559,7 +568,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
         const relay = await initPromises[i]
 
-        if (relay && !didLeaveRoom) {
+        if (relay && !didLeaveRoom && (!isPassive || ctx.isActive)) {
           void queueAnnounce(relay, i)
         }
       })
@@ -575,6 +584,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         ? {onPeerHandshake: composedPeerHandshake}
         : {}),
       ...(handshakeTimeoutMs === undefined ? {} : {handshakeTimeoutMs}),
+      isPassive,
       onHandshakeError: (peerId: string, error: string) =>
         onJoinError?.({
           error: error.replace(/^handshake failed: /, ''),
@@ -703,14 +713,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
       })
 
-      // Skip initial presence broadcast for inactive passive rooms.
-      // Presence is advertised when the room activates instead.
       if (!isPassive || ctx.isActive) {
         advertiseRoomPresenceToAll(appId, roomToken, true)
       }
     })
-
-    joinedRoom.isPassive = () => isPassive
 
     return (occupiedRooms[appId][roomId] = joinedRoom)
   }

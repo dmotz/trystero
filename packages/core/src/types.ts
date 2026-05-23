@@ -277,6 +277,29 @@ export type StrategyOnMessage = (
   signalPeer: SignalPeer
 ) => void | Promise<void>
 
+export type StrategyContext<TConfig extends BaseRoomConfig = JoinRoomConfig> = {
+  config: TConfig
+  appId: string
+  roomId: string
+  isPassive: boolean
+}
+
+export type TopicSubscriptionContext = {
+  kind: 'root' | 'self'
+  appId: string
+  roomId: string
+  rootTopic: string
+  selfTopic: string
+}
+
+export type TopicPublishContext = {
+  kind: 'announce' | 'signal'
+  appId: string
+  roomId: string
+  rootTopic: string
+  selfTopic: string
+}
+
 export type OfferRecord = {
   peer: PeerHandle
   offer: string
@@ -296,18 +319,45 @@ export type StrategyAdapter<
     rootTopic: string,
     selfTopic: string,
     onMessage: StrategyOnMessage,
-    getOffers: (n: number) => Promise<OfferRecord[]>
+    getOffers: (n: number) => Promise<OfferRecord[]>,
+    context?: StrategyContext<TConfig>
   ) => MaybePromise<() => void>
   announce: (
     relay: TRelay,
     rootTopic: string,
     selfTopic: string,
-    extraPayload?: Record<string, unknown>
+    extraPayload?: Record<string, unknown>,
+    context?: StrategyContext<TConfig>
   ) => MaybePromise<number | void>
   deactivate?: (
     relay: TRelay,
     rootTopic: string,
-    selfTopic: string
+    selfTopic: string,
+    context?: StrategyContext<TConfig>
+  ) => MaybePromise<void>
+}
+
+export type TopicStrategyAdapter<
+  TRelay,
+  TConfig extends BaseRoomConfig = JoinRoomConfig
+> = {
+  init: (config: TConfig) => MaybePromise<TRelay> | Array<MaybePromise<TRelay>>
+  subscribeTopic: (
+    relay: TRelay,
+    topic: string,
+    onMessage: (topic: string, msg: StrategyMessage) => void | Promise<void>,
+    context: TopicSubscriptionContext
+  ) => MaybePromise<() => void>
+  publishTopic: (
+    relay: TRelay,
+    topic: string,
+    msg: StrategyMessage,
+    context: TopicPublishContext
+  ) => MaybePromise<void>
+  unpublishTopic?: (
+    relay: TRelay,
+    topic: string,
+    context: TopicPublishContext
   ) => MaybePromise<void>
 }
 

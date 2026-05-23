@@ -1,6 +1,6 @@
 import {
   createRelayManager,
-  createStrategy,
+  createTopicStrategy,
   makeSocket,
   pauseRelayReconnection,
   resumeRelayReconnection,
@@ -73,7 +73,7 @@ const unsubscribe = (topic: string): WsRelayClientMessage => ({
   topic
 })
 
-export const joinRoom: JoinRoom<WsRelayRoomConfig> = createStrategy({
+export const joinRoom: JoinRoom<WsRelayRoomConfig> = createTopicStrategy({
   init: config =>
     config.relayConfig.urls.map(url => {
       const client = relayManager.register(
@@ -94,50 +94,37 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> = createStrategy({
       return client.ready
     }),
 
-  subscribe: (client, rootTopic, selfTopic, onMessage) => {
+  subscribeTopic: (client, topic, onMessage) => {
     const handlers = msgHandlers.forRelay(client)
     const topicHandler = (topic: string, data: StrategyMessage): void =>
-      void onMessage(topic, data, (peerTopic, signal) =>
-        client.send(toJson(publish(peerTopic, signal)))
-      )
+      void onMessage(topic, data)
 
-    const addTopic = (topic: string): void => {
-      const wasEmpty = !handlers[topic]
-      const topicHandlers = (handlers[topic] ??= new Set())
+    const wasEmpty = !handlers[topic]
+    const topicHandlers = (handlers[topic] ??= new Set())
 
-      topicHandlers.add(topicHandler)
+    topicHandlers.add(topicHandler)
 
-      if (wasEmpty) {
-        client.send(toJson(subscribe(topic)))
-      }
+    if (wasEmpty) {
+      client.send(toJson(subscribe(topic)))
     }
 
-    addTopic(rootTopic)
-    addTopic(selfTopic)
-
     return () => {
-      const removeTopic = (topic: string): void => {
-        const topicHandlers = handlers[topic]
+      const topicHandlers = handlers[topic]
 
-        if (!topicHandlers) {
-          return
-        }
-
-        topicHandlers.delete(topicHandler)
-
-        if (topicHandlers.size === 0) {
-          delete handlers[topic]
-          client.send(toJson(unsubscribe(topic)))
-        }
+      if (!topicHandlers) {
+        return
       }
 
-      removeTopic(rootTopic)
-      removeTopic(selfTopic)
+      topicHandlers.delete(topicHandler)
+
+      if (topicHandlers.size === 0) {
+        delete handlers[topic]
+        client.send(toJson(unsubscribe(topic)))
+      }
     }
   },
 
-  announce: (client, rootTopic) =>
-    client.send(toJson(publish(rootTopic, toJson({peerId: selfId}))))
+  publishTopic: (client, topic, msg) => client.send(toJson(publish(topic, msg)))
 })
 
 export const getRelaySockets = relayManager.getSockets

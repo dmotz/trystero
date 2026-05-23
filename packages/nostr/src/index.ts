@@ -1,7 +1,7 @@
 import {schnorr} from '@noble/secp256k1'
 import {
   createRelayManager,
-  createStrategy,
+  createTopicStrategy,
   fromJson,
   genId,
   getRelays,
@@ -88,19 +88,11 @@ export const subscribe = (subId: string, topic: string): string => {
   ])
 }
 
-const unsubscribe = (subId: string): string => {
-  delete subIdToTopic[subId]
-  return toJson(['CLOSE', subId])
-}
-
-// Batched subscription management — groups topic subscriptions per relay into
-// bounded REQ filters to stay within relay subscription and filter-size limits.
 type TopicHandler = (topic: string, data: string) => void
 
 type BatchState = {
   subIds: string[]
   topics: Map<string, TopicHandler>
-  since: number
   updateTimer: ReturnType<typeof setTimeout> | null
 }
 
@@ -114,7 +106,6 @@ const batchAdd = (
   const batcher = (batchers[client.url] ??= {
     subIds: [],
     topics: new Map(),
-    since: now(),
     updateTimer: null
   })
 
@@ -124,7 +115,10 @@ const batchAdd = (
 
 const batchRemove = (client: SocketClient, topic: string): void => {
   const batcher = batchers[client.url]
-  if (!batcher) return
+
+  if (!batcher) {
+    return
+  }
 
   batcher.topics.delete(topic)
 
@@ -133,6 +127,7 @@ const batchRemove = (client: SocketClient, topic: string): void => {
       clearTimeout(batcher.updateTimer)
       batcher.updateTimer = null
     }
+
     batcher.subIds.forEach(subId => client.send(toJson(['CLOSE', subId])))
     delete batchers[client.url]
   } else {
@@ -144,7 +139,10 @@ const scheduleBatchFlush = (
   client: SocketClient,
   batcher: BatchState
 ): void => {
-  if (batcher.updateTimer !== null) return
+  if (batcher.updateTimer !== null) {
+    return
+  }
+
   batcher.updateTimer = setTimeout(() => {
     batcher.updateTimer = null
     flushBatch(client)
@@ -153,10 +151,14 @@ const scheduleBatchFlush = (
 
 const flushBatch = (client: SocketClient): void => {
   const batcher = batchers[client.url]
-  if (!batcher || batcher.topics.size === 0) return
+
+  if (!batcher || batcher.topics.size === 0) {
+    return
+  }
 
   const topics = [...batcher.topics.keys()]
   const chunks: string[][] = []
+  const since = now()
 
   for (let i = 0; i < topics.length; i += maxTopicsPerSubscription) {
     chunks.push(topics.slice(i, i + maxTopicsPerSubscription))
@@ -179,7 +181,7 @@ const flushBatch = (client: SocketClient): void => {
         subId,
         {
           kinds: [...new Set(chunk.map(topicToKind))],
-          since: batcher.since,
+          since,
           ['#' + tag]: chunk
         }
       ])
@@ -187,7 +189,7 @@ const flushBatch = (client: SocketClient): void => {
   })
 }
 
-export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
+export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
       const client = relayManager.register(
@@ -216,19 +218,19 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
           }
 
           if (payload && typeof payload === 'object' && 'content' in payload) {
-            const content = String(payload.content)
-
-            // Individual subscription handler (for exported subscribe() users)
+            const {content} = payload
             const handler = msgHandlers[subId]
+
             if (handler) {
               handler(subIdToTopic[subId] ?? '', content)
               return
             }
 
-            // Batched subscription — route by topic extracted from event tags
-            const batcher = batchers[url]
+            const batcher = batchers[client.url]
+
             if (batcher?.subIds.includes(subId) && payload.tags) {
               const topicTag = payload.tags.find(t => t[0] === tag)
+
               if (topicTag?.[1]) {
                 batcher.topics.get(topicTag[1])?.(topicTag[1], content)
               }
@@ -240,25 +242,19 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createStrategy({
       return client.ready
     }),
 
-  subscribe: (client, rootTopic, selfTopic, onMessage) => {
-    const handler: TopicHandler = (topic, data) => {
-      void onMessage(topic, data, async (peerTopic, signal) => {
-        client.send(await createEvent(peerTopic, signal))
-      })
-    }
+  subscribeTopic: (client, topic, onMessage) => {
+    const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
 
-    batchAdd(client, rootTopic, handler)
-    batchAdd(client, selfTopic, handler)
+    batchAdd(client, topic, handler)
 
     return () => {
-      batchRemove(client, rootTopic)
-      batchRemove(client, selfTopic)
+      batchRemove(client, topic)
     }
   },
 
-  announce: async (client, rootTopic, _selfTopic, extra) =>
+  publishTopic: async (client, topic, msg) =>
     client.send(
-      await createEvent(rootTopic, toJson({peerId: selfId, ...extra}))
+      await createEvent(topic, typeof msg === 'string' ? msg : toJson(msg))
     )
 })
 

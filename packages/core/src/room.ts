@@ -49,6 +49,7 @@ type RoomOptions = {
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs?: number
+  isPassive?: boolean
 }
 
 type PendingPongWaiter = {
@@ -63,7 +64,8 @@ export default (
   {
     onPeerHandshake,
     onHandshakeError,
-    handshakeTimeoutMs = defaultHandshakeTimeoutMs
+    handshakeTimeoutMs = defaultHandshakeTimeoutMs,
+    isPassive = false
   }: RoomOptions = {}
 ): Room => {
   const peerMap: Record<string, PeerHandle> = {}
@@ -339,6 +341,8 @@ export default (
 
       return Date.now() - start
     },
+
+    isPassive: () => isPassive,
 
     getPeers: () =>
       fromEntries(

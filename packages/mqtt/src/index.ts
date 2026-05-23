@@ -1,7 +1,7 @@
 import mqtt from 'mqtt'
 import {
   createRelayManager,
-  createStrategy,
+  createTopicStrategy,
   getRelays,
   selfId,
   toJson,
@@ -21,7 +21,7 @@ const subscriptionTokens = relayManager.scoped<symbol>()
 const subscriptionRefs = relayManager.scoped<number>()
 export type MqttRoomConfig = JoinRoomConfig
 
-export const joinRoom: JoinRoom<MqttRoomConfig> = createStrategy({
+export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
       const client = relayManager.register(url, mqtt.connect(url))
@@ -38,66 +38,41 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createStrategy({
       )
     }),
 
-  subscribe: (client, rootTopic, selfTopic, onMessage) => {
+  subscribeTopic: (client, topic, onMessage) => {
     const handlers = msgHandlers.forRelay(client)
     const tokens = subscriptionTokens.forRelay(client)
     const refs = subscriptionRefs.forRelay(client)
-    const token = Symbol(`${rootTopic}|${selfTopic}`)
-    const topicHandler = (topic: string, data: string): void => {
-      void onMessage(topic, data, (peerTopic, signal) => {
-        client.publish(peerTopic, signal)
-      })
+    const token = Symbol(topic)
+    const topicHandler = (topic: string, data: string) => onMessage(topic, data)
+
+    handlers[topic] = topicHandler
+    tokens[topic] = token
+    refs[topic] = (refs[topic] ?? 0) + 1
+
+    if (refs[topic] === 1) {
+      client.subscribe(topic)
     }
-
-    handlers[rootTopic] = topicHandler
-    handlers[selfTopic] = topicHandler
-    tokens[rootTopic] = token
-    tokens[selfTopic] = token
-
-    const incrementTopic = (topic: string): void => {
-      refs[topic] = (refs[topic] ?? 0) + 1
-
-      if (refs[topic] === 1) {
-        client.subscribe(topic)
-      }
-    }
-
-    incrementTopic(rootTopic)
-    incrementTopic(selfTopic)
 
     return () => {
-      const decrementTopic = (topic: string): void => {
-        refs[topic] = Math.max(0, (refs[topic] ?? 1) - 1)
+      refs[topic] = Math.max(0, (refs[topic] ?? 1) - 1)
 
-        if (refs[topic] === 0) {
-          client.unsubscribe(topic)
-          delete refs[topic]
-        }
+      if (refs[topic] === 0) {
+        client.unsubscribe(topic)
+        delete refs[topic]
       }
 
-      decrementTopic(rootTopic)
-      decrementTopic(selfTopic)
-
-      if (handlers[rootTopic] === topicHandler) {
-        delete handlers[rootTopic]
+      if (handlers[topic] === topicHandler) {
+        delete handlers[topic]
       }
 
-      if (handlers[selfTopic] === topicHandler) {
-        delete handlers[selfTopic]
-      }
-
-      if (tokens[rootTopic] === token) {
-        delete tokens[rootTopic]
-      }
-
-      if (tokens[selfTopic] === token) {
-        delete tokens[selfTopic]
+      if (tokens[topic] === token) {
+        delete tokens[topic]
       }
     }
   },
 
-  announce: (client, rootTopic, _selfTopic, extra) => {
-    client.publish(rootTopic, toJson({peerId: selfId, ...extra}))
+  publishTopic: (client, topic, msg) => {
+    client.publish(topic, typeof msg === 'string' ? msg : toJson(msg))
   }
 })
 

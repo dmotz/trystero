@@ -20,7 +20,9 @@ export const withStrategyBrowserPair = (
   overrides,
   name,
   fn,
-  options: {skip?: (ctx: {browserName: string; strategy: string}) => boolean} = {}
+  options: {
+    skip?: (ctx: {browserName: string; strategy: string}) => boolean
+  } = {}
 ) => {
   const config = {...strategyConfigs[strategy], ...overrides}
 

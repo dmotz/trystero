@@ -1,7 +1,6 @@
 import {createLightNode, type LightNode} from '@waku/sdk'
 import {
-  all,
-  createStrategy,
+  createTopicStrategy,
   decodeBytes,
   encodeBytes,
   libName,
@@ -34,7 +33,7 @@ let node: Promise<LightNode>
 
 export type IpfsRoomConfig = BaseRoomConfig
 
-const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createStrategy({
+const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createTopicStrategy({
   init: () =>
     (node ??= createLightNode({
       defaultBootstrap: true,
@@ -46,38 +45,25 @@ const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createStrategy({
       return createdNode
     })),
 
-  subscribe: async (activeNode, rootTopic, selfTopic, onMessage) => {
-    const handleMsg = (topic: string) => (msg: {payload?: Uint8Array}) => {
+  subscribeTopic: async (activeNode, topic, onMessage) => {
+    const decoder = activeNode.createDecoder({
+      contentTopic: contentTopic(topic)
+    })
+    const handler = (msg: {payload?: Uint8Array}) => {
       if (msg.payload) {
-        void onMessage(topic, decodeBytes(msg.payload), (peerTopic, signal) =>
-          sendMessage(activeNode, peerTopic, signal)
-        )
+        void onMessage(topic, decodeBytes(msg.payload))
       }
     }
 
-    const subscriptions = [rootTopic, selfTopic].map(topic => {
-      const decoder = activeNode.createDecoder({
-        contentTopic: contentTopic(topic)
-      })
-      const handler = handleMsg(topic)
-
-      return {
-        decoder,
-        ready: activeNode.filter.subscribe(decoder, handler)
-      }
-    })
-
-    await all(subscriptions.map(subscription => subscription.ready))
+    await activeNode.filter.subscribe(decoder, handler)
 
     return () => {
-      subscriptions.forEach(
-        subscription => void activeNode.filter.unsubscribe(subscription.decoder)
-      )
+      void activeNode.filter.unsubscribe(decoder)
     }
   },
 
-  announce: (activeNode, rootTopic, _selfTopic, extra) =>
-    sendMessage(activeNode, rootTopic, toJson({peerId: selfId, ...extra}))
+  publishTopic: (activeNode, topic, msg) =>
+    sendMessage(activeNode, topic, typeof msg === 'string' ? msg : toJson(msg))
 })
 
 export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>

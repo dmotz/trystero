@@ -257,7 +257,7 @@ const runPassiveNodeTest = (
     `Trystero: ${strategy} passive peer connects with active peer using node`,
     {timeout, skip},
     async () => {
-      // Start the passive responder first — it should stay dormant until
+      // Start the passive responder first - it should stay dormant until
       // the active initiator joins
       const passiveResponder = startPeer({
         role: 'responder',
