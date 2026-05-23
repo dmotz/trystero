@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/nostr",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Simple, serverless WebRTC (via Nostr)",
   "keywords": [
     "chat",

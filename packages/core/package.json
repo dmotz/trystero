@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/core",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Simple, serverless WebRTC",
   "keywords": [
     "bittorrent",
