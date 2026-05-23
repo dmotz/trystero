@@ -1,7 +1,7 @@
 {
   "name": "@trystero-p2p/torrent",
   "version": "0.24.0",
-  "description": "Torrent tracker strategy for Trystero",
+  "description": "Simple, serverless WebRTC (via Torrent)",
   "keywords": [
     "bittorrent",
     "chat",
@@ -15,6 +15,7 @@
     "serverless",
     "signaling",
     "torrent",
+    "trystero",
     "webrtc",
     "webtorrent"
   ],

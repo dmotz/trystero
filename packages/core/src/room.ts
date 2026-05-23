@@ -1,32 +1,19 @@
 import {
-  all,
-  alloc,
-  decodeBytes,
-  encodeBytes,
   entries,
   fromEntries,
-  fromJson,
-  genId,
   isBrowser,
   keys,
   libName,
   mkErr,
   noOp,
-  resetTimer,
-  selfId,
-  toError,
-  toErrorMessage,
-  toJson
+  toError
 } from './utils'
+import {createActionManager} from './actions'
+import {createHandshakeManager} from './handshake'
+import {createMediaManager, type InternalMediaMeta} from './media'
 import type {
-  ActionProgress,
-  ActionReceiver,
-  ActionSender,
+  AddMediaOptions,
   DataPayload,
-  HandshakePayload,
-  HandshakeReceiver,
-  HandshakeSender,
-  JsonValue,
   PeerHandle,
   PeerHandshake,
   Room,
@@ -34,23 +21,8 @@ import type {
   TargetPeers
 } from './types'
 
-const TypedArray = Object.getPrototypeOf(Uint8Array)
-const typeByteLimit = 32
-const nonceByteLimit = 2
-const typeIndex = 0
-const nonceIndex = typeIndex + typeByteLimit
-const tagIndex = nonceIndex + nonceByteLimit
-const progressIndex = tagIndex + 1
-const payloadIndex = progressIndex + 1
-const chunkSize = 16 * 2 ** 10 - payloadIndex
-const oneByteMax = 0xff
-const twoByteMax = 0xffff
-const buffLowEvent = 'bufferedamountlow'
-const channelCloseEvent = 'close'
-const channelErrorEvent = 'error'
 const unloadEvent = 'beforeunload'
 const defaultHandshakeTimeoutMs = 10_000
-const backpressureWaitTimeoutMs = 10_000
 const internalNs = (ns: string): string => '@_' + ns
 const beforeUnloadRoomCleanups = new Set<() => void>()
 
@@ -73,137 +45,15 @@ const registerBeforeUnloadCleanup = (cleanup: () => void): (() => void) => {
   }
 }
 
-type ActionOptions = {
-  sendToPending: boolean
-  receiveWhilePending: boolean
-}
-
-type ActionState = {
-  onComplete: (
-    payload: DataPayload,
-    peerId: string,
-    metadata?: JsonValue
-  ) => void
-  onProgress: (percent: number, peerId: string, metadata?: JsonValue) => void
-  setOnComplete: (
-    f: (payload: DataPayload, peerId: string, metadata?: JsonValue) => void
-  ) => void
-  setOnProgress: (
-    f: (percent: number, peerId: string, metadata?: JsonValue) => void
-  ) => void
-  send: ActionSender
-  options: ActionOptions
-}
-
-type PendingTransmission = {
-  chunks: Uint8Array[]
-  meta?: JsonValue
-}
-
-type PendingActionPayload = {
-  payload: DataPayload
-  peerId: string
-  metadata?: JsonValue
-}
-
-type PendingPeerState = {
-  peer: PeerHandle
-  isActive: boolean
-  didLocalHandshakePass: boolean
-  didReceiveRemoteReady: boolean
-  handshakeTimer: ReturnType<typeof setTimeout> | null
-  pendingHandshakePayloads: HandshakePayload[]
-  handshakeWaiters: Array<{
-    resolve: (payload: HandshakePayload) => void
-    reject: (error: Error) => void
-  }>
-}
-
 type RoomOptions = {
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs?: number
 }
 
-type InternalMediaMeta = {
-  k: string
-  m?: JsonValue
-  s?: string
-  t?: string
-}
-
-type PendingMediaMeta = {
-  key: string
-  metadata?: JsonValue
-  streamId?: string
-  trackId?: string
-}
-
 type PendingPongWaiter = {
   resolve: () => void
   reject: (error: Error) => void
-}
-
-const toByteArray = (value: ArrayBuffer | ArrayBufferView): Uint8Array =>
-  value instanceof ArrayBuffer
-    ? new Uint8Array(value)
-    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
-
-const toHandshakeErrorMessage = (error: Error): string => {
-  const message = toErrorMessage(error, 'unknown error')
-
-  return message.startsWith('handshake ')
-    ? message
-    : `handshake failed: ${message}`
-}
-
-const waitForBufferedAmountLow = (
-  channel: RTCDataChannel,
-  timeoutMs = backpressureWaitTimeoutMs
-): Promise<boolean> => {
-  if (
-    channel.readyState !== 'open' ||
-    channel.bufferedAmount <= channel.bufferedAmountLowThreshold
-  ) {
-    return Promise.resolve(channel.readyState === 'open')
-  }
-
-  return new Promise<boolean>(res => {
-    let settled = false
-    let timeout: ReturnType<typeof setTimeout> | null = null
-
-    const finish = (didDrain: boolean): void => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      channel.removeEventListener(buffLowEvent, onBufferLow)
-      channel.removeEventListener(channelCloseEvent, onCloseOrError)
-      channel.removeEventListener(channelErrorEvent, onCloseOrError)
-
-      resetTimer(timeout)
-      res(didDrain)
-    }
-
-    const onBufferLow = (): void => finish(true)
-    const onCloseOrError = (): void => finish(false)
-
-    channel.addEventListener(buffLowEvent, onBufferLow)
-    channel.addEventListener(channelCloseEvent, onCloseOrError)
-    channel.addEventListener(channelErrorEvent, onCloseOrError)
-
-    timeout = setTimeout(() => finish(false), timeoutMs)
-
-    if (channel.readyState !== 'open') {
-      finish(false)
-      return
-    }
-
-    if (channel.bufferedAmount <= channel.bufferedAmountLowThreshold) {
-      finish(true)
-    }
-  })
 }
 
 export default (
@@ -218,38 +68,13 @@ export default (
 ): Room => {
   const peerMap: Record<string, PeerHandle> = {}
   const activePeerMap: Record<string, PeerHandle> = {}
-  const peerStates: Record<string, PendingPeerState> = {}
-  const actions: Record<string, ActionState> = {}
-  const actionsCache: Record<
-    string,
-    [ActionSender, ActionReceiver, ActionProgress]
-  > = {}
-  const pendingTransmissions: Record<
-    string,
-    Record<string, Record<number, PendingTransmission>>
-  > = {}
-  const pendingActionPayloads: Record<string, PendingActionPayload[]> = {}
   const pendingPongs: Record<string, PendingPongWaiter[] | undefined> = {}
-  const pendingStreamMetas: Record<string, PendingMediaMeta[]> = {}
-  const pendingTrackMetas: Record<string, PendingMediaMeta[]> = {}
-  const localStreamKeys = new WeakMap<MediaStream, string>()
-  const localTrackKeys = new WeakMap<MediaStreamTrack, string>()
   const listeners = {
-    onPeerJoin: noOp as (peerId: string) => void,
-    onPeerLeave: noOp as (peerId: string) => void,
-    onPeerStream: noOp as (
-      stream: MediaStream,
-      peerId: string,
-      metadata?: JsonValue
-    ) => void,
-    onPeerTrack: noOp as (
-      track: MediaStreamTrack,
-      stream: MediaStream,
-      peerId: string,
-      metadata?: JsonValue
-    ) => void
+    onPeerJoin: null as ((peerId: string) => void) | null,
+    onPeerLeave: null as ((peerId: string) => void) | null
   }
   let unregisterBeforeUnloadCleanup: () => void = noOp
+  let handshakeManager: ReturnType<typeof createHandshakeManager> | null = null
 
   const iterate = (
     targets: TargetPeers,
@@ -272,113 +97,39 @@ export default (
       return [Promise.resolve(f(id, peer))]
     })
 
-  const applyMediaOp = (
-    targets: TargetPeers,
-    key: string,
-    metadata: JsonValue | undefined,
-    sendMeta: ActionSender<InternalMediaMeta>,
-    op: (peer: PeerHandle) => void,
-    mediaIds: Partial<InternalMediaMeta> = {}
-  ): Promise<void>[] => {
-    const payload = {
-      k: key,
-      ...mediaIds,
-      ...(metadata === undefined ? {} : {m: metadata})
-    }
+  const mediaManager = createMediaManager({
+    iterate: (targets, f) =>
+      iterate(targets, (id, peer) => f(id, peer as SharedMediaPeer)),
+    isActive: id => Boolean(activePeerMap[id]),
+    getSharedMediaPeer: id =>
+      (peerMap[id] as SharedMediaPeer | undefined) ?? null
+  })
 
-    return iterate(targets, async (id, peer) => {
-      await sendMeta(payload, id)
-      op(peer)
-    })
-  }
-
-  const makeKeyGetter =
-    <K extends object>(map: WeakMap<K, string>) =>
-    (item: K): string => {
-      let key = map.get(item)
-
-      if (!key) {
-        key = genId(20)
-        map.set(item, key)
-      }
-
-      return key
-    }
-
-  const getStreamKey = makeKeyGetter(localStreamKeys)
-  const getTrackKey = makeKeyGetter(localTrackKeys)
-
-  const getSharedMediaPeer = (id: string): SharedMediaPeer | null =>
-    (peerMap[id] as SharedMediaPeer | undefined) ?? null
-
-  const emitStream = (
-    id: string,
-    key: string,
-    stream: MediaStream,
-    metadata?: JsonValue
-  ): void => {
-    if (!activePeerMap[id]) {
-      return
-    }
-
-    getSharedMediaPeer(id)?.__trysteroSetRemoteStreamByKey?.(key, stream)
-
-    if (typeof stream.id === 'string') {
-      getSharedMediaPeer(id)?.__trysteroSetRemoteStreamById?.(stream.id, stream)
-    }
-
-    listeners.onPeerStream(stream, id, metadata)
-  }
-
-  const emitTrack = (
-    id: string,
-    key: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    metadata?: JsonValue
-  ): void => {
-    if (!activePeerMap[id]) {
-      return
-    }
-
-    getSharedMediaPeer(id)?.__trysteroSetRemoteTrackByKey?.(key, track, stream)
-
-    if (typeof stream.id === 'string') {
-      getSharedMediaPeer(id)?.__trysteroSetRemoteStreamById?.(stream.id, stream)
-    }
-
-    if (typeof track.id === 'string') {
-      getSharedMediaPeer(id)?.__trysteroSetRemoteTrackById?.(
-        track.id,
-        track,
-        stream
-      )
-    }
-
-    listeners.onPeerTrack(track, stream, id, metadata)
-  }
+  const actionManager = createActionManager({
+    getPeer: (id, includePending) =>
+      (includePending ? peerMap : activePeerMap)[id],
+    getPeerIds: includePending =>
+      keys(includePending ? peerMap : activePeerMap),
+    canReceiveFromPeer: (id, receiveWhilePending) =>
+      Boolean(handshakeManager?.canReceiveFromPeer(id, receiveWhilePending))
+  })
+  const makeActionInternal = actionManager.makeInternalAction
+  const handleData = actionManager.handleData
+  const makeAction = actionManager.makeAction
 
   const clearPeerState = (
     id: string,
     reason: Error = mkErr('peer disconnected')
   ): void => {
-    const state = peerStates[id]
     const err = toError(reason, 'peer disconnected')
 
-    if (state) {
-      resetTimer(state.handshakeTimer)
-      state.pendingHandshakePayloads.length = 0
-      state.handshakeWaiters.splice(0).forEach(waiter => waiter.reject(err))
-      delete peerStates[id]
-    }
-
+    handshakeManager?.clearPeer(id, err)
     delete peerMap[id]
     delete activePeerMap[id]
-    delete pendingTransmissions[id]
+    actionManager.clearPeer(id, err)
     pendingPongs[id]?.splice(0).forEach(waiter => waiter.reject(err))
     delete pendingPongs[id]
-    delete pendingStreamMetas[id]
-    delete pendingTrackMetas[id]
+    mediaManager.clearPeer(id)
   }
 
   const exitPeer = (id: string, peer?: PeerHandle, reason?: Error): void => {
@@ -398,300 +149,14 @@ export default (
     current.destroy()
 
     if (wasActive) {
-      listeners.onPeerLeave(id)
+      listeners.onPeerLeave?.(id)
     }
 
     onPeerLeave(id)
   }
 
-  const makeActionInternal = <T extends DataPayload = DataPayload>(
-    type: string,
-    options: Partial<ActionOptions> = {}
-  ): [ActionSender<T>, ActionReceiver<T>, ActionProgress] => {
-    const cached = actionsCache[type]
-
-    if (actions[type] && cached) {
-      const cachedOptions = actions[type].options
-
-      if (
-        cachedOptions.sendToPending !== Boolean(options.sendToPending) ||
-        cachedOptions.receiveWhilePending !==
-          Boolean(options.receiveWhilePending)
-      ) {
-        throw mkErr(`action type "${type}" cannot be redefined`)
-      }
-
-      return cached as unknown as [
-        ActionSender<T>,
-        ActionReceiver<T>,
-        ActionProgress
-      ]
-    }
-
-    if (!type) {
-      throw mkErr('action type argument is required')
-    }
-
-    const typeBytes = encodeBytes(type)
-
-    if (typeBytes.byteLength > typeByteLimit) {
-      throw mkErr(
-        `action type string "${type}" (${typeBytes.byteLength}b) exceeds ` +
-          `byte limit (${typeByteLimit}). Hint: choose a shorter name.`
-      )
-    }
-
-    const normalizedOptions = {
-      sendToPending: Boolean(options.sendToPending),
-      receiveWhilePending: Boolean(options.receiveWhilePending)
-    }
-    const typeBytesPadded = new Uint8Array(typeByteLimit)
-    typeBytesPadded.set(typeBytes)
-
-    let nonce = 0
-
-    actions[type] = {
-      onComplete: noOp as (
-        payload: DataPayload,
-        peerId: string,
-        metadata?: JsonValue
-      ) => void,
-      onProgress: noOp as (
-        percent: number,
-        peerId: string,
-        metadata?: JsonValue
-      ) => void,
-
-      setOnComplete: f => {
-        actions[type]!.onComplete = f
-
-        const pending = pendingActionPayloads[type]
-
-        if (pending?.length) {
-          delete pendingActionPayloads[type]
-          pending.forEach(({payload, peerId, metadata}) =>
-            f(payload, peerId, metadata)
-          )
-        }
-      },
-
-      setOnProgress: f => {
-        actions[type]!.onProgress = f
-      },
-
-      send: async (data, targets, meta, onProgress) => {
-        const dataType = typeof data
-
-        if (dataType === 'undefined') {
-          throw mkErr('action data cannot be undefined')
-        }
-
-        const isJson = dataType !== 'string'
-        const isBlob = data instanceof Blob
-        const isBinary =
-          isBlob || data instanceof ArrayBuffer || data instanceof TypedArray
-        const hasMeta = meta !== undefined
-
-        const buffer = isBinary
-          ? toByteArray(
-              isBlob
-                ? await data.arrayBuffer()
-                : (data as ArrayBuffer | ArrayBufferView)
-            )
-          : encodeBytes(isJson ? toJson(data) : (data as string))
-
-        const metaEncoded = hasMeta ? encodeBytes(toJson(meta)) : null
-
-        const chunkTotal =
-          Math.ceil(buffer.byteLength / chunkSize) + (hasMeta ? 1 : 0) || 1
-
-        const chunks = alloc(chunkTotal, (_, i) => {
-          const isLast = i === chunkTotal - 1
-          const isMeta = Boolean(hasMeta && i === 0)
-          const chunk = new Uint8Array(
-            payloadIndex +
-              (isMeta
-                ? (metaEncoded?.byteLength ?? 0)
-                : isLast
-                  ? buffer.byteLength -
-                    chunkSize * (chunkTotal - (hasMeta ? 2 : 1))
-                  : chunkSize)
-          )
-
-          chunk.set(typeBytesPadded)
-          chunk.set([nonce >> 8, nonce & oneByteMax], nonceIndex)
-          chunk.set(
-            [
-              Number(isLast) |
-                (Number(isMeta) << 1) |
-                (Number(isBinary) << 2) |
-                (Number(isJson) << 3)
-            ],
-            tagIndex
-          )
-          chunk.set(
-            [Math.round(((i + 1) / chunkTotal) * oneByteMax)],
-            progressIndex
-          )
-          chunk.set(
-            hasMeta
-              ? isMeta
-                ? (metaEncoded ?? new Uint8Array())
-                : buffer.subarray((i - 1) * chunkSize, i * chunkSize)
-              : buffer.subarray(i * chunkSize, (i + 1) * chunkSize),
-            payloadIndex
-          )
-
-          return chunk
-        })
-
-        nonce = (nonce + 1) & twoByteMax
-
-        await all(
-          iterate(
-            targets,
-            async (id, peer) => {
-              const {channel} = peer
-              let chunkN = 0
-
-              while (chunkN < chunkTotal) {
-                const chunk = chunks[chunkN]
-
-                if (!chunk) {
-                  break
-                }
-
-                if (
-                  channel &&
-                  channel.bufferedAmount > channel.bufferedAmountLowThreshold
-                ) {
-                  const didDrain = await waitForBufferedAmountLow(channel)
-
-                  if (!didDrain) {
-                    break
-                  }
-                }
-
-                const currentPeer = normalizedOptions.sendToPending
-                  ? peerMap[id]
-                  : activePeerMap[id]
-
-                if (!currentPeer || currentPeer !== peer) {
-                  break
-                }
-
-                peer.sendData(chunk)
-                chunkN++
-                const progressByte = chunk[progressIndex] ?? oneByteMax
-                onProgress?.(progressByte / oneByteMax, id, meta)
-              }
-            },
-            {includePending: normalizedOptions.sendToPending}
-          )
-        )
-
-        return []
-      },
-
-      options: normalizedOptions
-    }
-
-    return (actionsCache[type] = [
-      actions[type].send as ActionSender,
-      actions[type].setOnComplete as ActionReceiver,
-      actions[type].setOnProgress as ActionProgress
-    ]) as unknown as [ActionSender<T>, ActionReceiver<T>, ActionProgress]
-  }
-
-  const makeAction = <T extends DataPayload = DataPayload>(
-    type: string
-  ): [ActionSender<T>, ActionReceiver<T>, ActionProgress] =>
-    makeActionInternal<T>(type)
-
-  const handleData = (id: string, data: ArrayBuffer): void => {
-    const state = peerStates[id]
-
-    if (!state) {
-      return
-    }
-
-    const buffer = new Uint8Array(data)
-    const type = decodeBytes(buffer.subarray(typeIndex, nonceIndex)).replaceAll(
-      '\x00',
-      ''
-    )
-    const action = actions[type]
-
-    if (!state.isActive && !action?.options.receiveWhilePending) {
-      return
-    }
-
-    const nonce =
-      ((buffer[nonceIndex] ?? 0) << 8) | (buffer[nonceIndex + 1] ?? 0)
-    const tag = buffer[tagIndex] ?? 0
-    const progress = buffer[progressIndex] ?? 0
-    const payload = buffer.subarray(payloadIndex)
-    const isLast = Boolean(tag & 1)
-    const isMeta = Boolean(tag & (1 << 1))
-    const isBinary = Boolean(tag & (1 << 2))
-    const isJson = Boolean(tag & (1 << 3))
-
-    pendingTransmissions[id] ??= {}
-    pendingTransmissions[id][type] ??= {}
-
-    const target = (pendingTransmissions[id][type][nonce] ??= {chunks: []})
-
-    if (isMeta) {
-      target.meta = fromJson<JsonValue>(decodeBytes(payload))
-    } else {
-      target.chunks.push(payload)
-    }
-
-    action?.onProgress(progress / oneByteMax, id, target.meta)
-
-    if (!isLast) {
-      return
-    }
-
-    const full = new Uint8Array(
-      target.chunks.reduce((a: number, c: Uint8Array) => a + c.byteLength, 0)
-    )
-
-    target.chunks.reduce((a: number, c: Uint8Array) => {
-      full.set(c, a)
-      return a + c.byteLength
-    }, 0)
-
-    delete pendingTransmissions[id][type][nonce]
-
-    if (isBinary) {
-      if (action) {
-        action.onComplete(full, id, target.meta)
-      } else {
-        ;(pendingActionPayloads[type] ??= []).push({
-          payload: full,
-          peerId: id,
-          ...(target.meta === undefined ? {} : {metadata: target.meta})
-        })
-      }
-    } else {
-      const text = decodeBytes(full)
-      const decoded = isJson ? fromJson<JsonValue>(text) : text
-
-      if (action) {
-        action.onComplete(decoded, id, target.meta)
-      } else {
-        ;(pendingActionPayloads[type] ??= []).push({
-          payload: decoded,
-          peerId: id,
-          ...(target.meta === undefined ? {} : {metadata: target.meta})
-        })
-      }
-    }
-  }
-
   const leave = async (): Promise<void> => {
-    await sendLeave('')
+    await leaveAction.send('')
     await new Promise<void>(res => setTimeout(res, 99))
 
     entries(peerMap).forEach(([id, peer]) => {
@@ -703,170 +168,44 @@ export default (
     onSelfLeave()
   }
 
-  const [sendPing, getPing] = makeActionInternal<string>(internalNs('ping'))
-  const [sendPong, getPong] = makeActionInternal<string>(internalNs('pong'))
-  const [sendSignal, getSignal] = makeActionInternal(internalNs('signal'))
-  const [sendStreamMeta, getStreamMeta] = makeActionInternal<InternalMediaMeta>(
+  const pingAction = makeActionInternal<string>(internalNs('ping'))
+  const pongAction = makeActionInternal<string>(internalNs('pong'))
+  const signalAction = makeActionInternal(internalNs('signal'))
+  const streamMetaAction = makeActionInternal<InternalMediaMeta>(
     internalNs('stream')
   )
-  const [sendTrackMeta, getTrackMeta] = makeActionInternal<InternalMediaMeta>(
+  const trackMetaAction = makeActionInternal<InternalMediaMeta>(
     internalNs('track')
   )
-  const [sendLeave, getLeave] = makeActionInternal<string>(
-    internalNs('leave'),
-    {
-      sendToPending: true,
-      receiveWhilePending: true
-    }
-  )
-  const [sendHandshakeData, getHandshakeData] = makeActionInternal<DataPayload>(
+  const leaveAction = makeActionInternal<string>(internalNs('leave'), {
+    sendToPending: true,
+    receiveWhilePending: true
+  })
+  const handshakeDataAction = makeActionInternal<DataPayload>(
     internalNs('hsdata'),
     {sendToPending: true, receiveWhilePending: true}
   )
-  const [sendHandshakeReady, getHandshakeReady] = makeActionInternal<string>(
+  const handshakeReadyAction = makeActionInternal<string>(
     internalNs('hsready'),
     {sendToPending: true, receiveWhilePending: true}
   )
 
-  const maybeActivatePeer = (id: string, peer?: PeerHandle): void => {
-    const state = peerStates[id]
+  handshakeManager = createHandshakeManager({
+    ...(onPeerHandshake === undefined ? {} : {onPeerHandshake}),
+    ...(onHandshakeError === undefined ? {} : {onHandshakeError}),
+    handshakeTimeoutMs,
+    sendHandshakeData: handshakeDataAction.send,
+    sendHandshakeReady: handshakeReadyAction.send,
+    onActivate: (id, peer) => {
+      activePeerMap[id] = peer
+      listeners.onPeerJoin?.(id)
+    },
+    onFailure: (id, peer, reason) => exitPeer(id, peer, reason)
+  })
 
-    if (!state || (peer && state.peer !== peer) || state.isActive) {
-      return
-    }
+  pingAction.onMessage((_, id) => pongAction.send('', id))
 
-    if (!state.didLocalHandshakePass || !state.didReceiveRemoteReady) {
-      return
-    }
-
-    state.isActive = true
-    activePeerMap[id] = state.peer
-    state.handshakeTimer = resetTimer(state.handshakeTimer)
-    listeners.onPeerJoin(id)
-  }
-
-  const failPeerHandshake = (
-    id: string,
-    peer: PeerHandle,
-    reason: Error
-  ): void => {
-    const state = peerStates[id]
-
-    if (!state || state.peer !== peer) {
-      return
-    }
-
-    const error = toHandshakeErrorMessage(reason)
-
-    onHandshakeError?.(id, error)
-    exitPeer(id, peer, mkErr(error))
-  }
-
-  const markLocalHandshakePassed = (id: string, peer: PeerHandle): void => {
-    const state = peerStates[id]
-
-    if (!state || state.peer !== peer || state.isActive) {
-      return
-    }
-
-    state.didLocalHandshakePass = true
-
-    void sendHandshakeReady('', id).catch(err =>
-      failPeerHandshake(
-        id,
-        peer,
-        mkErr(
-          `failed sending handshake readiness: ${toErrorMessage(
-            err,
-            'unknown send failure'
-          )}`
-        )
-      )
-    )
-    maybeActivatePeer(id, peer)
-  }
-
-  const startPeerHandshake = (id: string, peer: PeerHandle): void => {
-    const state = peerStates[id]
-
-    if (!state || state.peer !== peer) {
-      return
-    }
-
-    state.handshakeTimer = setTimeout(
-      () =>
-        failPeerHandshake(
-          id,
-          peer,
-          mkErr(`handshake timed out after ${handshakeTimeoutMs}ms`)
-        ),
-      handshakeTimeoutMs
-    )
-
-    const sendHandshake: HandshakeSender = async (data, metadata) => {
-      await sendHandshakeData(data, id, metadata)
-    }
-
-    const receiveHandshake: HandshakeReceiver = () =>
-      new Promise<HandshakePayload>((resolve, reject) => {
-        const current = peerStates[id]
-
-        if (!current || current.peer !== peer) {
-          reject(mkErr('peer disconnected during handshake'))
-          return
-        }
-
-        const payload = current.pendingHandshakePayloads.shift()
-
-        if (payload) {
-          resolve(payload)
-          return
-        }
-
-        current.handshakeWaiters.push({
-          resolve,
-          reject: error => reject(error)
-        })
-      })
-
-    const isInitiator = selfId < id
-
-    void Promise.resolve(
-      onPeerHandshake?.(id, sendHandshake, receiveHandshake, isInitiator)
-    )
-      .then(() => markLocalHandshakePassed(id, peer))
-      .catch(err =>
-        failPeerHandshake(id, peer, toError(err, 'handshake failed'))
-      )
-  }
-
-  const toPendingMediaMeta = (value: DataPayload): PendingMediaMeta | null => {
-    if (
-      value &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      typeof (value as {k?: unknown}).k === 'string'
-    ) {
-      return {
-        key: (value as {k: string}).k,
-        ...(typeof (value as {s?: unknown}).s === 'string'
-          ? {streamId: (value as {s: string}).s}
-          : {}),
-        ...(typeof (value as {t?: unknown}).t === 'string'
-          ? {trackId: (value as {t: string}).t}
-          : {}),
-        ...(Object.hasOwn(value as object, 'm')
-          ? {metadata: (value as {m?: JsonValue}).m}
-          : {})
-      }
-    }
-
-    return null
-  }
-
-  getPing((_, id) => sendPong('', id))
-
-  getPong((_, id) => {
+  pongAction.onMessage((_, id) => {
     const queue = pendingPongs[id]
     const waiter = queue?.shift()
 
@@ -877,7 +216,7 @@ export default (
     }
   })
 
-  getSignal((sdp, id) => {
+  signalAction.onMessage((sdp, id) => {
     if (!activePeerMap[id]) {
       return
     }
@@ -885,89 +224,25 @@ export default (
     void peerMap[id]?.signal(sdp as never)
   })
 
-  getStreamMeta((meta, id) => {
-    if (!activePeerMap[id]) {
-      return
-    }
+  streamMetaAction.onMessage((meta, id) =>
+    mediaManager.receiveStreamMeta(meta, id)
+  )
 
-    const parsed = toPendingMediaMeta(meta)
+  trackMetaAction.onMessage((meta, id) =>
+    mediaManager.receiveTrackMeta(meta, id)
+  )
 
-    if (!parsed) {
-      return
-    }
+  leaveAction.onMessage((_, id) =>
+    exitPeer(id, undefined, mkErr('peer left room'))
+  )
 
-    const sharedPeer = getSharedMediaPeer(id)
-    const cached =
-      sharedPeer?.__trysteroGetRemoteStreamByKey?.(parsed.key) ??
-      (parsed.streamId
-        ? sharedPeer?.__trysteroGetRemoteStreamById?.(parsed.streamId)
-        : undefined)
+  handshakeDataAction.onMessage((data, id, metadata) =>
+    handshakeManager?.receiveHandshakeData(data, id, metadata)
+  )
 
-    if (cached) {
-      emitStream(id, parsed.key, cached, parsed.metadata)
-      return
-    }
-
-    ;(pendingStreamMetas[id] ??= []).push(parsed)
-  })
-
-  getTrackMeta((meta, id) => {
-    if (!activePeerMap[id]) {
-      return
-    }
-
-    const parsed = toPendingMediaMeta(meta)
-
-    if (!parsed) {
-      return
-    }
-
-    const sharedPeer = getSharedMediaPeer(id)
-    const cached =
-      sharedPeer?.__trysteroGetRemoteTrackByKey?.(parsed.key) ??
-      (parsed.trackId
-        ? sharedPeer?.__trysteroGetRemoteTrackById?.(parsed.trackId)
-        : undefined)
-
-    if (cached) {
-      emitTrack(id, parsed.key, cached.track, cached.stream, parsed.metadata)
-      return
-    }
-
-    ;(pendingTrackMetas[id] ??= []).push(parsed)
-  })
-
-  getLeave((_, id) => exitPeer(id, undefined, mkErr('peer left room')))
-
-  getHandshakeData((data, id, metadata) => {
-    const state = peerStates[id]
-
-    if (!state || state.isActive) {
-      return
-    }
-
-    const payload =
-      metadata === undefined ? {data} : ({data, metadata} as HandshakePayload)
-    const pending = state.handshakeWaiters.shift()
-
-    if (pending) {
-      pending.resolve(payload)
-      return
-    }
-
-    state.pendingHandshakePayloads.push(payload)
-  })
-
-  getHandshakeReady((_, id) => {
-    const state = peerStates[id]
-
-    if (!state || state.isActive) {
-      return
-    }
-
-    state.didReceiveRemoteReady = true
-    maybeActivatePeer(id)
-  })
+  handshakeReadyAction.onMessage((_, id) =>
+    handshakeManager?.receiveHandshakeReady(id)
+  )
 
   onPeer((peer, id) => {
     const existingPeer = peerMap[id]
@@ -982,50 +257,19 @@ export default (
     }
 
     peerMap[id] = peer
-    peerStates[id] = {
-      peer,
-      isActive: false,
-      didLocalHandshakePass: false,
-      didReceiveRemoteReady: false,
-      handshakeTimer: null,
-      pendingHandshakePayloads: [],
-      handshakeWaiters: []
-    }
+    handshakeManager?.addPeer(id, peer)
 
     peer.setHandlers({
       data: d => handleData(id, d),
-      stream: stream => {
-        if (!activePeerMap[id]) {
-          return
-        }
-
-        const next = pendingStreamMetas[id]?.shift()
-
-        if (!next) {
-          return
-        }
-
-        emitStream(id, next.key, stream, next.metadata)
-      },
-      track: (track, stream) => {
-        if (!activePeerMap[id]) {
-          return
-        }
-
-        const next = pendingTrackMetas[id]?.shift()
-
-        if (!next) {
-          return
-        }
-
-        emitTrack(id, next.key, track, stream, next.metadata)
-      },
+      stream: stream => mediaManager.receiveRemoteStream(id, stream),
+      track: (track, stream) =>
+        mediaManager.receiveRemoteTrack(id, track, stream),
       signal: sdp => {
         if (!activePeerMap[id]) {
           return
         }
 
-        void sendSignal(sdp as unknown as DataPayload, id)
+        void signalAction.send(sdp as unknown as DataPayload, id)
       },
       close: () => exitPeer(id, peer, mkErr('peer disconnected')),
       error: (err: Error) => {
@@ -1034,7 +278,7 @@ export default (
       }
     })
 
-    startPeerHandshake(id, peer)
+    handshakeManager?.start(id, peer)
   })
 
   if (isBrowser) {
@@ -1088,9 +332,9 @@ export default (
         }
 
         queue.push(waiter)
-        void sendPing('', id).catch(err =>
-          waiter.reject(toError(err, 'peer disconnected'))
-        )
+        void pingAction
+          .send('', id)
+          .catch(err => waiter.reject(toError(err, 'peer disconnected')))
       })
 
       return Date.now() - start
@@ -1101,55 +345,62 @@ export default (
         entries(activePeerMap).map(([id, peer]) => [id, peer.connection])
       ) as Record<string, RTCPeerConnection>,
 
-    addStream: (stream, targets, meta) =>
-      applyMediaOp(
-        targets,
-        getStreamKey(stream),
-        meta,
-        sendStreamMeta,
-        peer => peer.addStream(stream),
-        {s: stream.id}
-      ),
+    addStream: (stream, options: AddMediaOptions = {}) =>
+      mediaManager.addStream(stream, options, streamMetaAction.send),
 
-    removeStream: (stream, targets) => {
-      void iterate(targets, (_, peer) => peer.removeStream(stream))
+    removeStream: (stream, options = {}) => {
+      mediaManager.removeStream(stream, options.target)
     },
 
-    addTrack: (track, stream, targets, meta) =>
-      applyMediaOp(
-        targets,
-        getTrackKey(track),
-        meta,
-        sendTrackMeta,
-        peer => peer.addTrack(track, stream),
-        {s: stream.id, t: track.id}
-      ),
+    addTrack: (track, stream, options: AddMediaOptions = {}) =>
+      mediaManager.addTrack(track, stream, options, trackMetaAction.send),
 
-    removeTrack: (track, targets) => {
-      void iterate(targets, (_, peer) => peer.removeTrack(track))
+    removeTrack: (track, options = {}) => {
+      mediaManager.removeTrack(track, options.target)
     },
 
-    replaceTrack: (oldTrack, newTrack, targets, meta) =>
-      applyMediaOp(
-        targets,
-        getTrackKey(newTrack),
-        meta,
-        sendTrackMeta,
-        peer => peer.replaceTrack(oldTrack, newTrack),
-        {t: oldTrack.id}
+    replaceTrack: (oldTrack, newTrack, options: AddMediaOptions = {}) =>
+      mediaManager.replaceTrack(
+        oldTrack,
+        newTrack,
+        options,
+        trackMetaAction.send
       ),
 
-    onPeerJoin: f => {
-      listeners.onPeerJoin = f
-      keys(activePeerMap).forEach(peerId => f(peerId))
+    get onPeerJoin() {
+      return listeners.onPeerJoin
     },
 
-    onPeerLeave: f => (listeners.onPeerLeave = f),
+    set onPeerJoin(handler) {
+      listeners.onPeerJoin = handler
 
-    onPeerStream: f => (listeners.onPeerStream = f),
+      if (handler) {
+        keys(activePeerMap).forEach(peerId => handler(peerId))
+      }
+    },
 
-    onPeerTrack: f => (listeners.onPeerTrack = f),
+    get onPeerLeave() {
+      return listeners.onPeerLeave
+    },
 
-    isPassive: () => false
+    set onPeerLeave(handler) {
+      listeners.onPeerLeave = handler
+    },
+
+    get onPeerStream() {
+      return mediaManager.onPeerStream
+    },
+
+    set onPeerStream(handler) {
+      mediaManager.onPeerStream = handler
+    },
+
+    get onPeerTrack() {
+      return mediaManager.onPeerTrack
+    },
+
+    set onPeerTrack(handler) {
+      mediaManager.onPeerTrack = handler
+    }
   }
 }

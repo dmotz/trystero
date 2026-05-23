@@ -1,6 +1,6 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 void test(
@@ -131,7 +131,7 @@ void test(
         {
           appId: `trystero-offer-reuse-${Date.now()}-${Math.random()}`,
           password: 'reuse-test',
-          rtcPolyfill: CountingRTCPeerConnection
+          rtcPolyfill: CountingRTCPeerConnection as any
         },
         `room-${Math.random().toString(16).slice(2)}`
       )

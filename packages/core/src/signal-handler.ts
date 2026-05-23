@@ -14,6 +14,7 @@ import {
   topicPath
 } from './utils'
 import type {
+  BaseRoomConfig,
   PeerHandle,
   PeerState,
   SharedPeerState,
@@ -94,8 +95,51 @@ const makeState = (): PeerState => ({
   connectedPeerUnhealthySinceMs: null,
   answeringExpiryTimer: null,
   answeringPeer: null,
+  answerSent: false,
+  connectionErrorReported: false,
   pendingCandidates: {}
 })
+
+const hasTurnServer = (config: BaseRoomConfig): boolean => {
+  const iceServers = [
+    ...(config.turnConfig ?? []),
+    ...(config.rtcConfig?.iceServers ?? [])
+  ]
+
+  return iceServers.some(({urls}) => {
+    const urlList = Array.isArray(urls) ? urls : [urls]
+
+    return urlList.some(url => /^turns?:/i.test(url))
+  })
+}
+
+const getSdpExchangeConnectionError = (
+  peerId: string,
+  config: BaseRoomConfig
+): string =>
+  `could not connect to peer ${peerId} after exchanging SDP; ${
+    hasTurnServer(config)
+      ? 'check that your TURN server URLs and credentials are reachable by both peers'
+      : 'configure TURN servers with turnConfig or rtcConfig.iceServers'
+  }`
+
+const reportSdpExchangeConnectionFailure = (
+  ctx: SignalContext,
+  state: PeerState,
+  peerId: string
+): void => {
+  if (ctx.isLeaving() || state.connectedPeer || state.connectionErrorReported) {
+    return
+  }
+
+  state.connectionErrorReported = true
+  ctx.onJoinError?.({
+    error: getSdpExchangeConnectionError(peerId, ctx.config),
+    appId: ctx.appId,
+    peerId,
+    roomId: ctx.roomId
+  })
+}
 
 export const getState = (
   peerStates: Record<string, PeerState>,
@@ -118,6 +162,7 @@ const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
   if (state.answeringPeer === peer) {
     state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
     state.answeringPeer = null
+    state.answerSent = false
     updateStatus(state)
   }
 }
@@ -200,6 +245,7 @@ export const resetOfferState = (
   state.offerId = null
   state.offerSdp = null
   state.offerAnswered = false
+  state.connectionErrorReported = false
   updateStatus(state)
 }
 
@@ -219,6 +265,9 @@ const scheduleAnsweringExpiry = (
     }
 
     DEV: log('answering timed out for', peerId, '- retrying on next offer')
+    if (current.answerSent) {
+      reportSdpExchangeConnectionFailure(ctx, current, peerId)
+    }
     peer.destroy()
     clearAnswering(current, peer)
     ctx.checkDeactivate()
@@ -267,6 +316,10 @@ const scheduleOfferExpiry = (
     }
 
     DEV: log('offer expired for', peerId, '- resetting')
+
+    if (current.offerAnswered) {
+      reportSdpExchangeConnectionFailure(ctx, current, peerId)
+    }
     resetOfferState(current, ctx.offerPool)
     ctx.checkDeactivate()
   }, ttlMs)
@@ -305,11 +358,15 @@ const ensureOffer = (
     state.offerId = genId(offerIdSize)
     state.offerSdp = offer
     state.offerAnswered = false
+    state.connectionErrorReported = false
     state.offerSignalBacklog = []
     updateStatus(state)
 
     const onOfferPeerClosedOrError = (): void => {
       if (state.offerPeer === peer && !state.connectedPeer) {
+        if (state.offerAnswered) {
+          reportSdpExchangeConnectionFailure(ctx, state, peerId)
+        }
         resetOfferState(state, ctx.offerPool)
       }
 
@@ -479,10 +536,19 @@ const handleOffer = async (
 
   const answerPeer = ctx.initPeer(false, ctx.config)
   state.answeringPeer = answerPeer
+  state.answerSent = false
+  state.connectionErrorReported = false
   scheduleAnsweringExpiry(ctx, state, peerId, answerPeer)
   updateStatus(state)
 
   const onAnswerPeerClosedOrError = (): void => {
+    if (
+      state.answeringPeer === answerPeer &&
+      !state.connectedPeer &&
+      state.answerSent
+    ) {
+      reportSdpExchangeConnectionFailure(ctx, state, peerId)
+    }
     clearAnswering(state, answerPeer)
     ctx.disconnectPeer(answerPeer, peerId)
     ctx.checkDeactivate()
@@ -547,6 +613,7 @@ const handleOffer = async (
           }
 
           if (signal.type === 'answer') {
+            state.answerSent = true
             payloadToSend['answer'] = sdp
           } else {
             payloadToSend['candidate'] = sdp

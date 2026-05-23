@@ -1,7 +1,7 @@
 {
   "name": "@trystero-p2p/firebase",
   "version": "0.24.0",
-  "description": "Firebase strategy for Trystero",
+  "description": "Simple, serverless WebRTC (via Firebase)",
   "keywords": [
     "chat",
     "decentralized",
@@ -14,6 +14,7 @@
     "realtime",
     "serverless",
     "signaling",
+    "trystero",
     "webrtc"
   ],
   "license": "MIT",
@@ -33,6 +34,6 @@
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
-    "firebase": "^12.12.1"
+    "firebase": "^12.13.0"
   }
 }

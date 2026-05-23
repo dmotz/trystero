@@ -3,6 +3,15 @@
   "compilerOptions": {
     "composite": false,
     "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "exactOptionalPropertyTypes": false,
+    "strictPropertyInitialization": false,
+    "useUnknownInCatchVariables": false,
+    "noPropertyAccessFromIndexSignature": false,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": false,
     "types": ["node"]
   },
   "include": ["playwright.config.ts", "test/**/*.ts"],

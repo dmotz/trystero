@@ -1,7 +1,7 @@
 {
   "name": "@trystero-p2p/nostr",
   "version": "0.24.0",
-  "description": "Nostr strategy for Trystero",
+  "description": "Simple, serverless WebRTC (via Nostr)",
   "keywords": [
     "chat",
     "decentralized",
@@ -14,6 +14,7 @@
     "realtime",
     "serverless",
     "signaling",
+    "trystero",
     "webrtc"
   ],
   "license": "MIT",

@@ -25,5 +25,13 @@
     "prefer-rest-params": "error",
     "prefer-spread": "error",
     "unicorn/no-new-array": "off"
-  }
+  },
+  "overrides": [
+    {
+      "files": ["playwright.config.ts", "test/**/*.ts"],
+      "rules": {
+        "typescript/no-useless-default-assignment": "off"
+      }
+    }
+  ]
 }
