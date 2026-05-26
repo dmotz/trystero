@@ -21,6 +21,7 @@ import {
   noOp,
   resetTimer,
   selfId,
+  toErrorMessage,
   topicPath,
   values,
   watchOnline
@@ -458,6 +459,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     ctx.announceIntervals = initPromises.map(() => announceIntervalMs)
     const announceAttemptCounts = initPromises.map(() => 0)
+    const announceErrorStreaks = initPromises.map(() => 0)
     const announceTimeouts: Array<ReturnType<typeof setTimeout> | undefined> =
       []
 
@@ -487,13 +489,28 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
 
         const extra = isPassive ? {passive: true} : undefined
-        const ms = await announce(
-          relay,
-          rootTopic,
-          selfTopic,
-          extra,
-          strategyContext
-        )
+        let ms: number | void = undefined
+
+        try {
+          ms = await announce(
+            relay,
+            rootTopic,
+            selfTopic,
+            extra,
+            strategyContext
+          )
+          announceErrorStreaks[i] = 0
+        } catch (error) {
+          const errorStreak = announceErrorStreaks[i] ?? 0
+
+          if (errorStreak === 0) {
+            console.warn(
+              `${libName}: announce failed - ${toErrorMessage(error, '')}`
+            )
+          }
+
+          announceErrorStreaks[i] = errorStreak + 1
+        }
 
         if (didLeaveRoom || (isPassive && !ctx.isActive)) {
           return

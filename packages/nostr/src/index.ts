@@ -189,54 +189,70 @@ const flushBatch = (client: SocketClient): void => {
   })
 }
 
+const resubscribeOnReconnect = (client: SocketClient): void => {
+  const batcher = batchers[client.url]
+
+  if (batcher && batcher.topics.size > 0) {
+    flushBatch(client)
+  }
+}
+
 export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
       const client = relayManager.register(
         url,
-        makeSocket(url, data => {
-          const [msgType, subId, payload, relayMsg] =
-            fromJson<
-              [
-                string,
-                string,
-                {content: string; tags?: string[][]} | boolean,
-                string
-              ]
-            >(data)
+        makeSocket(
+          url,
+          data => {
+            const [msgType, subId, payload, relayMsg] =
+              fromJson<
+                [
+                  string,
+                  string,
+                  {content: string; tags?: string[][]} | boolean,
+                  string
+                ]
+              >(data)
 
-          if (msgType !== eventMsgType) {
-            const prefix = `${libName}: relay failure from ${client.url} - `
+            if (msgType !== eventMsgType) {
+              const prefix = `${libName}: relay failure from ${client.url} - `
 
-            if (msgType === 'NOTICE') {
-              console.warn(prefix + subId)
-            } else if (msgType === 'OK' && !payload) {
-              console.warn(prefix + relayMsg)
-            }
+              if (msgType === 'NOTICE') {
+                console.warn(prefix + subId)
+              } else if (msgType === 'OK' && !payload) {
+                console.warn(prefix + relayMsg)
+              }
 
-            return
-          }
-
-          if (payload && typeof payload === 'object' && 'content' in payload) {
-            const {content} = payload
-            const handler = msgHandlers[subId]
-
-            if (handler) {
-              handler(subIdToTopic[subId] ?? '', content)
               return
             }
 
-            const batcher = batchers[client.url]
+            if (
+              payload &&
+              typeof payload === 'object' &&
+              'content' in payload
+            ) {
+              const {content} = payload
+              const handler = msgHandlers[subId]
 
-            if (batcher?.subIds.includes(subId) && payload.tags) {
-              const topicTag = payload.tags.find(t => t[0] === tag)
+              if (handler) {
+                handler(subIdToTopic[subId] ?? '', content)
+                return
+              }
 
-              if (topicTag?.[1]) {
-                batcher.topics.get(topicTag[1])?.(topicTag[1], content)
+              const batcher = batchers[client.url]
+
+              if (batcher?.subIds.includes(subId) && payload.tags) {
+                const topicTag = payload.tags.find(t => t[0] === tag)
+
+                if (topicTag?.[1]) {
+                  batcher.topics.get(topicTag[1])?.(topicTag[1], content)
+                }
               }
             }
-          }
-        })
+          },
+          () => resubscribeOnReconnect(client)
+        )
       )
 
       return client.ready

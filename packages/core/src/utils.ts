@@ -1,6 +1,6 @@
 import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
 
-const {floor, random, sin} = Math
+const {floor, min, sin} = Math
 
 export const libName = 'Trystero'
 
@@ -10,7 +10,7 @@ export const alloc = <T>(n: number, f: (v: undefined, i: number) => T): T[] =>
 const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
 
 export const genId = (n: number): string =>
-  alloc(n, () => charSet[floor(random() * charSet.length)] ?? '').join('')
+  alloc(n, () => charSet[floor(Math.random() * charSet.length)] ?? '').join('')
 
 export const selfId = genId(20)
 
@@ -112,6 +112,7 @@ export const strToNum = (
 ): number => str.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % limit
 
 const defaultRetryMs = 3333
+const maxRetryMs = 60_000
 const socketRetryPeriods: Record<string, number> = {}
 
 let reconnectionLockingPromise: Promise<void> | null = null
@@ -134,9 +135,14 @@ export const resumeRelayReconnection = (): void => {
 
 export const makeSocket = (
   url: string,
-  onMessage: (data: string) => void
+  onMessage: (data: string) => void,
+  onReconnect?: () => void
 ): SocketClient => {
   const client = {} as SocketClient
+  let didOpen = false
+  let resolveReady: (_: SocketClient) => void = noOp
+
+  client.ready = new Promise(res => (resolveReady = res))
 
   const init = (): void => {
     const socket = new WebSocket(url)
@@ -147,21 +153,26 @@ export const makeSocket = (
         return
       }
 
-      socketRetryPeriods[url] ??= defaultRetryMs
-      setTimeout(init, socketRetryPeriods[url])
-      socketRetryPeriods[url] *= 2
+      const period = (socketRetryPeriods[url] ??= defaultRetryMs)
+      setTimeout(init, Math.random() * period)
+      socketRetryPeriods[url] = min(period * 2, maxRetryMs)
     }
 
     socket.onmessage = e => onMessage(String(e.data))
     client.socket = socket
     client.url = socket.url
-    client.ready = new Promise<SocketClient>(
-      res =>
-        (socket.onopen = () => {
-          res(client)
-          socketRetryPeriods[url] = defaultRetryMs
-        })
-    )
+
+    socket.onopen = () => {
+      const isReconnect = didOpen
+
+      didOpen = true
+      resolveReady(client)
+      socketRetryPeriods[url] = defaultRetryMs
+
+      if (isReconnect) {
+        onReconnect?.()
+      }
+    }
 
     client.send = data => {
       if (socket.readyState === 1) {
