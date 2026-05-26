@@ -318,7 +318,6 @@ export const defaultRelayUrls = [
   'relay.nostr.place',
   'relay.nostrdice.com',
   'relay.notoshi.win',
-  'relay.orangepill.ovh',
   'relay.sigit.io',
   'relay02.lnfi.network',
   'relay2.angor.io',
