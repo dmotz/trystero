@@ -85,6 +85,9 @@ void test(
   {timeout: 5_000},
   async () => {
     let announceCount = 0
+    const joinErrors = []
+    const warnings = []
+    const realWarn = console.warn
 
     // Without the fix, queueAnnounce throws an unhandled rejection that
     // node:test would catch first. Swallow it so the assertion runs.
@@ -96,6 +99,7 @@ void test(
 
       return realEmit(event, ...args)
     }
+    console.warn = (...args) => warnings.push(args)
 
     const joinRoom = createStrategy({
       init: () => ({}),
@@ -127,7 +131,14 @@ void test(
         announceCount >= 2,
         `expected the announce loop to keep firing after a rejection, but it stopped after ${announceCount} call(s)`
       )
+
+      assert.equal(
+        warnings.length,
+        1,
+        'first announce failure in a streak should be logged once'
+      )
     } finally {
+      console.warn = realWarn
       process.emit = realEmit
       await room.leave()
     }

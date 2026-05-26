@@ -1,6 +1,6 @@
 import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
 
-const {floor, min, random, sin} = Math
+const {floor, min, sin} = Math
 
 export const libName = 'Trystero'
 
@@ -10,7 +10,7 @@ export const alloc = <T>(n: number, f: (v: undefined, i: number) => T): T[] =>
 const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
 
 export const genId = (n: number): string =>
-  alloc(n, () => charSet[floor(random() * charSet.length)] ?? '').join('')
+  alloc(n, () => charSet[floor(Math.random() * charSet.length)] ?? '').join('')
 
 export const selfId = genId(20)
 
@@ -139,38 +139,40 @@ export const makeSocket = (
   onReconnect?: () => void
 ): SocketClient => {
   const client = {} as SocketClient
-  let isReconnect = false
+  let didOpen = false
+  let resolveReady: (_: SocketClient) => void = noOp
+
+  client.ready = new Promise(res => (resolveReady = res))
 
   const init = (): void => {
     const socket = new WebSocket(url)
 
     socket.onclose = () => {
-      isReconnect = true
-
       if (reconnectionLockingPromise) {
         void reconnectionLockingPromise.then(init)
         return
       }
 
       const period = (socketRetryPeriods[url] ??= defaultRetryMs)
-      setTimeout(init, random() * period)
+      setTimeout(init, Math.random() * period)
       socketRetryPeriods[url] = min(period * 2, maxRetryMs)
     }
 
     socket.onmessage = e => onMessage(String(e.data))
     client.socket = socket
     client.url = socket.url
-    client.ready = new Promise<SocketClient>(
-      res =>
-        (socket.onopen = () => {
-          res(client)
-          socketRetryPeriods[url] = defaultRetryMs
 
-          if (isReconnect) {
-            onReconnect?.()
-          }
-        })
-    )
+    socket.onopen = () => {
+      const isReconnect = didOpen
+
+      didOpen = true
+      resolveReady(client)
+      socketRetryPeriods[url] = defaultRetryMs
+
+      if (isReconnect) {
+        onReconnect?.()
+      }
+    }
 
     client.send = data => {
       if (socket.readyState === 1) {

@@ -504,12 +504,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           const errorStreak = announceErrorStreaks[i] ?? 0
 
           if (errorStreak === 0) {
-            onJoinError?.({
-              error: toErrorMessage(error, 'announce failed'),
-              appId,
-              peerId: selfId,
-              roomId
-            })
+            console.warn(
+              `${libName}: announce failed - ${toErrorMessage(error, '')}`
+            )
           }
 
           announceErrorStreaks[i] = errorStreak + 1
