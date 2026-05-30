@@ -6,6 +6,7 @@ import {
   genId,
   getRelays,
   hashWith,
+  keys,
   libName,
   makeSocket,
   pauseRelayReconnection,
@@ -19,7 +20,10 @@ import {
   type SocketClient
 } from '@trystero-p2p/core'
 
-const relayManager = createRelayManager<SocketClient>(client => client.socket)
+const relayManager = createRelayManager<SocketClient>(
+  client => client.socket,
+  client => client.close()
+)
 const defaultRedundancy = 5
 const tag = 'x'
 const eventMsgType = 'EVENT'
@@ -271,7 +275,21 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
   publishTopic: async (client, topic, msg) =>
     client.send(
       await createEvent(topic, typeof msg === 'string' ? msg : toJson(msg))
-    )
+    ),
+
+  destroy: () => {
+    relayManager.reset()
+
+    keys(batchers).forEach(url => {
+      const batcher = batchers[url]
+
+      if (batcher && batcher.updateTimer !== null) {
+        clearTimeout(batcher.updateTimer)
+      }
+
+      delete batchers[url]
+    })
+  }
 })
 
 export const getRelaySockets = relayManager.getSockets
