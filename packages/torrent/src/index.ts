@@ -19,7 +19,10 @@ import {
   type SocketClient
 } from '@trystero-p2p/core'
 
-const relayManager = createRelayManager<SocketClient>(client => client.socket)
+const relayManager = createRelayManager<SocketClient>(
+  client => client.socket,
+  client => client.close()
+)
 const topicToInfoHash: Record<string, string> = {}
 const infoHashToTopic: Record<string, string> = {}
 const announceIntervals = relayManager.scoped<ReturnType<typeof setInterval>>()
@@ -459,6 +462,10 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       }, dormantAnnounceMs)
       void fn()
     }
+  },
+
+  destroy: () => {
+    relayManager.reset()
   }
 })
 
