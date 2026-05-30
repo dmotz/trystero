@@ -55,7 +55,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
   subscribe,
   announce,
-  deactivate
+  deactivate,
+  destroy
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
   const occupiedRooms: Record<
     string,
@@ -693,6 +694,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
 
         didInit = false
+        destroy?.()
         pool.destroy()
         offerPool = null
         cleanupWatchOnline()

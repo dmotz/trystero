@@ -100,10 +100,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
   subscribeTopic,
   publishTopic,
-  unpublishTopic
+  unpublishTopic,
+  destroy
 }: TopicStrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> =>
   createStrategy<TRelay, TConfig>({
     init,
+    ...(destroy ? {destroy} : {}),
 
     subscribe: async (
       relay,

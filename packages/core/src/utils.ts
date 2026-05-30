@@ -140,14 +140,23 @@ export const makeSocket = (
 ): SocketClient => {
   const client = {} as SocketClient
   let didOpen = false
+  let isClosed = false
   let resolveReady: (_: SocketClient) => void = noOp
 
   client.ready = new Promise(res => (resolveReady = res))
 
   const init = (): void => {
+    if (isClosed) {
+      return
+    }
+
     const socket = new WebSocket(url)
 
     socket.onclose = () => {
+      if (isClosed) {
+        return
+      }
+
       if (reconnectionLockingPromise) {
         void reconnectionLockingPromise.then(init)
         return
@@ -181,6 +190,19 @@ export const makeSocket = (
     }
   }
 
+  client.close = () => {
+    isClosed = true
+
+    const {socket} = client
+
+    if (socket) {
+      socket.onclose = null
+      socket.onmessage = null
+      socket.onopen = null
+      socket.close()
+    }
+  }
+
   init()
 
   return client
@@ -201,12 +223,14 @@ type RelayScopedStore<T, TRelay extends object> = {
 }
 
 export const createRelayManager = <TRelay extends object>(
-  getSocket: (relay: TRelay) => WebSocket | undefined
+  getSocket: (relay: TRelay) => WebSocket | undefined,
+  closeRelay?: (relay: TRelay) => void
 ): {
   register: (key: string, relay: TRelay) => TRelay
   keyOf: (relay: TRelay) => string
   scoped: <T>() => RelayScopedStore<T, TRelay>
   getSockets: () => Record<string, WebSocket>
+  reset: () => void
 } => {
   const relays: Record<string, TRelay> = {}
   const keysByRelay = new WeakMap<TRelay, string>()
@@ -247,7 +271,11 @@ export const createRelayManager = <TRelay extends object>(
 
           return socket ? [[key, socket]] : []
         })
-      ) as Record<string, WebSocket>
+      ) as Record<string, WebSocket>,
+    reset: () => {
+      values(relays).forEach(relay => closeRelay?.(relay))
+      keys(relays).forEach(key => delete relays[key])
+    }
   }
 }
 

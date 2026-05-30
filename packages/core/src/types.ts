@@ -335,6 +335,7 @@ export type StrategyAdapter<
     selfTopic: string,
     context?: StrategyContext<TConfig>
   ) => MaybePromise<void>
+  destroy?: () => void
 }
 
 export type TopicStrategyAdapter<
@@ -359,6 +360,7 @@ export type TopicStrategyAdapter<
     topic: string,
     context: TopicPublishContext
   ) => MaybePromise<void>
+  destroy?: () => void
 }
 
 export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (
@@ -372,6 +374,7 @@ export type SocketClient = {
   url: string
   ready: Promise<SocketClient>
   send: (data: string) => void
+  close: () => void
 }
 
 export type RemoteTrackRef = {
