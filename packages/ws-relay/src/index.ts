@@ -13,7 +13,10 @@ import {
   type StrategyMessage
 } from '@trystero-p2p/core'
 
-const relayManager = createRelayManager<SocketClient>(client => client.socket)
+const relayManager = createRelayManager<SocketClient>(
+  client => client.socket,
+  client => client.close()
+)
 const msgHandlers =
   relayManager.scoped<Set<(topic: string, data: StrategyMessage) => void>>()
 
@@ -124,7 +127,12 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> = createTopicStrategy({
     }
   },
 
-  publishTopic: (client, topic, msg) => client.send(toJson(publish(topic, msg)))
+  publishTopic: (client, topic, msg) =>
+    client.send(toJson(publish(topic, msg))),
+
+  destroy: () => {
+    relayManager.reset()
+  }
 })
 
 export const getRelaySockets = relayManager.getSockets
