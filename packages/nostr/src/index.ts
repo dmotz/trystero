@@ -200,8 +200,7 @@ const resubscribeOnReconnect = (client: SocketClient): void => {
 export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
-      const client = relayManager.register(
-        url,
+      const client = relayManager.register(url, () =>
         makeSocket(
           url,
           data => {

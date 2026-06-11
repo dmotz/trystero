@@ -201,8 +201,7 @@ const ensureOutstandingOffers = async (
 const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
-      const client = relayManager.register(
-        rawUrl,
+      const client = relayManager.register(rawUrl, () =>
         makeSocket(rawUrl, rawData => {
           const data = fromJson<TrackerMessage>(rawData)
           const errMsg = data['failure reason']
