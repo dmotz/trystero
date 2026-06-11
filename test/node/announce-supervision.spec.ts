@@ -85,7 +85,6 @@ void test(
   {timeout: 5_000},
   async () => {
     let announceCount = 0
-    const joinErrors = []
     const warnings = []
     const realWarn = console.warn
 

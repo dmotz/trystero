@@ -140,14 +140,23 @@ export const makeSocket = (
 ): SocketClient => {
   const client = {} as SocketClient
   let didOpen = false
+  let isReconnectPending = false
   let resolveReady: (_: SocketClient) => void = noOp
 
   client.ready = new Promise(res => (resolveReady = res))
 
   const init = (): void => {
+    isReconnectPending = false
+
     const socket = new WebSocket(url)
 
     socket.onclose = () => {
+      if (isReconnectPending) {
+        return
+      }
+
+      isReconnectPending = true
+
       if (reconnectionLockingPromise) {
         void reconnectionLockingPromise.then(init)
         return
@@ -203,7 +212,7 @@ type RelayScopedStore<T, TRelay extends object> = {
 export const createRelayManager = <TRelay extends object>(
   getSocket: (relay: TRelay) => WebSocket | undefined
 ): {
-  register: (key: string, relay: TRelay) => TRelay
+  register: (key: string, createRelay: () => TRelay) => TRelay
   keyOf: (relay: TRelay) => string
   scoped: <T>() => RelayScopedStore<T, TRelay>
   getSockets: () => Record<string, WebSocket>
@@ -231,12 +240,22 @@ export const createRelayManager = <TRelay extends object>(
     }
   }
 
-  return {
-    register: (key, relay) => {
-      relays[key] = relay
-      keysByRelay.set(relay, key)
+  const store = (key: string, relay: TRelay): TRelay => {
+    relays[key] = relay
+    keysByRelay.set(relay, key)
 
-      return relay
+    return relay
+  }
+
+  return {
+    register: (key, createRelay) => {
+      const relay = relays[key]
+
+      if (relay) {
+        return relay
+      }
+
+      return store(key, createRelay())
     },
     keyOf,
     scoped,

@@ -24,18 +24,22 @@ export type MqttRoomConfig = JoinRoomConfig
 export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
-      const client = relayManager.register(url, mqtt.connect(url))
+      const client = relayManager.register(url, () => mqtt.connect(url))
       const handlers = msgHandlers.forRelay(client)
 
-      client
-        .on('message', (topic, buffer) =>
-          handlers[topic]?.(topic, buffer.toString())
-        )
-        .on('error', console.error)
+      if (client.listenerCount('message') === 0) {
+        client
+          .on('message', (topic, buffer) =>
+            handlers[topic]?.(topic, buffer.toString())
+          )
+          .on('error', console.error)
+      }
 
-      return new Promise<mqtt.MqttClient>(res =>
-        client.on('connect', () => res(client))
-      )
+      return client.connected
+        ? Promise.resolve(client)
+        : new Promise<mqtt.MqttClient>(res =>
+            client.once('connect', () => res(client))
+          )
     }),
 
   subscribeTopic: (client, topic, onMessage) => {
