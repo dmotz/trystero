@@ -483,7 +483,8 @@ export const defaultRelayUrls = [
   'tracker.webtorrent.dev',
   'tracker.openwebtorrent.com',
   'tracker.btorrent.xyz',
-  'tracker.files.fm:7073/announce'
+  'tracker.files.fm:7073/announce',
+  'open.ftorrent.com'
 ].map(url => 'wss://' + url)
 
 export type * from '@trystero-p2p/core'
