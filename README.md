@@ -19,7 +19,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
-- 🏭⚡ Can run peers server-side on Node and Bun
+- 🏭⚡ Can run peers server-side on Node, Bun, and Deno
 - ⚛️🪝 React hooks
 
 You can see what people are building with Trystero
@@ -41,7 +41,7 @@ You can see what people are building with Trystero
   - [Encryption](#encryption)
   - [React hooks](#react-hooks)
   - [Troubleshooting connection issues](#troubleshooting-connection-issues)
-  - [Running server-side (Node, Bun)](#running-server-side-node-bun)
+  - [Running server-side (Node, Bun, Deno)](#running-server-side-node-bun-deno)
   - [Self-hosted WebSocket relay](#self-hosted-websocket-relay)
   - [Write your own strategy](#write-your-own-strategy)
   - [Supabase setup](#supabase-setup)
@@ -558,11 +558,11 @@ aren't able to connect directly to one another.
    )
    ```
 
-### Running server-side (Node, Bun)
+### Running server-side (Node, Bun, Deno)
 
-Trystero works outside browsers too, like in Node or Bun. Why would you want to
-run something that helps you avoid servers on a server? One reason is if you
-want an always-on peer which can be useful for remembering the last state of
+Trystero works outside browsers too, like in Node, Bun, or Deno. Why would you
+want to run something that helps you avoid servers on a server? One reason is if
+you want an always-on peer which can be useful for remembering the last state of
 data, broadcasting it to new users. Another reason might be to run peers that
 are lighter weight and don't need a full browser running, like an embedded
 device or Raspberry Pi.
@@ -583,7 +583,7 @@ const room = joinRoom(
 ### Self-hosted WebSocket relay
 
 If you want a tiny relay that you control, use the WebSocket relay package.
-Start the relay on Node or Bun:
+Start the relay on Node, Bun, or Deno:
 
 ```js
 import {createWsRelayServer} from '@trystero-p2p/ws-relay/server'
