@@ -50,6 +50,10 @@ const waitFor = async (
   }
 }
 
+const getLatestReqs = (reqs: unknown[][]): unknown[][] => [
+  ...new Map(reqs.map(req => [req[1], req])).values()
+]
+
 void test(
   'Trystero: nostr batches many passive room subscriptions into bounded filters',
   {timeout: 10_000},
@@ -77,18 +81,33 @@ void test(
         )
       }
 
-      await waitFor(() =>
-        MockWebSocket.sockets.some(
-          socket => socket.sent.filter(msg => msg[0] === 'REQ').length === 2
-        )
-      )
-
       const socket = MockWebSocket.sockets[0]
-      const reqs = socket.sent.filter(msg => msg[0] === 'REQ')
+      let reqs = []
+      let latestReqs = []
 
-      assert.equal(reqs.length, 2, '251 topics should be split into 2 REQs')
-      assert.equal(reqs[0][2]['#x'].length, 250)
-      assert.equal(reqs[1][2]['#x'].length, 1)
+      await waitFor(() => {
+        reqs = socket.sent.filter(msg => msg[0] === 'REQ')
+        latestReqs = getLatestReqs(reqs)
+
+        return (
+          latestReqs.length === 2 &&
+          latestReqs.some(req => req[2]['#x'].length === 250) &&
+          latestReqs.some(req => req[2]['#x'].length === 1)
+        )
+      })
+
+      const finalTopics = new Set(latestReqs.flatMap(req => req[2]['#x']))
+
+      assert.equal(finalTopics.size, roomCount)
+      assert.equal(
+        latestReqs.length,
+        2,
+        '251 topics should be split into 2 active REQs'
+      )
+      assert.deepEqual(
+        latestReqs.map(req => req[2]['#x'].length).sort((a, b) => b - a),
+        [250, 1]
+      )
       assert.equal(
         Math.max(...reqs.map(req => req[2]['#x'].length)),
         250,

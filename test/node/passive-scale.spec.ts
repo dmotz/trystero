@@ -5,6 +5,7 @@ import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 type Subscriber = {
+  roomId?: string
   rootTopic: string
   selfTopic: string
   onMessage: (
@@ -269,14 +270,27 @@ void test(
 
     const joinRoom = createStrategy({
       init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
+      subscribe: async (
+        _relay,
+        rootTopic,
+        selfTopic,
+        onMessage,
+        _getOffers,
+        context
+      ) => {
+        subscribers.push({
+          roomId: context.roomId,
+          rootTopic,
+          selfTopic,
+          onMessage
+        })
         return () => {}
       },
       announce: () => {}
     })
 
     const appId = `scale-shared-${Date.now()}`
+    const peerId = '~active-peer'
     const config = {
       appId,
       passive: true,
@@ -294,8 +308,9 @@ void test(
     const rtcBeforeConnect = rtcCreated
 
     // Activate room-0 and connect a mock peer
-    const sub0 = subscribers[0]
-    await sub0.onMessage(sub0.rootTopic, {peerId: 'active-peer'}, () => {})
+    const sub0 = subscribers.find(sub => sub.roomId === 'room-0')
+    assert.ok(sub0, 'expected room-0 subscriber')
+    await sub0.onMessage(sub0.rootTopic, {peerId}, () => {})
 
     const mockPeer = new MockPeer()
     const encryptedAnswer = await encrypt(
@@ -305,7 +320,7 @@ void test(
 
     await sub0.onMessage(
       sub0.rootTopic,
-      {peerId: 'active-peer', answer: encryptedAnswer, peer: mockPeer},
+      {peerId, answer: encryptedAnswer, peer: mockPeer},
       () => {}
     )
 
@@ -318,7 +333,7 @@ void test(
     // rather than creating new ones.
     for (let i = 1; i < roomCount; i++) {
       const sub = subscribers[i]
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
+      await sub.onMessage(sub.rootTopic, {peerId}, () => {})
     }
 
     await wait(500)
