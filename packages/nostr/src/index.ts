@@ -217,10 +217,12 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
             if (msgType !== eventMsgType) {
               const prefix = `${libName}: relay failure from ${client.url} - `
 
-              if (msgType === 'NOTICE') {
-                console.warn(prefix + subId)
-              } else if (msgType === 'OK' && !payload) {
-                console.warn(prefix + relayMsg)
+              if (config.relayConfig?.warnOnRelayFailure !== false) {
+                if (msgType === 'NOTICE') {
+                  console.warn(prefix + subId)
+                } else if (msgType === 'OK' && !payload) {
+                  console.warn(prefix + relayMsg)
+                }
               }
 
               return

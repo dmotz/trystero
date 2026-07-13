@@ -503,7 +503,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         } catch (error) {
           const errorStreak = announceErrorStreaks[i] ?? 0
 
-          if (errorStreak === 0) {
+          if (
+            errorStreak === 0 &&
+            config.relayConfig?.warnOnRelayFailure !== false
+          ) {
             console.warn(
               `${libName}: announce failed - ${toErrorMessage(error, '')}`
             )

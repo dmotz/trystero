@@ -143,3 +143,43 @@ void test(
     }
   }
 )
+
+void test(
+  'Trystero: relay failure warnings can be disabled',
+  {timeout: 5_000},
+  async () => {
+    let announceCount = 0
+    const warnings = []
+    const realWarn = console.warn
+    console.warn = (...args) => warnings.push(args)
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: () => () => {},
+      announce: () => {
+        announceCount += 1
+        return Promise.reject(new Error('simulated announce failure'))
+      }
+    })
+
+    const room = joinRoom(
+      {
+        appId: `trystero-disabled-relay-warnings-${Date.now()}-${Math.random()}`,
+        password: 'disabled-relay-warnings-test',
+        relayConfig: {warnOnRelayFailure: false},
+        rtcPolyfill: MockRTCPeerConnection
+      },
+      'r'
+    )
+
+    try {
+      await new Promise(res => setTimeout(res, 300))
+
+      assert.ok(announceCount >= 1, 'expected an announce attempt')
+      assert.equal(warnings.length, 0)
+    } finally {
+      console.warn = realWarn
+      await room.leave()
+    }
+  }
+)

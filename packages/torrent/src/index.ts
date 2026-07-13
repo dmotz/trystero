@@ -212,11 +212,14 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
             : undefined
 
           if (errMsg) {
-            warn(client.url, errMsg, true)
+            if (config.relayConfig?.warnOnRelayFailure !== false) {
+              warn(client.url, errMsg, true)
+            }
+
             return
           }
 
-          if (warnMsg) {
+          if (warnMsg && config.relayConfig?.warnOnRelayFailure !== false) {
             warn(client.url, warnMsg)
           }
 

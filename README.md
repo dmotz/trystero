@@ -776,6 +776,11 @@ the same namespace will return the same room instance.
       and comes back online. This is useful if you want to manage this behavior
       yourself.
 
+    - `warnOnRelayFailure` - **(optional)** Boolean (default: `true`) that when
+      set to `false` suppresses warnings caused by relay failures. This includes
+      failed announce attempts and strategy-specific failure messages from
+      relays or trackers.
+
     - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
       `anon public` API key.
 

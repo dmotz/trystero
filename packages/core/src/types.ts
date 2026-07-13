@@ -54,6 +54,7 @@ export type TurnServerConfig = {
 
 export type BaseRelayConfig = {
   manualReconnection?: boolean
+  warnOnRelayFailure?: boolean
 }
 
 export type RelayConfig = BaseRelayConfig & {
