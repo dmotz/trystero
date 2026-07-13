@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/mqtt",
-  "version": "0.25.2",
+  "version": "0.25.3",
   "description": "Simple, serverless WebRTC (via MQTT)",
   "keywords": [
     "chat",
