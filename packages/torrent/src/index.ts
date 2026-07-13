@@ -483,11 +483,11 @@ export const getRelaySockets = relayManager.getSockets
 export {pauseRelayReconnection, resumeRelayReconnection, selfId}
 
 export const defaultRelayUrls = [
+  'open.ftorrent.com',
   'tracker.webtorrent.dev',
   'tracker.openwebtorrent.com',
   'tracker.btorrent.xyz',
-  'tracker.files.fm:7073/announce',
-  'open.ftorrent.com'
+  'tracker.files.fm:7073/announce'
 ].map(url => 'wss://' + url)
 
 export type * from '@trystero-p2p/core'
