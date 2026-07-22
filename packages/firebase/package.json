@@ -34,6 +34,6 @@
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
-    "firebase": "^12.14.0"
+    "firebase": "^12.16.0"
   }
 }

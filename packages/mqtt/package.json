@@ -34,6 +34,6 @@
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
-    "mqtt": "^5.15.1"
+    "mqtt": "^5.15.2"
   }
 }
