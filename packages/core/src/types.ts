@@ -346,6 +346,8 @@ export type TopicStrategyAdapter<
   TRelay,
   TConfig extends BaseRoomConfig = JoinRoomConfig
 > = {
+  steadyAnnounceIntervalMs?: number
+  reannounceOnDisconnect?: boolean
   init: (config: TConfig) => MaybePromise<TRelay> | Array<MaybePromise<TRelay>>
   subscribeTopic: (
     relay: TRelay,

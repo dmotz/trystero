@@ -679,6 +679,10 @@ const room = joinRoom(
 )
 ```
 
+`createTopicStrategy` uses a short startup announcement burst followed by a
+60-second steady interval. Override it with `steadyAnnounceIntervalMs`, or set
+`reannounceOnDisconnect: true` to repeat the startup burst after a peer drops.
+
 For non-pub/sub signaling protocols, such as trackers that exchange offers in
 bulk, `createStrategy` is available as a lower-level advanced API.
 

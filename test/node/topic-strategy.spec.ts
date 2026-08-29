@@ -105,6 +105,37 @@ const waitFor = async (
 }
 
 void test(
+  'Trystero: createTopicStrategy accepts a custom steady announce interval',
+  {timeout: 5_000},
+  async () => {
+    let announceCount = 0
+    const joinRoom = createTopicStrategy({
+      steadyAnnounceIntervalMs: 100,
+      init: () => ({}),
+      subscribeTopic: () => () => {},
+      publishTopic: (_relay, _topic, _msg, {kind}) => {
+        if (kind === 'announce') {
+          announceCount++
+        }
+      }
+    })
+    const room = joinRoom(
+      {
+        appId: `topic-custom-announce-interval-${Date.now()}`,
+        rtcPolyfill: MockRTCPeerConnection
+      },
+      'room'
+    )
+
+    try {
+      await waitFor(() => announceCount >= 3, 500)
+    } finally {
+      await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
   'Trystero: createTopicStrategy leaves passive self topic unsubscribed until activation',
   {timeout: 10_000},
   async () => {

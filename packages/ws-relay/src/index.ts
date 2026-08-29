@@ -16,6 +16,7 @@ import {
 const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const msgHandlers =
   relayManager.scoped<Set<(topic: string, data: StrategyMessage) => void>>()
+const announcementMessages = relayManager.scoped<StrategyMessage>()
 
 export type WsRelayConfig = Omit<RelayConfig, 'urls' | 'redundancy'> & {
   urls: string[]
@@ -74,20 +75,33 @@ const unsubscribe = (topic: string): WsRelayClientMessage => ({
 })
 
 export const joinRoom: JoinRoom<WsRelayRoomConfig> = createTopicStrategy({
+  reannounceOnDisconnect: true,
+
   init: config =>
     config.relayConfig.urls.map(url => {
       const client = relayManager.register(url, () =>
-        makeSocket(url, data => {
-          const msg = parseServerMessage(data)
+        makeSocket(
+          url,
+          data => {
+            const msg = parseServerMessage(data)
 
-          if (!msg) {
-            return
+            if (!msg) {
+              return
+            }
+
+            msgHandlers
+              .forRelay(client)
+              [msg.topic]?.forEach(handler => handler(msg.topic, msg.payload))
+          },
+          () => {
+            Object.keys(msgHandlers.forKey(url)).forEach(topic =>
+              client.send(toJson(subscribe(topic)))
+            )
+            Object.entries(announcementMessages.forKey(url)).forEach(
+              ([topic, msg]) => client.send(toJson(publish(topic, msg)))
+            )
           }
-
-          msgHandlers
-            .forRelay(client)
-            [msg.topic]?.forEach(handler => handler(msg.topic, msg.payload))
-        })
+        )
       )
 
       return client.ready
@@ -118,12 +132,19 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> = createTopicStrategy({
 
       if (topicHandlers.size === 0) {
         delete handlers[topic]
+        delete announcementMessages.forRelay(client)[topic]
         client.send(toJson(unsubscribe(topic)))
       }
     }
   },
 
-  publishTopic: (client, topic, msg) => client.send(toJson(publish(topic, msg)))
+  publishTopic: (client, topic, msg, {kind}) => {
+    client.send(toJson(publish(topic, msg)))
+
+    if (kind === 'announce') {
+      announcementMessages.forRelay(client)[topic] = msg
+    }
+  }
 })
 
 export const getRelaySockets = relayManager.getSockets

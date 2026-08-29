@@ -12,6 +12,7 @@ import type {
 } from './types'
 
 const signalKeys = ['offer', 'answer', 'candidate'] as const
+const defaultSteadyAnnounceIntervalMs = 60_000
 
 const toPayload = (msg: StrategyMessage): Record<string, unknown> | null => {
   if (typeof msg === 'string') {
@@ -97,6 +98,8 @@ const publishContext = <TConfig extends BaseRoomConfig>(
 })
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
+  steadyAnnounceIntervalMs = defaultSteadyAnnounceIntervalMs,
+  reannounceOnDisconnect = false,
   init,
   subscribeTopic,
   publishTopic,
@@ -114,14 +117,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       rawContext
     ) => {
       const context = requireContext(rawContext)
-      const signalPeer = (peerTopic: string, signal: string): void => {
+      const signalPeer = (peerTopic: string, signal: string) =>
         void publishTopic(
           relay,
           peerTopic,
           signal,
           publishContext(context, 'signal', rootTopic, selfTopic)
         )
-      }
+
       let selfCleanup: (() => void) | null = null
       let selfCleanupDone = false
       let selfSubscriptionP: Promise<void> | null = null
@@ -197,14 +200,16 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     },
 
-    announce: (relay, rootTopic, selfTopic, extraPayload, rawContext) => {
+    announce: async (relay, rootTopic, selfTopic, extraPayload, rawContext) => {
       const context = requireContext(rawContext)
 
-      return publishTopic(
-        relay,
-        rootTopic,
-        toJson({peerId: selfId, ...extraPayload}),
-        publishContext(context, 'announce', rootTopic, selfTopic)
+      return (
+        (await publishTopic(
+          relay,
+          rootTopic,
+          toJson({peerId: selfId, ...extraPayload}),
+          publishContext(context, 'announce', rootTopic, selfTopic)
+        )) ?? {nextAnnounceMs: steadyAnnounceIntervalMs, reannounceOnDisconnect}
       )
     },
 
