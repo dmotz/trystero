@@ -39,8 +39,6 @@ let node: Promise<LightNode>
 export type IpfsRoomConfig = BaseRoomConfig
 
 const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createTopicStrategy({
-  reannounceOnDisconnect: true,
-
   init: () =>
     (node ??= createLightNode({
       defaultBootstrap: true,

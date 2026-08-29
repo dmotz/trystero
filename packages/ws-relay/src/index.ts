@@ -75,8 +75,6 @@ const unsubscribe = (topic: string): WsRelayClientMessage => ({
 })
 
 export const joinRoom: JoinRoom<WsRelayRoomConfig> = createTopicStrategy({
-  reannounceOnDisconnect: true,
-
   init: config =>
     config.relayConfig.urls.map(url => {
       const client = relayManager.register(url, () =>

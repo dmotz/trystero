@@ -81,10 +81,7 @@ const getRelayBackoffMs = (client: SocketClient): number => {
   return 0
 }
 
-const nextAnnounce = (nextAnnounceMs: number) => ({
-  nextAnnounceMs,
-  reannounceOnDisconnect: true
-})
+const nextAnnounce = (nextAnnounceMs: number) => ({nextAnnounceMs})
 
 const trackAnnouncementAck = (client: SocketClient, eventId: string): void => {
   const pending = pendingAnnouncementAcks.get(client)

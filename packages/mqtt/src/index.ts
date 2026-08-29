@@ -23,8 +23,6 @@ const announcementMessages = relayManager.scoped<string>()
 export type MqttRoomConfig = JoinRoomConfig
 
 export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
-  reannounceOnDisconnect: true,
-
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
       const client = relayManager.register(url, () =>

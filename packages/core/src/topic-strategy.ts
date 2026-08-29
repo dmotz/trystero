@@ -99,7 +99,7 @@ const publishContext = <TConfig extends BaseRoomConfig>(
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   steadyAnnounceIntervalMs = defaultSteadyAnnounceIntervalMs,
-  reannounceOnDisconnect = false,
+  reannounceOnDisconnect = true,
   init,
   subscribeTopic,
   publishTopic,
@@ -202,15 +202,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     announce: async (relay, rootTopic, selfTopic, extraPayload, rawContext) => {
       const context = requireContext(rawContext)
-
-      return (
-        (await publishTopic(
-          relay,
-          rootTopic,
-          toJson({peerId: selfId, ...extraPayload}),
-          publishContext(context, 'announce', rootTopic, selfTopic)
-        )) ?? {nextAnnounceMs: steadyAnnounceIntervalMs, reannounceOnDisconnect}
+      const result = await publishTopic(
+        relay,
+        rootTopic,
+        toJson({peerId: selfId, ...extraPayload}),
+        publishContext(context, 'announce', rootTopic, selfTopic)
       )
+
+      return typeof result === 'number'
+        ? result
+        : {
+            nextAnnounceMs: result?.nextAnnounceMs ?? steadyAnnounceIntervalMs,
+            reannounceOnDisconnect:
+              result?.reannounceOnDisconnect ?? reannounceOnDisconnect
+          }
     },
 
     ...(unpublishTopic

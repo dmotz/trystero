@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {createTopicStrategy} from '../../packages/core/src/index.ts'
+import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import {MockPeer} from './peer-harness.ts'
 
 class MockDataChannel {
   readyState = 'connecting'
@@ -129,6 +131,51 @@ void test(
 
     try {
       await waitFor(() => announceCount >= 3, 500)
+    } finally {
+      await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: createTopicStrategy defaults to reannouncing after disconnect',
+  {timeout: 5_000},
+  async () => {
+    const subscriptions = []
+    let announceCount = 0
+    const joinRoom = createTopicStrategy({
+      init: () => ({}),
+      subscribeTopic: (_relay, topic, onMessage, {kind}) => {
+        subscriptions.push({topic, onMessage, kind})
+        return () => {}
+      },
+      publishTopic: (_relay, _topic, _msg, {kind}) => {
+        if (kind === 'announce') {
+          announceCount++
+          return {nextAnnounceMs: 60_000}
+        }
+      }
+    })
+    const appId = `topic-reannounce-on-disconnect-${Date.now()}`
+    const room = joinRoom({appId, rtcPolyfill: MockRTCPeerConnection}, 'room')
+
+    try {
+      await waitFor(
+        () =>
+          announceCount > 0 && subscriptions.some(sub => sub.kind === 'root')
+      )
+
+      const root = subscriptions.find(sub => sub.kind === 'root')
+      const peer = new MockPeer()
+      const answer = await encrypt(genKey('', appId, 'room'), 'answer-sdp')
+
+      await root.onMessage(root.topic, {peerId: 'remote-peer', answer, peer})
+      await wait(50)
+
+      const countBeforeDisconnect = announceCount
+      peer.destroy()
+
+      await waitFor(() => announceCount > countBeforeDisconnect, 500)
     } finally {
       await room.leave().catch(() => {})
     }

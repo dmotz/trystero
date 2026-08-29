@@ -53,6 +53,8 @@ const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> =>
       ))
 
 export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
+  reannounceOnDisconnect: false,
+
   init: config =>
     ref(initDb(config), config.relayConfig?.firebasePath ?? defaultRootPath),
 
