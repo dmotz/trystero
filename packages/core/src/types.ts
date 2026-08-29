@@ -310,6 +310,10 @@ export type OfferRecord = {
 
 export type MaybePromise<T> = T | Promise<T>
 
+export type AnnounceResult =
+  | number
+  | {nextAnnounceMs: number; reannounceOnDisconnect?: boolean}
+
 export type StrategyAdapter<
   TRelay,
   TConfig extends BaseRoomConfig = JoinRoomConfig
@@ -329,7 +333,7 @@ export type StrategyAdapter<
     selfTopic: string,
     extraPayload?: Record<string, unknown>,
     context?: StrategyContext<TConfig>
-  ) => MaybePromise<number | void>
+  ) => MaybePromise<AnnounceResult | void>
   deactivate?: (
     relay: TRelay,
     rootTopic: string,
@@ -354,7 +358,7 @@ export type TopicStrategyAdapter<
     topic: string,
     msg: StrategyMessage,
     context: TopicPublishContext
-  ) => MaybePromise<void>
+  ) => MaybePromise<AnnounceResult | void>
   unpublishTopic?: (
     relay: TRelay,
     topic: string,

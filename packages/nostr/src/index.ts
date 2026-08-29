@@ -33,6 +33,88 @@ const msgHandlers: Record<
 const kindCache: Record<string, number> = {}
 const maxTopicsPerSubscription = 250
 
+// Newcomers announce immediately and wake subscribed incumbents, so the fast
+// cadence is only needed during startup. Keep a low-rate heartbeat for relay
+// reconnect and missed-subscription recovery.
+const steadyAnnounceIntervalMs = 60_000
+const maxRelayBackoffMs = 15 * 60_000
+const relayAckTimeoutMs = 5_333
+
+type RelayBackoffState = {
+  delayMs: number
+  untilMs: number
+}
+
+const relayBackoffs = new WeakMap<SocketClient, RelayBackoffState>()
+const pendingAnnouncementAcks = new WeakMap<
+  SocketClient,
+  {eventIds: Set<string>; timer: ReturnType<typeof setTimeout>}
+>()
+
+const backoffRelay = (client: SocketClient): number => {
+  const previous = relayBackoffs.get(client)
+  const delayMs = Math.min(
+    previous?.delayMs
+      ? Math.max(steadyAnnounceIntervalMs, previous.delayMs * 2)
+      : steadyAnnounceIntervalMs,
+    maxRelayBackoffMs
+  )
+
+  relayBackoffs.set(client, {delayMs, untilMs: Date.now() + delayMs})
+
+  return delayMs
+}
+
+const getRelayBackoffMs = (client: SocketClient): number => {
+  const state = relayBackoffs.get(client)
+
+  if (!state) {
+    return 0
+  }
+
+  const remainingMs = state.untilMs - Date.now()
+
+  if (remainingMs > 0) {
+    return remainingMs
+  }
+
+  return 0
+}
+
+const nextAnnounce = (nextAnnounceMs: number) => ({
+  nextAnnounceMs,
+  reannounceOnDisconnect: true
+})
+
+const trackAnnouncementAck = (client: SocketClient, eventId: string): void => {
+  const pending = pendingAnnouncementAcks.get(client)
+
+  if (pending) {
+    clearTimeout(pending.timer)
+    pending.eventIds.add(eventId)
+  }
+
+  const eventIds = pending?.eventIds ?? new Set([eventId])
+  const timer = setTimeout(() => {
+    pendingAnnouncementAcks.delete(client)
+    backoffRelay(client)
+  }, relayAckTimeoutMs)
+
+  pendingAnnouncementAcks.set(client, {eventIds, timer})
+}
+
+const acknowledgeEvent = (client: SocketClient, eventId: string): boolean => {
+  const pending = pendingAnnouncementAcks.get(client)
+
+  if (!pending?.eventIds.has(eventId)) {
+    return false
+  }
+
+  clearTimeout(pending.timer)
+  pendingAnnouncementAcks.delete(client)
+  return true
+}
+
 export type NostrRoomConfig = JoinRoomConfig
 
 const now = (): number => Math.floor(Date.now() / 1000)
@@ -94,9 +176,15 @@ type BatchState = {
   subIds: string[]
   topics: Map<string, TopicHandler>
   updateTimer: ReturnType<typeof setTimeout> | null
+  flushWaiters: Set<() => void>
 }
 
 const batchers: Record<string, BatchState> = {}
+
+const resolveBatchFlush = (batcher: BatchState): void => {
+  batcher.flushWaiters.forEach(resolve => resolve())
+  batcher.flushWaiters.clear()
+}
 
 const batchAdd = (
   client: SocketClient,
@@ -106,7 +194,8 @@ const batchAdd = (
   const batcher = (batchers[client.url] ??= {
     subIds: [],
     topics: new Map(),
-    updateTimer: null
+    updateTimer: null,
+    flushWaiters: new Set()
   })
 
   batcher.topics.set(topic, handler)
@@ -128,6 +217,8 @@ const batchRemove = (client: SocketClient, topic: string): void => {
       batcher.updateTimer = null
     }
 
+    resolveBatchFlush(batcher)
+
     batcher.subIds.forEach(subId => client.send(toJson(['CLOSE', subId])))
     delete batchers[client.url]
   } else {
@@ -145,8 +236,23 @@ const scheduleBatchFlush = (
 
   batcher.updateTimer = setTimeout(() => {
     batcher.updateTimer = null
-    flushBatch(client)
+
+    try {
+      flushBatch(client)
+    } finally {
+      resolveBatchFlush(batcher)
+    }
   }, 0)
+}
+
+const waitForBatchFlush = (client: SocketClient): Promise<void> => {
+  const batcher = batchers[client.url]
+
+  if (!batcher || batcher.updateTimer === null) {
+    return Promise.resolve()
+  }
+
+  return new Promise(resolve => batcher.flushWaiters.add(resolve))
 }
 
 const flushBatch = (client: SocketClient): void => {
@@ -216,6 +322,20 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
 
             if (msgType !== eventMsgType) {
               const prefix = `${libName}: relay failure from ${client.url} - `
+              const isRateLimited =
+                msgType === 'OK' &&
+                !payload &&
+                typeof relayMsg === 'string' &&
+                relayMsg.startsWith('rate-limited:')
+
+              const didAcknowledgeAnnouncement =
+                msgType === 'OK' && acknowledgeEvent(client, subId)
+
+              if (isRateLimited) {
+                backoffRelay(client)
+              } else if (didAcknowledgeAnnouncement) {
+                relayBackoffs.delete(client)
+              }
 
               if (config.relayConfig?.warnOnRelayFailure !== false) {
                 if (msgType === 'NOTICE') {
@@ -259,20 +379,54 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
       return client.ready
     }),
 
-  subscribeTopic: (client, topic, onMessage) => {
+  subscribeTopic: (client, topic, onMessage, context) => {
     const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
 
     batchAdd(client, topic, handler)
 
-    return () => {
+    const cleanup = () => {
       batchRemove(client, topic)
     }
+
+    // Active rooms add the self topic before the root topic. Waiting only on
+    // the root keeps both topics in one batch while guaranteeing the REQ is
+    // written before createStrategy starts announcing.
+    return context.kind === 'root'
+      ? waitForBatchFlush(client).then(() => cleanup)
+      : cleanup
   },
 
-  publishTopic: async (client, topic, msg) =>
-    client.send(
-      await createEvent(topic, typeof msg === 'string' ? msg : toJson(msg))
+  publishTopic: async (client, topic, msg, context) => {
+    if (context.kind === 'announce') {
+      const remainingBackoffMs = getRelayBackoffMs(client)
+
+      if (remainingBackoffMs > 0) {
+        return nextAnnounce(
+          Math.max(steadyAnnounceIntervalMs, remainingBackoffMs)
+        )
+      }
+    }
+
+    const event = await createEvent(
+      topic,
+      typeof msg === 'string' ? msg : toJson(msg)
     )
+    const didSend = client.socket.readyState === 1
+    client.send(event)
+
+    if (context.kind !== 'announce') {
+      return
+    }
+
+    if (!didSend) {
+      return nextAnnounce(backoffRelay(client))
+    }
+
+    const eventId = fromJson<[string, {id: string}]>(event)[1].id
+    trackAnnouncementAck(client, eventId)
+
+    return nextAnnounce(steadyAnnounceIntervalMs)
+  }
 })
 
 export const getRelaySockets = relayManager.getSockets

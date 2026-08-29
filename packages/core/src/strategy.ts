@@ -237,6 +237,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const toCipher = withKey(encrypt)
     const sharedPeerMap = sharedPeers.getMap(appId)
     const makeOffer = (): PeerHandle => initPeer(true, config)
+    let reannounceOnDisconnect = false
 
     offerPool ||= new OfferPool(makeOffer)
 
@@ -362,6 +363,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         DEV: log('peer disconnected:', peerId)
         clearConnectedPeer(state, peerId, 'close-event')
         checkDeactivate()
+
+        if (!isPassive && reannounceOnDisconnect) {
+          ctx.requeueAnnounce?.()
+        }
       }
     }
 
@@ -458,6 +463,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     ctx.announceIntervals = initPromises.map(() => announceIntervalMs)
+    const announceScheduleIntervals = initPromises.map(() => announceIntervalMs)
     const announceAttemptCounts = initPromises.map(() => 0)
     const announceErrorStreaks = initPromises.map(() => 0)
     const announceTimeouts: Array<ReturnType<typeof setTimeout> | undefined> =
@@ -489,10 +495,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
 
         const extra = isPassive ? {passive: true} : undefined
-        let ms: number | void = undefined
+        let announceResult: Awaited<
+          ReturnType<StrategyAdapter<TRelay, TConfig>['announce']>
+        > = undefined
 
         try {
-          ms = await announce(
+          announceResult = await announce(
             relay,
             rootTopic,
             selfTopic,
@@ -519,13 +527,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           return
         }
 
-        if (typeof ms === 'number') {
-          ctx.announceIntervals[i] = ms
+        if (typeof announceResult === 'number') {
+          ctx.announceIntervals[i] = announceResult
+          announceScheduleIntervals[i] = announceResult
+        } else if (announceResult) {
+          announceScheduleIntervals[i] = announceResult.nextAnnounceMs
+          reannounceOnDisconnect ||=
+            announceResult.reannounceOnDisconnect === true
         }
 
         const announceAttempt = announceAttemptCounts[i] ?? 0
         announceAttemptCounts[i] = announceAttempt + 1
-        const currentInterval = ctx.announceIntervals[i] ?? announceIntervalMs
+        const currentInterval =
+          announceScheduleIntervals[i] ?? announceIntervalMs
         const warmupDelay = announceWarmupIntervalsMs[announceAttempt]
         const nextAnnounceDelayMs =
           typeof warmupDelay === 'number'

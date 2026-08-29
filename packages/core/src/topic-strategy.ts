@@ -114,13 +114,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       rawContext
     ) => {
       const context = requireContext(rawContext)
-      const signalPeer = (peerTopic: string, signal: string) =>
-        publishTopic(
+      const signalPeer = (peerTopic: string, signal: string): void => {
+        void publishTopic(
           relay,
           peerTopic,
           signal,
           publishContext(context, 'signal', rootTopic, selfTopic)
         )
+      }
       let selfCleanup: (() => void) | null = null
       let selfCleanupDone = false
       let selfSubscriptionP: Promise<void> | null = null
