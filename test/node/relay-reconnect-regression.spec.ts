@@ -2,7 +2,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import createStrategy from '../../packages/core/src/strategy.ts'
-import {makeSocket} from '../../packages/core/src/utils.ts'
 import {joinRoom} from '../../packages/nostr/src/index.ts'
 
 class MockDataChannel {
@@ -103,31 +102,6 @@ class AutoOpenWebSocket {
 
   send(data) {
     this.sent.push(JSON.parse(data))
-  }
-
-  close() {
-    this.readyState = 3
-    this.onclose?.()
-  }
-}
-
-class ManualWebSocket {
-  static sockets = []
-
-  readyState = 0
-  sent = []
-  onopen = null
-  onclose = null
-  onmessage = null
-  url
-
-  constructor(url) {
-    this.url = url
-    ManualWebSocket.sockets.push(this)
-  }
-
-  send(data) {
-    this.sent.push(data)
   }
 
   close() {
@@ -243,41 +217,32 @@ void test(
 )
 
 void test(
-  'Trystero: socket reconnect backoff stays capped',
-  {timeout: 10_000},
+  'Trystero: relay announcements can stop after a terminal failure',
+  {timeout: 5_000},
   async () => {
-    const originalWebSocket = globalThis.WebSocket
-    const originalSetTimeout = globalThis.setTimeout
-    const retryDelays = []
-
-    globalThis.WebSocket = ManualWebSocket
-    ManualWebSocket.sockets.length = 0
-    globalThis.setTimeout = (fn, ms, ...args) => {
-      retryDelays.push(ms)
-
-      return originalSetTimeout(fn, 0, ...args)
-    }
+    let announceCalls = 0
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: () => () => {},
+      announce: () => {
+        announceCalls++
+        return {stopAnnouncing: true}
+      }
+    })
+    const room = joinRoom(
+      {
+        appId: `announce-stop-${Date.now()}`,
+        rtcPolyfill: MockRTCPeerConnection
+      },
+      'room'
+    )
 
     try {
-      const client = makeSocket('wss://socket-backoff.test', () => {})
-
-      for (let i = 0; i < 16; i++) {
-        const socket = ManualWebSocket.sockets.at(-1)
-        socket.close()
-
-        await waitFor(() => ManualWebSocket.sockets.length === i + 2)
-      }
-
-      assert.ok(client.socket)
-      assert.ok(
-        Math.max(...retryDelays) <= 60_000,
-        `expected retry delay to stay capped at 60000ms, got ${Math.max(
-          ...retryDelays
-        )}ms`
-      )
+      await waitFor(() => announceCalls === 1)
+      await wait(300)
+      assert.equal(announceCalls, 1)
     } finally {
-      globalThis.setTimeout = originalSetTimeout
-      globalThis.WebSocket = originalWebSocket
+      await room.leave().catch(() => {})
     }
   }
 )

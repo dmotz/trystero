@@ -141,17 +141,24 @@ export const makeSocket = (
   const client = {} as SocketClient
   let didOpen = false
   let isReconnectPending = false
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
   let resolveReady: (_: SocketClient) => void = noOp
 
+  client.isClosed = false
   client.ready = new Promise(res => (resolveReady = res))
 
   const init = (): void => {
+    if (client.isClosed) {
+      return
+    }
+
+    retryTimer = undefined
     isReconnectPending = false
 
     const socket = new WebSocket(url)
 
     socket.onclose = () => {
-      if (isReconnectPending) {
+      if (client.isClosed || isReconnectPending) {
         return
       }
 
@@ -163,7 +170,13 @@ export const makeSocket = (
       }
 
       const period = (socketRetryPeriods[url] ??= defaultRetryMs)
-      setTimeout(init, Math.random() * period)
+
+      if (period >= maxRetryMs) {
+        client.isClosed = true
+        return
+      }
+
+      retryTimer = setTimeout(init, Math.random() * period)
       socketRetryPeriods[url] = min(period * 2, maxRetryMs)
     }
 
@@ -188,6 +201,17 @@ export const makeSocket = (
         socket.send(data)
       }
     }
+  }
+
+  client.close = () => {
+    client.isClosed = true
+
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
+    }
+
+    client.socket.close()
   }
 
   init()

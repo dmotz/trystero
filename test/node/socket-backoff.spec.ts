@@ -6,7 +6,7 @@ import {makeSocket} from '../../packages/core/src/utils.ts'
 const tick = () => Promise.resolve()
 
 void test(
-  'Trystero: socket reconnect backoff is capped at a sane maximum',
+  'Trystero: socket reconnects stop when backoff reaches its ceiling',
   {timeout: 5_000},
   async () => {
     const realRandom = Math.random
@@ -49,7 +49,7 @@ void test(
 
       makeSocket(`ws://test-backoff-${Date.now()}`, () => {})
 
-      for (let i = 0; i < 15; i += 1) {
+      for (let i = 0; i < 5; i += 1) {
         await tick()
         assert.ok(
           pendingInit,
@@ -61,11 +61,13 @@ void test(
         next()
       }
 
-      const maxDelay = Math.max(...scheduledDelays)
-      assert.ok(
-        maxDelay <= 60_000,
-        `expected reconnect delay to be capped at 60s, but max was ${maxDelay}ms`
+      await tick()
+      assert.equal(
+        pendingInit,
+        null,
+        'a permanently failing relay should not reconnect forever'
       )
+      assert.deepEqual(scheduledDelays, [3_333, 6_666, 13_332, 26_664, 53_328])
     } finally {
       allowClose = false
       Math.random = realRandom

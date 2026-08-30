@@ -46,6 +46,7 @@ type RelayBackoffState = {
 }
 
 const relayBackoffs = new WeakMap<SocketClient, RelayBackoffState>()
+const retiredRelays = new WeakSet<SocketClient>()
 const pendingAnnouncementAcks = new WeakMap<
   SocketClient,
   {eventIds: Set<string>; timer: ReturnType<typeof setTimeout>}
@@ -82,6 +83,25 @@ const getRelayBackoffMs = (client: SocketClient): number => {
 }
 
 const nextAnnounce = (nextAnnounceMs: number) => ({nextAnnounceMs})
+const stopAnnouncing = {stopAnnouncing: true} as const
+
+const retireRelay = (client: SocketClient): boolean => {
+  if (retiredRelays.has(client)) {
+    return false
+  }
+
+  const pending = pendingAnnouncementAcks.get(client)
+
+  if (pending) {
+    clearTimeout(pending.timer)
+    pendingAnnouncementAcks.delete(client)
+  }
+
+  retiredRelays.add(client)
+  relayBackoffs.delete(client)
+  client.close?.()
+  return true
+}
 
 const trackAnnouncementAck = (client: SocketClient, eventId: string): void => {
   const pending = pendingAnnouncementAcks.get(client)
@@ -311,33 +331,47 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
                 [
                   string,
                   string,
-                  {content: string; tags?: string[][]} | boolean,
+                  {content: string; tags?: string[][]} | boolean | string,
                   string
                 ]
               >(data)
 
             if (msgType !== eventMsgType) {
               const prefix = `${libName}: relay failure from ${client.url} - `
+              const rejectionReason =
+                msgType === 'CLOSED' && typeof payload === 'string'
+                  ? payload
+                  : relayMsg
+              const didRejectEvent = msgType === 'OK' && payload === false
               const isRateLimited =
-                msgType === 'OK' &&
-                !payload &&
-                typeof relayMsg === 'string' &&
-                relayMsg.startsWith('rate-limited:')
+                didRejectEvent && rejectionReason?.startsWith('rate-limited:')
+              const isDuplicate =
+                didRejectEvent && rejectionReason?.startsWith('duplicate:')
+              const isTerminalRejection =
+                msgType === 'CLOSED' ||
+                (didRejectEvent && !isRateLimited && !isDuplicate)
 
               const didAcknowledgeAnnouncement =
                 msgType === 'OK' && acknowledgeEvent(client, subId)
 
-              if (isRateLimited || (didAcknowledgeAnnouncement && !payload)) {
+              if (isTerminalRejection && !retireRelay(client)) {
+                return
+              }
+
+              if (isRateLimited) {
                 backoffRelay(client)
               } else if (didAcknowledgeAnnouncement) {
                 relayBackoffs.delete(client)
               }
 
-              if (config.relayConfig?.warnOnRelayFailure !== false) {
+              if (
+                !isDuplicate &&
+                config.relayConfig?.warnOnRelayFailure !== false
+              ) {
                 if (msgType === 'NOTICE') {
                   console.warn(prefix + subId)
-                } else if (msgType === 'OK' && !payload) {
-                  console.warn(prefix + relayMsg)
+                } else if (didRejectEvent || msgType === 'CLOSED') {
+                  console.warn(prefix + rejectionReason)
                 }
               }
 
@@ -393,6 +427,10 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
   },
 
   publishTopic: async (client, topic, msg, context) => {
+    if (retiredRelays.has(client) || client.isClosed) {
+      return context.kind === 'announce' ? stopAnnouncing : undefined
+    }
+
     if (context.kind === 'announce') {
       const remainingBackoffMs = getRelayBackoffMs(client)
 

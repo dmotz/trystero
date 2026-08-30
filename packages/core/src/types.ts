@@ -312,6 +312,7 @@ export type MaybePromise<T> = T | Promise<T>
 
 export type AnnounceResult =
   | number
+  | {stopAnnouncing: true}
   | {nextAnnounceMs: number; reannounceOnDisconnect?: boolean}
 
 export type StrategyAdapter<
@@ -378,6 +379,8 @@ export type SocketClient = {
   socket: WebSocket
   url: string
   ready: Promise<SocketClient>
+  isClosed?: boolean
+  close?: () => void
   send: (data: string) => void
 }
 

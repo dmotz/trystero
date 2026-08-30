@@ -527,6 +527,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           return
         }
 
+        if (
+          announceResult &&
+          typeof announceResult !== 'number' &&
+          'stopAnnouncing' in announceResult
+        ) {
+          return
+        }
+
         if (typeof announceResult === 'number') {
           ctx.announceIntervals[i] = announceResult
           announceScheduleIntervals[i] = announceResult

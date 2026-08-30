@@ -209,7 +209,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         publishContext(context, 'announce', rootTopic, selfTopic)
       )
 
-      return typeof result === 'number'
+      return typeof result === 'number' ||
+        (result !== undefined && 'stopAnnouncing' in result)
         ? result
         : {
             nextAnnounceMs: result?.nextAnnounceMs ?? steadyAnnounceIntervalMs,

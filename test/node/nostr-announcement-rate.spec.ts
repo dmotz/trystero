@@ -300,6 +300,11 @@ void test(
         1,
         'rate-limited relay should suppress the rest of the startup burst'
       )
+      assert.equal(
+        MockWebSocket.sockets[0].readyState,
+        1,
+        'a temporary rate limit should not retire the relay'
+      )
     } finally {
       await room.leave().catch(() => {})
       globalThis.WebSocket = originalWebSocket
@@ -308,7 +313,7 @@ void test(
 )
 
 void test(
-  'Trystero: nostr rejection feedback suppresses the rest of the startup burst',
+  'Trystero: nostr retires a relay that rejects its event kind',
   {timeout: 5_000},
   async () => {
     const originalWebSocket = globalThis.WebSocket
@@ -326,6 +331,11 @@ void test(
         announcementCount(MockWebSocket.sockets[0]),
         1,
         'rejecting relay should suppress the rest of the startup burst'
+      )
+      assert.equal(
+        MockWebSocket.sockets[0].readyState,
+        3,
+        'rejecting relay should be closed instead of retried forever'
       )
     } finally {
       await room.leave().catch(() => {})
