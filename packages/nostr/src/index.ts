@@ -94,7 +94,6 @@ const trackAnnouncementAck = (client: SocketClient, eventId: string): void => {
   const eventIds = pending?.eventIds ?? new Set([eventId])
   const timer = setTimeout(() => {
     pendingAnnouncementAcks.delete(client)
-    backoffRelay(client)
   }, relayAckTimeoutMs)
 
   pendingAnnouncementAcks.set(client, {eventIds, timer})
@@ -328,7 +327,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
               const didAcknowledgeAnnouncement =
                 msgType === 'OK' && acknowledgeEvent(client, subId)
 
-              if (isRateLimited) {
+              if (isRateLimited || (didAcknowledgeAnnouncement && !payload)) {
                 backoffRelay(client)
               } else if (didAcknowledgeAnnouncement) {
                 relayBackoffs.delete(client)

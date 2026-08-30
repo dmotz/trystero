@@ -200,7 +200,13 @@ const startPeer = (
   let settled = false
   const connected = new Promise<PeerResult>((resolve, reject) => {
     createInterface({input: child.stdout!}).on('line', line => {
-      const event = JSON.parse(line) as Record<string, unknown>
+      let event: Record<string, unknown>
+
+      try {
+        event = JSON.parse(line) as Record<string, unknown>
+      } catch {
+        return
+      }
 
       if (!settled && event['type'] === 'connected') {
         settled = true

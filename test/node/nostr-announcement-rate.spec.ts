@@ -78,6 +78,7 @@ class MockRTCPeerConnection {
 class MockWebSocket {
   static sockets = []
   static rateLimitAnnouncements = false
+  static rejectAnnouncements = false
 
   readyState = 0
   sent = []
@@ -100,7 +101,11 @@ class MockWebSocket {
     const msg = JSON.parse(data)
     this.sent.push(msg)
 
-    if (MockWebSocket.rateLimitAnnouncements && msg[0] === 'EVENT') {
+    if (
+      (MockWebSocket.rateLimitAnnouncements ||
+        MockWebSocket.rejectAnnouncements) &&
+      msg[0] === 'EVENT'
+    ) {
       const payload = JSON.parse(msg[1].content)
 
       if (
@@ -115,7 +120,9 @@ class MockWebSocket {
               'OK',
               msg[1].id,
               false,
-              'rate-limited: test cooldown'
+              MockWebSocket.rateLimitAnnouncements
+                ? 'rate-limited: test cooldown'
+                : 'blocked: event kind not accepted'
             ])
           })
         )
@@ -295,6 +302,66 @@ void test(
       )
     } finally {
       await room.leave().catch(() => {})
+      globalThis.WebSocket = originalWebSocket
+    }
+  }
+)
+
+void test(
+  'Trystero: nostr rejection feedback suppresses the rest of the startup burst',
+  {timeout: 5_000},
+  async () => {
+    const originalWebSocket = globalThis.WebSocket
+    MockWebSocket.sockets.length = 0
+    MockWebSocket.rateLimitAnnouncements = false
+    MockWebSocket.rejectAnnouncements = true
+    globalThis.WebSocket = MockWebSocket
+
+    const room = joinTestRoom(`wss://nostr-rejecting-${Date.now()}.test`)
+
+    try {
+      await wait(2_500)
+
+      assert.equal(
+        announcementCount(MockWebSocket.sockets[0]),
+        1,
+        'rejecting relay should suppress the rest of the startup burst'
+      )
+    } finally {
+      await room.leave().catch(() => {})
+      MockWebSocket.rejectAnnouncements = false
+      globalThis.WebSocket = originalWebSocket
+    }
+  }
+)
+
+void test(
+  'Trystero: nostr missing acknowledgement does not suppress retry room startup',
+  {timeout: 12_000},
+  async () => {
+    const originalWebSocket = globalThis.WebSocket
+    MockWebSocket.sockets.length = 0
+    MockWebSocket.rateLimitAnnouncements = false
+    globalThis.WebSocket = MockWebSocket
+
+    const url = `wss://nostr-missing-ack-${Date.now()}.test`
+    const firstRoom = joinTestRoom(url)
+
+    try {
+      await wait(8_000)
+      await firstRoom.leave()
+
+      const socket = MockWebSocket.sockets[0]
+      const previousCount = announcementCount(socket)
+      const retryRoom = joinTestRoom(url)
+
+      try {
+        await waitFor(() => announcementCount(socket) > previousCount)
+      } finally {
+        await retryRoom.leave().catch(() => {})
+      }
+    } finally {
+      await firstRoom.leave().catch(() => {})
       globalThis.WebSocket = originalWebSocket
     }
   }
