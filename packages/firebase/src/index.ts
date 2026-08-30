@@ -26,6 +26,8 @@ const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const dbs: Record<string, ReturnType<typeof getDatabase>> = {}
 const presenceRefs: Record<string, DatabaseReference> = {}
+const presenceMessages: Record<string, Record<string, unknown>> = {}
+const presenceCleanups: Record<string, () => void> = {}
 const subscriptionTokens: Record<string, symbol> = {}
 
 export type FirebaseRelayConfig = BaseRelayConfig & {
@@ -51,6 +53,8 @@ const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> =>
       ))
 
 export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
+  reannounceOnDisconnect: false,
+
   init: config =>
     ref(initDb(config), config.relayConfig?.firebasePath ?? defaultRootPath),
 
@@ -145,8 +149,11 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
       }
 
       if (presenceRefs[key]) {
+        presenceCleanups[key]?.()
         void remove(presenceRefs[key])
         delete presenceRefs[key]
+        delete presenceMessages[key]
+        delete presenceCleanups[key]
       }
 
       delete subscriptionTokens[key]
@@ -158,14 +165,44 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
     const key = roomKey(rootTopic, selfTopic)
 
     if (kind === 'announce') {
+      presenceMessages[key] = {
+        [presencePath]:
+          typeof msg === 'string' ? fromJson<Record<string, unknown>>(msg) : msg
+      }
+
       const presenceRef =
         presenceRefs[key] ?? (presenceRefs[key] = push(roomRef))
 
-      void set(presenceRef, {
-        [presencePath]:
-          typeof msg === 'string' ? fromJson<Record<string, unknown>>(msg) : msg
-      })
-      void onDisconnect(presenceRef).remove()
+      if (!presenceCleanups[key]) {
+        let didConnect = false
+
+        void onDisconnect(presenceRef).remove()
+        void set(presenceRef, presenceMessages[key])
+        presenceCleanups[key] = onValue(
+          child(rootRef.root, '.info/connected'),
+          snapshot => {
+            if (snapshot.val() !== true) {
+              return
+            }
+
+            const isReconnect = didConnect
+            didConnect = true
+
+            if (!isReconnect) {
+              return
+            }
+
+            void onDisconnect(presenceRef)
+              .remove()
+              .then(() => {
+                if (presenceRefs[key] === presenceRef) {
+                  void set(presenceRef, presenceMessages[key])
+                }
+              })
+          }
+        )
+      }
+
       return
     }
 
@@ -173,14 +210,18 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
 
     void onDisconnect(signalRef).remove()
     void set(signalRef, msg)
+    return undefined
   },
 
   unpublishTopic: (rootRef, _topic, {rootTopic, selfTopic}) => {
     const key = roomKey(rootTopic, selfTopic)
 
     if (presenceRefs[key]) {
+      presenceCleanups[key]?.()
       void remove(presenceRefs[key])
       delete presenceRefs[key]
+      delete presenceMessages[key]
+      delete presenceCleanups[key]
     }
   }
 })

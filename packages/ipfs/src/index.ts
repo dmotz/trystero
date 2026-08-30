@@ -13,11 +13,16 @@ import {
 const contentTopic = (topic: string): string =>
   `/${libName.toLowerCase()}-${topic}/0/msg/json`
 
-const sendMessage = (node: LightNode, topic: string, payload: string): void =>
-  void node.lightPush.send(
+const sendMessage = (
+  node: LightNode,
+  topic: string,
+  payload: string,
+  autoRetry: boolean
+) =>
+  node.lightPush.send(
     node.createEncoder({contentTopic: contentTopic(topic), ephemeral: true}),
     {payload: encodeBytes(payload)},
-    {autoRetry: true}
+    {autoRetry}
   )
 
 const waitForPeersBounded = (
@@ -62,8 +67,22 @@ const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createTopicStrategy({
     }
   },
 
-  publishTopic: (activeNode, topic, msg) =>
-    sendMessage(activeNode, topic, typeof msg === 'string' ? msg : toJson(msg))
+  publishTopic: async (activeNode, topic, msg, {kind}) => {
+    const result = await sendMessage(
+      activeNode,
+      topic,
+      typeof msg === 'string' ? msg : toJson(msg),
+      kind !== 'announce'
+    )
+
+    if (kind !== 'announce') {
+      return
+    }
+
+    if (result.successes.length === 0) {
+      throw new Error(result.failures[0]?.error ?? 'Push failed')
+    }
+  }
 })
 
 export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>

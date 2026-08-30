@@ -19,12 +19,15 @@ const relayManager = createRelayManager<mqtt.MqttClient>(
 const msgHandlers = relayManager.scoped<(topic: string, data: string) => void>()
 const subscriptionTokens = relayManager.scoped<symbol>()
 const subscriptionRefs = relayManager.scoped<number>()
+const announcementMessages = relayManager.scoped<string>()
 export type MqttRoomConfig = JoinRoomConfig
 
 export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
   init: config =>
     getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
-      const client = relayManager.register(url, () => mqtt.connect(url))
+      const client = relayManager.register(url, () =>
+        mqtt.connect(url, {queueQoSZero: false, resubscribe: false})
+      )
       const handlers = msgHandlers.forRelay(client)
 
       if (client.listenerCount('message') === 0) {
@@ -32,6 +35,22 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
           .on('message', (topic, buffer) =>
             handlers[topic]?.(topic, buffer.toString())
           )
+          .on('connect', () => {
+            const topics = Object.keys(subscriptionRefs.forRelay(client))
+
+            if (topics.length === 0) {
+              return
+            }
+
+            void client
+              .subscribeAsync(topics)
+              .then(() => {
+                Object.entries(announcementMessages.forRelay(client)).forEach(
+                  ([topic, msg]) => client.publish(topic, msg)
+                )
+              })
+              .catch(console.error)
+          })
           .on('error', console.error)
       }
 
@@ -42,7 +61,7 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
           )
     }),
 
-  subscribeTopic: (client, topic, onMessage) => {
+  subscribeTopic: async (client, topic, onMessage) => {
     const handlers = msgHandlers.forRelay(client)
     const tokens = subscriptionTokens.forRelay(client)
     const refs = subscriptionRefs.forRelay(client)
@@ -54,7 +73,7 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
     refs[topic] = (refs[topic] ?? 0) + 1
 
     if (refs[topic] === 1) {
-      client.subscribe(topic)
+      await client.subscribeAsync(topic)
     }
 
     return () => {
@@ -63,6 +82,7 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
       if (refs[topic] === 0) {
         client.unsubscribe(topic)
         delete refs[topic]
+        delete announcementMessages.forRelay(client)[topic]
       }
 
       if (handlers[topic] === topicHandler) {
@@ -75,8 +95,16 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
     }
   },
 
-  publishTopic: (client, topic, msg) => {
-    client.publish(topic, typeof msg === 'string' ? msg : toJson(msg))
+  publishTopic: (client, topic, msg, {kind}) => {
+    const payload = typeof msg === 'string' ? msg : toJson(msg)
+
+    if (kind === 'announce') {
+      announcementMessages.forRelay(client)[topic] = payload
+    }
+
+    if (client.connected) {
+      client.publish(topic, payload)
+    }
   }
 })
 

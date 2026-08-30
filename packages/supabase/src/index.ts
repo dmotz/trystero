@@ -36,6 +36,7 @@ type ChannelCache = {
 type ChannelEntry = {
   channel: RealtimeChannel
   ready: Promise<RealtimeChannel>
+  announcement?: unknown
   listeners: Record<string, Record<string, (payload: unknown) => void>>
   boundEvents: Record<string, boolean>
   nextListenerId: number
@@ -114,10 +115,26 @@ const createChannelEntry = (
     nextListenerId: 0
   }
 
+  let didSubscribe = false
+
   channel.subscribe(status => {
-    if (status === 'SUBSCRIBED' && resolveReady) {
-      resolveReady(channel)
+    if (status !== 'SUBSCRIBED') {
+      return
+    }
+
+    if (!didSubscribe) {
+      didSubscribe = true
+      resolveReady?.(channel)
       resolveReady = null
+      return
+    }
+
+    if (entry.announcement !== undefined) {
+      void channel.send({
+        type: events.broadcast,
+        event: events.join,
+        payload: entry.announcement
+      })
     }
   })
 
@@ -178,19 +195,25 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = createTopicStrategy({
     }
   },
 
-  publishTopic: (client, topic, msg, {kind}) =>
-    getOrCreateChannel(client, topic).ready.then(chan =>
-      chan
-        .send({
-          type: events.broadcast,
-          event: kind === 'announce' ? events.join : events.sdp,
-          payload:
-            kind === 'announce' && typeof msg === 'string'
-              ? fromJson<Record<string, unknown>>(msg)
-              : msg
-        })
-        .then(() => undefined)
-    )
+  publishTopic: (client, topic, msg, {kind}) => {
+    const entry = getOrCreateChannel(client, topic)
+    const payload =
+      kind === 'announce' && typeof msg === 'string'
+        ? fromJson<Record<string, unknown>>(msg)
+        : msg
+
+    if (kind === 'announce') {
+      entry.announcement = payload
+    }
+
+    return entry.ready.then(async chan => {
+      await chan.send({
+        type: events.broadcast,
+        event: kind === 'announce' ? events.join : events.sdp,
+        payload
+      })
+    })
+  }
 })
 
 export {selfId}
