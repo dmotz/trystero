@@ -294,7 +294,7 @@ export const createMediaManager = ({
         parsed.streamId
       )
 
-      if (cached) {
+      if (cached?.getTracks().length) {
         emitStream(id, parsed.key, cached, parsed.metadata)
         return
       }

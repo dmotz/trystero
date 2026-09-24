@@ -395,12 +395,6 @@ export default (
       handlers.stream?.(stream)
     }
   }
-  ;(
-    pc as RTCPeerConnection & {
-      onremovestream: ((e: {stream: MediaStream}) => void) | null
-    }
-  ).onremovestream = e => handlers.stream?.(e.stream)
-
   const offerPromise = initiator
     ? new Promise<Signal | void>(res =>
         appendSignalHandler(signal => {

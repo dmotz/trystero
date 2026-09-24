@@ -188,7 +188,7 @@ void test(
 )
 
 void test(
-  'Trystero: shared peer re-emits cached remote streams in later rooms',
+  'Trystero: shared peer re-emits cached and restored remote streams in later rooms',
   {timeout: 10_000},
   async () => {
     const appId = `shared-media-reuse-${Date.now()}`
@@ -202,6 +202,7 @@ void test(
     const localStream = {id: 'camera-stream', getTracks: () => [localTrack]}
     let firstRooms = null
     let secondRooms = null
+    let thirdRooms = null
 
     const sharedA = managerA.register(appId, 'peer-b', peerA as any, 60_000)
     const sharedB = managerB.register(appId, 'peer-a', peerB as any, 60_000)
@@ -262,11 +263,51 @@ void test(
         metadata: {phase: 'second'}
       })
       assert.equal(peerA.addStreamCalls, 2)
+
+      await Promise.all([secondRooms.roomA.leave(), secondRooms.roomB.leave()])
+      secondRooms = null
+      const remoteStream = peerB.remoteStreams.get('camera-stream')
+      assert.ok(remoteStream)
+      remoteStream.tracksById.clear()
+
+      thirdRooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'media-room-c'
+      )
+
+      const restoredStream = new Promise(resolve => {
+        thirdRooms.roomB.onPeerStream = (stream, peerId, metadata) =>
+          resolve({
+            streamId: stream.id,
+            trackCount: stream.getTracks().length,
+            peerId,
+            metadata
+          })
+      })
+
+      await Promise.all(
+        thirdRooms.roomA.addStream(localStream, {
+          target: 'peer-b',
+          metadata: {phase: 'restored'}
+        })
+      )
+
+      assert.deepEqual(await withTimeout(restoredStream), {
+        streamId: 'camera-stream',
+        trackCount: 1,
+        peerId: 'peer-a',
+        metadata: {phase: 'restored'}
+      })
     } finally {
       await firstRooms?.roomA.leave().catch(() => {})
       await firstRooms?.roomB.leave().catch(() => {})
       await secondRooms?.roomA.leave().catch(() => {})
       await secondRooms?.roomB.leave().catch(() => {})
+      await thirdRooms?.roomA.leave().catch(() => {})
+      await thirdRooms?.roomB.leave().catch(() => {})
       managerA.clear(appId, 'peer-b', {destroyPeer: true})
       managerB.clear(appId, 'peer-a', {destroyPeer: true})
     }
