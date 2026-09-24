@@ -77,6 +77,7 @@ export default (
   }
   let unregisterBeforeUnloadCleanup: () => void = noOp
   let handshakeManager: ReturnType<typeof createHandshakeManager> | null = null
+  let leavePromise: Promise<void> | null = null
 
   const iterate = (
     targets: TargetPeers,
@@ -157,18 +158,29 @@ export default (
     onPeerLeave(id)
   }
 
-  const leave = async (): Promise<void> => {
-    await leaveAction.send('')
-    await new Promise<void>(res => setTimeout(res, 99))
+  const leave = (): Promise<void> =>
+    (leavePromise ??= (async () => {
+      try {
+        await leaveAction.send('')
+      } catch {
+        // A disconnected peer cannot prevent local room cleanup.
+      }
 
-    entries(peerMap).forEach(([id, peer]) => {
-      peer.destroy()
-      clearPeerState(id, mkErr('room left'))
-    })
+      await new Promise<void>(res => setTimeout(res, 99))
 
-    unregisterBeforeUnloadCleanup()
-    onSelfLeave()
-  }
+      try {
+        entries(peerMap).forEach(([id, peer]) => {
+          peer.destroy()
+          clearPeerState(id, mkErr('room left'))
+        })
+      } finally {
+        try {
+          unregisterBeforeUnloadCleanup()
+        } finally {
+          onSelfLeave()
+        }
+      }
+    })())
 
   const pingAction = makeActionInternal<string>(internalNs('ping'))
   const pongAction = makeActionInternal<string>(internalNs('pong'))

@@ -680,11 +680,26 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         didLeaveRoom = true
         onPeerConnect = noOp
 
-        const registration = roomRegistrations[appId]?.[roomId]
+        if (occupiedRooms[appId]) {
+          delete occupiedRooms[appId][roomId]
 
-        if (registration?.roomToken) {
-          advertiseRoomPresenceToAll(appId, registration.roomToken, false)
-          delete roomIdsByToken[appId]?.[registration.roomToken]
+          if (keys(occupiedRooms[appId]).length === 0) {
+            delete occupiedRooms[appId]
+          }
+        }
+
+        const registration = roomRegistrations[appId]?.[roomId]
+        const roomToken = registration?.roomToken
+
+        if (roomToken) {
+          values(sharedPeers.getMap(appId)).forEach(shared => {
+            try {
+              advertiseRoomPresence(shared, roomToken, false)
+            } catch {
+              // Departure announcements are best effort during cleanup.
+            }
+          })
+          delete roomIdsByToken[appId]?.[roomToken]
 
           if (roomIdsByToken[appId] && !keys(roomIdsByToken[appId]).length) {
             delete roomIdsByToken[appId]
@@ -720,14 +735,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           state.answerReplay = null
           updateStatus(state)
         })
-
-        if (occupiedRooms[appId]) {
-          delete occupiedRooms[appId][roomId]
-
-          if (keys(occupiedRooms[appId]).length === 0) {
-            delete occupiedRooms[appId]
-          }
-        }
 
         announceTimeouts.forEach(resetTimer)
         passiveActivationTimeout = resetTimer(passiveActivationTimeout)
