@@ -3,7 +3,8 @@ import {attachPageLogging, emojis, shortBrowsers} from '../logger'
 import {strategyConfigs} from '../strategy-configs'
 
 const testPort = process.env.TRYSTERO_TEST_PORT ?? '8080'
-const testUrl = `https://localhost:${testPort}/test`
+// Firefox may gather no host ICE candidates when the page uses localhost.
+const testUrl = `https://127.0.0.1:${testPort}/test`
 const proxy = process.env.PROXY
 const useTestOnlyMdnsFallback =
   process.env.TRYSTERO_TEST_FORCE_LOOPBACK_MDNS !== '0'
@@ -57,7 +58,7 @@ export const withStrategyBrowserPair = (
       const context2 = await browser.newContext({
         ignoreHTTPSErrors: true,
         ...(proxy
-          ? {proxy: {server: 'http://' + proxy, bypass: 'localhost'}}
+          ? {proxy: {server: 'http://' + proxy, bypass: 'localhost,127.0.0.1'}}
           : {})
       })
       const page2 = await context2.newPage()

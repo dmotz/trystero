@@ -13,7 +13,7 @@ const testPort =
     ? configuredPort
     : Math.floor(Math.random() * (maxPort - minPort + 1)) + minPort
 
-const testUrl = `https://localhost:${testPort}/test`
+const testUrl = `https://127.0.0.1:${testPort}/test`
 const defaultCompletionLogPath = join(
   tmpdir(),
   `trystero-test-completions-${process.cwd().replaceAll(/\W/g, '_')}.jsonl`
