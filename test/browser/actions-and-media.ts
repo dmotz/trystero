@@ -9,7 +9,6 @@ export const registerActionsAndMediaTests = (strategy, overrides) =>
     'actions, requests, binary payloads, and media',
     async ctx => {
       const {
-        browserName,
         initialConnectionResults,
         isRelayStrategy,
         joinPairWithRetry,
@@ -21,9 +20,7 @@ export const registerActionsAndMediaTests = (strategy, overrides) =>
         selfId2
       } = ctx
 
-      if (browserName !== 'webkit') {
-        await warmMediaDevices({page, page2})
-      }
+      await warmMediaDevices({page, page2})
 
       const roomRuns = Array(concurrentRooms(strategy))
         .fill(undefined)
@@ -57,9 +54,7 @@ export const registerActionsAndMediaTests = (strategy, overrides) =>
 
           expect(isRoomIdentical).toBe(true)
 
-          if (browserName !== 'webkit') {
-            await verifyMediaMetadata({page, page2, roomNs, peer1Id, peer2Id})
-          }
+          await verifyMediaMetadata({page, page2, roomNs, peer1Id, peer2Id})
 
           expect(await page.evaluate(getPeerId, roomNs)).toEqual(peer2Id)
           expect(await page2.evaluate(getPeerId, roomNs)).toEqual(peer1Id)
