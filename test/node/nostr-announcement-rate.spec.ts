@@ -177,6 +177,160 @@ const joinTestRoom = (url: string) =>
     'room'
   )
 
+void test('Nostr late EOSE replays discovery once without blocking startup', async () => {
+  const previous = globalThis.WebSocket
+  globalThis.WebSocket = MockWebSocket
+  const room = joinTestRoom(`wss://late-eose-${Date.now()}.test`)
+  try {
+    const socket = MockWebSocket.sockets.at(-1)
+    await waitFor(() => announcementCount(socket) > 0)
+    const req = socket.sent.find(msg => msg[0] === 'REQ')
+    await wait(1100)
+    const before = announcementCount(socket)
+    socket.onmessage({data: JSON.stringify(['EOSE', req[1]])})
+    await waitFor(() => announcementCount(socket) === before + 1, 300)
+    socket.onmessage({data: JSON.stringify(['EOSE', req[1]])})
+    await wait(100)
+    assert.equal(announcementCount(socket), before + 1)
+  } finally {
+    await room.leave()
+    globalThis.WebSocket = previous
+  }
+})
+
+void test(
+  'Nostr same-second discovery retries have distinct event IDs',
+  {timeout: 3000},
+  async () => {
+    const previousSocket = globalThis.WebSocket
+    const previousNow = Date.now
+    const frozen = Date.now()
+    globalThis.WebSocket = MockWebSocket
+    Date.now = () => frozen
+    const room = joinTestRoom(`wss://unique-announcement-${frozen}.test`)
+    try {
+      const socket = MockWebSocket.sockets.at(-1)
+      await waitFor(() => announcementCount(socket) >= 2)
+      const events = socket.sent
+        .filter(msg => msg[0] === 'EVENT')
+        .map(msg => msg[1])
+      assert.equal(events[0].created_at, events[1].created_at)
+      assert.notEqual(events[0].id, events[1].id)
+    } finally {
+      Date.now = previousNow
+      await room.leave()
+      globalThis.WebSocket = previousSocket
+    }
+  }
+)
+
+void test(
+  'Nostr temporary CLOSED restores subscriptions without retiring the socket',
+  {timeout: 8000},
+  async () => {
+    const previous = globalThis.WebSocket
+    globalThis.WebSocket = MockWebSocket
+    const room = joinTestRoom(`wss://closed-retry-${Date.now()}.test`)
+    try {
+      const socket = MockWebSocket.sockets.at(-1)
+      await waitFor(() => announcementCount(socket) > 0)
+      const req = socket.sent.find(msg => msg[0] === 'REQ')
+      socket.onmessage({
+        data: JSON.stringify([
+          'CLOSED',
+          req[1],
+          'error: subscription interrupted'
+        ])
+      })
+      assert.equal(socket.readyState, 1)
+      await waitFor(
+        () => socket.sent.filter(msg => msg[0] === 'REQ').length === 2,
+        6000
+      )
+      await waitFor(() => socket.sent.at(-1)[0] === 'EVENT')
+    } finally {
+      await room.leave()
+      globalThis.WebSocket = previous
+    }
+  }
+)
+
+for (const recovered of [false, true])
+  void test(
+    `Nostr pending subscription retry respects ${recovered ? 'successful reconnect' : 'a later cooldown'}`,
+    {timeout: 8000},
+    async () => {
+      const previous = globalThis.WebSocket
+      globalThis.WebSocket = MockWebSocket
+      const room = joinTestRoom(
+        `wss://pending-retry-${recovered}-${Date.now()}.test`
+      )
+      try {
+        const socket = MockWebSocket.sockets.at(-1)
+        await waitFor(() => announcementCount(socket) > 0)
+        const req = socket.sent.find(msg => msg[0] === 'REQ')
+        const deliver = frame => socket.onmessage({data: JSON.stringify(frame)})
+        deliver(['CLOSED', req[1], 'error: retry later'])
+        if (recovered) {
+          socket.onopen()
+          deliver(['EOSE', req[1]])
+        } else {
+          deliver(['CLOSED', req[1], 'rate-limited: slow down'])
+        }
+        const before = socket.sent.filter(msg => msg[0] === 'REQ').length
+        await wait(5600)
+        assert.equal(socket.sent.filter(msg => msg[0] === 'REQ').length, before)
+      } finally {
+        await room.leave()
+        globalThis.WebSocket = previous
+      }
+    }
+  )
+
+void test('Nostr temporary event errors do not retire the relay or cancel discovery', async () => {
+  const previous = globalThis.WebSocket
+  globalThis.WebSocket = MockWebSocket
+  const room = joinTestRoom(`wss://temporary-error-${Date.now()}.test`)
+  try {
+    const socket = MockWebSocket.sockets.at(-1)
+    await waitFor(() => announcementCount(socket) > 0)
+    const event = socket.sent.find(msg => msg[0] === 'EVENT')[1]
+    socket.onmessage({
+      data: JSON.stringify([
+        'OK',
+        event.id,
+        false,
+        'error: database unavailable'
+      ])
+    })
+    assert.equal(socket.readyState, 1)
+    await waitFor(() => announcementCount(socket) > 1)
+  } finally {
+    await room.leave()
+    globalThis.WebSocket = previous
+  }
+})
+
+void test('Nostr successful late ACKs cannot cancel an active rate-limit cooldown', async () => {
+  const previous = globalThis.WebSocket
+  globalThis.WebSocket = MockWebSocket
+  const room = joinTestRoom(`wss://cooldown-ack-${Date.now()}.test`)
+  try {
+    const socket = MockWebSocket.sockets.at(-1)
+    await waitFor(() => announcementCount(socket) > 0)
+    const event = socket.sent.find(msg => msg[0] === 'EVENT')[1]
+    socket.onmessage({
+      data: JSON.stringify(['OK', event.id, false, 'rate-limited: slow down'])
+    })
+    socket.onmessage({data: JSON.stringify(['OK', event.id, true, ''])})
+    await wait(850)
+    assert.equal(announcementCount(socket), 1)
+  } finally {
+    await room.leave()
+    globalThis.WebSocket = previous
+  }
+})
+
 void test(
   'Trystero: nostr writes its batched subscription before its first announcement',
   {timeout: 5_000},
@@ -249,7 +403,7 @@ void test(
 
 void test(
   'Trystero: nostr keeps the fast announcement warmup but slows steady state',
-  {timeout: 12_000},
+  {timeout: 20_000},
   async () => {
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
@@ -271,8 +425,14 @@ void test(
       await wait(5_500)
       assert.equal(
         announcementCount(socket),
-        4,
-        'steady announcements should no longer fire every 5.333 seconds'
+        5,
+        'one later recovery pulse should cover slow subscriptions'
+      )
+      await wait(5_500)
+      assert.equal(
+        announcementCount(socket),
+        5,
+        'recovery must not resume a continuous fast heartbeat'
       )
     } finally {
       await room.leave().catch(() => {})

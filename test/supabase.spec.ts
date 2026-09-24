@@ -1,5 +1,5 @@
-// import runTests from './tests'
+import runTests from './tests'
 
-// runTests('supabase')
+runTests('supabase')
 
-console.log('skipping supabase playwright test')
+// console.log('skipping supabase playwright test')

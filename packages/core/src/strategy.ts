@@ -263,6 +263,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
       state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
       state.answeringPeer = null
+      state.answerReplay = null
 
       const {proxy, isNew} = sharedPeers.bind(
         roomId,
@@ -352,6 +353,21 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     }
 
+    let disconnectReannounceQueued = false
+    const reannounceAfterDisconnect = (): void => {
+      if (isPassive || !reannounceOnDisconnect || disconnectReannounceQueued) {
+        return
+      }
+      // Several peers can close together. Start only one warmup per room.
+      disconnectReannounceQueued = true
+      queueMicrotask(() => {
+        disconnectReannounceQueued = false
+        if (!didLeaveRoom) {
+          ctx.requeueAnnounce?.()
+        }
+      })
+    }
+
     const disconnectPeer = (peer: PeerHandle, peerId: string): void => {
       if (didLeaveRoom) {
         return
@@ -364,9 +380,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         clearConnectedPeer(state, peerId, 'close-event')
         checkDeactivate()
 
-        if (!isPassive && reannounceOnDisconnect) {
-          ctx.requeueAnnounce?.()
-        }
+        reannounceAfterDisconnect()
       }
     }
 
@@ -462,7 +476,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       pool.warmup()
     }
 
-    ctx.announceIntervals = initPromises.map(() => announceIntervalMs)
+    // Only explicit numeric relay pacing overrides the signaling retry default.
     const announceScheduleIntervals = initPromises.map(() => announceIntervalMs)
     const announceAttemptCounts = initPromises.map(() => 0)
     const announceErrorStreaks = initPromises.map(() => 0)
@@ -548,7 +562,13 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceAttemptCounts[i] = announceAttempt + 1
         const currentInterval =
           announceScheduleIntervals[i] ?? announceIntervalMs
-        const warmupDelay = announceWarmupIntervalsMs[announceAttempt]
+        // Topic discovery gets one later recovery pulse. Numeric intervals
+        // (e.g. tracker-requested pacing) must retain their own cadence.
+        const warmupDelay =
+          announceWarmupIntervalsMs[announceAttempt] ??
+          (announceAttempt === 3 && typeof announceResult === 'object'
+            ? announceIntervalMs
+            : undefined)
         const nextAnnounceDelayMs =
           typeof warmupDelay === 'number'
             ? Math.min(currentInterval, warmupDelay)
@@ -653,6 +673,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           updateStatus(state)
           checkDeactivate()
         }
+        // Shared-peer close handlers reach the room callback, not disconnectPeer.
+        reannounceAfterDisconnect()
       },
       () => {
         didLeaveRoom = true
@@ -695,6 +717,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           resetOfferState(state, pool)
           state.connectedPeer = null
           state.answeringPeer = null
+          state.answerReplay = null
           updateStatus(state)
         })
 

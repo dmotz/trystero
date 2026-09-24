@@ -171,11 +171,6 @@ export const makeSocket = (
 
       const period = (socketRetryPeriods[url] ??= defaultRetryMs)
 
-      if (period >= maxRetryMs) {
-        client.isClosed = true
-        return
-      }
-
       retryTimer = setTimeout(init, Math.random() * period)
       socketRetryPeriods[url] = min(period * 2, maxRetryMs)
     }

@@ -34,11 +34,11 @@ const kindCache: Record<string, number> = {}
 const maxTopicsPerSubscription = 250
 
 // Newcomers announce immediately and wake subscribed incumbents, so the fast
-// cadence is only needed during startup. Keep a low-rate heartbeat for relay
-// reconnect and missed-subscription recovery.
+// cadence is only needed during startup. Reconnects restore discovery directly;
+// keep a low-rate heartbeat as a fallback for missed discovery.
 const steadyAnnounceIntervalMs = 60_000
 const maxRelayBackoffMs = 15 * 60_000
-const relayAckTimeoutMs = 5_333
+const subscriptionRetryMs = 5_333
 
 type RelayBackoffState = {
   delayMs: number
@@ -46,11 +46,8 @@ type RelayBackoffState = {
 }
 
 const relayBackoffs = new WeakMap<SocketClient, RelayBackoffState>()
+const announcementMessages = relayManager.scoped<string>()
 const retiredRelays = new WeakSet<SocketClient>()
-const pendingAnnouncementAcks = new WeakMap<
-  SocketClient,
-  {eventIds: Set<string>; timer: ReturnType<typeof setTimeout>}
->()
 
 const backoffRelay = (client: SocketClient): number => {
   const previous = relayBackoffs.get(client)
@@ -90,44 +87,9 @@ const retireRelay = (client: SocketClient): boolean => {
     return false
   }
 
-  const pending = pendingAnnouncementAcks.get(client)
-
-  if (pending) {
-    clearTimeout(pending.timer)
-    pendingAnnouncementAcks.delete(client)
-  }
-
   retiredRelays.add(client)
   relayBackoffs.delete(client)
   client.close?.()
-  return true
-}
-
-const trackAnnouncementAck = (client: SocketClient, eventId: string): void => {
-  const pending = pendingAnnouncementAcks.get(client)
-
-  if (pending) {
-    clearTimeout(pending.timer)
-    pending.eventIds.add(eventId)
-  }
-
-  const eventIds = pending?.eventIds ?? new Set([eventId])
-  const timer = setTimeout(() => {
-    pendingAnnouncementAcks.delete(client)
-  }, relayAckTimeoutMs)
-
-  pendingAnnouncementAcks.set(client, {eventIds, timer})
-}
-
-const acknowledgeEvent = (client: SocketClient, eventId: string): boolean => {
-  const pending = pendingAnnouncementAcks.get(client)
-
-  if (!pending?.eventIds.has(eventId)) {
-    return false
-  }
-
-  clearTimeout(pending.timer)
-  pendingAnnouncementAcks.delete(client)
   return true
 }
 
@@ -193,6 +155,10 @@ type BatchState = {
   topics: Map<string, TopicHandler>
   updateTimer: ReturnType<typeof setTimeout> | null
   flushWaiters: Set<() => void>
+  retryTimer: ReturnType<typeof setTimeout> | null
+  retryMs: number
+  pendingEose: Set<string>
+  requestedAt: number
 }
 
 const batchers: Record<string, BatchState> = {}
@@ -211,7 +177,11 @@ const batchAdd = (
     subIds: [],
     topics: new Map(),
     updateTimer: null,
-    flushWaiters: new Set()
+    flushWaiters: new Set(),
+    retryTimer: null,
+    retryMs: subscriptionRetryMs,
+    pendingEose: new Set(),
+    requestedAt: 0
   })
 
   batcher.topics.set(topic, handler)
@@ -226,8 +196,12 @@ const batchRemove = (client: SocketClient, topic: string): void => {
   }
 
   batcher.topics.delete(topic)
+  delete announcementMessages.forRelay(client)[topic]
 
   if (batcher.topics.size === 0) {
+    if (batcher.retryTimer !== null) {
+      clearTimeout(batcher.retryTimer)
+    }
     if (batcher.updateTimer !== null) {
       clearTimeout(batcher.updateTimer)
       batcher.updateTimer = null
@@ -294,8 +268,11 @@ const flushBatch = (client: SocketClient): void => {
     }
   }
 
+  batcher.pendingEose.clear()
+  batcher.requestedAt = Date.now()
   chunks.forEach((chunk, i) => {
     const subId = (batcher.subIds[i] ??= genId(64))
+    batcher.pendingEose.add(subId)
 
     client.send(
       toJson([
@@ -314,9 +291,89 @@ const flushBatch = (client: SocketClient): void => {
 const resubscribeOnReconnect = (client: SocketClient): void => {
   const batcher = batchers[client.url]
 
-  if (batcher && batcher.topics.size > 0) {
+  if (batcher && batcher.topics.size > 0 && !client.isClosed) {
+    if (getRelayBackoffMs(client) > 0) {
+      retrySubscription(client, true)
+      return
+    }
+    if (batcher.retryTimer !== null) {
+      clearTimeout(batcher.retryTimer)
+      batcher.retryTimer = null
+    }
     flushBatch(client)
+    replayAnnouncements(client)
   }
+}
+
+const replayAnnouncements = (client: SocketClient): void => {
+  Object.entries(announcementMessages.forRelay(client)).forEach(
+    ([topic, payload]) => {
+      void publishMessage(client, topic, payload, true)
+    }
+  )
+}
+
+const publishMessage = async (
+  client: SocketClient,
+  topic: string,
+  payload: string,
+  isAnnouncement: boolean
+) => {
+  if (retiredRelays.has(client) || client.isClosed) {
+    return isAnnouncement ? stopAnnouncing : undefined
+  }
+  const remaining = getRelayBackoffMs(client)
+  if (remaining > 0 || client.socket.readyState !== 1) {
+    return isAnnouncement
+      ? nextAnnounce(Math.max(steadyAnnounceIntervalMs, remaining))
+      : undefined
+  }
+  // Relays deduplicate IDs, and created_at only has second precision. An
+  // intentional discovery retry must remain distinct from the previous send.
+  const event = await createEvent(
+    topic,
+    isAnnouncement
+      ? toJson({...fromJson<Record<string, unknown>>(payload), nonce: genId(8)})
+      : payload
+  )
+  if (isAnnouncement && !batchers[client.url]?.topics.has(topic)) {
+    return nextAnnounce(steadyAnnounceIntervalMs)
+  }
+  // Feedback or disconnection can arrive while another event is being signed.
+  if (
+    getRelayBackoffMs(client) > 0 ||
+    client.isClosed ||
+    client.socket.readyState !== 1
+  ) {
+    return isAnnouncement ? nextAnnounce(steadyAnnounceIntervalMs) : undefined
+  }
+  client.send(event)
+  if (isAnnouncement) {
+    return nextAnnounce(steadyAnnounceIntervalMs)
+  }
+  return undefined
+}
+
+const retrySubscription = (
+  client: SocketClient,
+  rateLimited: boolean
+): void => {
+  const batcher = batchers[client.url]
+  if (!batcher || (batcher.retryTimer !== null && !rateLimited)) {
+    return
+  }
+  if (batcher.retryTimer !== null) {
+    clearTimeout(batcher.retryTimer)
+  }
+  const delay = rateLimited ? getRelayBackoffMs(client) : batcher.retryMs
+  batcher.retryMs = Math.min(batcher.retryMs * 2, steadyAnnounceIntervalMs)
+  batcher.retryTimer = setTimeout(
+    () => {
+      batcher.retryTimer = null
+      resubscribeOnReconnect(client)
+    },
+    Math.max(delay, subscriptionRetryMs)
+  )
 }
 
 export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
@@ -344,24 +401,52 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
                   : relayMsg
               const didRejectEvent = msgType === 'OK' && payload === false
               const isRateLimited =
-                didRejectEvent && rejectionReason?.startsWith('rate-limited:')
+                (didRejectEvent || msgType === 'CLOSED') &&
+                rejectionReason?.startsWith('rate-limited:')
               const isDuplicate =
                 didRejectEvent && rejectionReason?.startsWith('duplicate:')
               const isTerminalRejection =
-                msgType === 'CLOSED' ||
-                (didRejectEvent && !isRateLimited && !isDuplicate)
+                rejectionReason &&
+                /^(blocked|restricted|auth-required|pow):/.test(rejectionReason)
 
-              const didAcknowledgeAnnouncement =
-                msgType === 'OK' && acknowledgeEvent(client, subId)
+              if (
+                msgType === 'OK' &&
+                payload === true &&
+                getRelayBackoffMs(client) === 0
+              ) {
+                relayBackoffs.delete(client)
+              }
 
-              if (isTerminalRejection && !retireRelay(client)) {
+              if (
+                didRejectEvent &&
+                isTerminalRejection &&
+                !retireRelay(client)
+              ) {
                 return
               }
 
               if (isRateLimited) {
                 backoffRelay(client)
-              } else if (didAcknowledgeAnnouncement) {
-                relayBackoffs.delete(client)
+              } else if (msgType === 'EOSE') {
+                const batcher = batchers[client.url]
+                if (
+                  batcher?.pendingEose.delete(subId) &&
+                  batcher.pendingEose.size === 0
+                ) {
+                  batcher.retryMs = subscriptionRetryMs
+                  if (batcher.retryTimer !== null) {
+                    clearTimeout(batcher.retryTimer)
+                    batcher.retryTimer = null
+                  }
+                  // Do not wait for EOSE on the fast path. If installation was
+                  // slow, announce once when all batched subscriptions are ready.
+                  if (Date.now() - batcher.requestedAt >= 1_000) {
+                    replayAnnouncements(client)
+                  }
+                }
+              }
+              if (msgType === 'CLOSED' && !isTerminalRejection) {
+                retrySubscription(client, Boolean(isRateLimited))
               }
 
               if (
@@ -426,40 +511,16 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
       : cleanup
   },
 
-  publishTopic: async (client, topic, msg, context) => {
-    if (retiredRelays.has(client) || client.isClosed) {
-      return context.kind === 'announce' ? stopAnnouncing : undefined
+  publishTopic: (client, topic, msg, {kind}) => {
+    const payload = typeof msg === 'string' ? msg : toJson(msg)
+    if (kind === 'announce') {
+      announcementMessages.forRelay(client)[topic] = payload
     }
+    return publishMessage(client, topic, payload, kind === 'announce')
+  },
 
-    if (context.kind === 'announce') {
-      const remainingBackoffMs = getRelayBackoffMs(client)
-
-      if (remainingBackoffMs > 0) {
-        return nextAnnounce(
-          Math.max(steadyAnnounceIntervalMs, remainingBackoffMs)
-        )
-      }
-    }
-
-    const event = await createEvent(
-      topic,
-      typeof msg === 'string' ? msg : toJson(msg)
-    )
-    const didSend = client.socket.readyState === 1
-    client.send(event)
-
-    if (context.kind !== 'announce') {
-      return
-    }
-
-    if (!didSend) {
-      return nextAnnounce(backoffRelay(client))
-    }
-
-    const eventId = fromJson<[string, {id: string}]>(event)[1].id
-    trackAnnouncementAck(client, eventId)
-
-    return nextAnnounce(steadyAnnounceIntervalMs)
+  unpublishTopic: (client, topic) => {
+    delete announcementMessages.forRelay(client)[topic]
   }
 })
 
