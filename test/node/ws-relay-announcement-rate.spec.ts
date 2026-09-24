@@ -44,7 +44,7 @@ const announcementCount = socket =>
 
 void test(
   'Trystero: ws-relay slows steady announcements and restores state on reconnect',
-  {timeout: 12_000},
+  {timeout: 20_000},
   async () => {
     const originalWebSocket = globalThis.WebSocket
     const originalRandom = Math.random
@@ -68,7 +68,9 @@ void test(
       assert.equal(announcementCount(firstSocket), 4)
 
       await wait(5_500)
-      assert.equal(announcementCount(firstSocket), 4)
+      assert.equal(announcementCount(firstSocket), 5)
+      await wait(5_500)
+      assert.equal(announcementCount(firstSocket), 5)
 
       firstSocket.close()
       await waitFor(() => MockWebSocket.sockets.length === 2)

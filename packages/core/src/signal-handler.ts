@@ -95,6 +95,7 @@ const makeState = (): PeerState => ({
   answeringExpiryTimer: null,
   answeringPeer: null,
   answerSent: false,
+  answerReplay: null,
   connectionErrorReported: false,
   pendingCandidates: {}
 })
@@ -162,6 +163,7 @@ const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
     state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
     state.answeringPeer = null
     state.answerSent = false
+    state.answerReplay = null
     updateStatus(state)
   }
 }
@@ -400,7 +402,8 @@ const handleAnnouncement = async (
   relayId: number,
   peerId: string,
   shared: SharedPeerState | undefined,
-  signalPeer: (peerTopic: string, signal: string) => void
+  signalPeer: (peerTopic: string, signal: string) => void,
+  retryAttempt = 0
 ): Promise<void> => {
   if (shared) {
     ctx.attachSharedPeerToRoom(peerId, shared)
@@ -448,8 +451,35 @@ const handleAnnouncement = async (
   updateStatus(state)
 
   state.offerRelayTimers[relayId] = setTimeout(
-    () => prunePendingOffer(ctx, peerId, relayId),
-    (ctx.announceIntervals[relayId] ?? ctx.announceIntervalMs) * 0.9
+    () => {
+      // Discovery can be quiet for a minute. Retry this exchange directly,
+      // but never keep a missing peer (or a departed room) busy indefinitely.
+      if (
+        retryAttempt >= 2 ||
+        ctx.isLeaving() ||
+        state.connectedPeer ||
+        state.answeringPeer ||
+        state.offerAnswered ||
+        state.offerPeer !== offerInfo.peer ||
+        state.offerId !== offerInfo.offerId
+      ) {
+        prunePendingOffer(ctx, peerId, relayId)
+        return
+      }
+
+      state.offerRelays[relayId] = offerRelayPlaceholder
+      void handleAnnouncement(
+        ctx,
+        relayId,
+        peerId,
+        undefined,
+        signalPeer,
+        retryAttempt + 1
+      )
+    },
+    retryAttempt === 0 && ctx.announceIntervals[relayId] === undefined
+      ? 2_000
+      : (ctx.announceIntervals[relayId] ?? ctx.announceIntervalMs) * 0.9
   )
 
   let didSendOffer = false
@@ -517,6 +547,30 @@ const handleOffer = async (
   const state = getState(ctx.peerStates, peerId)
 
   if (state.answeringPeer || state.offerAnswered) {
+    const replay = state.answerReplay
+
+    if (
+      state.answeringPeer &&
+      !state.answeringPeer.isDead &&
+      replay &&
+      replay.offer === offer &&
+      replay.offerId === offerId &&
+      replay.messages.length > 0 &&
+      Date.now() - replay.lastSentAt >= 1_000
+    ) {
+      replay.lastSentAt = Date.now()
+
+      const peerTopic = await sha1(topicPath(ctx.rootTopicPlaintext, peerId))
+
+      if (
+        !ctx.isLeaving() &&
+        state.answerReplay === replay &&
+        !state.connectedPeer
+      ) {
+        replay.messages.forEach(message => signalPeer(peerTopic, message))
+      }
+    }
+
     return
   }
 
@@ -536,6 +590,7 @@ const handleOffer = async (
   const answerPeer = ctx.initPeer(false, ctx.config)
   state.answeringPeer = answerPeer
   state.answerSent = false
+  state.answerReplay = {offer, offerId, messages: [], lastSentAt: Date.now()}
   state.connectionErrorReported = false
   scheduleAnsweringExpiry(ctx, state, peerId, answerPeer)
   updateStatus(state)
@@ -624,6 +679,12 @@ const handleOffer = async (
 
           if (ctx.isPassive) {
             payloadToSend['passive'] = true
+          }
+
+          state.answerReplay?.messages.push(toJson(payloadToSend))
+
+          if (state.answerReplay) {
+            state.answerReplay.lastSentAt = Date.now()
           }
 
           return payloadToSend

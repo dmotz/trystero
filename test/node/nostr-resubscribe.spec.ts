@@ -208,6 +208,14 @@ void test(
 
       const reqOnSecond = second.sent.filter(isReqFrame)
       assert.ok(
+        second.sent.some(frame => frame.startsWith('["EVENT"')),
+        'restoring subscriptions must also replay room discovery'
+      )
+      assert.ok(
+        second.sent.findIndex(isReqFrame) <
+          second.sent.findIndex(frame => frame.startsWith('["EVENT"'))
+      )
+      assert.ok(
         reqOnSecond.length >= 1,
         `BUG: expected at least one batched REQ frame to be re-sent on reconnect, but got ${reqOnSecond.length}`
       )

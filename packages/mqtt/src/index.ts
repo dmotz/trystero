@@ -20,6 +20,7 @@ const msgHandlers = relayManager.scoped<(topic: string, data: string) => void>()
 const subscriptionTokens = relayManager.scoped<symbol>()
 const subscriptionRefs = relayManager.scoped<number>()
 const announcementMessages = relayManager.scoped<string>()
+const subscriptionReady = relayManager.scoped<Promise<unknown>>()
 export type MqttRoomConfig = JoinRoomConfig
 
 export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
@@ -61,7 +62,7 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
           )
     }),
 
-  subscribeTopic: async (client, topic, onMessage) => {
+  subscribeTopic: (client, topic, onMessage, context) => {
     const handlers = msgHandlers.forRelay(client)
     const tokens = subscriptionTokens.forRelay(client)
     const refs = subscriptionRefs.forRelay(client)
@@ -73,7 +74,24 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
     refs[topic] = (refs[topic] ?? 0) + 1
 
     if (refs[topic] === 1) {
-      await client.subscribeAsync(topic)
+      subscriptionReady.forRelay(client)[topic] = client.subscribeAsync(topic)
+      void subscriptionReady.forRelay(client)[topic]?.catch(console.error)
+    }
+
+    if (context.kind === 'root') {
+      // Queue both SUBSCRIBEs before the initial publish, without two network
+      // round trips. Replay once they're confirmed if discovery raced setup.
+      void Promise.all([
+        subscriptionReady.forRelay(client)[context.selfTopic],
+        subscriptionReady.forRelay(client)[topic]
+      ])
+        .then(() => {
+          const payload = announcementMessages.forRelay(client)[topic]
+          if (tokens[topic] === token && client.connected && payload) {
+            client.publish(topic, payload)
+          }
+        })
+        .catch(console.error)
     }
 
     return () => {
@@ -83,6 +101,7 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
         client.unsubscribe(topic)
         delete refs[topic]
         delete announcementMessages.forRelay(client)[topic]
+        delete subscriptionReady.forRelay(client)[topic]
       }
 
       if (handlers[topic] === topicHandler) {

@@ -1,5 +1,5 @@
-// import runTests from './tests'
+import runTests from './tests'
 
-// runTests('ipfs')
+runTests('ipfs')
 
-console.log('skipping ipfs playwright test')
+// console.log('skipping ipfs playwright test')

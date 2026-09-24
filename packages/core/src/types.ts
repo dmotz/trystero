@@ -463,6 +463,12 @@ export type PeerState = {
   answeringExpiryTimer: ReturnType<typeof setTimeout> | null
   answeringPeer: PeerHandle | null
   answerSent: boolean
+  answerReplay: {
+    offer: string
+    offerId: string | undefined
+    messages: string[]
+    lastSentAt: number
+  } | null
   connectionErrorReported: boolean
   pendingCandidates: Record<string, Signal[]>
 }

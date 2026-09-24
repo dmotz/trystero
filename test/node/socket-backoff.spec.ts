@@ -6,7 +6,7 @@ import {makeSocket} from '../../packages/core/src/utils.ts'
 const tick = () => Promise.resolve()
 
 void test(
-  'Trystero: socket reconnects stop when backoff reaches its ceiling',
+  'Trystero: temporary outages retain capped retries until explicitly closed',
   {timeout: 5_000},
   async () => {
     const realRandom = Math.random
@@ -47,9 +47,9 @@ void test(
       }
       globalThis.WebSocket = FailingSocket
 
-      makeSocket(`ws://test-backoff-${Date.now()}`, () => {})
+      const client = makeSocket(`ws://test-backoff-${Date.now()}`, () => {})
 
-      for (let i = 0; i < 5; i += 1) {
+      for (let i = 0; i < 8; i += 1) {
         await tick()
         assert.ok(
           pendingInit,
@@ -62,12 +62,15 @@ void test(
       }
 
       await tick()
-      assert.equal(
-        pendingInit,
-        null,
-        'a permanently failing relay should not reconnect forever'
+      assert.ok(pendingInit, 'a recovered endpoint must remain reachable')
+      assert.equal(client.isClosed, false)
+      assert.deepEqual(
+        scheduledDelays.slice(0, 5),
+        [3_333, 6_666, 13_332, 26_664, 53_328]
       )
-      assert.deepEqual(scheduledDelays, [3_333, 6_666, 13_332, 26_664, 53_328])
+      assert.ok(scheduledDelays.slice(5).every(delay => delay === 60_000))
+      client.close()
+      assert.equal(client.isClosed, true)
     } finally {
       allowClose = false
       Math.random = realRandom
