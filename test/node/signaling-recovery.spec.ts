@@ -1,7 +1,10 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {createSignalHandler} from '../../packages/core/src/signal-handler.ts'
+import {
+  createSignalHandler,
+  resetOfferState
+} from '../../packages/core/src/signal-handler.ts'
 import {selfId} from '../../packages/core/src/utils.ts'
 
 const settle = async () => {
@@ -45,10 +48,7 @@ const fixture = t => {
     isPassive: false,
     isActive: true,
     sharedPeers: {get: () => undefined},
-    offerPool: {
-      checkout: async () => [{peer: peer(), offer: 'offer'}],
-      recycle() {}
-    },
+    offerManager: {checkout: async () => [{peer: peer(), offer: 'offer'}]},
     initPeer: peer,
     checkDeactivate() {},
     connectPeer() {},
@@ -97,6 +97,24 @@ void test('offer retries stop after an answer or room leave', async t => {
   t.mock.timers.tick(5000)
   await settle()
   assert.equal(f.messages.length, 2)
+})
+
+void test('a pending outgoing offer is discarded after its state resets', async t => {
+  const f = fixture(t)
+  const peerId = selfId + 'z'
+  const outgoingPeer = f.ctx.initPeer()
+  let resolveOffer
+  f.ctx.offerManager.checkout = () =>
+    new Promise(resolve => (resolveOffer = resolve))
+
+  const pendingAnnouncement = f.receive({peerId})
+  await settle()
+  resetOfferState(f.ctx.peerStates[peerId])
+  resolveOffer([{peer: outgoingPeer, offer: 'outgoing-offer'}])
+  await pendingAnnouncement
+
+  assert.equal(outgoingPeer.isDead, true)
+  assert.equal(f.ctx.peerStates[peerId].offerPeer, null)
 })
 
 void test('first topic retry is prompt but later retries retain their spacing', async t => {

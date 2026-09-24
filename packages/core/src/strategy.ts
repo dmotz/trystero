@@ -1,5 +1,5 @@
 import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
-import {OfferPool, offerTtl} from './offer-pool'
+import {OfferManager} from './offer-manager'
 import {createPasswordHandshake} from './handshake'
 import initPeer from './peer'
 import room from './room'
@@ -178,7 +178,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
   let didInit = false
   let initPromises: Promise<TRelay>[] = []
-  let offerPool: OfferPool | null = null
   let cleanupWatchOnline: () => void = noOp
 
   return (config: TConfig, roomId: string, callbacks?: JoinRoomCallbacks) => {
@@ -238,15 +237,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const sharedPeerMap = sharedPeers.getMap(appId)
     const makeOffer = (): PeerHandle => initPeer(true, config)
     let reannounceOnDisconnect = false
-
-    offerPool ||= new OfferPool(makeOffer)
-
-    const pool = offerPool
+    const offerManager = new OfferManager(makeOffer)
 
     const encryptOffer = async (peer: PeerHandle): Promise<string> => {
-      const plainOffer = await peer.getOffer(
-        Date.now() - peer.created > offerTtl
-      )
+      const plainOffer = await peer.getOffer()
 
       if (!plainOffer || plainOffer.type !== 'offer') {
         throw mkErr('failed to get offer for peer')
@@ -290,7 +284,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         onPeerConnect(proxy, peerId)
       }
 
-      resetOfferState(state, pool)
+      resetOfferState(state)
     }
 
     const connectPeer = (
@@ -442,7 +436,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       isActive: !isPassive,
       onJoinError,
       sharedPeers,
-      offerPool: pool,
+      offerManager,
       encryptOffer,
       initPeer,
       connectPeer,
@@ -472,10 +466,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         : watchOnline()
     }
 
-    if (!isPassive && !pool.isActive) {
-      pool.warmup()
-    }
-
     // Only explicit numeric relay pacing overrides the signaling retry default.
     const announceScheduleIntervals = initPromises.map(() => announceIntervalMs)
     const announceAttemptCounts = initPromises.map(() => 0)
@@ -489,7 +479,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         await rootTopicP,
         await selfTopicP,
         handleMessage(i),
-        n => pool.getOffers(n, encryptOffer),
+        n => offerManager.getOffers(n, encryptOffer),
         strategyContext
       )
     )
@@ -597,10 +587,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceTimeouts.forEach(resetTimer)
         announceTimeouts.length = 0
         passiveActivationTimeout = resetTimer(passiveActivationTimeout)
-
-        if (!pool.isActive) {
-          pool.warmup()
-        }
 
         if (roomRegistration?.roomToken) {
           advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, true)
@@ -714,7 +700,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             state.answeringPeer.destroy()
           }
 
-          resetOfferState(state, pool)
+          resetOfferState(state)
           state.connectedPeer = null
           state.answeringPeer = null
           state.answerReplay = null
@@ -736,13 +722,13 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           cleanup()
         })
 
+        offerManager.destroy()
+
         if (hasActiveRooms()) {
           return
         }
 
         didInit = false
-        pool.destroy()
-        offerPool = null
         cleanupWatchOnline()
         cleanupRoomPresenceHandler(appId)
       },

@@ -42,7 +42,8 @@ const roomOfferGenerationPromises: Record<string, Promise<void> | undefined> =
 const roomSubscriberCounts: Record<string, number> = {}
 const trackerAction = 'announce'
 const hashLimit = 20
-const offerPoolSize = 3
+const offersPerAnnounce = 1
+const requestedPeers = 3
 const defaultAnnounceMs = 10_000
 const dormantAnnounceMs = 120_000
 const offerRetentionMs = 120_000
@@ -176,7 +177,7 @@ const ensureOutstandingOffers = async (
 
     const outstandingOffers = getRoomOutstandingOffers(rootTopic)
     const outstandingCount = keys(outstandingOffers).length
-    const missingOffers = Math.max(0, offerPoolSize - outstandingCount)
+    const missingOffers = Math.max(0, offersPerAnnounce - outstandingCount)
 
     if (missingOffers > 0) {
       ;(await getOffers(missingOffers)).forEach(peerAndOffer => {
@@ -287,9 +288,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           rootTopic,
           {
             offer: data.offer.sdp,
-            peerId: data.peer_id,
-            hasOutgoingOffer:
-              keys(getRoomOutstandingOffers(rootTopic)).length > 0
+            peerId: data.peer_id
           },
           (_, signal) =>
             void send(client, rootTopic, {
@@ -314,6 +313,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
             },
             () => {}
           )
+          void topicState.announce()
         }
       }
     }
@@ -334,7 +334,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         if (!topicState.isActive) {
           void send(client, rootTopic, {
             left: 0,
-            numwant: offerPoolSize,
+            numwant: requestedPeers,
             offers: []
           })
           return
@@ -350,7 +350,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         }))
 
         void send(client, rootTopic, {
-          numwant: offerPoolSize,
+          numwant: requestedPeers,
           offers
         })
       },

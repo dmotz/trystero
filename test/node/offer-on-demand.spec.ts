@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
+import {OfferManager} from '../../packages/core/src/offer-manager.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 void test(
-  'Trystero: strategy reuses offer peers across repeated batch allocations',
+  'Trystero: strategy creates offers on demand and reclaims unused peers',
   {timeout: 10_000},
   async () => {
     class MockDataChannel {
@@ -26,6 +28,7 @@ void test(
 
     class CountingRTCPeerConnection {
       static created = 0
+      static closed = 0
 
       iceGatheringState = 'complete'
       connectionState = 'new'
@@ -83,6 +86,7 @@ void test(
       }
 
       close() {
+        CountingRTCPeerConnection.closed += 1
         this.connectionState = 'closed'
         this.iceConnectionState = 'closed'
         this.onconnectionstatechange?.()
@@ -99,62 +103,61 @@ void test(
       removeTrack() {}
     }
 
-    const runScenario = async (reuseOffers: boolean): Promise<number> => {
-      CountingRTCPeerConnection.created = 0
+    let complete = null
+    let createdBeforeRequest = -1
+    let createdAfterRequest = -1
+    let closedAfterReclaim = -1
+    const completePromise = new Promise(res => {
+      complete = res
+    })
 
-      let complete = null
-      const completePromise = new Promise(res => {
-        complete = res
-      })
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_, _root, _self, _onMessage, getOffers) => {
+        createdBeforeRequest = CountingRTCPeerConnection.created
+        const offers = await getOffers(3)
+        createdAfterRequest = CountingRTCPeerConnection.created
+        offers.forEach(offer => offer.reclaim?.())
+        closedAfterReclaim = CountingRTCPeerConnection.closed
+        complete?.()
+        return () => {}
+      },
+      announce: () => {}
+    })
 
-      const joinRoom = createStrategy({
-        init: () => ({}),
-        subscribe: async (_, _root, _self, _onMessage, getOffers) => {
-          for (let i = 0; i < 8; i += 1) {
-            const offers = await getOffers(10)
+    const room = joinRoom(
+      {
+        appId: `trystero-on-demand-offers-${Date.now()}`,
+        password: 'offer-test',
+        rtcPolyfill: CountingRTCPeerConnection as any
+      },
+      'room'
+    )
 
-            if (reuseOffers) {
-              offers.forEach(offer => offer.reclaim?.())
-            }
-
-            await new Promise(res => setTimeout(res, 0))
-          }
-
-          complete?.()
-
-          return () => {}
-        },
-        announce: () => {}
-      })
-
-      const room = joinRoom(
-        {
-          appId: `trystero-offer-reuse-${Date.now()}-${Math.random()}`,
-          password: 'reuse-test',
-          rtcPolyfill: CountingRTCPeerConnection as any
-        },
-        `room-${Math.random().toString(16).slice(2)}`
-      )
-
-      try {
-        await completePromise
-      } finally {
-        await room.leave()
-      }
-
-      return CountingRTCPeerConnection.created
+    try {
+      assert.equal(CountingRTCPeerConnection.created, 0)
+      await completePromise
+      assert.equal(createdBeforeRequest, 0)
+      assert.equal(createdAfterRequest, 3)
+      assert.equal(closedAfterReclaim, 3)
+    } finally {
+      await room.leave()
     }
-
-    const unreclaimedConnections = await runScenario(false)
-    const reclaimedConnections = await runScenario(true)
-
-    assert.ok(
-      reclaimedConnections < unreclaimedConnections,
-      `expected reuse to lower allocations, got ${String(unreclaimedConnections)} without reuse vs ${String(reclaimedConnections)} with reuse`
-    )
-    assert.ok(
-      reclaimedConnections <= 30,
-      `expected <= 30 peer connections with reuse but saw ${String(reclaimedConnections)}`
-    )
   }
 )
+
+void test('Trystero: leaving during offer creation closes the pending peer', async () => {
+  let release!: (offer: string) => void
+  let closed = 0
+  const pendingOffer = new Promise<string>(resolve => (release = resolve))
+  const manager = new OfferManager(
+    () => ({destroy: () => (closed += 1)}) as any
+  )
+
+  const result = manager.checkout(1, false, async () => pendingOffer)
+  manager.destroy()
+  release('offer')
+
+  await assert.rejects(result, /room left while preparing offer/)
+  assert.equal(closed, 1)
+})
