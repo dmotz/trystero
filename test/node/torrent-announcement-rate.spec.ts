@@ -69,6 +69,15 @@ void test(
         4,
         'torrent should retain the core startup burst without a duplicate scheduler'
       )
+      assert.ok(
+        socket.sent.every(msg => msg.offers.length === 1 && msg.numwant === 3),
+        'torrent should advertise one offer while requesting up to three peers'
+      )
+      assert.equal(
+        new Set(socket.sent.map(msg => msg.offers[0].offer_id)).size,
+        1,
+        'repeated announcements should reuse the outstanding offer'
+      )
 
       await wait(5_500)
       assert.equal(

@@ -41,6 +41,7 @@
     "test:bun": "pnpm run build && bun test test/node/*.spec.ts",
     "test:deno": "pnpm run build && deno test test/node/*.spec.ts -A --no-check",
     "test:ice": "pnpm run build && jiti scripts/test-ice.ts",
+    "test:turn:local": "pnpm run build && node scripts/test-local-turn.mjs",
     "test:proxy": "PROXY=$(jiti scripts/find-proxy.ts) pnpm test",
     "test:relays": "pnpm run build && jiti scripts/test-relays.ts",
     "measure:nostr-announcements": "pnpm run build && node --import jiti/register scripts/measure-nostr-announcements.ts",

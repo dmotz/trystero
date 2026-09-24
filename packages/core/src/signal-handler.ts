@@ -1,5 +1,4 @@
 import {sha1} from './crypto'
-import {offerTtl, type OfferPool} from './offer-pool'
 import {getConnectedPeerHealth} from './shared-peer'
 import {
   all,
@@ -15,6 +14,7 @@ import {
 } from './utils'
 import type {
   BaseRoomConfig,
+  OfferRecord,
   PeerHandle,
   PeerState,
   SharedPeerState,
@@ -23,6 +23,7 @@ import type {
 } from './types'
 
 const offerPostAnswerTtlMs = 23_333
+const offerTtl = 57_333
 const offerIdSize = 12
 const disconnectedPeerGraceMs = 7_533
 const answeringTtlMs = 23_333
@@ -206,24 +207,7 @@ const clearOfferRelayIfPlaceholder = (
   }
 }
 
-const hasRemoteDescription = (peer: PeerHandle): boolean => {
-  if (peer.isDead || peer.connection.connectionState === 'closed') {
-    return true
-  }
-
-  try {
-    return Boolean(peer.connection.remoteDescription)
-  } catch {
-    return true
-  }
-}
-
-export const resetOfferState = (
-  state: PeerState,
-  offerPool: OfferPool
-): void => {
-  const previousOfferAnswered = state.offerAnswered
-
+export const resetOfferState = (state: PeerState): void => {
   state.offerExpiryTimer = resetTimer(state.offerExpiryTimer)
   state.offerInitPromise = null
   state.offerRelays.forEach((_, relayId) => clearOfferRelay(state, relayId))
@@ -233,12 +217,8 @@ export const resetOfferState = (
   state.offerSignalBacklog = []
 
   if (state.offerPeer && state.offerPeer !== state.connectedPeer) {
-    if (previousOfferAnswered || hasRemoteDescription(state.offerPeer)) {
-      if (!state.offerPeer.isDead) {
-        state.offerPeer.destroy()
-      }
-    } else {
-      offerPool.recycle(state.offerPeer)
+    if (!state.offerPeer.isDead) {
+      state.offerPeer.destroy()
     }
   }
 
@@ -321,7 +301,7 @@ const scheduleOfferExpiry = (
     if (current.offerAnswered) {
       reportSdpExchangeConnectionFailure(ctx, current, peerId)
     }
-    resetOfferState(current, ctx.offerPool)
+    resetOfferState(current)
     ctx.checkDeactivate()
   }, ttlMs)
 }
@@ -331,7 +311,7 @@ const ensureOffer = (
   state: PeerState,
   peerId: string,
   relayId: number
-): Promise<{peer: PeerHandle; offer: string; offerId: string}> => {
+): NonNullable<PeerState['offerInitPromise']> => {
   if (state.offerPeer && state.offerId && state.offerSdp) {
     return Promise.resolve({
       peer: state.offerPeer,
@@ -344,16 +324,31 @@ const ensureOffer = (
     return state.offerInitPromise
   }
 
-  state.offerInitPromise = (async () => {
-    const firstOffer = (
-      await ctx.offerPool.checkout(1, false, ctx.encryptOffer)
-    )[0]
+  const pending: NonNullable<PeerState['offerInitPromise']> = (async () => {
+    let firstOffer: OfferRecord | undefined
+
+    try {
+      firstOffer = (
+        await ctx.offerManager.checkout(1, false, ctx.encryptOffer)
+      )[0]
+    } catch (error) {
+      if (ctx.isLeaving() || state.offerInitPromise !== pending) {
+        return null
+      }
+
+      throw error
+    }
 
     if (!firstOffer) {
       throw mkErr('failed to allocate offer peer')
     }
 
     const {peer, offer} = firstOffer
+
+    if (ctx.isLeaving() || state.offerInitPromise !== pending) {
+      peer.destroy()
+      return null
+    }
 
     state.offerPeer = peer
     state.offerId = genId(offerIdSize)
@@ -368,7 +363,7 @@ const ensureOffer = (
         if (state.offerAnswered) {
           reportSdpExchangeConnectionFailure(ctx, state, peerId)
         }
-        resetOfferState(state, ctx.offerPool)
+        resetOfferState(state)
       }
 
       ctx.disconnectPeer(peer, peerId)
@@ -392,9 +387,13 @@ const ensureOffer = (
     scheduleOfferExpiry(ctx, state, peerId)
 
     return {peer, offer, offerId: state.offerId}
-  })().finally(() => (state.offerInitPromise = null))
+  })().finally(() => {
+    if (state.offerInitPromise === pending) {
+      state.offerInitPromise = null
+    }
+  })
 
-  return state.offerInitPromise
+  return (state.offerInitPromise = pending)
 }
 
 const handleAnnouncement = async (
@@ -431,7 +430,13 @@ const handleAnnouncement = async (
     ensureOffer(ctx, state, peerId, relayId)
   ])
 
+  if (!offerInfo) {
+    clearOfferRelayIfPlaceholder(state, relayId)
+    return
+  }
+
   if (ctx.isLeaving()) {
+    resetOfferState(state)
     return
   }
 
@@ -584,7 +589,7 @@ const handleOffer = async (
   }
 
   if (hasTrackedOutgoingOffer) {
-    resetOfferState(state, ctx.offerPool)
+    resetOfferState(state)
   }
 
   const answerPeer = ctx.initPeer(false, ctx.config)
@@ -761,7 +766,7 @@ const handleAnswer = async (
   DEV: log('got answer from', peerId)
 
   if (peer) {
-    ctx.offerPool.claimLeased(peer)
+    ctx.offerManager.claimLeased(peer)
     peer.setHandlers({
       connect: () => ctx.connectPeer(peer, peerId, relayId),
       close: () => ctx.disconnectPeer(peer, peerId)

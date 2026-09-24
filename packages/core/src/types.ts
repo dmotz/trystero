@@ -1,4 +1,4 @@
-import type {OfferPool} from './offer-pool'
+import type {OfferManager} from './offer-manager'
 import type {SharedPeerManager} from './shared-peer'
 
 export type JsonPrimitive = null | string | number | boolean
@@ -452,7 +452,7 @@ export type PeerState = {
     peer: PeerHandle
     offer: string
     offerId: string
-  }> | null
+  } | null> | null
   offerAnswered: boolean
   offerRelays: unknown[]
   offerSignalRelays: Array<((signal: Signal) => void) | null>
@@ -489,7 +489,7 @@ export type SignalContext = {
   isActive: boolean
   onJoinError: JoinErrorHandler | undefined
   sharedPeers: SharedPeerManager
-  offerPool: OfferPool
+  offerManager: OfferManager
   encryptOffer: (peer: PeerHandle) => Promise<string>
   initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
   connectPeer: (peer: PeerHandle, peerId: string, relayId: number) => void
