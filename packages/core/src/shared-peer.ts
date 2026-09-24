@@ -295,7 +295,16 @@ export class SharedPeerManager {
         return
       }
 
-      this.pruneRoomOwnership(shared, roomId)
+      // Media peers need a signaling route to remove tracks before reuse.
+      const shouldDestroy =
+        keys(shared.bindings).length === 1 &&
+        (shared.streamOwners.size > 0 ||
+          shared.trackOwners.size > 0 ||
+          shared.media.hasRemoteMedia())
+
+      if (!shouldDestroy) {
+        this.pruneRoomOwnership(shared, roomId)
+      }
       delete shared.bindings[roomId]
       if (
         binding.roomToken &&
@@ -309,7 +318,11 @@ export class SharedPeerManager {
       }
 
       onDetach()
-      this.scheduleIdleTimer(shared)
+      if (shouldDestroy) {
+        this.clear(shared.appId, shared.peerId, {destroyPeer: true})
+      } else {
+        this.scheduleIdleTimer(shared)
+      }
     }
 
     const proxy: SharedMediaPeer = {
@@ -576,7 +589,13 @@ export class SharedPeerManager {
 
   private dispatchSignal(shared: SharedPeerState, signal: Signal): void {
     const binding = this.getSignalBinding(shared)
-    binding?.handlers.signal?.(signal)
+
+    if (binding) {
+      binding.handlers.signal?.(signal)
+    } else if (signal.type === 'offer') {
+      // An unsent offer would leave the reused connection in have-local-offer.
+      this.clear(shared.appId, shared.peerId, {destroyPeer: true})
+    }
   }
 
   private dispatchTrack(

@@ -106,6 +106,8 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
     getRemoteTrack: (key, trackId) =>
       remoteTracksByKey.get(key) ??
       (trackId ? remoteTracksById.get(trackId) : undefined),
+    hasRemoteMedia: () =>
+      remoteStreamsByKey.size > 0 || remoteTracksByKey.size > 0,
     clearRemote: () => {
       remoteStreamsByKey.clear()
       remoteStreamsById.clear()

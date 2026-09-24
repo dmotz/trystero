@@ -406,6 +406,7 @@ export type MediaIdentityCache = {
     streamId?: string
   ) => void
   getRemoteTrack: (key: string, trackId?: string) => RemoteTrackRef | undefined
+  hasRemoteMedia: () => boolean
   clearRemote: () => void
 }
 

@@ -187,8 +187,44 @@ void test(
   }
 )
 
+void test('Trystero: closes shared media peers when their last room leaves', () => {
+  const manager = new SharedPeerManager()
+  const peer = new MockPeer()
+  const shared = manager.register('media-app', 'remote', peer as any, 60_000)
+  const first = manager.bind('first', Promise.resolve('first-token'), shared, {
+    onDetach: () => {}
+  })
+
+  first.proxy.addStream({getTracks: () => []} as any)
+  first.proxy.destroy()
+
+  assert.equal(peer.destroyCount, 1)
+  assert.equal(manager.get('media-app', 'remote'), undefined)
+
+  const receivingPeer = new MockPeer()
+  const receiving = manager.register(
+    'media-app',
+    'sender',
+    receivingPeer as any,
+    60_000
+  )
+  receiving.media.rememberRemoteStream(
+    'stream-key',
+    {getTracks: () => []} as any,
+    'stream-id'
+  )
+  const receivingRoom = manager.bind(
+    'second',
+    Promise.resolve('second-token'),
+    receiving,
+    {onDetach: () => {}}
+  )
+  receivingRoom.proxy.destroy()
+  assert.equal(receivingPeer.destroyCount, 1)
+})
+
 void test(
-  'Trystero: shared peer re-emits cached and restored remote streams in later rooms',
+  'Trystero: shared peer re-emits cached and restored remote streams in overlapping rooms',
   {timeout: 10_000},
   async () => {
     const appId = `shared-media-reuse-${Date.now()}`
@@ -234,9 +270,6 @@ void test(
         metadata: {phase: 'first'}
       })
 
-      await Promise.all([firstRooms.roomA.leave(), firstRooms.roomB.leave()])
-      firstRooms = null
-
       secondRooms = await createSharedMediaRooms(
         managerA,
         managerB,
@@ -262,10 +295,10 @@ void test(
         peerId: 'peer-a',
         metadata: {phase: 'second'}
       })
-      assert.equal(peerA.addStreamCalls, 2)
+      assert.equal(peerA.addStreamCalls, 1)
 
-      await Promise.all([secondRooms.roomA.leave(), secondRooms.roomB.leave()])
-      secondRooms = null
+      firstRooms.roomA.removeStream(localStream, {target: 'peer-b'})
+      secondRooms.roomA.removeStream(localStream, {target: 'peer-b'})
       const remoteStream = peerB.remoteStreams.get('camera-stream')
       assert.ok(remoteStream)
       remoteStream.tracksById.clear()
@@ -301,6 +334,7 @@ void test(
         peerId: 'peer-a',
         metadata: {phase: 'restored'}
       })
+      assert.equal(peerA.addStreamCalls, 2)
     } finally {
       await firstRooms?.roomA.leave().catch(() => {})
       await firstRooms?.roomB.leave().catch(() => {})
@@ -315,7 +349,7 @@ void test(
 )
 
 void test(
-  'Trystero: shared peer re-emits cached remote tracks in later rooms',
+  'Trystero: shared peer re-emits cached remote tracks in overlapping rooms',
   {timeout: 10_000},
   async () => {
     const appId = `shared-track-reuse-${Date.now()}`
@@ -360,9 +394,6 @@ void test(
         peerId: 'peer-a',
         metadata: {phase: 'first'}
       })
-
-      await Promise.all([firstRooms.roomA.leave(), firstRooms.roomB.leave()])
-      firstRooms = null
 
       secondRooms = await createSharedMediaRooms(
         managerA,
