@@ -63,6 +63,13 @@ export const withStrategyBrowserPair = (
       const page2 = await context2.newPage()
 
       try {
+        if (browserName === 'webkit') {
+          await Promise.all([
+            page.context().grantPermissions(['camera', 'microphone']),
+            context2.grantPermissions(['camera', 'microphone'])
+          ])
+        }
+
         await attachPageLogging({
           strategy,
           browserName,

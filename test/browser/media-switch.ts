@@ -131,6 +131,5 @@ export const registerMediaSwitchTests = (strategy, overrides) =>
         page.evaluate(cleanupStreamSwitchRoom, streamSwitchRoomB),
         page2.evaluate(cleanupStreamSwitchRoom, streamSwitchRoomB)
       ])
-    },
-    {skip: ({browserName}) => browserName === 'webkit'}
+    }
   )
