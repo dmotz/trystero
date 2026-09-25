@@ -8,6 +8,8 @@ const iceConnectionStateEvent = 'iceconnectionstatechange'
 const offerType = 'offer'
 const answerType = 'answer'
 const outOfRangePattern = /out of range/i
+const maxPendingRemoteCandidates = 128
+const maxRemoteCandidateSdpLength = 8_192
 
 type SdpDescription = {
   type: RTCSdpType
@@ -172,6 +174,12 @@ export default (
     }
   }
 
+  const queueRemoteCandidate = (candidate: RTCIceCandidateInit): void => {
+    if (pendingRemoteCandidates.length < maxPendingRemoteCandidates) {
+      pendingRemoteCandidates.push(candidate)
+    }
+  }
+
   const flushPendingRemoteCandidates = async (): Promise<void> => {
     if (!pc.remoteDescription || pendingRemoteCandidates.length === 0) {
       return
@@ -193,9 +201,7 @@ export default (
       }
     }
 
-    if (stillPending.length > 0) {
-      pendingRemoteCandidates.push(...stillPending)
-    }
+    stillPending.forEach(queueRemoteCandidate)
   }
 
   const addRemoteCandidate = async (
@@ -205,12 +211,12 @@ export default (
       const didApply = await addIceCandidateSafe(candidate)
 
       if (!didApply) {
-        pendingRemoteCandidates.push(candidate)
+        queueRemoteCandidate(candidate)
       }
       return
     }
 
-    pendingRemoteCandidates.push(candidate)
+    queueRemoteCandidate(candidate)
   }
 
   const setupDataChannel = (channel: RTCDataChannel): void => {
@@ -451,6 +457,10 @@ export default (
 
     async signal(sdp: Signal): Promise<Signal | void> {
       if (sdp.type === candidateType) {
+        if (sdp.sdp.length > maxRemoteCandidateSdpLength) {
+          return
+        }
+
         try {
           const candidate = JSON.parse(sdp.sdp) as RTCIceCandidateInit | null
 

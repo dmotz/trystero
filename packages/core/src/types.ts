@@ -471,7 +471,6 @@ export type PeerState = {
     lastSentAt: number
   } | null
   connectionErrorReported: boolean
-  pendingCandidates: Record<string, Signal[]>
 }
 
 export type SignalContext = {
