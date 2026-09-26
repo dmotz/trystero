@@ -1023,7 +1023,9 @@ Returns an object with the following methods:
 
   Message actions expose:
   - `send(data, [options])` - Sends data to peers and resolves when local
-    sending is complete.
+    sending is complete. To cancel an in-progress send, pass an
+    `AbortController`'s `signal` in the options (e.g.
+    `send(data, {signal: controller.signal})`) and call `controller.abort()`.
   - `onMessage` - Nullable callback property for received messages.
   - `onReceiveProgress` - Nullable callback property for inbound progress.
 
