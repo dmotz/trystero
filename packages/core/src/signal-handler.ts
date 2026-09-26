@@ -27,7 +27,6 @@ const offerTtl = 57_333
 const offerIdSize = 12
 const disconnectedPeerGraceMs = 7_533
 const answeringTtlMs = 23_333
-const legacyCandidateKey = '__legacy__'
 const offerRelayPlaceholder = 'offer-placeholder'
 const signalKeys = ['offer', 'answer', 'candidate'] as const
 
@@ -97,8 +96,7 @@ const makeState = (): PeerState => ({
   answeringPeer: null,
   answerSent: false,
   answerReplay: null,
-  connectionErrorReported: false,
-  pendingCandidates: {}
+  connectionErrorReported: false
 })
 
 const hasTurnServer = (config: BaseRoomConfig): boolean => {
@@ -253,30 +251,6 @@ const scheduleAnsweringExpiry = (
     clearAnswering(current, peer)
     ctx.checkDeactivate()
   }, answeringTtlMs)
-}
-
-const flushBufferedCandidates = async (
-  state: PeerState,
-  peer: PeerHandle,
-  offerId?: string
-): Promise<void> => {
-  const bufferKeys = offerId
-    ? [offerId, legacyCandidateKey]
-    : [legacyCandidateKey]
-
-  for (const key of bufferKeys) {
-    const buffered = state.pendingCandidates[key]
-
-    if (!buffered?.length) {
-      continue
-    }
-
-    delete state.pendingCandidates[key]
-
-    for (const candidate of buffered) {
-      await peer.signal(candidate)
-    }
-  }
 }
 
 const scheduleOfferExpiry = (
@@ -701,7 +675,6 @@ const handleOffer = async (
 
   DEV: log('sending answer to', peerId)
   await answerPeer.signal(plainOffer)
-  await flushBufferedCandidates(state, answerPeer, offerId)
 }
 
 const handleCandidate = async (
@@ -719,12 +692,15 @@ const handleCandidate = async (
     return
   }
 
-  const state = getState(ctx.peerStates, peerId)
+  const state = ctx.peerStates[peerId]
   const offerPeerMatch =
     offerId && state?.offerPeer && state.offerId === offerId
       ? state.offerPeer
       : null
-  const answeringPeer = state?.answeringPeer ?? null
+  const answeringPeer =
+    !offerId || state?.answerReplay?.offerId === offerId
+      ? state?.answeringPeer
+      : null
   const fallbackOfferPeer =
     !offerId && state?.offerPeer ? state.offerPeer : null
   const targetPeer =
@@ -732,13 +708,9 @@ const handleCandidate = async (
       ? peer
       : (offerPeerMatch ?? answeringPeer ?? fallbackOfferPeer)
 
-  if (!targetPeer || targetPeer.isDead) {
-    const pendingKey = offerId ?? legacyCandidateKey
-    ;(state.pendingCandidates[pendingKey] ??= []).push(plainCandidate)
-    return
+  if (targetPeer && !targetPeer.isDead) {
+    void targetPeer.signal(plainCandidate)
   }
-
-  void targetPeer.signal(plainCandidate)
 }
 
 const handleAnswer = async (

@@ -188,3 +188,58 @@ void test('a matching repeated offer replays its answer and candidates, not a ne
   assert.deepEqual(f.messages, [...initial, ...initial])
   assert.equal(f.ctx.peerStates[offer.peerId].answeringPeer, answeringPeer)
 })
+
+void test('stray candidates do not retain peer states or offer IDs', async t => {
+  const f = fixture(t)
+
+  for (let i = 0; i < 50; i++) {
+    await f.receive({
+      peerId: `unknown-${i}`,
+      offerId: `offer-${i}`,
+      candidate: 'candidate'
+    })
+  }
+
+  assert.equal(Object.keys(f.ctx.peerStates).length, 0)
+
+  const peerId = selfId + 'z'
+  await f.receive({peerId})
+  const state = f.ctx.peerStates[peerId]
+
+  for (let i = 0; i < 50; i++) {
+    await f.receive({peerId, offerId: `wrong-${i}`, candidate: 'candidate'})
+  }
+
+  assert.equal(state.pendingCandidates, undefined)
+
+  const received = []
+  state.offerPeer.signal = async signal => received.push(signal)
+  await f.receive({
+    peerId,
+    offerId: f.messages[0].offerId,
+    candidate: 'candidate'
+  })
+  assert.deepEqual(received, [{type: 'candidate', sdp: 'candidate'}])
+
+  const incomingId = 'incoming-peer'
+  await f.receive({
+    peerId: incomingId,
+    offerId: 'incoming-offer',
+    offer: 'offer'
+  })
+  const incoming = []
+  f.ctx.peerStates[incomingId].answeringPeer.signal = async signal =>
+    incoming.push(signal)
+
+  await f.receive({
+    peerId: incomingId,
+    offerId: 'wrong-offer',
+    candidate: 'candidate'
+  })
+  await f.receive({
+    peerId: incomingId,
+    offerId: 'incoming-offer',
+    candidate: 'candidate'
+  })
+  assert.deepEqual(incoming, [{type: 'candidate', sdp: 'candidate'}])
+})
