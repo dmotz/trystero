@@ -1,6 +1,9 @@
 name: Publish packages and release bundles
 
 on:
+  push:
+    tags:
+      - '**'
   workflow_dispatch:
 
 permissions:
@@ -16,56 +19,56 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.4.0
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: '26'
           cache: pnpm
+          cache-dependency-path: package.json
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile --ignore-scripts
+
+      - name: Validate release tag
+        id: version
+        run: |
+          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('packages/trystero/package.json', 'utf8')).version")"
+          TAG="${VERSION}"
+          if [[ "${GITHUB_REF_TYPE}" == 'tag' ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            if [[ "${TAG#v}" != "${VERSION}" ]]; then
+              echo "Release tag ${TAG} does not match package version ${VERSION}" >&2
+              exit 1
+            fi
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Build packages and browser bundles
         run: pnpm build
 
-      - name: Read release version
-        id: version
-        run: |
-          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('packages/trystero/package.json', 'utf8')).version")"
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
-
-      - name: Check if version already exists on npm
-        id: npm
-        run: |
-          if npm view "trystero@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            echo "published=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "published=false" >> "${GITHUB_OUTPUT}"
-          fi
+      - name: Copy README into each package
+        run: pnpm copy-readmes-for-publish
 
       - name: Publish all packages to npm
-        if: steps.npm.outputs.published == 'false'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm changeset:publish
+        run: pnpm -r publish --no-git-checks --access public
 
       - name: Check if GitHub release already exists
         id: gh_release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             echo "exists=true" >> "${GITHUB_OUTPUT}"
           else
             echo "exists=false" >> "${GITHUB_OUTPUT}"
@@ -73,7 +76,7 @@ jobs:
 
       - name: Create GitHub release with JS bundles
         if: steps.gh_release.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
