@@ -32,10 +32,7 @@
   "scripts": {
     "build": "tsdown",
     "build:test": "TEST_BUILD=1 tsdown",
-    "changeset": "changeset",
-    "changeset:version": "changeset version",
     "copy-readmes-for-publish": "jiti scripts/copy-readmes.ts",
-    "changeset:publish": "pnpm copy-readmes-for-publish && changeset publish",
     "test": "pnpm run build:test && playwright test ./test",
     "test:node": "pnpm run build && node --import jiti/register --import ./test/node/diagnostic-summary.ts --test 'test/node/*.spec.ts'",
     "test:bun": "pnpm run build && bun test test/node/*.spec.ts",
@@ -67,7 +64,6 @@
   },
   "devDependencies": {
     "@arethetypeswrong/core": "^0.18.5",
-    "@changesets/cli": "^3.0.3",
     "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.2",
     "@types/ws": "^8.18.1",
@@ -86,5 +82,5 @@
     "werift": "^0.24.4",
     "ws": "^8.21.3"
   },
-  "packageManager": "pnpm@10.4.0"
+  "packageManager": "pnpm@12.6.0"
 }
