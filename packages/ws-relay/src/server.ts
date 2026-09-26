@@ -16,6 +16,9 @@ export type WsRelayServerMessage = {
 export type WsRelayServerOptions = WebSocket.ServerOptions & {
   port?: number
   onError?: (err: Error) => void
+  maxTopicLength?: number
+  maxSubscriptionsPerSocket?: number
+  maxSubscriptions?: number
 }
 
 export type WsRelayServer = {
@@ -82,7 +85,13 @@ const parseClientMessage = (
 export const createWsRelayServer = (
   options: WsRelayServerOptions = {}
 ): WsRelayServer => {
-  const {onError, ...wsOptions} = options
+  const {
+    onError,
+    maxTopicLength = 256,
+    maxSubscriptionsPerSocket = 128,
+    maxSubscriptions = 10_000,
+    ...wsOptions
+  } = options
   let resolveReady = (): void => {}
   let rejectReady = (_err: Error): void => {}
   let didSettleReady = false
@@ -109,19 +118,25 @@ export const createWsRelayServer = (
   const wss = new WebSocketServer(
     {
       port: wsOptions.server ? undefined : (wsOptions.port ?? defaultPort),
+      maxPayload: 1024 * 1024,
       ...wsOptions
     },
     resolveReadyOnce
   )
   const topics = new Map<string, Set<WebSocket>>()
   const socketTopics = new WeakMap<WebSocket, Set<string>>()
+  let subscriptionCount = 0
 
   if (wsOptions.server || wsOptions.noServer) {
     queueMicrotask(resolveReadyOnce)
   }
 
   const unsubscribe = (socket: WebSocket, topic: string): void => {
-    socketTopics.get(socket)?.delete(topic)
+    if (!socketTopics.get(socket)?.delete(topic)) {
+      return
+    }
+
+    subscriptionCount--
 
     const subscribers = topics.get(topic)
 
@@ -137,6 +152,20 @@ export const createWsRelayServer = (
   }
 
   const subscribe = (socket: WebSocket, topic: string): void => {
+    let subscriptions = socketTopics.get(socket)
+
+    if (subscriptions?.has(topic)) {
+      return
+    }
+
+    if (
+      (subscriptions?.size ?? 0) >= maxSubscriptionsPerSocket ||
+      subscriptionCount >= maxSubscriptions
+    ) {
+      socket.close(1008, 'subscription limit exceeded')
+      return
+    }
+
     let subscribers = topics.get(topic)
 
     if (!subscribers) {
@@ -146,14 +175,13 @@ export const createWsRelayServer = (
 
     subscribers.add(socket)
 
-    let subscriptions = socketTopics.get(socket)
-
     if (!subscriptions) {
       subscriptions = new Set()
       socketTopics.set(socket, subscriptions)
     }
 
     subscriptions.add(topic)
+    subscriptionCount++
   }
 
   const publish = (topic: string, payload: JsonValue): void => {
@@ -174,9 +202,18 @@ export const createWsRelayServer = (
   wss.on('connection', socket => {
     socket.on('message', data => {
       try {
+        if (socket.readyState !== WebSocket.OPEN) {
+          return
+        }
+
         const msg = parseClientMessage(data)
 
         if (!msg) {
+          return
+        }
+
+        if (msg.topic.length > maxTopicLength) {
+          socket.close(1008, 'topic too long')
           return
         }
 
@@ -207,8 +244,6 @@ export const createWsRelayServer = (
       }),
     publish,
     getSubscriberCount: topic =>
-      topic
-        ? (topics.get(topic)?.size ?? 0)
-        : [...topics.values()].reduce((sum, sockets) => sum + sockets.size, 0)
+      topic ? (topics.get(topic)?.size ?? 0) : subscriptionCount
   }
 }
