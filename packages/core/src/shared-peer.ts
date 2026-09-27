@@ -291,7 +291,7 @@ export class SharedPeerManager {
     }
 
     const detachBinding = (): void => {
-      if (!shared.bindings[roomId]) {
+      if (shared.bindings[roomId] !== binding) {
         return
       }
 
@@ -561,6 +561,10 @@ export class SharedPeerManager {
         shared.remoteRoomTokens.add(decoded.roomToken)
       } else {
         shared.remoteRoomTokens.delete(decoded.roomToken)
+        shared.pendingDataByToken.delete(decoded.roomToken)
+        const binding = shared.bindingsByToken[decoded.roomToken]
+        binding?.handlers.close?.()
+        binding?.detach()
       }
 
       this.roomPresenceHandlers[shared.appId]?.(
