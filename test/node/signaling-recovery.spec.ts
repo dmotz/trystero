@@ -6,6 +6,9 @@ import {
   resetOfferState
 } from '../../packages/core/src/signal-handler.ts'
 import {selfId} from '../../packages/core/src/utils.ts'
+import initPeer from '../../packages/core/src/peer.ts'
+import {OfferManager} from '../../packages/core/src/offer-manager.ts'
+import {MockRTCPeerConnection} from './peer-harness.ts'
 
 const settle = async () => {
   for (let i = 0; i < 20; i++) {
@@ -115,6 +118,64 @@ void test('a pending outgoing offer is discarded after its state resets', async 
 
   assert.equal(outgoingPeer.isDead, true)
   assert.equal(f.ctx.peerStates[peerId].offerPeer, null)
+})
+
+void test('offer candidates gathered before signaling handlers attach are published after the offer', async t => {
+  const f = fixture(t)
+  const peerId = selfId + 'z'
+  let offerPeer
+  let releaseEncryption
+  let offerReady
+  const encryptedOffer = new Promise(resolve => (releaseEncryption = resolve))
+  const preparedOffer = new Promise(resolve => (offerReady = resolve))
+  const emitCandidate = port =>
+    offerPeer.connection.onicecandidate({
+      candidate: {
+        toJSON: () => ({
+          candidate: `candidate:1 1 udp 1 127.0.0.1 ${port} typ host`,
+          sdpMLineIndex: 0
+        })
+      }
+    })
+
+  const manager = new OfferManager(() => {
+    offerPeer = initPeer(true, {rtcPolyfill: MockRTCPeerConnection})
+    emitCandidate(10001)
+    return offerPeer
+  })
+  f.ctx.offerManager = manager
+  f.ctx.encryptOffer = async peer => {
+    const offer = await peer.getOffer()
+    assert.equal(offer.type, 'offer')
+    offerReady()
+    return encryptedOffer
+  }
+
+  try {
+    const announcement = f.receive({peerId})
+    await preparedOffer
+    emitCandidate(10002)
+    assert.deepEqual(f.messages, [])
+    releaseEncryption('encrypted-offer')
+    await announcement
+    await settle()
+    emitCandidate(10003)
+    await settle()
+
+    const [offer, ...candidates] = f.messages
+    assert.equal(offer.offer, 'encrypted-offer')
+    assert.deepEqual(
+      candidates.map(message => JSON.parse(message.candidate).candidate),
+      [10001, 10002, 10003].map(
+        port => `candidate:1 1 udp 1 127.0.0.1 ${port} typ host`
+      )
+    )
+    assert.ok(candidates.every(message => message.offerId === offer.offerId))
+  } finally {
+    f.leave()
+    resetOfferState(f.ctx.peerStates[peerId])
+    manager.destroy()
+  }
 })
 
 void test('first topic retry is prompt but later retries retain their spacing', async t => {

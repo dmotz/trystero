@@ -41,6 +41,7 @@ export default (
   const pendingRemoteCandidates: RTCIceCandidateInit[] = []
   const pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}> =
     []
+  let resolveInitialOffer: ((signal: Signal) => void) | undefined
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
   let dataChannel: RTCDataChannel | null = null
@@ -61,6 +62,11 @@ export default (
   }
 
   const emitSignal = (signal: Signal): void => {
+    if (signal.type === offerType) {
+      resolveInitialOffer?.(signal)
+      resolveInitialOffer = undefined
+    }
+
     if (handlers.signal) {
       handlers.signal(signal)
     } else {
@@ -402,13 +408,9 @@ export default (
     }
   }
   const offerPromise = initiator
-    ? new Promise<Signal | void>(res =>
-        appendSignalHandler(signal => {
-          if (signal.type === offerType) {
-            res(signal)
-          }
-        })
-      )
+    ? new Promise<Signal | void>(res => {
+        resolveInitialOffer = res
+      })
     : Promise.resolve()
 
   if (initiator) {
