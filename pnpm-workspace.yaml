@@ -3,3 +3,4 @@ packages:
 allowBuilds:
   '@firebase/util': true
   protobufjs: true
+minimumReleaseAge: 0

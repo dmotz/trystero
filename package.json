@@ -65,7 +65,7 @@
   "devDependencies": {
     "@arethetypeswrong/core": "^0.18.5",
     "@playwright/test": "^1.63.0",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@types/ws": "^8.18.1",
     "chalk": "^6.0.0",
     "jiti": "^2.7.0",
@@ -80,7 +80,7 @@
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
     "werift": "^0.24.4",
-    "ws": "^8.21.3"
+    "ws": "^8.22.0"
   },
   "packageManager": "pnpm@12.6.0"
 }
