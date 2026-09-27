@@ -41,6 +41,7 @@
     "test:turn:local": "pnpm run build && node scripts/test-local-turn.mjs",
     "test:proxy": "PROXY=$(jiti scripts/find-proxy.ts) pnpm test",
     "test:relays": "pnpm run build && jiti scripts/test-relays.ts",
+    "update:nostr-relays": "pnpm run build && jiti scripts/update-nostr-relays.ts",
     "measure:nostr-announcements": "pnpm run build && node --import jiti/register scripts/measure-nostr-announcements.ts",
     "lint": "oxlint --type-aware --type-check .",
     "lint:fix": "oxlint --type-aware --type-check . --fix",
