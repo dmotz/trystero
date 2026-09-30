@@ -73,9 +73,13 @@ export default (
   }
 
   const emitSignal = (signal: Signal): void => {
-    if (signal.type === offerType) {
-      resolveInitialOffer?.(signal)
+    if (signal.type === offerType && resolveInitialOffer) {
+      resolveInitialOffer(signal)
       resolveInitialOffer = undefined
+      // getOffer() already hands this first offer to the signaling strategy.
+      if (!handlers.signal) {
+        return
+      }
     }
 
     if (handlers.signal) {

@@ -313,6 +313,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
             },
             () => {}
           )
+          void topicState.announce()
         }
       }
     }
