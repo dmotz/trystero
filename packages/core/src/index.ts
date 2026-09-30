@@ -26,6 +26,8 @@ export {
 export type {
   ActionProgressContext,
   ActionProgressHandler,
+  ActionReceiveContext,
+  ActionReceiveHandler,
   AddMediaOptions,
   BaseRelayConfig,
   BaseRoomConfig,

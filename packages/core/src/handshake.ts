@@ -313,6 +313,14 @@ export const createHandshakeManager = ({
         return
       }
 
+      if (state.pendingHandshakePayloads.length >= 16) {
+        failPeerHandshake(
+          id,
+          state.peer,
+          mkErr('too many pending handshake messages')
+        )
+        return
+      }
       state.pendingHandshakePayloads.push(payload)
     },
 

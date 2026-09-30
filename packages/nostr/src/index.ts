@@ -530,7 +530,6 @@ export {pauseRelayReconnection, resumeRelayReconnection, selfId}
 
 export const defaultRelayUrls = [
   '0x-nostr-relay.fly.dev',
-  'bitcoiner.social',
   'nostr-verified.wellorder.net',
   'nostr.azzamo.net',
   'nostr.chaima.info',

@@ -1,3 +1,8 @@
+import {
+  maxRoomFrameBytes,
+  maxQueuedDataFrames,
+  pendingDataTimeoutMs
+} from './data-limits'
 import {all, alloc, candidateType, resetTimer, toError} from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
@@ -37,6 +42,7 @@ export default (
   const handlers: PeerHandlers = {}
   const pendingSignals: Signal[] = []
   const pendingData: ArrayBuffer[] = []
+  let pendingDataTimer: ReturnType<typeof setTimeout> | null = null
   const shouldTrickleIce = trickleIce !== false
   const pendingRemoteCandidates: RTCIceCandidateInit[] = []
   const pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}> =
@@ -57,6 +63,11 @@ export default (
     }
 
     didEmitClose = true
+    if (pendingDataTimer) {
+      clearTimeout(pendingDataTimer)
+      pendingDataTimer = null
+    }
+    pendingData.length = 0
     clearDisconnectedCloseTimer()
     handlers.close?.()
   }
@@ -228,19 +239,54 @@ export default (
   const setupDataChannel = (channel: RTCDataChannel): void => {
     channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = 0xffff
+    const failData = (): void => {
+      console.warn(
+        'Trystero: invalid or excessive data before handler registration; disconnecting peer'
+      )
+      channel.close()
+      pc.close()
+      emitClose()
+    }
     channel.onmessage = e => {
       const data = e.data as ArrayBuffer
+      if (didEmitClose) {
+        return
+      }
+      if (
+        (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) ||
+        data.byteLength > maxRoomFrameBytes
+      ) {
+        failData()
+        return
+      }
 
       if (handlers.data) {
         handlers.data(data)
       } else {
+        if (pendingData.length >= maxQueuedDataFrames) {
+          failData()
+          return
+        }
+        if (!pendingDataTimer) {
+          pendingDataTimer = setTimeout(failData, pendingDataTimeoutMs)
+        }
         pendingData.push(data)
       }
     }
     channel.onopen = () => handlers.connect?.()
     channel.onclose = emitClose
-    channel.onerror = ({error}) =>
+    channel.onerror = ({error}) => {
+      if (
+        didEmitClose ||
+        (error?.errorDetail === 'sctp-failure' &&
+          (error.sctpCauseCode === 12 ||
+            /^User-Initiated Abort\b/.test(error.message)))
+      ) {
+        return
+      }
+
       handlers.error?.(toError(error, 'data channel error'))
+    }
   }
 
   const waitForIceGathering = async (
@@ -300,7 +346,9 @@ export default (
       makingOffer = true
 
       if (restartIce) {
+        // Rolling back the first unanswered offer can discard its data m-line.
         if (
+          pc.remoteDescription &&
           pc.signalingState !== 'stable' &&
           pc.signalingState !== 'closed' &&
           pc.localDescription?.type === offerType
@@ -544,6 +592,10 @@ export default (
       Object.assign(handlers, restHandlers)
 
       if (handlers.data && pendingData.length > 0) {
+        if (pendingDataTimer) {
+          clearTimeout(pendingDataTimer)
+          pendingDataTimer = null
+        }
         const queued = pendingData.splice(0)
         queued.forEach(data => handlers.data?.(data))
       }

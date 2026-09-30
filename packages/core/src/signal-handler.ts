@@ -17,7 +17,6 @@ import type {
   OfferRecord,
   PeerHandle,
   PeerState,
-  SharedPeerState,
   Signal,
   SignalContext
 } from './types'
@@ -374,15 +373,9 @@ const handleAnnouncement = async (
   ctx: SignalContext,
   relayId: number,
   peerId: string,
-  shared: SharedPeerState | undefined,
   signalPeer: (peerTopic: string, signal: string) => void,
   retryAttempt = 0
 ): Promise<void> => {
-  if (shared) {
-    ctx.attachSharedPeerToRoom(peerId, shared)
-    return
-  }
-
   const state = ctx.peerStates[peerId]
 
   if (
@@ -451,7 +444,6 @@ const handleAnnouncement = async (
         ctx,
         relayId,
         peerId,
-        undefined,
         signalPeer,
         retryAttempt + 1
       )
@@ -881,16 +873,13 @@ export const createSignalHandler =
       }
     }
 
-    let shared = ctx.sharedPeers.get(ctx.appId, peerId)
-
-    if (shared && ctx.sharedPeers.getHealth(shared.peer) === 'stale') {
-      ctx.sharedPeers.clear(ctx.appId, peerId, {destroyPeer: true})
-      shared = undefined
+    if (ctx.reusePeer(peerId)) {
+      return
     }
 
     const isAnnouncement = Boolean(peerId && !offer && !answer && !candidate)
 
-    if (isAnnouncement && !shared) {
+    if (isAnnouncement) {
       const announcePeerState = getState(ctx.peerStates, peerId)
       const shouldLeadOffer = selfId < peerId
 
@@ -920,21 +909,8 @@ export const createSignalHandler =
       updateStatus(announcePeerState)
     }
 
-    if (shared && (offer || answer || candidate)) {
-      if (shared.bindings[ctx.roomId]) {
-        DEV: log(
-          'ignoring room signal because shared binding already exists:',
-          peerId
-        )
-        return
-      }
-
-      ctx.attachSharedPeerToRoom(peerId, shared)
-      return
-    }
-
     if (isAnnouncement) {
-      return handleAnnouncement(ctx, relayId, peerId, shared, signalPeer)
+      return handleAnnouncement(ctx, relayId, peerId, signalPeer)
     }
 
     if (offer) {

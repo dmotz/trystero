@@ -81,13 +81,15 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
     const queuedActionA = roomA.makeAction('queued-meta')
     const queuedActionB = roomB.makeAction('queued-meta')
 
-    await queuedActionA.send('later', {metadata: null})
+    const queuedSend = queuedActionA.send('later', {metadata: null})
     await tick()
 
     const queuedReceived = new Promise(resolve => {
       queuedActionB.onMessage = (payload, {peerId, metadata}) =>
         resolve({payload, peerId, metadata})
     })
+
+    await queuedSend
 
     assert.deepEqual(await queuedReceived, {
       payload: 'later',
@@ -170,7 +172,7 @@ void test('Trystero: room callback properties replace and clear handlers', async
   }
 })
 
-void test('Trystero: request actions resolve, reject, buffer briefly, and fan out', async () => {
+void test('Trystero: request actions resolve, reject, wait for handlers, and fan out', async () => {
   const {roomA, roomB} = await createJoinedRooms()
 
   try {
@@ -216,7 +218,7 @@ void test('Trystero: request actions resolve, reject, buffer briefly, and fan ou
           target: 'peer-b',
           timeoutMs: 1_000
         }),
-      /unavailable/
+      /timed out/
     )
 
     const fanoutResults = []

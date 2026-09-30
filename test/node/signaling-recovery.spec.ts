@@ -50,7 +50,7 @@ const fixture = t => {
     isLeaving: () => leaving,
     isPassive: false,
     isActive: true,
-    sharedPeers: {get: () => undefined},
+    reusePeer: () => false,
     offerManager: {checkout: async () => [{peer: peer(), offer: 'offer'}]},
     initPeer: peer,
     checkDeactivate() {},

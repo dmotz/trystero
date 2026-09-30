@@ -11,7 +11,6 @@ void test('Trystero: shared peer room presence uses opaque tokens and routes buf
   const decoder = new TextDecoder()
   const roomId = 'super-secret-room'
   const roomToken = 'opaque-room-token'
-  const presenceEvents = []
   const receivedPayloads = []
 
   const sharedA = managerA.register('app-id', 'peer-b', peerA as any, 60_000)
@@ -22,16 +21,20 @@ void test('Trystero: shared peer room presence uses opaque tokens and routes buf
     managerB.clear('app-id', 'peer-a', {destroyPeer: true})
   })
 
-  managerB.setRoomPresenceHandler(
-    'app-id',
-    (peerId, token, isPresent) =>
-      void presenceEvents.push({peerId, token, isPresent})
-  )
-
   const {proxy: proxyA} = managerA.bind(
     roomId,
     Promise.resolve(roomToken),
     sharedA,
+    {onDetach: () => {}}
+  )
+
+  let resolveToken: (token: string) => void
+  const {proxy: proxyB} = managerB.bind(
+    roomId,
+    new Promise(resolve => {
+      resolveToken = resolve
+    }),
+    sharedB,
     {onDetach: () => {}}
   )
 
@@ -40,9 +43,6 @@ void test('Trystero: shared peer room presence uses opaque tokens and routes buf
   managerA.sendRoomPresence(sharedA, roomToken, true)
   await tick()
 
-  assert.deepEqual(presenceEvents, [
-    {peerId: 'peer-a', token: roomToken, isPresent: true}
-  ])
   assert.equal(sharedB.remoteRoomTokens.has(roomToken), true)
 
   proxyA.sendData(Uint8Array.of(1, 2, 3))
@@ -55,12 +55,7 @@ void test('Trystero: shared peer room presence uses opaque tokens and routes buf
     'shared-peer frames should not expose plaintext room ids'
   )
 
-  const {proxy: proxyB} = managerB.bind(
-    roomId,
-    Promise.resolve(roomToken),
-    sharedB,
-    {onDetach: () => {}}
-  )
+  resolveToken(roomToken)
 
   proxyB.setHandlers({
     data: data => receivedPayloads.push(Array.from(new Uint8Array(data)))
@@ -90,11 +85,15 @@ void test('Trystero: departure clears queued room data and cannot detach a repla
     bind(managerB, sharedB, 'lobby', 'lobby-token')
     const sender = bind(managerA, sharedA, 'room', 'room-token')
     await tick()
+    const pending = managerB.bind('joining', new Promise(() => {}), sharedB, {
+      onDetach: () => {}
+    })
     sender.proxy.sendData(Uint8Array.of(1))
     assert.equal(sharedB.pendingDataByToken.get('room-token').length, 1)
 
     managerA.sendRoomPresence(sharedA, 'room-token', false)
     assert.equal(sharedB.pendingDataByToken.has('room-token'), false)
+    pending.proxy.destroy()
 
     const previous = bind(managerB, sharedB, 'room', 'room-token')
     let replacement = null

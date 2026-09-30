@@ -1,3 +1,5 @@
+// @ts-expect-error Internal source import crosses a referenced package boundary.
+import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
@@ -10,10 +12,6 @@ type TestMediaStream = {
 }
 
 const internalTypeByteLimit = 32
-const internalNonceIndex = internalTypeByteLimit
-const internalTagIndex = internalNonceIndex + 2
-const internalProgressIndex = internalTagIndex + 1
-const internalPayloadIndex = internalProgressIndex + 1
 const encoder = new TextEncoder()
 
 export const tick = () => new Promise(res => setTimeout(res, 0))
@@ -47,10 +45,9 @@ export const encodeInternalAction = type => {
   const typeBytes = encoder.encode(type)
   assert.ok(typeBytes.byteLength <= internalTypeByteLimit)
 
-  const packet = new Uint8Array(internalPayloadIndex)
-  packet.set(typeBytes)
-  packet[internalTagIndex] = 1
-  packet[internalProgressIndex] = 0xff
+  const packet = new Uint8Array(36)
+  packet[0] = 2 // wire version; inline empty string, with no metadata
+  packet.set(typeBytes, 2)
 
   return packet.buffer
 }
@@ -151,7 +148,11 @@ export class MockPeer {
     iceConnectionState: 'connected',
     getSenders: () => []
   }
-  channel = {readyState: 'open'}
+  channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    bufferedAmountLowThreshold: 0
+  }
 
   async getOffer() {}
 
@@ -337,4 +338,58 @@ export const createJoinedRooms = async () => {
   await Promise.all([joinA, joinB])
 
   return {roomA, roomB, peerA, peerB}
+}
+
+export const linkedActions = (maxReceiveBytes?: number) => {
+  let disconnected = false
+  const frames: {from: string; kind: number; id: number}[] = []
+  const peer = (from: string, deliver: (data: ArrayBuffer) => void) => ({
+    sendData: (bytes: Uint8Array) => {
+      frames.push({
+        from,
+        kind: bytes[1] & 15,
+        id:
+          (bytes[1] & 15) === 0
+            ? -1
+            : new DataView(bytes.buffer).getUint32(
+                (bytes[1] & 15) === 1 ? 36 : 2
+              )
+      })
+      deliver(bytes.slice().buffer)
+    },
+    destroy: () => {
+      disconnected = true
+    }
+  })
+  const toRight = peer('left', bytes => right.handleData('left', bytes))
+  const toLeft = peer('right', bytes => left.handleData('right', bytes))
+  const left = createActionManager({
+    onPeerError: (id, error) => {
+      disconnected = true
+      left.clearPeer(id, error)
+    },
+    getPeer: () => toRight as never,
+    getPeerIds: () => ['right'],
+    canReceiveFromPeer: () => !disconnected
+  })
+  const right = createActionManager({
+    onPeerError: (id, error) => {
+      disconnected = true
+      right.clearPeer(id, error)
+    },
+    getPeer: () => toLeft as never,
+    getPeerIds: () => ['left'],
+    canReceiveFromPeer: () => !disconnected,
+    ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes})
+  })
+  return {
+    left,
+    right,
+    frames,
+    disconnected: () => disconnected,
+    close: () => {
+      left.clearPeer('right', new Error('closed'))
+      right.clearPeer('left', new Error('closed'))
+    }
+  }
 }

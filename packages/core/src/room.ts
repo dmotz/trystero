@@ -46,6 +46,7 @@ const registerBeforeUnloadCleanup = (cleanup: () => void): (() => void) => {
 }
 
 type RoomOptions = {
+  maxReceiveBytes?: number
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs?: number
@@ -65,6 +66,7 @@ export default (
     onPeerHandshake,
     onHandshakeError,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
+    maxReceiveBytes,
     isPassive = false
   }: RoomOptions = {}
 ): Room => {
@@ -100,7 +102,11 @@ export default (
       return [Promise.resolve(f(id, peer))]
     })
 
+  const onPeerError = (id: string, error: Error): void =>
+    exitPeer(id, undefined, error)
+
   const mediaManager = createMediaManager({
+    onPeerError,
     iterate: (targets, f) =>
       iterate(targets, (id, peer) => f(id, peer as SharedMediaPeer)),
     isActive: id => Boolean(activePeerMap[id]),
@@ -109,6 +115,8 @@ export default (
   })
 
   const actionManager = createActionManager({
+    onPeerError,
+    ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes}),
     getPeer: (id, includePending) =>
       (includePending ? peerMap : activePeerMap)[id],
     getPeerIds: includePending =>
@@ -160,13 +168,12 @@ export default (
 
   const leave = (): Promise<void> =>
     (leavePromise ??= (async () => {
-      try {
-        await leaveAction.send('')
-      } catch {
-        // A disconnected peer cannot prevent local room cleanup.
-      }
-
+      const controller = new AbortController()
+      void leaveAction
+        .send('', undefined, undefined, undefined, controller.signal)
+        .catch(noOp)
       await new Promise<void>(res => setTimeout(res, 99))
+      controller.abort()
 
       try {
         entries(peerMap).forEach(([id, peer]) => {
@@ -186,10 +193,12 @@ export default (
   const pongAction = makeActionInternal<string>(internalNs('pong'))
   const signalAction = makeActionInternal(internalNs('signal'))
   const streamMetaAction = makeActionInternal<InternalMediaMeta>(
-    internalNs('stream')
+    internalNs('stream'),
+    {maxPayloadBytes: 64 * 1024}
   )
   const trackMetaAction = makeActionInternal<InternalMediaMeta>(
-    internalNs('track')
+    internalNs('track'),
+    {maxPayloadBytes: 64 * 1024}
   )
   const leaveAction = makeActionInternal<string>(internalNs('leave'), {
     sendToPending: true,
@@ -197,7 +206,7 @@ export default (
   })
   const handshakeDataAction = makeActionInternal<DataPayload>(
     internalNs('hsdata'),
-    {sendToPending: true, receiveWhilePending: true}
+    {sendToPending: true, receiveWhilePending: true, maxPayloadBytes: 64 * 1024}
   )
   const handshakeReadyAction = makeActionInternal<string>(
     internalNs('hsready'),
@@ -217,7 +226,9 @@ export default (
     onFailure: (id, peer, reason) => exitPeer(id, peer, reason)
   })
 
-  pingAction.onMessage((_, id) => pongAction.send('', id))
+  pingAction.onMessage((_, id) => {
+    void pongAction.send('', id).catch(noOp)
+  })
 
   pongAction.onMessage((_, id) => {
     const queue = pendingPongs[id]
@@ -274,7 +285,11 @@ export default (
     handshakeManager?.addPeer(id, peer)
 
     peer.setHandlers({
-      data: d => handleData(id, d),
+      data: d => {
+        if (peerMap[id] === peer) {
+          handleData(id, d)
+        }
+      },
       stream: stream => mediaManager.receiveRemoteStream(id, stream),
       track: (track, stream) =>
         mediaManager.receiveRemoteTrack(id, track, stream),
@@ -283,7 +298,7 @@ export default (
           return
         }
 
-        void signalAction.send(sdp as unknown as DataPayload, id)
+        void signalAction.send(sdp as unknown as DataPayload, id).catch(noOp)
       },
       close: () => exitPeer(id, peer, mkErr('peer disconnected')),
       error: (err: Error) => {

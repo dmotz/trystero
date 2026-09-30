@@ -16,6 +16,7 @@ import {
 } from './action-wire'
 import type {
   ActionProgressHandler,
+  ActionReceiveHandler,
   DataPayload,
   JsonValue,
   MessageAction,
@@ -30,8 +31,6 @@ import type {
   SendOptions
 } from './types'
 
-const requestHandlerBufferMs = 500
-
 export type {ActionOptions, InternalAction, InternalActionSender}
 
 type PublicActionKind = 'message' | 'request'
@@ -39,24 +38,13 @@ type PublicActionKind = 'message' | 'request'
 type PublicActionState = {
   kind: PublicActionKind
   action: MessageAction | RequestAction
-  pendingMessages: PendingActionPayload[]
-  pendingRequests: PendingIncomingRequest[]
+  onReceive: ActionReceiveHandler | null
   onReceiveProgress: ActionProgressHandler | null
 }
 
-type PendingActionPayload = {
-  payload: DataPayload
-  peerId: string
-  metadata?: JsonValue
-}
-
-type PendingIncomingRequest = PendingActionPayload & {
-  requestId: string
-  timer: ReturnType<typeof setTimeout>
-  controller: AbortController
-}
-
 type PendingRequestWaiter = {
+  controller: AbortController
+  getReceive: () => ActionReceiveHandler | null
   peerId: string
   resolve: (payload: DataPayload) => void
   reject: (error: Error) => void
@@ -86,6 +74,8 @@ type ActionError = Error & {
 }
 
 type ActionManagerDeps = {
+  onPeerError: (peerId: string, error: Error) => void
+  maxReceiveBytes?: number
   getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
@@ -152,7 +142,9 @@ const withMetadata = <T extends {peerId: string}>(
 export const createActionManager = ({
   getPeer,
   getPeerIds,
-  canReceiveFromPeer
+  canReceiveFromPeer,
+  onPeerError,
+  maxReceiveBytes
 }: ActionManagerDeps): {
   makeAction: Room['makeAction']
   makeInternalAction: <T extends DataPayload = DataPayload>(
@@ -162,12 +154,14 @@ export const createActionManager = ({
   handleData: (id: string, data: ArrayBuffer) => void
   clearPeer: (id: string, error: Error) => void
 } => {
-  const publicActions: Record<string, PublicActionState> = {}
+  const publicActions: Record<string, PublicActionState> = Object.create(null)
   const pendingRequestWaiters: Record<string, PendingRequestWaiter> = {}
   const wire = createActionWireManager({
     getPeer,
     getPeerIds,
     canReceiveFromPeer,
+    onPeerError,
+    ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes}),
     throwIfAborted
   })
   const makeInternalAction = wire.makeInternalAction
@@ -187,6 +181,7 @@ export const createActionManager = ({
     }
 
     delete pendingRequestWaiters[requestId]
+    waiter.controller.abort()
   }
 
   const rejectPendingRequestsForPeer = (id: string, error: Error): void => {
@@ -211,7 +206,35 @@ export const createActionManager = ({
     )
   }
 
-  const responseAction = makeInternalAction<DataPayload>('@_response')
+  const responseAction = makeInternalAction<DataPayload>('@_response', {
+    receiveScope: (peerId, metadata) => {
+      const parsed = getResponseMetadata(metadata)
+      const waiter = parsed && pendingRequestWaiters[parsed.r]
+      if (!parsed || !waiter || waiter.peerId !== peerId) {
+        return null
+      }
+      const receive = waiter.getReceive()
+      return {
+        key: parsed.r,
+        signal: waiter.controller.signal,
+        receive: receive
+          ? context =>
+              receive({
+                byteLength: context.byteLength,
+                peerId: context.peerId,
+                kind: 'response',
+                signal: context.signal
+              })
+          : null,
+        reject: reason => {
+          if (pendingRequestWaiters[parsed.r] === waiter) {
+            clearPendingRequestWaiter(parsed.r)
+            waiter.reject(makeActionError('rejected', reason))
+          }
+        }
+      }
+    }
+  })
 
   responseAction.onMessage((payload, id, metadata) => {
     const parsed = getResponseMetadata(metadata)
@@ -262,8 +285,7 @@ export const createActionManager = ({
     const state: PublicActionState = {
       kind,
       action: null as unknown as MessageAction | RequestAction,
-      pendingMessages: [],
-      pendingRequests: [],
+      onReceive: config?.onReceive ?? null,
       onReceiveProgress: config?.onReceiveProgress ?? null
     }
 
@@ -296,30 +318,45 @@ export const createActionManager = ({
       )
     }
 
+    const setReceive = (handler: ActionReceiveHandler | null): void => {
+      state.onReceive = handler
+      rawAction.onReceive(
+        handler
+          ? context => {
+              const requestMetadata =
+                kind === 'request' ? getRequestMetadata(context.metadata) : null
+              return handler(
+                withMetadata(
+                  {
+                    byteLength: context.byteLength,
+                    peerId: context.peerId,
+                    signal: context.signal,
+                    kind
+                  },
+                  requestMetadata ? requestMetadata.m : context.metadata
+                )
+              )
+            }
+          : null
+      )
+    }
+    setReceive(state.onReceive)
+
     rawAction.onProgress(dispatchReceiveProgress)
 
     if (kind === 'message') {
       let onMessage =
         (config as MessageActionConfig<T> | undefined)?.onMessage ?? null
 
-      const flushMessages = (): void => {
-        if (!onMessage) {
-          return
-        }
-
-        const handler = onMessage
-
-        state.pendingMessages
-          .splice(0)
-          .forEach(({payload, peerId, metadata}) => {
-            void Promise.resolve()
-              .then(() =>
-                handler(payload as T, withMetadata({peerId}, metadata))
-              )
-              .catch(err =>
-                console.error(`${libName} action handler error:`, err)
-              )
-          })
+      const receiveMessage = (
+        payload: DataPayload,
+        peerId: string,
+        metadata?: JsonValue
+      ): void => {
+        const handler = onMessage!
+        void Promise.resolve()
+          .then(() => handler(payload as T, withMetadata({peerId}, metadata)))
+          .catch(err => console.error(`${libName} action handler error:`, err))
       }
 
       const action = {
@@ -339,7 +376,14 @@ export const createActionManager = ({
 
         set onMessage(handler) {
           onMessage = handler
-          flushMessages()
+          rawAction.onMessage(handler ? receiveMessage : null)
+        },
+
+        get onReceive() {
+          return state.onReceive
+        },
+        set onReceive(handler) {
+          setReceive(handler)
         },
 
         get onReceiveProgress() {
@@ -351,129 +395,58 @@ export const createActionManager = ({
         }
       } satisfies MessageAction<T>
 
-      rawAction.onMessage((payload, peerId, metadata) => {
-        if (!onMessage) {
-          state.pendingMessages.push(
-            metadata === undefined
-              ? {payload, peerId}
-              : {payload, peerId, metadata}
-          )
-          return
-        }
-
-        const handler = onMessage
-
-        void Promise.resolve()
-          .then(() => handler(payload as T, withMetadata({peerId}, metadata)))
-          .catch(err => console.error(`${libName} action handler error:`, err))
-      })
-
       state.action = action as MessageAction
       publicActions[type] = state
-      flushMessages()
+      rawAction.onMessage(onMessage ? receiveMessage : null)
 
       return action
     }
 
+    rawAction.onReject((peerId, metadata, reason) => {
+      const parsed = getRequestMetadata(metadata)
+      if (parsed) {
+        void responseAction
+          .send(null, peerId, {r: parsed.r, e: reason})
+          .catch(() => {})
+      }
+    })
+
     let onRequest =
       (config as RequestActionConfig<T, R> | undefined)?.onRequest ?? null
 
-    const removePendingIncomingRequest = (
-      request: PendingIncomingRequest
-    ): void => {
-      resetTimer(request.timer)
-
-      const i = state.pendingRequests.indexOf(request)
-
-      if (i > -1) {
-        state.pendingRequests.splice(i, 1)
-      }
-    }
-
-    const sendRequestError = (
+    const receiveRequest = (
+      payload: DataPayload,
       peerId: string,
-      requestId: string,
-      error: unknown
+      metadata?: JsonValue
     ): void => {
-      void responseAction.send(null, peerId, {
-        r: requestId,
-        e: toErrorMessage(error, 'request failed')
-      })
-    }
-
-    const respondToIncomingRequest = (
-      request: PendingIncomingRequest,
-      handler: NonNullable<typeof onRequest>
-    ): void => {
-      removePendingIncomingRequest(request)
-
+      const parsed = getRequestMetadata(metadata)
+      if (!parsed) {
+        return
+      }
+      const handler = onRequest!
+      const controller = new AbortController()
       void Promise.resolve()
         .then(() =>
-          handler(request.payload as T, {
-            peerId: request.peerId,
-            ...(request.metadata === undefined
-              ? {}
-              : {metadata: request.metadata}),
-            signal: request.controller.signal
+          handler(payload as T, {
+            ...withMetadata({peerId}, parsed.m),
+            signal: controller.signal
           })
         )
         .then(async response => {
           if (response === undefined) {
             throw mkErr('request handler returned undefined')
           }
-
-          await responseAction.send(response, request.peerId, {
-            r: request.requestId
-          })
+          await responseAction.send(response, peerId, {r: parsed.r})
         })
-        .catch(err => sendRequestError(request.peerId, request.requestId, err))
-        .finally(() => request.controller.abort())
-    }
-
-    const flushRequests = (): void => {
-      if (!onRequest) {
-        return
-      }
-
-      state.pendingRequests
-        .slice()
-        .forEach(request => respondToIncomingRequest(request, onRequest!))
-    }
-
-    const queueIncomingRequest = (
-      payload: DataPayload,
-      peerId: string,
-      metadata: JsonValue | undefined,
-      requestId: string
-    ): void => {
-      if (onRequest) {
-        const request: PendingIncomingRequest = {
-          payload,
-          peerId,
-          ...(metadata === undefined ? {} : {metadata}),
-          requestId,
-          controller: new AbortController(),
-          timer: null as unknown as ReturnType<typeof setTimeout>
-        }
-
-        respondToIncomingRequest(request, onRequest)
-        return
-      }
-
-      const request: PendingIncomingRequest = {
-        payload,
-        peerId,
-        ...(metadata === undefined ? {} : {metadata}),
-        requestId,
-        controller: new AbortController(),
-        timer: setTimeout(() => {
-          removePendingIncomingRequest(request)
-          request.controller.abort()
-          sendRequestError(peerId, requestId, 'request handler unavailable')
-        }, requestHandlerBufferMs)
-      }
-
-      state.pendingRequests.push(request)
+        .catch(error =>
+          responseAction
+            .send(null, peerId, {
+              r: parsed.r,
+              e: toErrorMessage(error, 'request failed').slice(0, 512)
+            })
+            .catch(() => {})
+        )
+        .finally(() => controller.abort())
     }
 
     const requestOne = async (data: T, options: RequestOptions): Promise<R> => {
@@ -489,8 +462,11 @@ export const createActionManager = ({
       }
 
       const requestId = genId(20)
+      const controller = new AbortController()
       const responsePromise = new Promise<DataPayload>((resolve, reject) => {
         const waiter: PendingRequestWaiter = {
+          controller,
+          getReceive: () => state.onReceive,
           peerId: target,
           resolve,
           reject,
@@ -509,33 +485,27 @@ export const createActionManager = ({
         }
 
         pendingRequestWaiters[requestId] = waiter
-      })
-      const handledResponsePromise = responsePromise.catch(err => {
-        throw err
-      })
-
-      try {
-        await rawAction.send(
-          data,
-          target,
-          metadata === undefined ? {r: requestId} : {r: requestId, m: metadata},
-          toProgressHandler(onProgress, metadata),
-          signal
-        )
-
-        const waiter = pendingRequestWaiters[requestId]
-
-        if (waiter && timeoutMs !== undefined) {
+        if (timeoutMs !== undefined) {
           waiter.timer = setTimeout(() => {
             clearPendingRequestWaiter(requestId)
             waiter.reject(makeActionError('timeout', 'request timed out'))
           }, timeoutMs)
         }
-
-        return (await handledResponsePromise) as R
-      } catch (err) {
+      })
+      try {
+        const sending = rawAction.send(
+          data,
+          target,
+          metadata === undefined ? {r: requestId} : {r: requestId, m: metadata},
+          toProgressHandler(onProgress, metadata),
+          controller.signal
+        )
+        return (await Promise.race([
+          responsePromise,
+          sending.then(() => responsePromise)
+        ])) as R
+      } finally {
         clearPendingRequestWaiter(requestId)
-        throw err
       }
     }
 
@@ -606,7 +576,14 @@ export const createActionManager = ({
 
       set onRequest(handler) {
         onRequest = handler
-        flushRequests()
+        rawAction.onMessage(handler ? receiveRequest : null)
+      },
+
+      get onReceive() {
+        return state.onReceive
+      },
+      set onReceive(handler) {
+        setReceive(handler)
       },
 
       get onReceiveProgress() {
@@ -618,24 +595,9 @@ export const createActionManager = ({
       }
     } satisfies RequestAction<T, R>
 
-    rawAction.onMessage((payload, peerId, metadata) => {
-      const requestMetadata = getRequestMetadata(metadata)
-
-      if (!requestMetadata) {
-        return
-      }
-
-      queueIncomingRequest(
-        payload,
-        peerId,
-        requestMetadata.m,
-        requestMetadata.r
-      )
-    })
-
     state.action = action as unknown as RequestAction
     publicActions[type] = state
-    flushRequests()
+    rawAction.onMessage(onRequest ? receiveRequest : null)
 
     return action
   }

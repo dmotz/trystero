@@ -1,5 +1,4 @@
 import type {OfferManager} from './offer-manager'
-import type {SharedPeerManager} from './shared-peer'
 
 export type JsonPrimitive = null | string | number | boolean
 
@@ -64,6 +63,7 @@ export type RelayConfig = BaseRelayConfig & {
 
 export type BaseRoomConfig = {
   appId: string
+  maxReceiveBytes?: number
   password?: string
   passive?: boolean
   relayConfig?: BaseRelayConfig
@@ -94,6 +94,18 @@ export type ActionProgressHandler = (
   progress: number,
   context: ActionProgressContext
 ) => void
+
+export type ActionReceiveContext = {
+  peerId: string
+  byteLength: number
+  kind: 'message' | 'request' | 'response'
+  signal: AbortSignal
+  metadata?: JsonValue
+}
+
+export type ActionReceiveHandler = (
+  context: ActionReceiveContext
+) => boolean | Promise<boolean>
 
 export type MessageContext = {
   peerId: string
@@ -140,6 +152,7 @@ export type MessageAction<T extends DataPayload = DataPayload> = {
   send: (data: T, options?: SendOptions) => Promise<void>
   onMessage: ((data: T, context: MessageContext) => void | Promise<void>) | null
   onReceiveProgress: ActionProgressHandler | null
+  onReceive: ActionReceiveHandler | null
 }
 
 export type RequestAction<
@@ -153,12 +166,14 @@ export type RequestAction<
   ) => Promise<PeerResult<R>[]>
   onRequest: ((data: T, context: RequestContext) => R | Promise<R>) | null
   onReceiveProgress: ActionProgressHandler | null
+  onReceive: ActionReceiveHandler | null
 }
 
 export type MessageActionConfig<T extends DataPayload = DataPayload> = {
   kind?: 'message'
   onMessage?: (data: T, context: MessageContext) => void | Promise<void>
   onReceiveProgress?: ActionProgressHandler
+  onReceive?: ActionReceiveHandler
 }
 
 export type RequestActionConfig<
@@ -168,6 +183,7 @@ export type RequestActionConfig<
   kind: 'request'
   onRequest?: (data: T, context: RequestContext) => R | Promise<R>
   onReceiveProgress?: ActionProgressHandler
+  onReceive?: ActionReceiveHandler
 }
 
 export type AddMediaOptions = {
@@ -487,13 +503,12 @@ export type SignalContext = {
   isPassive: boolean
   isActive: boolean
   onJoinError: JoinErrorHandler | undefined
-  sharedPeers: SharedPeerManager
   offerManager: OfferManager
   encryptOffer: (peer: PeerHandle) => Promise<string>
   initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
   connectPeer: (peer: PeerHandle, peerId: string, relayId: number) => void
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
-  attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
+  reusePeer: (peerId: string) => boolean
   checkDeactivate: () => void
   announceIntervals: number[]
   announceIntervalMs: number

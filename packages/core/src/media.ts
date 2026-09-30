@@ -1,4 +1,4 @@
-import {genId} from './utils'
+import {genId, libName, mkErr} from './utils'
 import type {
   AddMediaOptions,
   JsonValue,
@@ -24,6 +24,7 @@ type PendingMediaMeta = {
 }
 
 type MediaManagerDeps = {
+  onPeerError: (peerId: string, error: Error) => void
   iterate: (
     targets: TargetPeers,
     f: (id: string, peer: SharedMediaPeer) => Promise<void> | void
@@ -120,7 +121,8 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
 export const createMediaManager = ({
   iterate,
   isActive,
-  getSharedMediaPeer
+  getSharedMediaPeer,
+  onPeerError
 }: MediaManagerDeps): {
   addStream: (
     stream: MediaStream,
@@ -301,7 +303,13 @@ export const createMediaManager = ({
         return
       }
 
-      ;(pendingStreamMetas[id] ??= []).push(parsed)
+      const queue = (pendingStreamMetas[id] ??= [])
+      if (queue.length >= 64) {
+        console.warn(`${libName}: too many pending stream metadata messages`)
+        onPeerError(id, mkErr('too many pending media metadata messages'))
+        return
+      }
+      queue.push(parsed)
     },
 
     receiveTrackMeta: (meta, id) => {
@@ -326,7 +334,13 @@ export const createMediaManager = ({
         return
       }
 
-      ;(pendingTrackMetas[id] ??= []).push(parsed)
+      const queue = (pendingTrackMetas[id] ??= [])
+      if (queue.length >= 64) {
+        console.warn(`${libName}: too many pending track metadata messages`)
+        onPeerError(id, mkErr('too many pending media metadata messages'))
+        return
+      }
+      queue.push(parsed)
     },
 
     receiveRemoteStream: (id, stream) => {
