@@ -506,7 +506,7 @@ export type SignalContext = {
   offerManager: OfferManager
   encryptOffer: (peer: PeerHandle) => Promise<string>
   initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
-  connectPeer: (peer: PeerHandle, peerId: string, relayId: number) => void
+  connectPeer: (peer: PeerHandle, peerId: string) => void
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
   reusePeer: (peerId: string) => boolean
   checkDeactivate: () => void

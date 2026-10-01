@@ -42,7 +42,7 @@ void test(
       offerNum = 0
       listeners = {}
 
-      constructor(_) {
+      constructor() {
         CountingRTCPeerConnection.created += 1
       }
 

@@ -16,6 +16,8 @@ const encoder = new TextEncoder()
 
 export const tick = () => new Promise(res => setTimeout(res, 0))
 
+export const turn = () => new Promise<void>(resolve => setImmediate(resolve))
+
 export const wait = (ms: number) => new Promise(res => setTimeout(res, ms))
 
 export const waitFor = async (
@@ -50,6 +52,74 @@ export const encodeInternalAction = type => {
   packet.set(typeBytes, 2)
 
   return packet.buffer
+}
+
+export const roomFrame = (
+  token: string,
+  payloadOrSize: ArrayBuffer | Uint8Array | number[] | number = 16_384
+) => {
+  const name = encoder.encode(token)
+  const payload =
+    typeof payloadOrSize === 'number'
+      ? new Uint8Array(payloadOrSize)
+      : payloadOrSize instanceof Uint8Array
+        ? payloadOrSize
+        : Array.isArray(payloadOrSize)
+          ? Uint8Array.from(payloadOrSize)
+          : new Uint8Array(payloadOrSize)
+  const bytes = new Uint8Array(3 + name.length + payload.byteLength)
+  bytes[0] = 1
+  new DataView(bytes.buffer).setUint16(1, name.length)
+  bytes.set(name, 3)
+  bytes.set(payload, 3 + name.length)
+  return bytes.buffer
+}
+
+export const presenceFrame = (token: string, present = true) => {
+  const bytes = encoder.encode(token)
+  const frame = new Uint8Array(4 + bytes.length)
+  frame[0] = 2
+  frame[1] = Number(present)
+  new DataView(frame.buffer).setUint16(2, bytes.length)
+  frame.set(bytes, 4)
+  return frame.buffer
+}
+
+export const actionStartFrame = (
+  id: number,
+  size: number,
+  {
+    type = 'file',
+    payload,
+    metadata,
+    format = 2
+  }: {
+    type?: string
+    payload?: Uint8Array
+    metadata?: unknown
+    format?: number
+  } = {}
+) => {
+  const meta =
+    metadata === undefined
+      ? new Uint8Array()
+      : encoder.encode(JSON.stringify(metadata))
+  const header = payload ? 36 : 48
+  const bytes = new Uint8Array(header + meta.length + (payload?.length ?? 0))
+  const view = new DataView(bytes.buffer)
+  bytes[0] = 2
+  bytes[1] = (payload ? 0 : 1) | (format << 4)
+  bytes.set(encoder.encode(type), 2)
+  view.setUint16(34, meta.length)
+  if (!payload) {
+    view.setUint32(36, id)
+    view.setFloat64(40, size)
+  }
+  bytes.set(meta, header)
+  if (payload) {
+    bytes.set(payload, header + meta.length)
+  }
+  return bytes.buffer
 }
 
 export class MockDataChannel {
@@ -238,6 +308,35 @@ export class LinkedPeer {
   replaceTrack() {}
 }
 
+export class BufferedPeer extends LinkedPeer {
+  inbox: ArrayBuffer[] = []
+
+  override async signal() {
+    this.handlers.connect?.()
+  }
+
+  override sendData(data: Uint8Array) {
+    const payload = data.slice().buffer
+    const partner = this.partner as BufferedPeer
+
+    queueMicrotask(() => {
+      partner.inbox.push(payload)
+      partner.flush()
+    })
+  }
+
+  override setHandlers(handlers) {
+    super.setHandlers(handlers)
+    this.flush()
+  }
+
+  flush() {
+    if (this.handlers.data) {
+      this.inbox.splice(0).forEach(data => this.handlers.data(data))
+    }
+  }
+}
+
 export class LinkedMediaPeer extends LinkedPeer {
   addStreamCalls = 0
   remoteStreams = new Map<
@@ -281,6 +380,7 @@ export class LinkedMediaPeer extends LinkedPeer {
 
       if (remote?.isNew) {
         this.partner?.handlers.track?.(remote.track, remote.stream)
+        this.partner?.handlers.stream?.(remote.stream)
       }
     })
   }
@@ -293,6 +393,7 @@ export class LinkedMediaPeer extends LinkedPeer {
 
     if (remote?.isNew) {
       this.partner?.handlers.track?.(remote.track, remote.stream)
+      this.partner?.handlers.stream?.(remote.stream)
     }
 
     return {}

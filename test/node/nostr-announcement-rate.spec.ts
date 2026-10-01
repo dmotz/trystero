@@ -255,7 +255,7 @@ void test(
   }
 )
 
-for (const recovered of [false, true])
+for (const recovered of [false, true]) {
   void test(
     `Nostr pending subscription retry respects ${recovered ? 'successful reconnect' : 'a later cooldown'}`,
     {timeout: 8000},
@@ -286,6 +286,7 @@ for (const recovered of [false, true])
       }
     }
   )
+}
 
 void test('Nostr temporary event errors do not retire the relay or cancel discovery', async () => {
   const previous = globalThis.WebSocket

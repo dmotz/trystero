@@ -1,20 +1,20 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {MockPeer, encodeInternalAction, waitFor} from './peer-harness.ts'
+import {
+  LinkedPeer,
+  MockPeer,
+  actionStartFrame,
+  encodeInternalAction,
+  linkPeers,
+  roomFrame as frame,
+  turn,
+  waitFor
+} from './peer-harness.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 
-const frame = (token: string, action: ArrayBuffer) => {
-  const name = new TextEncoder().encode(token)
-  const bytes = new Uint8Array(3 + name.length + action.byteLength)
-  bytes[0] = 1
-  new DataView(bytes.buffer).setUint16(1, name.length)
-  bytes.set(name, 3)
-  bytes.set(new Uint8Array(action), 3 + name.length)
-  return bytes.buffer
-}
 const metadataAction = (type: string, key: string) => {
   const payload = new TextEncoder().encode(JSON.stringify({k: key}))
   const bytes = new Uint8Array(36 + payload.length)
@@ -90,16 +90,8 @@ for (const fault of ['wire', 'stream', 'track']) {
   })
 }
 
-const fileOffer = (id: number, type = 'file', size = 20_000) => {
-  const bytes = new Uint8Array(48)
-  bytes[0] = 2
-  bytes[1] = 33
-  bytes.set(new TextEncoder().encode(type), 2)
-  const view = new DataView(bytes.buffer)
-  view.setUint32(36, id)
-  view.setFloat64(40, size)
-  return bytes.buffer
-}
+const fileOffer = (id: number, type = 'file', size = 20_000) =>
+  actionStartFrame(id, size, {type})
 
 for (const saturation of ['policies', 'transfers']) {
   void test(`media control messages bypass saturated ${saturation} and retain their size limit`, async t => {
@@ -190,7 +182,162 @@ void test('application policy saturation does not block new peer handshakes', as
   }
   assert.equal(approvals.length, 128)
   join('new-peer')
-  await new Promise(resolve => setImmediate(resolve))
+  await turn()
   assert.ok(proofs.includes('new-peer'))
   assert.ok('new-peer' in room.getPeers())
+})
+
+void test('room peer errors and handshake failures notify the remote shared peer to exit that room', async t => {
+  t.mock.method(console, 'warn', () => {})
+  const managerA = new SharedPeerManager()
+  const managerB = new SharedPeerManager()
+  const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+  const sharedA = managerA.register('app', 'peer-b', peerA as never, 60_000)
+  const sharedB = managerB.register('app', 'peer-a', peerB as never, 60_000)
+  t.after(() => {
+    managerA.clear('app', 'peer-b', {destroyPeer: true})
+    managerB.clear('app', 'peer-a', {destroyPeer: true})
+  })
+  const bindPair = (token: string, rejectHandshake = false) => {
+    const {proxy: proxyA} = managerA.bind(
+      token,
+      Promise.resolve(token),
+      sharedA,
+      {
+        onDetach: () => {}
+      }
+    )
+    const {proxy: proxyB} = managerB.bind(
+      token,
+      Promise.resolve(token),
+      sharedB,
+      {
+        onDetach: () => {}
+      }
+    )
+    let connectA
+    let connectB
+    const roomA = createRoom(
+      callback => {
+        connectA = callback
+      },
+      () => {},
+      () => {},
+      rejectHandshake
+        ? {
+            onPeerHandshake: async () => {
+              throw new Error('rejected handshake')
+            },
+            onHandshakeError: () => {}
+          }
+        : undefined
+    )
+    const roomB = createRoom(
+      callback => {
+        connectB = callback
+      },
+      () => {},
+      () => {}
+    )
+    connectA(proxyA, 'peer-b')
+    connectB(proxyB, 'peer-a')
+    return {roomA, roomB}
+  }
+  const bad = bindPair('bad')
+  const good = bindPair('good')
+  t.after(async () => {
+    await Promise.all([
+      bad.roomA.leave(),
+      bad.roomB.leave(),
+      good.roomA.leave(),
+      good.roomB.leave()
+    ])
+  })
+  await waitFor(
+    () =>
+      'peer-b' in bad.roomA.getPeers() &&
+      'peer-a' in bad.roomB.getPeers() &&
+      'peer-b' in good.roomA.getPeers() &&
+      'peer-a' in good.roomB.getPeers()
+  )
+  let remoteLeaves = 0
+  bad.roomB.onPeerLeave = () => {
+    remoteLeaves++
+  }
+  // Trigger a room-level wire fault on bad.roomA; bad.roomB should also exit.
+  peerA.handlers.data(frame('bad', new Uint8Array(36).buffer))
+  await waitFor(() => !('peer-a' in bad.roomB.getPeers()))
+  assert.equal(remoteLeaves, 1)
+  assert.ok('peer-a' in good.roomB.getPeers())
+
+  // A handshake failure on roomA must also cause roomB to exit that room.
+  const rejected = bindPair('rejected', true)
+  t.after(async () => {
+    await Promise.all([rejected.roomA.leave(), rejected.roomB.leave()])
+  })
+  await waitFor(
+    () =>
+      !('peer-b' in rejected.roomA.getPeers()) &&
+      !('peer-a' in rejected.roomB.getPeers())
+  )
+  assert.ok('peer-a' in good.roomB.getPeers())
+})
+
+void test('renegotiation signals route to an active room instead of a room still in handshake', async t => {
+  const manager = new SharedPeerManager()
+  const physical = new MockPeer()
+  const sentTokens: string[] = []
+  physical.sendData = (bytes?: Uint8Array) => {
+    if (bytes && bytes[0] === 1) {
+      const len = new DataView(
+        bytes.buffer,
+        bytes.byteOffset,
+        bytes.byteLength
+      ).getUint16(1)
+      sentTokens.push(new TextDecoder().decode(bytes.subarray(3, 3 + len)))
+    }
+  }
+  const shared = manager.register('app', 'peer', physical as never, 60_000)
+  t.after(() => manager.clear('app', 'peer', {destroyPeer: true}))
+  let releasePendingHandshake: () => void
+  const createBoundRoom = (token: string, blockHandshake: boolean) => {
+    const {proxy} = manager.bind(token, Promise.resolve(token), shared, {
+      onDetach: () => {}
+    })
+    let connect
+    const room = createRoom(
+      callback => {
+        connect = callback
+      },
+      () => {},
+      () => {},
+      blockHandshake
+        ? {
+            onPeerHandshake: () =>
+              new Promise<void>(resolve => {
+                releasePendingHandshake = resolve
+              })
+          }
+        : undefined
+    )
+    connect(proxy, 'peer')
+    return room
+  }
+  const pendingRoom = createBoundRoom('pending', true)
+  const activeRoom = createBoundRoom('active', false)
+  t.after(async () => {
+    releasePendingHandshake?.()
+    await Promise.all([pendingRoom.leave(), activeRoom.leave()])
+  })
+  await turn()
+  physical.handlers.data(frame('active', encodeInternalAction('@_hsready')))
+  await waitFor(() => 'peer' in activeRoom.getPeers())
+  assert.equal(shared.controlRoomId, 'pending')
+  sentTokens.length = 0
+
+  physical.handlers.signal({type: 'offer', sdp: 'renegotiation-sdp'})
+  await turn()
+  assert.equal(physical.isDead, false)
+  assert.equal(shared.controlRoomId, 'active')
+  assert.deepEqual(sentTokens, ['active'])
 })

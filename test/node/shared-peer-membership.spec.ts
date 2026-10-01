@@ -7,18 +7,11 @@ import {
   LinkedPeer,
   linkPeers,
   encodeInternalAction,
+  presenceFrame as presence,
+  roomFrame as roomData,
   tick
 } from './peer-harness.ts'
 
-const encoder = new TextEncoder()
-const presence = (token: string, present = true) => {
-  const bytes = encoder.encode(token)
-  return Uint8Array.of(2, Number(present), 0, bytes.length, ...bytes).buffer
-}
-const roomData = (token: string, payload: number[]) => {
-  const bytes = encoder.encode(token)
-  return Uint8Array.of(1, 0, bytes.length, ...bytes, ...payload).buffer
-}
 const deferred = () => {
   let resolve: (token: string) => void
   const promise = new Promise<string>(res => {

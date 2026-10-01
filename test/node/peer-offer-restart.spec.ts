@@ -71,3 +71,116 @@ void test('unanswered offer restarts preserve the pending data channel without r
   await peer.getOffer(true)
   assert.equal(pc.rollbacks, 1)
 })
+
+void test('a restarted prewarmed offer does not queue in pendingSignals or destroy its shared peer', async t => {
+  const peer = initPeer(true, {
+    appId: 'restarted-prewarmed-offer-test',
+    rtcPolyfill: MockRTCPeerConnection as never
+  })
+  const manager = new SharedPeerManager()
+  let joins = 0
+  const replayedSignals: unknown[] = []
+  const room = manager.registerRoom(
+    'restarted-prewarmed-offer-test',
+    'room',
+    Promise.resolve('room-token'),
+    {
+      active: true,
+      onPeer: proxy => {
+        joins++
+        proxy.setHandlers({signal: signal => replayedSignals.push(signal)})
+      },
+      onDetach: () => {}
+    }
+  )
+  t.after(() => {
+    room.leave()
+    peer.destroy()
+  })
+
+  await peer.getOffer()
+  const restarted = await peer.getOffer(true)
+  assert.ok(restarted)
+  assert.equal(restarted.type, 'offer')
+
+  room.connect('remote', peer, 60_000)
+  assert.equal(joins, 1)
+  assert.equal(peer.isDead, false)
+  assert.deepEqual(replayedSignals, [])
+})
+
+void test('spurious negotiationneeded while have-local-offer does not create a conflicting offer', async t => {
+  class StrictRTCPeerConnection extends MockRTCPeerConnection {
+    offerCalls = 0
+
+    override async createOffer() {
+      this.offerCalls++
+      return super.createOffer()
+    }
+  }
+
+  const peer = initPeer(true, {
+    appId: 'spurious-negotiation-test',
+    rtcPolyfill: StrictRTCPeerConnection as never
+  })
+  t.after(() => peer.destroy())
+  const errors: Error[] = []
+  peer.setHandlers({error: error => errors.push(error)})
+  const pc = peer.connection as unknown as StrictRTCPeerConnection
+
+  await peer.getOffer()
+  assert.equal(pc.signalingState, 'have-local-offer')
+  assert.equal(pc.offerCalls, 1)
+
+  pc.onnegotiationneeded?.()
+  await Promise.resolve()
+  assert.equal(pc.offerCalls, 1)
+  assert.deepEqual(errors, [])
+})
+
+void test('non-trickle offer resolves once gathered candidates settle without waiting for full iceTimeout', async t => {
+  class StalledGatheringRTCPeerConnection extends MockRTCPeerConnection {
+    override iceGatheringState = 'gathering'
+
+    override async setLocalDescription(description) {
+      const nextDescription = description ?? (await this.createOffer())
+      this.localDescription = {
+        type: nextDescription.type,
+        sdp: 'v=0\r\na=candidate:1 1 udp 2113937151 127.0.0.1 50000 typ host\r\n'
+      }
+      this.signalingState = 'have-local-offer'
+      this.listeners['icegatheringstatechange']?.forEach(listener => listener())
+
+      queueMicrotask(() => {
+        const candidateLine =
+          'candidate:2 1 udp 1677729535 203.0.113.5 50000 typ srflx raddr 0.0.0.0 rport 0'
+        this.localDescription = {
+          type: 'offer',
+          sdp: `${this.localDescription.sdp}a=${candidateLine}\r\n`
+        }
+        this.listeners['icecandidate']?.forEach(listener =>
+          listener({candidate: {candidate: candidateLine}})
+        )
+      })
+    }
+  }
+
+  const start = Date.now()
+  const peer = initPeer(true, {
+    appId: 'stalled-gathering-settle-test',
+    trickleIce: false,
+    rtcPolyfill: StalledGatheringRTCPeerConnection as never
+  })
+  t.after(() => peer.destroy())
+
+  const offer = await peer.getOffer()
+  const elapsedMs = Date.now() - start
+
+  assert.ok(offer)
+  assert.equal(offer.type, 'offer')
+  assert.match(offer.sdp, /typ srflx/)
+  assert.ok(
+    elapsedMs < 1_500,
+    `expected non-trickle offer to settle quickly (<1500ms), got ${elapsedMs}ms`
+  )
+})

@@ -9,6 +9,7 @@ import {
   encodeBytes,
   keys,
   libName,
+  mkErr,
   noOp,
   resetTimer,
   values
@@ -155,6 +156,15 @@ type RoomMembership = {
 
 export class SharedPeerManager {
   private rooms = new Map<string, Map<string, RoomRegistration>>()
+  private unclaimedDataTimers = new WeakMap<
+    SharedPeerState,
+    ReturnType<typeof setTimeout>
+  >()
+  private pendingDataTimers = new WeakMap<
+    SharedPeerState,
+    ReturnType<typeof setTimeout>
+  >()
+  private byApp: Record<string, Record<string, SharedPeerState>> = {}
 
   registerRoom(
     appId: string,
@@ -168,7 +178,7 @@ export class SharedPeerManager {
   ): RoomMembership {
     const rooms = this.rooms.get(appId) ?? new Map<string, RoomRegistration>()
     if (rooms.has(roomId)) {
-      throw new Error('room membership already registered')
+      throw mkErr('room membership already registered')
     }
     const registration: RoomRegistration = {
       token: null,
@@ -302,12 +312,6 @@ export class SharedPeerManager {
     }
   }
 
-  private pendingDataTimers = new WeakMap<
-    SharedPeerState,
-    ReturnType<typeof setTimeout>
-  >()
-
-  private byApp: Record<string, Record<string, SharedPeerState>> = {}
   get(appId: string, peerId: string): SharedPeerState | undefined {
     return this.byApp[appId]?.[peerId]
   }
@@ -337,11 +341,7 @@ export class SharedPeerManager {
     }
 
     shared.idleTimer = resetTimer(shared.idleTimer)
-    const pendingTimer = this.pendingDataTimers.get(shared)
-    if (pendingTimer) {
-      clearTimeout(pendingTimer)
-    }
-    this.pendingDataTimers.delete(shared)
+    this.clearDataTimers(shared)
     shared.isClosing = true
 
     if (destroyPeer && !shared.peer.isDead) {
@@ -518,7 +518,7 @@ export class SharedPeerManager {
           binding.handlers.signal = signal
         }
 
-        this.flushBindingQueues(binding)
+        this.flushBindingQueues(shared, binding)
       },
       offerPromise: shared.peer.offerPromise,
       addStream: stream => {
@@ -625,7 +625,7 @@ export class SharedPeerManager {
       pendingSendData.forEach(payload =>
         shared.peer.sendData(wrapRoomFrame(roomToken, payload))
       )
-      this.flushBindingQueues(binding)
+      this.flushBindingQueues(shared, binding)
       this.discardUnboundData(shared)
     })
 
@@ -695,12 +695,18 @@ export class SharedPeerManager {
     return fallback
   }
 
-  private flushBindingQueues(binding: SharedPeerBinding): void {
+  private flushBindingQueues(
+    shared: SharedPeerState,
+    binding: SharedPeerBinding
+  ): void {
     const {handlers} = binding
 
     if (handlers.data && binding.pendingData.length > 0) {
       const queued = binding.pendingData.splice(0)
+      this.syncDataTimers(shared)
       queued.forEach(payload => handlers.data?.(payload))
+    } else {
+      this.syncDataTimers(shared)
     }
 
     if ((handlers.track || handlers.stream) && binding.pendingTracks.length) {
@@ -712,15 +718,71 @@ export class SharedPeerManager {
     }
   }
 
-  private bufferedFrameCount(shared: SharedPeerState): number {
+  private unclaimedBufferedFrameCount(shared: SharedPeerState): number {
     let count = 0
     for (const queue of shared.pendingDataByToken.values()) {
       count += queue.length
     }
+    return count
+  }
+
+  private boundBufferedFrameCount(shared: SharedPeerState): number {
+    let count = 0
     for (const binding of values(shared.bindings)) {
       count += binding.pendingData.length
     }
     return count
+  }
+
+  private bufferedFrameCount(shared: SharedPeerState): number {
+    return (
+      this.unclaimedBufferedFrameCount(shared) +
+      this.boundBufferedFrameCount(shared)
+    )
+  }
+
+  private clearDataTimers(shared: SharedPeerState): void {
+    resetTimer(this.unclaimedDataTimers.get(shared))
+    this.unclaimedDataTimers.delete(shared)
+    resetTimer(this.pendingDataTimers.get(shared))
+    this.pendingDataTimers.delete(shared)
+  }
+
+  private syncDataTimers(shared: SharedPeerState): void {
+    if (shared.isClosing) {
+      this.clearDataTimers(shared)
+      return
+    }
+
+    if (this.unclaimedBufferedFrameCount(shared) === 0) {
+      resetTimer(this.unclaimedDataTimers.get(shared))
+      this.unclaimedDataTimers.delete(shared)
+    } else if (!this.unclaimedDataTimers.has(shared)) {
+      this.unclaimedDataTimers.set(
+        shared,
+        setTimeout(() => {
+          this.unclaimedDataTimers.delete(shared)
+          // These may be late frames for rooms we left while another token
+          // was resolving. Expire them without closing unrelated bindings.
+          shared.pendingDataByToken.clear()
+        }, pendingDataTimeoutMs)
+      )
+    }
+
+    if (this.boundBufferedFrameCount(shared) === 0) {
+      resetTimer(this.pendingDataTimers.get(shared))
+      this.pendingDataTimers.delete(shared)
+    } else if (!this.pendingDataTimers.has(shared)) {
+      this.pendingDataTimers.set(
+        shared,
+        setTimeout(() => {
+          this.pendingDataTimers.delete(shared)
+          if (this.boundBufferedFrameCount(shared) > 0) {
+            this.failData(shared, 'room data handler timed out')
+          }
+        }, pendingDataTimeoutMs)
+      )
+    }
   }
 
   private canBindRoomToken(shared: SharedPeerState, token: string): boolean {
@@ -738,43 +800,12 @@ export class SharedPeerManager {
         shared.pendingDataByToken.delete(token)
       }
     }
+    this.syncDataTimers(shared)
   }
 
   private failData(shared: SharedPeerState, reason: string): void {
     console.warn(`${libName}: ${reason}; disconnecting peer ${shared.peerId}`)
     this.clear(shared.appId, shared.peerId, {destroyPeer: true})
-  }
-
-  private queueData(
-    shared: SharedPeerState,
-    queue: ArrayBuffer[],
-    data: ArrayBuffer
-  ): boolean {
-    const count = this.bufferedFrameCount(shared)
-    if (count >= maxQueuedDataFrames) {
-      this.failData(shared, 'too much data waiting for a room handler')
-      return false
-    }
-    if (!count) {
-      const previous = this.pendingDataTimers.get(shared)
-      if (previous) {
-        clearTimeout(previous)
-      }
-      this.pendingDataTimers.set(
-        shared,
-        setTimeout(() => {
-          this.pendingDataTimers.delete(shared)
-          // These may be late frames for rooms we left while another token
-          // was resolving. Expire them without closing unrelated bindings.
-          shared.pendingDataByToken.clear()
-          if (this.bufferedFrameCount(shared)) {
-            this.failData(shared, 'room data handler timed out')
-          }
-        }, pendingDataTimeoutMs)
-      )
-    }
-    queue.push(data)
-    return true
   }
 
   private dispatchData(shared: SharedPeerState, data: ArrayBuffer): void {
@@ -810,6 +841,7 @@ export class SharedPeerManager {
         const binding = shared.bindingsByToken[decoded.roomToken]
         binding?.handlers.close?.()
         binding?.detach()
+        this.syncDataTimers(shared)
       }
 
       return
@@ -827,16 +859,21 @@ export class SharedPeerManager {
         return
       }
       const pending = shared.pendingDataByToken.get(decoded.roomToken) ?? []
-      if (this.queueData(shared, pending, decoded.payload)) {
-        shared.pendingDataByToken.set(decoded.roomToken, pending)
-      }
+      pending.push(decoded.payload)
+      shared.pendingDataByToken.set(decoded.roomToken, pending)
+      this.syncDataTimers(shared)
       return
     }
 
     if (binding.handlers.data) {
       binding.handlers.data(decoded.payload)
     } else {
-      this.queueData(shared, binding.pendingData, decoded.payload)
+      if (this.bufferedFrameCount(shared) >= maxQueuedDataFrames) {
+        this.failData(shared, 'too much data waiting for a room handler')
+        return
+      }
+      binding.pendingData.push(decoded.payload)
+      this.syncDataTimers(shared)
     }
   }
 

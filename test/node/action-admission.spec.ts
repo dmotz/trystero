@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {linkedActions, waitFor} from './peer-harness.ts'
-
-const turn = () => new Promise<void>(resolve => setImmediate(resolve))
+import {linkedActions, turn, waitFor} from './peer-harness.ts'
 
 void test('expired inline request approval rejects once and cannot deliver after late approval', async t => {
   t.mock.timers.enable({apis: ['setTimeout', 'Date']})
@@ -369,3 +367,73 @@ for (const saturation of ['policies', 'transfers']) {
     }
   )
 }
+
+void test('remote request errors bypass the requester response policy', async t => {
+  const pair = linkedActions()
+  t.after(pair.close)
+  pair.right.makeAction('fail', {
+    kind: 'request',
+    onRequest: () => {
+      throw new Error('handler failure')
+    }
+  })
+  const action = pair.left.makeAction('fail', {
+    kind: 'request',
+    onReceive: () =>
+      assert.fail('response policy should not run on remote error')
+  })
+  await assert.rejects(action.request('hello', {target: 'right'}), {
+    kind: 'rejected',
+    message: /handler failure/
+  })
+})
+
+void test('rejected bulk responses do not emit a second error response frame', async t => {
+  const pair = linkedActions()
+  t.after(pair.close)
+  pair.right.makeAction('bulk', {
+    kind: 'request',
+    onRequest: () => new Uint8Array(100_000)
+  })
+  const action = pair.left.makeAction('bulk', {
+    kind: 'request',
+    onReceive: () => false
+  })
+  await assert.rejects(action.request('hello', {target: 'right'}), {
+    kind: 'rejected'
+  })
+  await turn()
+  assert.deepEqual(
+    pair.frames
+      .filter(frame => frame.from === 'right')
+      .map(frame => frame.kind),
+    [1]
+  )
+})
+
+void test('request actions report receive progress for bulk responses', async t => {
+  const pair = linkedActions()
+  t.after(pair.close)
+  const payload = new Uint8Array(100_000).fill(7)
+  pair.right.makeAction('download', {
+    kind: 'request',
+    onRequest: () => payload
+  })
+  const progresses: number[] = []
+  const contexts: Array<{peerId: string; metadata?: unknown}> = []
+  const download = pair.left.makeAction('download', {
+    kind: 'request',
+    onReceiveProgress: (progress, context) => {
+      progresses.push(progress)
+      contexts.push({peerId: context.peerId, metadata: context.metadata})
+    }
+  })
+  const result = await download.request('start', {
+    target: 'right',
+    metadata: {file: 'data.bin'}
+  })
+  assert.deepEqual(result, payload)
+  assert.ok(progresses.length > 1)
+  assert.equal(progresses.at(-1), 1)
+  assert.ok(contexts.every(context => context.peerId === 'right'))
+})

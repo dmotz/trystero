@@ -1,4 +1,4 @@
-import {decodeBytes, fromJson, libName, noOp} from './utils'
+import {decodeBytes, fromJson, libName, noOp, resetTimer} from './utils'
 import type {ActionReceiveContext, DataPayload, JsonValue} from './types'
 
 const maxPendingTransfers = 1024
@@ -8,18 +8,22 @@ const maxDecisionsPerPeer = 8
 const transferTimeoutMs = 120_000
 const emptyBytes = new Uint8Array()
 
-export type WireReceiveContext = Omit<ActionReceiveContext, 'kind'>
+export const textFormat = 0
+export const jsonFormat = 1
+export const binaryFormat = 2
+
+type WireReceiveContext = Omit<ActionReceiveContext, 'kind'>
 export type WireReceiveHandler = (
   context: WireReceiveContext
 ) => boolean | Promise<boolean>
 // Request ownership is independent of optional application admission policy.
-export type ReceiveScope = {
+type ReceiveScope = {
   key: string
   signal: AbortSignal
   receive: WireReceiveHandler | null
   reject: (reason: string) => void
 }
-export type ReceiveScopeResolver = (
+type ReceiveScopeResolver = (
   peerId: string,
   metadata?: JsonValue
 ) => ReceiveScope | null
@@ -40,7 +44,7 @@ type ReceiveAction = ReceiveOptions & {
   receive: WireReceiveHandler | null
   reject: WireRejectHandler | null
 }
-type Message = {
+export type Message = {
   peerId: string
   type: string
   format: number
@@ -72,7 +76,7 @@ type PeerIncoming = {
 }
 
 // Normalize application policy results in one place, preserving synchronous decisions.
-export const decideReceive = (
+const decideReceive = (
   decide: () => boolean | Promise<boolean>,
   settle: (allow: boolean) => boolean
 ): boolean | Promise<boolean> => {
@@ -95,11 +99,11 @@ const decodePayload = (
   format: number,
   copy: boolean
 ): DataPayload =>
-  format === 2
+  format === binaryFormat
     ? copy
       ? bytes.slice()
       : bytes
-    : format === 1
+    : format === jsonFormat
       ? fromJson<JsonValue>(decodeBytes(bytes))
       : decodeBytes(bytes)
 
@@ -157,12 +161,25 @@ export const createActionReceiver = ({
   const notifyRejected = (
     message: Message,
     reason: string,
-    scope?: ReceiveScope
+    scope?: ReceiveScope,
+    bulkId?: number
   ): void => {
     scope?.reject(reason)
     actions
       .get(message.type)
       ?.reject?.(message.peerId, message.metadata, reason)
+    if (bulkId !== undefined) {
+      refuse(message.peerId, bulkId, reason)
+    }
+  }
+  const rotateWaitingForPeer = (peerId: string): void => {
+    // Rotate this peer's offers behind other peers when it releases capacity.
+    for (const queued of Array.from(waiting)) {
+      if (queued.peerId === peerId) {
+        waiting.delete(queued)
+        waiting.add(queued)
+      }
+    }
   }
 
   const release = (state: Incoming): void => {
@@ -171,9 +188,7 @@ export const createActionReceiver = ({
     }
     state.phase = 'released'
     state.removeAbortListener?.()
-    if (state.timer) {
-      clearTimeout(state.timer)
-    }
+    state.timer = resetTimer(state.timer)
     const peer = peers.get(state.peerId)!
     if (state.kind === 'inline') {
       const queue = peer.inline.get(state.key)!
@@ -188,14 +203,9 @@ export const createActionReceiver = ({
       state.data = null
       if (state.transfer === 'receiving') {
         reservedBytes -= state.size
-        peer.active = null
-        // Rotate this peer's offers behind other peers when it releases capacity.
-        const queuedTransfers = [...waiting]
-        for (const queued of queuedTransfers) {
-          if (queued.peerId === state.peerId) {
-            waiting.delete(queued)
-            waiting.add(queued)
-          }
+        if (peer.active === state) {
+          peer.active = null
+          rotateWaitingForPeer(state.peerId)
         }
         drainAgain = true
       }
@@ -212,10 +222,12 @@ export const createActionReceiver = ({
       return
     }
     release(state)
-    notifyRejected(state, reason, state.scope)
-    if (state.kind === 'bulk') {
-      refuse(state.peerId, state.id, reason)
-    }
+    notifyRejected(
+      state,
+      reason,
+      state.scope,
+      state.kind === 'bulk' ? state.id : undefined
+    )
   }
   const admit = (state: Incoming, action: ReceiveAction): boolean => {
     if (state.phase !== 'pending') {
@@ -287,7 +299,8 @@ export const createActionReceiver = ({
     try {
       payload = decodePayload(bytes, state.format, state.kind === 'inline')
     } catch {
-      reject(state, 'invalid action payload')
+      release(state)
+      fail(state.peerId, 'invalid action payload')
       return
     }
     release(state)
@@ -326,13 +339,13 @@ export const createActionReceiver = ({
     }
   }
   const drainInline = (peerId: string, key: string): void => {
-    let state = peers.get(peerId)?.inline.get(key)?.[0]
-    while (state) {
+    const queue = peers.get(peerId)?.inline.get(key)
+    while (queue?.[0]) {
+      const state = queue[0]
       tryInline(state)
       if (current(state)) {
         break
       }
-      state = peers.get(peerId)?.inline.get(key)?.[0]
     }
   }
   const drain = (): void => {
@@ -344,13 +357,15 @@ export const createActionReceiver = ({
     try {
       do {
         drainAgain = false
-        // ponytail: at most 1024 entries; ready inline traffic never scans these queues.
+        // At most 1024 entries; ready inline traffic never scans these queues.
         for (const state of waiting) {
           tryBulk(state)
         }
         for (const [id, peer] of peers) {
-          if (peer.active) {
-            tryBulk(peer.active)
+          for (const state of peer.bulk.values()) {
+            if (state.offset === state.size) {
+              tryBulk(state)
+            }
           }
           for (const key of peer.inline.keys()) {
             drainInline(id, key)
@@ -367,10 +382,12 @@ export const createActionReceiver = ({
       pendingCount >= maxPendingTransfers ||
       (peer?.count ?? 0) >= maxPendingPerPeer
     ) {
-      notifyRejected(state, 'too many pending transfers', state.scope)
-      if (state.kind === 'bulk') {
-        refuse(state.peerId, state.id, 'too many pending transfers')
-      }
+      notifyRejected(
+        state,
+        'too many pending transfers',
+        state.scope,
+        state.kind === 'bulk' ? state.id : undefined
+      )
       return false
     }
     if (!peer) {
@@ -413,6 +430,32 @@ export const createActionReceiver = ({
     }
     return true
   }
+  const resolveAdmission = (
+    message: Message,
+    bulkId?: number
+  ): {
+    action: ReceiveAction | undefined
+    scope: ReceiveScope | undefined
+  } | null => {
+    const action = actions.get(message.type)
+    const scope = action?.receiveScope?.(message.peerId, message.metadata)
+    if (scope === null || scope?.signal.aborted) {
+      if (bulkId !== undefined) {
+        refuse(message.peerId, bulkId, 'unexpected response')
+      }
+      return null
+    }
+    if (message.size > payloadLimit(action)) {
+      notifyRejected(
+        message,
+        'payload exceeds receiver size limit',
+        scope,
+        bulkId
+      )
+      return null
+    }
+    return {action, scope}
+  }
   const admission = (message: Message, scope?: ReceiveScope): Admission => ({
     ...message,
     ...(scope ? {scope} : {}),
@@ -447,66 +490,37 @@ export const createActionReceiver = ({
         }
       }
     },
-    receiveInline: (
-      peerId: string,
-      type: string,
-      format: number,
-      metadata: JsonValue | undefined,
-      data: Uint8Array
-    ): void => {
-      const action = actions.get(type)
-      const scope = action?.receiveScope?.(peerId, metadata)
-      if (scope === null || scope?.signal.aborted) {
+    receiveInline: (message: Message, data: Uint8Array): void => {
+      const resolved = resolveAdmission(message)
+      if (!resolved) {
         return
       }
-      if (data.length > payloadLimit(action)) {
-        notifyRejected(
-          {
-            peerId,
-            type,
-            format,
-            size: data.length,
-            ...(metadata === undefined ? {} : {metadata})
-          },
-          'payload exceeds receiver size limit',
-          scope
-        )
-        return
-      }
-      const key = scope ? `${type}\0${scope.key}` : type
+      const {action, scope} = resolved
+      const key = scope ? `${message.type}\0${scope.key}` : message.type
       if (
         action?.receiver &&
         !(scope ? scope.receive : action.receive) &&
-        !peers.get(peerId)?.inline.has(key)
+        !peers.get(message.peerId)?.inline.has(key)
       ) {
         // Direct delivery needs no admission entry, timer, context, or queue scan.
         let payload: DataPayload
         try {
-          payload = decodePayload(data, format, true)
+          payload = decodePayload(data, message.format, true)
         } catch {
-          fail(peerId, 'invalid action payload')
+          fail(message.peerId, 'invalid action payload')
           return
         }
-        deliverPayload(action, payload, peerId, metadata)
+        deliverPayload(action, payload, message.peerId, message.metadata)
         return
       }
       const state: Inline = {
-        ...admission(
-          {
-            peerId,
-            type,
-            format,
-            size: data.length,
-            ...(metadata === undefined ? {} : {metadata})
-          },
-          scope
-        ),
+        ...admission(message, scope),
         kind: 'inline',
         key,
         data
       }
       if (enqueue(state)) {
-        drainInline(peerId, key)
+        drainInline(message.peerId, key)
       }
     },
     receiveOffer: (message: Message, id: number): void => {
@@ -514,19 +528,12 @@ export const createActionReceiver = ({
         fail(message.peerId, 'duplicate action offer')
         return
       }
-      const action = actions.get(message.type)
-      const scope = action?.receiveScope?.(message.peerId, message.metadata)
-      if (scope === null || scope?.signal.aborted) {
-        refuse(message.peerId, id, 'unexpected response')
-        return
-      }
-      if (message.size > payloadLimit(action)) {
-        notifyRejected(message, 'payload exceeds receiver size limit', scope)
-        refuse(message.peerId, id, 'payload exceeds receiver size limit')
+      const resolved = resolveAdmission(message, id)
+      if (!resolved) {
         return
       }
       const state: Bulk = {
-        ...admission(message, scope),
+        ...admission(message, resolved.scope),
         kind: 'bulk',
         id,
         transfer: 'waiting',
@@ -543,7 +550,8 @@ export const createActionReceiver = ({
       offset: number,
       data: Uint8Array
     ): void => {
-      const state = peers.get(peerId)?.bulk.get(id)
+      const peer = peers.get(peerId)
+      const state = peer?.bulk.get(id)
       if (!state) {
         return
       } // Cancelled/expired suffixes cannot resurrect transfers.
@@ -565,9 +573,19 @@ export const createActionReceiver = ({
       }
       state.data.set(data, state.offset)
       state.offset += data.length
-      state.lastSeen = Date.now()
+      const now = Date.now()
+      state.lastSeen = now
+      for (const queued of waiting) {
+        if (queued.phase === 'ready' && actions.get(queued.type)?.receiver) {
+          queued.lastSeen = now
+        }
+      }
       if (state.offset === state.size) {
         tryBulk(state)
+        if (current(state) && peer?.active === state) {
+          peer.active = null
+          rotateWaitingForPeer(peerId)
+        }
         drain()
       } else {
         progress(
@@ -577,7 +595,6 @@ export const createActionReceiver = ({
           state.metadata
         )
       }
-      return
     },
     cancel: (peerId: string, id: number): void => {
       const state = peers.get(peerId)?.bulk.get(id)

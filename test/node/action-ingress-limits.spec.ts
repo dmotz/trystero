@@ -9,19 +9,11 @@ import createPeer from '../../packages/core/src/peer.ts'
 import {
   MockPeer,
   MockRTCPeerConnection,
-  encodeInternalAction
+  encodeInternalAction,
+  presenceFrame,
+  roomFrame,
+  turn
 } from './peer-harness.ts'
-
-const encoder = new TextEncoder()
-const roomFrame = (token: string, size = 16_384) => {
-  const name = encoder.encode(token)
-  const bytes = new Uint8Array(3 + name.length + size)
-  bytes[0] = 1
-  new DataView(bytes.buffer).setUint16(1, name.length)
-  bytes.set(name, 3)
-  return bytes.buffer
-}
-const turn = () => new Promise<void>(resolve => setImmediate(resolve))
 
 void test('unresolved room-token buffering is bounded across tokens', t => {
   t.mock.method(console, 'warn', () => {})
@@ -74,13 +66,7 @@ void test('room presence tokens cannot grow without bound', t => {
   const peer = new MockPeer()
   const shared = manager.register('app', 'peer', peer as never, 60_000)
   for (let i = 0; i < 65; i++) {
-    const name = encoder.encode(`room-${i}`)
-    const bytes = new Uint8Array(4 + name.length)
-    bytes[0] = 2
-    bytes[1] = 1
-    new DataView(bytes.buffer).setUint16(2, name.length)
-    bytes.set(name, 4)
-    peer.handlers.data(bytes.buffer)
+    peer.handlers.data(presenceFrame(`room-${i}`))
   }
   assert.equal(peer.isDead, true)
   assert.equal(shared.remoteRoomTokens.size, 0)
@@ -223,4 +209,36 @@ void test('bound room data still closes the peer when its handler deadline expir
   t.mock.timers.tick(10_000)
   assert.equal(peer.isDead, true)
   assert.equal(manager.get('app', 'peer'), undefined)
+})
+
+void test('expiring earlier unclaimed token data does not shorten a bound room handler deadline', async t => {
+  t.mock.timers.enable({apis: ['setTimeout']})
+  t.mock.method(console, 'warn', () => {})
+  const manager = new SharedPeerManager()
+  const peer = new MockPeer()
+  const shared = manager.register('app', 'peer', peer as never, 60_000)
+  t.after(() => manager.clear('app', 'peer', {destroyPeer: true}))
+  manager.bind('joining', new Promise(() => {}), shared, {onDetach: () => {}})
+  peer.handlers.data(roomFrame('unclaimed', [1]))
+  t.mock.timers.tick(8_000)
+
+  const {proxy} = manager.bind('room', Promise.resolve('room'), shared, {
+    onDetach: () => {}
+  })
+  await Promise.resolve()
+  peer.handlers.data(roomFrame('room', [42]))
+
+  // At t = 11s, the unclaimed token expires without killing the peer,
+  // while the bound room still has 7s left to attach its handler.
+  t.mock.timers.tick(3_000)
+  assert.equal(shared.pendingDataByToken.size, 0)
+  assert.equal(peer.isDead, false)
+
+  const received: number[][] = []
+  proxy.setHandlers({
+    data: data => received.push([...new Uint8Array(data)])
+  })
+  assert.deepEqual(received, [[42]])
+  t.mock.timers.tick(10_000)
+  assert.equal(peer.isDead, false)
 })

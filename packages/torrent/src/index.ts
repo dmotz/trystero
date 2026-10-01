@@ -288,6 +288,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           rootTopic,
           {
             offer: data.offer.sdp,
+            offerId: data.offer_id,
             peerId: data.peer_id
           },
           (_, signal) =>
@@ -308,6 +309,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
             rootTopic,
             {
               answer: data.answer.sdp,
+              offerId: data.offer_id,
               peerId: data.peer_id,
               peer: offer.peer
             },
@@ -340,10 +342,28 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           return
         }
 
-        const outstandingOffers = await ensureOutstandingOffers(
-          rootTopic,
-          getOffers
-        )
+        let outstandingOffers: Record<string, OfferRecord & {createdAt: number}>
+
+        try {
+          outstandingOffers = await ensureOutstandingOffers(
+            rootTopic,
+            getOffers
+          )
+        } catch (error) {
+          if (activeTokens[rootTopic] !== subscriptionToken) {
+            return
+          }
+
+          throw error
+        }
+
+        if (
+          activeTokens[rootTopic] !== subscriptionToken ||
+          !topicState.isActive
+        ) {
+          return
+        }
+
         const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
           offer_id: id,
           offer: {type: 'offer', sdp: offer}
@@ -428,7 +448,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     }
   },
 
-  announce: (client, rootTopic) => {
+  announce: async (client, rootTopic) => {
     const state = topicStates.forRelay(client)[rootTopic]
     const relayFns = announceFns.forRelay(client)
     const fn = relayFns[rootTopic]
@@ -439,7 +459,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     }
 
     if (fn) {
-      void fn()
+      await fn()
     }
 
     return trackerAnnounceMs.forRelay(client)[rootTopic] ?? defaultAnnounceMs

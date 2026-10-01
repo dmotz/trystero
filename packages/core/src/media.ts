@@ -1,3 +1,4 @@
+import {maxQueuedDataFrames} from './data-limits'
 import {genId, libName, mkErr} from './utils'
 import type {
   AddMediaOptions,
@@ -87,6 +88,12 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
       if (streamId) {
         remoteStreamsById.set(streamId, stream)
       }
+
+      stream.getTracks?.().forEach(track => {
+        if (typeof track.id === 'string') {
+          remoteTracksById.set(track.id, {track, stream})
+        }
+      })
     },
     getRemoteStream: (key, streamId) =>
       remoteStreamsByKey.get(key) ??
@@ -166,6 +173,7 @@ export const createMediaManager = ({
 } => {
   const pendingStreamMetas: Record<string, PendingMediaMeta[]> = {}
   const pendingTrackMetas: Record<string, PendingMediaMeta[]> = {}
+  const peerMediaCaches: Record<string, MediaIdentityCache> = {}
   const localMedia = createMediaIdentityCache()
   const listeners = {
     onPeerStream: null as
@@ -181,6 +189,27 @@ export const createMediaManager = ({
       | null
   }
 
+  const getPeerMedia = (id: string): MediaIdentityCache =>
+    getSharedMediaPeer(id)?.__trysteroMedia ??
+    (peerMediaCaches[id] ??= createMediaIdentityCache())
+
+  const queuePendingMeta = (
+    metas: Record<string, PendingMediaMeta[]>,
+    id: string,
+    parsed: PendingMediaMeta,
+    kind: 'stream' | 'track'
+  ): void => {
+    const queue = (metas[id] ??= [])
+
+    if (queue.length >= maxQueuedDataFrames) {
+      console.warn(`${libName}: too many pending ${kind} metadata messages`)
+      onPeerError(id, mkErr('too many pending media metadata messages'))
+      return
+    }
+
+    queue.push(parsed)
+  }
+
   const emitStream = (
     id: string,
     key: string,
@@ -191,7 +220,7 @@ export const createMediaManager = ({
       return
     }
 
-    getSharedMediaPeer(id)?.__trysteroMedia?.rememberRemoteStream(
+    getPeerMedia(id).rememberRemoteStream(
       key,
       stream,
       typeof stream.id === 'string' ? stream.id : undefined
@@ -211,7 +240,7 @@ export const createMediaManager = ({
       return
     }
 
-    getSharedMediaPeer(id)?.__trysteroMedia?.rememberRemoteTrack(
+    getPeerMedia(id).rememberRemoteTrack(
       key,
       track,
       stream,
@@ -292,8 +321,7 @@ export const createMediaManager = ({
         return
       }
 
-      const sharedPeer = getSharedMediaPeer(id)
-      const cached = sharedPeer?.__trysteroMedia?.getRemoteStream(
+      const cached = getPeerMedia(id).getRemoteStream(
         parsed.key,
         parsed.streamId
       )
@@ -303,13 +331,7 @@ export const createMediaManager = ({
         return
       }
 
-      const queue = (pendingStreamMetas[id] ??= [])
-      if (queue.length >= 64) {
-        console.warn(`${libName}: too many pending stream metadata messages`)
-        onPeerError(id, mkErr('too many pending media metadata messages'))
-        return
-      }
-      queue.push(parsed)
+      queuePendingMeta(pendingStreamMetas, id, parsed, 'stream')
     },
 
     receiveTrackMeta: (meta, id) => {
@@ -323,24 +345,14 @@ export const createMediaManager = ({
         return
       }
 
-      const sharedPeer = getSharedMediaPeer(id)
-      const cached = sharedPeer?.__trysteroMedia?.getRemoteTrack(
-        parsed.key,
-        parsed.trackId
-      )
+      const cached = getPeerMedia(id).getRemoteTrack(parsed.key, parsed.trackId)
 
       if (cached) {
         emitTrack(id, parsed.key, cached.track, cached.stream, parsed.metadata)
         return
       }
 
-      const queue = (pendingTrackMetas[id] ??= [])
-      if (queue.length >= 64) {
-        console.warn(`${libName}: too many pending track metadata messages`)
-        onPeerError(id, mkErr('too many pending media metadata messages'))
-        return
-      }
-      queue.push(parsed)
+      queuePendingMeta(pendingTrackMetas, id, parsed, 'track')
     },
 
     receiveRemoteStream: (id, stream) => {
@@ -374,6 +386,7 @@ export const createMediaManager = ({
     clearPeer: id => {
       delete pendingStreamMetas[id]
       delete pendingTrackMetas[id]
+      delete peerMediaCaches[id]
     },
 
     get onPeerStream() {

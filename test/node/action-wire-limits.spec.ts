@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {linkedActions as linked} from './peer-harness.ts'
+import {
+  actionStartFrame as start,
+  linkedActions as linked,
+  turn
+} from './peer-harness.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionWireManager} from '../../packages/core/src/action-wire.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
@@ -8,42 +12,6 @@ import {createActionManager} from '../../packages/core/src/actions.ts'
 
 const encoder = new TextEncoder()
 const chunkSize = 16 * 1024 - 14
-const start = (
-  id: number,
-  size: number,
-  {
-    type = 'file',
-    payload,
-    metadata,
-    format = 2
-  }: {
-    type?: string
-    payload?: Uint8Array
-    metadata?: unknown
-    format?: number
-  } = {}
-) => {
-  const meta =
-    metadata === undefined
-      ? new Uint8Array()
-      : encoder.encode(JSON.stringify(metadata))
-  const header = payload ? 36 : 48
-  const bytes = new Uint8Array(header + meta.length + (payload?.length ?? 0))
-  const view = new DataView(bytes.buffer)
-  bytes[0] = 2
-  bytes[1] = (payload ? 0 : 1) | (format << 4)
-  bytes.set(encoder.encode(type), 2)
-  view.setUint16(34, meta.length)
-  if (!payload) {
-    view.setUint32(36, id)
-    view.setFloat64(40, size)
-  }
-  bytes.set(meta, header)
-  if (payload) {
-    bytes.set(payload, header + meta.length)
-  }
-  return bytes.buffer
-}
 
 const dataFrame = (id: number, offset: number, length: number) => {
   const bytes = new Uint8Array(14 + length)
@@ -55,7 +23,6 @@ const dataFrame = (id: number, offset: number, length: number) => {
   bytes.fill(7, 14)
   return bytes.buffer
 }
-const turn = () => new Promise<void>(resolve => setImmediate(resolve))
 const receiver = (maxReceiveBytes = 256 * 1024 ** 2) => {
   const controls: {peerId: string; kind: number}[] = []
   const destroyed: string[] = []
@@ -909,3 +876,120 @@ for (const saturation of ['policies', 'transfers'] as const) {
     await rejection
   })
 }
+
+void test('receiver-rejected bulk offers do not send a redundant cancel frame back', async t => {
+  const pair = linked()
+  t.after(pair.close)
+  pair.right.makeAction('file', {
+    onMessage: () => {},
+    onReceive: () => false
+  })
+  await assert.rejects(
+    pair.left.makeAction('file').send(new Uint8Array(24_000)),
+    {kind: 'rejected'}
+  )
+  assert.deepEqual(
+    pair.frames.map(frame => ({from: frame.from, kind: frame.kind})),
+    [
+      {from: 'left', kind: 1},
+      {from: 'right', kind: 4}
+    ]
+  )
+})
+
+void test('queued bulk transfers do not expire while an active transfer makes progress', async t => {
+  t.mock.timers.enable({apis: ['setTimeout', 'Date']})
+  const pair = linked(64_000)
+  t.after(pair.close)
+  let step: () => void
+  const waitStep = () =>
+    new Promise<void>(resolve => {
+      step = resolve
+    })
+  class PacedBlob extends Blob {
+    override slice(start?: number, end?: number, type?: string): Blob {
+      const part = super.slice(start, end, type)
+      if (start) {
+        const read = part.arrayBuffer.bind(part)
+        part.arrayBuffer = async () => {
+          await waitStep()
+          return read()
+        }
+      }
+      return part
+    }
+  }
+  const received: number[] = []
+  pair.right.makeAction('file', {
+    onMessage: data => {
+      received.push((data as Uint8Array).byteLength)
+    }
+  })
+  const file = pair.left.makeAction('file')
+  const first = file.send(new PacedBlob([new Uint8Array(chunkSize * 3)]))
+  const second = file.send(new Uint8Array(24_000))
+  await turn()
+  t.mock.timers.tick(70_000)
+  step!()
+  await turn()
+  t.mock.timers.tick(70_000)
+  step!()
+  await Promise.all([first, second])
+  assert.deepEqual(received, [chunkSize * 3, 24_000])
+  assert.equal(pair.disconnected(), false)
+})
+
+void test('completed bulk transfer waiting for a removed handler does not block other bulk actions on the same peer', t => {
+  const {wire, controls} = receiver(64_000)
+  t.after(() => wire.clearPeer('peer'))
+  const first = wire.makeInternalAction('first')
+  const second = wire.makeInternalAction('second')
+  let firstCount = 0
+  let secondCount = 0
+  first.onMessage(() => {
+    firstCount++
+  })
+  second.onMessage(() => {
+    secondCount++
+  })
+  wire.handleData('peer', start(0, 24_000, {type: 'first'}))
+  wire.handleData('peer', start(1, 24_000, {type: 'second'}))
+  first.onMessage(null)
+  wire.handleData('peer', dataFrame(0, 0, chunkSize))
+  wire.handleData('peer', dataFrame(0, chunkSize, 24_000 - chunkSize))
+  assert.equal(firstCount, 0)
+  assert.deepEqual(controls.at(-1), {peerId: 'peer', kind: 3})
+  wire.handleData('peer', dataFrame(1, 0, chunkSize))
+  wire.handleData('peer', dataFrame(1, chunkSize, 24_000 - chunkSize))
+  assert.equal(secondCount, 1)
+  first.onMessage(() => {
+    firstCount++
+  })
+  assert.equal(firstCount, 1)
+})
+
+void test('malformed queued inline payload disconnects the peer on delivery', async t => {
+  t.mock.method(console, 'warn', () => {})
+  const {wire, destroyed} = receiver()
+  t.after(() => wire.clearPeer('peer'))
+  let approve: (allow: boolean) => void
+  const action = wire.makeInternalAction('json')
+  action.onReceive(
+    () =>
+      new Promise(resolve => {
+        approve = resolve
+      })
+  )
+  action.onMessage(() => assert.fail('malformed payload delivered'))
+  wire.handleData(
+    'peer',
+    start(0, 1, {
+      type: 'json',
+      payload: encoder.encode('{'),
+      format: 1
+    })
+  )
+  approve!(true)
+  await turn()
+  assert.deepEqual(destroyed, ['peer'])
+})

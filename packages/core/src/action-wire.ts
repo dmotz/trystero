@@ -1,5 +1,9 @@
 import {
+  binaryFormat,
   createActionReceiver,
+  jsonFormat,
+  textFormat,
+  type Message,
   type WireReceiveHandler,
   type WireRejectHandler,
   type ReceiveOptions
@@ -48,7 +52,7 @@ export type InternalActionSender<T extends DataPayload = DataPayload> = (
   metadata?: JsonValue,
   progress?: (percent: number, peerId: string, metadata?: JsonValue) => void,
   signal?: AbortSignal
-) => Promise<void[]>
+) => Promise<void>
 export type InternalActionReceiver<T extends DataPayload = DataPayload> = (
   receiver: ((data: T, peerId: string, metadata?: JsonValue) => void) | null
 ) => void
@@ -65,7 +69,11 @@ type WireAction = {
   options: ActionOptions
   action: InternalAction
 }
-type Outgoing = {accept: () => void; fail: (error: Error) => void}
+type Outgoing = {
+  accept: () => void
+  fail: (error: Error, fromReceiver?: boolean) => void
+  touch: () => void
+}
 type ActionWireManagerDeps = {
   onPeerError: (peerId: string, error: Error) => void
   getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
@@ -250,14 +258,20 @@ export const createActionWireManager = ({
           const isBlob = data instanceof Blob
           const binary =
             isBlob || data instanceof ArrayBuffer || ArrayBuffer.isView(data)
-          const format = binary ? 2 : typeof data === 'string' ? 0 : 1
+          const format = binary
+            ? binaryFormat
+            : typeof data === 'string'
+              ? textFormat
+              : jsonFormat
           let source = isBlob
             ? data
             : data instanceof ArrayBuffer
               ? new Uint8Array(data)
               : ArrayBuffer.isView(data)
                 ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-                : encodeBytes(format === 0 ? (data as string) : toJson(data))
+                : encodeBytes(
+                    format === textFormat ? (data as string) : toJson(data)
+                  )
           const size = source instanceof Blob ? source.size : source.byteLength
           const meta =
             metadata === undefined
@@ -306,7 +320,11 @@ export const createActionWireManager = ({
                 console.warn(`${libName}: no peer with id ${peerId} found`)
                 return
               }
+              let failure: Error | null = null
               const check = (): void => {
+                if (failure) {
+                  throw failure
+                }
                 throwIfAborted(signal)
                 if (
                   getPeer(peerId, normalizedOptions.sendToPending) !== peer ||
@@ -339,7 +357,9 @@ export const createActionWireManager = ({
                 onProgress?.(1, peerId, metadata)
                 return
               }
-              let failure: Error | null = null
+              let didSendOffer = false
+              let settledByReceiver = false
+              let lastSeen = Date.now()
               let accept!: () => void
               let rejectOffer!: (error: Error) => void
               const permission = new Promise<void>((resolve, rejectPromise) => {
@@ -356,25 +376,32 @@ export const createActionWireManager = ({
               let timer: ReturnType<typeof setTimeout> | null = null
               const state: Outgoing = {
                 accept: () => {
-                  if (timer) {
-                    clearTimeout(timer)
-                    timer = null
-                  }
+                  timer = resetTimer(timer)
                   accept()
                 },
-                fail: error => {
+                fail: (error, fromReceiver = false) => {
+                  if (fromReceiver) {
+                    settledByReceiver = true
+                  }
                   failure = error
                   rejectOffer(error)
+                },
+                touch: () => {
+                  if (timer) {
+                    lastSeen = Date.now()
+                  }
                 }
               }
               transfers.set(id, state)
-              timer = setTimeout(
-                () =>
-                  state.fail(
-                    transferError('timeout', 'action offer timed out')
-                  ),
-                transferTimeoutMs
-              )
+              const expire = (): void => {
+                const remaining = transferTimeoutMs - (Date.now() - lastSeen)
+                if (remaining > 0) {
+                  timer = setTimeout(expire, remaining)
+                } else {
+                  state.fail(transferError('timeout', 'action offer timed out'))
+                }
+              }
+              timer = setTimeout(expire, transferTimeoutMs)
               const abort = (): void => {
                 try {
                   throwIfAborted(signal)
@@ -385,11 +412,9 @@ export const createActionWireManager = ({
               signal?.addEventListener('abort', abort, {once: true})
               try {
                 await sendFrame(start)
+                didSendOffer = true
                 await permission
                 for (let offset = 0; offset < size; offset += chunkSize) {
-                  if (failure) {
-                    throw failure
-                  }
                   check()
                   const length = Math.min(chunkSize, size - offset)
                   const bytes = packet(chunk, id, chunkHeaderSize + length)
@@ -407,24 +432,28 @@ export const createActionWireManager = ({
                       : source.subarray(offset, offset + length),
                     chunkHeaderSize
                   )
-                  if (failure) {
-                    throw failure
-                  }
                   await sendFrame(bytes)
+                  for (const pending of transfers.values()) {
+                    pending.touch()
+                  }
                   onProgress?.((offset + length) / size, peerId, metadata)
                 }
-                if (failure) {
-                  throw failure
-                }
+                check()
               } catch (error) {
-                if (getPeer(peerId, true) === peer) {
+                if (
+                  didSendOffer &&
+                  !settledByReceiver &&
+                  getPeer(peerId, true) === peer &&
+                  (!peer.channel ||
+                    (peer.channel.readyState === 'open' &&
+                      (peer.channel.bufferedAmount ?? 0) <=
+                        maxControlBufferedBytes))
+                ) {
                   control(peerId, id, cancelled)
                 }
                 throw error
               } finally {
-                if (timer) {
-                  clearTimeout(timer)
-                }
+                timer = resetTimer(timer)
                 signal?.removeEventListener('abort', abort)
                 transfers.delete(id)
                 if (!transfers.size && outgoing.get(peerId) === transfers) {
@@ -433,7 +462,6 @@ export const createActionWireManager = ({
               }
             })
           )
-          return []
         }
       }
     }
@@ -454,7 +482,11 @@ export const createActionWireManager = ({
     const kind = bytes[1]! & 15
     const format = bytes[1]! >>> 4
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    if (kind > cancelled || format > 2 || (kind > offer && format !== 0)) {
+    if (
+      kind > cancelled ||
+      format > binaryFormat ||
+      (kind > offer && format !== textFormat)
+    ) {
       failPeer(peerId, 'invalid action frame')
       return
     }
@@ -470,7 +502,13 @@ export const createActionWireManager = ({
       }
       const id = view.getUint32(2)
       if (kind === accepted) {
-        outgoing.get(peerId)?.get(id)?.accept()
+        const transfers = outgoing.get(peerId)
+        if (transfers) {
+          for (const pending of transfers.values()) {
+            pending.touch()
+          }
+          transfers.get(id)?.accept()
+        }
         return
       }
       if (kind === rejected) {
@@ -481,7 +519,8 @@ export const createActionWireManager = ({
             transferError(
               'rejected',
               decodeBytes(bytes.subarray(controlHeaderSize))
-            )
+            ),
+            true
           )
         return
       }
@@ -537,25 +576,17 @@ export const createActionWireManager = ({
       failPeer(peerId, 'invalid action metadata')
       return
     }
+    const message: Message = {
+      peerId,
+      type,
+      format,
+      size,
+      ...(metadata === undefined ? {} : {metadata})
+    }
     if (kind === inline) {
-      receiver.receiveInline(
-        peerId,
-        type,
-        format,
-        metadata,
-        bytes.subarray(payloadIndex)
-      )
+      receiver.receiveInline(message, bytes.subarray(payloadIndex))
     } else {
-      receiver.receiveOffer(
-        {
-          peerId,
-          type,
-          format,
-          size,
-          ...(metadata === undefined ? {} : {metadata})
-        },
-        id
-      )
+      receiver.receiveOffer(message, id)
     }
   }
   return {makeInternalAction, handleData, clearPeer}

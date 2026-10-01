@@ -6,42 +6,11 @@ import createStrategy from '../../packages/core/src/strategy.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import {
-  LinkedPeer,
+  BufferedPeer,
   linkPeers,
   MockRTCPeerConnection,
   waitFor
 } from './peer-harness.ts'
-
-// Match ordered, asynchronous data-channel delivery, including frames sent
-// before the other strategy finishes registering its shared peer.
-class BufferedPeer extends LinkedPeer {
-  inbox: ArrayBuffer[] = []
-
-  async signal() {
-    this.handlers.connect?.()
-  }
-
-  sendData(data: Uint8Array) {
-    const payload = data.slice().buffer
-    const partner = this.partner as BufferedPeer
-
-    queueMicrotask(() => {
-      partner.inbox.push(payload)
-      partner.flush()
-    })
-  }
-
-  setHandlers(handlers) {
-    super.setHandlers(handlers)
-    this.flush()
-  }
-
-  flush() {
-    if (this.handlers.data) {
-      this.inbox.splice(0).forEach(data => this.handlers.data(data))
-    }
-  }
-}
 
 const createSide = () => {
   const subscribers = []

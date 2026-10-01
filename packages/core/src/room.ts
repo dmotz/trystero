@@ -83,16 +83,15 @@ export default (
 
   const iterate = (
     targets: TargetPeers,
-    f: (id: string, peer: PeerHandle) => Promise<void> | void,
-    {includePending = false}: {includePending?: boolean} = {}
+    f: (id: string, peer: PeerHandle) => Promise<void> | void
   ): Promise<void>[] =>
     (targets
       ? Array.isArray(targets)
         ? targets
         : [targets]
-      : keys(includePending ? peerMap : activePeerMap)
+      : keys(activePeerMap)
     ).flatMap(id => {
-      const peer = includePending ? peerMap[id] : activePeerMap[id]
+      const peer = activePeerMap[id]
 
       if (!peer) {
         console.warn(`${libName}: no peer with id ${id} found`)
@@ -102,8 +101,19 @@ export default (
       return [Promise.resolve(f(id, peer))]
     })
 
+  const kickPeer = (id: string, peer?: PeerHandle, reason?: Error): void => {
+    const current = peerMap[id]
+
+    if (!current || (peer && current !== peer)) {
+      return
+    }
+
+    void leaveAction.send('', id).catch(noOp)
+    exitPeer(id, current, reason)
+  }
+
   const onPeerError = (id: string, error: Error): void =>
-    exitPeer(id, undefined, error)
+    kickPeer(id, undefined, error)
 
   const mediaManager = createMediaManager({
     onPeerError,
@@ -221,9 +231,18 @@ export default (
     sendHandshakeReady: handshakeReadyAction.send,
     onActivate: (id, peer) => {
       activePeerMap[id] = peer
+      peer.setHandlers({
+        signal: sdp => {
+          if (activePeerMap[id] === peer) {
+            void signalAction
+              .send(sdp as unknown as DataPayload, id)
+              .catch(noOp)
+          }
+        }
+      })
       listeners.onPeerJoin?.(id)
     },
-    onFailure: (id, peer, reason) => exitPeer(id, peer, reason)
+    onFailure: (id, peer, reason) => kickPeer(id, peer, reason)
   })
 
   pingAction.onMessage((_, id) => {
@@ -293,13 +312,6 @@ export default (
       stream: stream => mediaManager.receiveRemoteStream(id, stream),
       track: (track, stream) =>
         mediaManager.receiveRemoteTrack(id, track, stream),
-      signal: sdp => {
-        if (!activePeerMap[id]) {
-          return
-        }
-
-        void signalAction.send(sdp as unknown as DataPayload, id).catch(noOp)
-      },
       close: () => exitPeer(id, peer, mkErr('peer disconnected')),
       error: (err: Error) => {
         console.error(`${libName} peer error:`, err)

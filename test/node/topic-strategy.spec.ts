@@ -137,7 +137,7 @@ void test(
   }
 )
 
-for (const reannounce of [true, false])
+for (const reannounce of [true, false]) {
   void test(
     `Trystero: quiet-room disconnect reannouncing is ${reannounce ? 'enabled by default' : 'disabled explicitly'}`,
     {timeout: 5_000},
@@ -193,6 +193,7 @@ for (const reannounce of [true, false])
       }
     }
   )
+}
 
 void test(
   'Trystero: topic strategy uses the prompt first signaling retry',
@@ -203,11 +204,15 @@ void test(
     const joinRoom = createTopicStrategy({
       init: () => ({}),
       subscribeTopic: (_relay, topic, onMessage, {kind}) => {
-        if (kind === 'root') root = {topic, onMessage}
+        if (kind === 'root') {
+          root = {topic, onMessage}
+        }
         return () => {}
       },
       publishTopic: (_relay, _topic, message, {kind}) => {
-        if (kind === 'signal' && JSON.parse(message).offer) offers++
+        if (kind === 'signal' && JSON.parse(message).offer) {
+          offers++
+        }
       }
     })
     const room = joinRoom(

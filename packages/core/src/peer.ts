@@ -3,11 +3,14 @@ import {
   maxQueuedDataFrames,
   pendingDataTimeoutMs
 } from './data-limits'
-import {all, alloc, candidateType, resetTimer, toError} from './utils'
+import {all, alloc, candidateType, libName, resetTimer, toError} from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
+const iceCandidateSettleMs = 150
+const iceHostFallbackSettleMs = 500
 const disconnectedCloseDelayMs = 5_000
+const iceCandidateEvent = 'icecandidate'
 const iceStateEvent = 'icegatheringstatechange'
 const iceConnectionStateEvent = 'iceconnectionstatechange'
 const offerType = 'offer'
@@ -63,21 +66,20 @@ export default (
     }
 
     didEmitClose = true
-    if (pendingDataTimer) {
-      clearTimeout(pendingDataTimer)
-      pendingDataTimer = null
-    }
+    pendingDataTimer = resetTimer(pendingDataTimer)
     pendingData.length = 0
     clearDisconnectedCloseTimer()
     handlers.close?.()
   }
 
   const emitSignal = (signal: Signal): void => {
-    if (signal.type === offerType && resolveInitialOffer) {
-      resolveInitialOffer(signal)
-      resolveInitialOffer = undefined
-      // getOffer() already hands this first offer to the signaling strategy.
-      if (!handlers.signal) {
+    if (signal.type === offerType) {
+      if (resolveInitialOffer) {
+        resolveInitialOffer(signal)
+        resolveInitialOffer = undefined
+      }
+      // getOffer() already hands pre-connection offers to the signaling strategy.
+      if (!handlers.signal && !pc.remoteDescription) {
         return
       }
     }
@@ -245,7 +247,7 @@ export default (
     channel.bufferedAmountLowThreshold = 0xffff
     const failData = (): void => {
       console.warn(
-        'Trystero: invalid or excessive data before handler registration; disconnecting peer'
+        `${libName}: invalid or excessive data before handler registration; disconnecting peer`
       )
       channel.close()
       pc.close()
@@ -293,22 +295,74 @@ export default (
     }
   }
 
+  const configuredIceServers =
+    rtcConfig?.iceServers ?? defaultIceServers.concat(turnConfig ?? [])
+  const hasServerUrlPattern = (pattern: RegExp): boolean =>
+    configuredIceServers.some(({urls}) =>
+      (Array.isArray(urls) ? urls : [urls]).some(url => pattern.test(url))
+    )
+  const expectsTurnCandidate = hasServerUrlPattern(/^turns?:/i)
+  const expectsStunCandidate =
+    !expectsTurnCandidate && hasServerUrlPattern(/^stuns?:/i)
+  const targetCandidatePattern = expectsTurnCandidate
+    ? /\btyp relay\b/
+    : expectsStunCandidate
+      ? /\btyp (?:srflx|relay|prflx)\b/
+      : /\btyp (?:host|srflx|relay|prflx)\b/
+  const anyCandidatePattern = /\btyp (?:host|srflx|relay|prflx)\b/
+
   const waitForIceGathering = async (
     peerConnection: RTCPeerConnection
   ): Promise<SdpDescription> => {
     let timeout: ReturnType<typeof setTimeout> | null = null
+    let settleTimeout: ReturnType<typeof setTimeout> | null = null
 
     try {
       await Promise.race([
         new Promise<void>(res => {
+          const finish = (): void => {
+            peerConnection.removeEventListener(iceStateEvent, checkState)
+            peerConnection.removeEventListener(iceCandidateEvent, onCandidate)
+            res()
+          }
+
+          const scheduleSettle = (candidateLine = ''): void => {
+            const combinedSdp = `${peerConnection.localDescription?.sdp ?? ''}\n${candidateLine}`
+
+            if (!anyCandidatePattern.test(combinedSdp)) {
+              return
+            }
+
+            const settleDelayMs = targetCandidatePattern.test(combinedSdp)
+              ? iceCandidateSettleMs
+              : iceHostFallbackSettleMs
+
+            resetTimer(settleTimeout)
+            settleTimeout = setTimeout(finish, settleDelayMs)
+          }
+
           const checkState = (): void => {
             if (peerConnection.iceGatheringState === 'complete') {
-              peerConnection.removeEventListener(iceStateEvent, checkState)
-              res()
+              finish()
+              return
             }
+
+            scheduleSettle()
+          }
+
+          const onCandidate = (event: Event): void => {
+            const {candidate} = event as RTCPeerConnectionIceEvent
+
+            if (!candidate) {
+              finish()
+              return
+            }
+
+            scheduleSettle(candidate.candidate)
           }
 
           peerConnection.addEventListener(iceStateEvent, checkState)
+          peerConnection.addEventListener(iceCandidateEvent, onCandidate)
           checkState()
         }),
         new Promise<void>(res => {
@@ -317,6 +371,7 @@ export default (
       ])
     } finally {
       resetTimer(timeout)
+      resetTimer(settleTimeout)
     }
 
     return localDescriptionSignal(peerConnection)
@@ -342,7 +397,10 @@ export default (
   }
 
   const createOffer = async (restartIce = false): Promise<Signal | void> => {
-    if (pc.connectionState === 'closed') {
+    if (
+      pc.connectionState === 'closed' ||
+      (!restartIce && (makingOffer || pc.signalingState !== 'stable'))
+    ) {
       return
     }
 
@@ -500,6 +558,10 @@ export default (
         return createOffer(true)
       }
 
+      if (resolveInitialOffer) {
+        return offerPromise
+      }
+
       if (pc.localDescription?.type === offerType) {
         return shouldTrickleIce
           ? localDescriptionSignal(pc)
@@ -596,10 +658,7 @@ export default (
       Object.assign(handlers, restHandlers)
 
       if (handlers.data && pendingData.length > 0) {
-        if (pendingDataTimer) {
-          clearTimeout(pendingDataTimer)
-          pendingDataTimer = null
-        }
+        pendingDataTimer = resetTimer(pendingDataTimer)
         const queued = pendingData.splice(0)
         queued.forEach(data => handlers.data?.(data))
       }

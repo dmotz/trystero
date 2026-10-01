@@ -4,6 +4,7 @@ import {
   genId,
   libName,
   mkErr,
+  noOp,
   resetTimer,
   toError,
   toErrorMessage
@@ -45,6 +46,7 @@ type PublicActionState = {
 type PendingRequestWaiter = {
   controller: AbortController
   getReceive: () => ActionReceiveHandler | null
+  getReceiveProgress: () => ActionProgressHandler | null
   peerId: string
   resolve: (payload: DataPayload) => void
   reject: (error: Error) => void
@@ -97,40 +99,34 @@ const throwIfAborted = (signal?: AbortSignal): void => {
   }
 }
 
-const getRequestMetadata = (metadata?: JsonValue): RequestMetadata | null => {
-  if (
-    metadata &&
-    typeof metadata === 'object' &&
-    !Array.isArray(metadata) &&
-    typeof (metadata as {r?: unknown}).r === 'string'
-  ) {
-    return {
-      r: (metadata as {r: string}).r,
-      ...(Object.hasOwn(metadata as object, 'm')
-        ? {m: (metadata as {m?: JsonValue}).m}
-        : {})
-    }
-  }
+const getEnvelopeRecord = (
+  metadata?: JsonValue
+): {r: string; m?: JsonValue; e?: unknown} | null =>
+  metadata &&
+  typeof metadata === 'object' &&
+  !Array.isArray(metadata) &&
+  typeof (metadata as {r?: unknown}).r === 'string'
+    ? (metadata as {r: string; m?: JsonValue; e?: unknown})
+    : null
 
-  return null
+const getRequestMetadata = (metadata?: JsonValue): RequestMetadata | null => {
+  const record = getEnvelopeRecord(metadata)
+  return record
+    ? {
+        r: record.r,
+        ...(Object.hasOwn(record, 'm') ? {m: record.m} : {})
+      }
+    : null
 }
 
 const getResponseMetadata = (metadata?: JsonValue): ResponseMetadata | null => {
-  if (
-    metadata &&
-    typeof metadata === 'object' &&
-    !Array.isArray(metadata) &&
-    typeof (metadata as {r?: unknown}).r === 'string'
-  ) {
-    return {
-      r: (metadata as {r: string}).r,
-      ...(typeof (metadata as {e?: unknown}).e === 'string'
-        ? {e: (metadata as {e: string}).e}
-        : {})
-    }
-  }
-
-  return null
+  const record = getEnvelopeRecord(metadata)
+  return record
+    ? {
+        r: record.r,
+        ...(typeof record.e === 'string' ? {e: record.e} : {})
+      }
+    : null
 }
 
 const withMetadata = <T extends {peerId: string}>(
@@ -213,7 +209,7 @@ export const createActionManager = ({
       if (!parsed || !waiter || waiter.peerId !== peerId) {
         return null
       }
-      const receive = waiter.getReceive()
+      const receive = parsed.e === undefined ? waiter.getReceive() : null
       return {
         key: parsed.r,
         signal: waiter.controller.signal,
@@ -233,6 +229,15 @@ export const createActionManager = ({
           }
         }
       }
+    }
+  })
+
+  responseAction.onProgress((progress, id, metadata) => {
+    const parsed = getResponseMetadata(metadata)
+    const waiter = parsed && pendingRequestWaiters[parsed.r]
+
+    if (waiter && waiter.peerId === id && parsed?.e === undefined) {
+      waiter.getReceiveProgress()?.(progress, {peerId: id})
     }
   })
 
@@ -297,12 +302,6 @@ export const createActionManager = ({
         ? (progress: number, peerId: string) =>
             handler(progress, withMetadata({peerId}, metadata))
         : undefined
-
-    const setReceiveProgress = (
-      handler: ActionProgressHandler | null
-    ): void => {
-      state.onReceiveProgress = handler
-    }
 
     const dispatchReceiveProgress = (
       progress: number,
@@ -391,7 +390,7 @@ export const createActionManager = ({
         },
 
         set onReceiveProgress(handler) {
-          setReceiveProgress(handler)
+          state.onReceiveProgress = handler
         }
       } satisfies MessageAction<T>
 
@@ -407,7 +406,7 @@ export const createActionManager = ({
       if (parsed) {
         void responseAction
           .send(null, peerId, {r: parsed.r, e: reason})
-          .catch(() => {})
+          .catch(noOp)
       }
     })
 
@@ -426,26 +425,25 @@ export const createActionManager = ({
       const handler = onRequest!
       const controller = new AbortController()
       void Promise.resolve()
-        .then(() =>
-          handler(payload as T, {
+        .then(async () => {
+          const response = await handler(payload as T, {
             ...withMetadata({peerId}, parsed.m),
             signal: controller.signal
           })
-        )
-        .then(async response => {
           if (response === undefined) {
             throw mkErr('request handler returned undefined')
           }
-          await responseAction.send(response, peerId, {r: parsed.r})
+          return response
         })
-        .catch(error =>
-          responseAction
-            .send(null, peerId, {
+        .then(
+          response => responseAction.send(response, peerId, {r: parsed.r}),
+          error =>
+            responseAction.send(null, peerId, {
               r: parsed.r,
               e: toErrorMessage(error, 'request failed').slice(0, 512)
             })
-            .catch(() => {})
         )
+        .catch(noOp)
         .finally(() => controller.abort())
     }
 
@@ -467,6 +465,7 @@ export const createActionManager = ({
         const waiter: PendingRequestWaiter = {
           controller,
           getReceive: () => state.onReceive,
+          getReceiveProgress: () => state.onReceiveProgress,
           peerId: target,
           resolve,
           reject,
@@ -591,7 +590,7 @@ export const createActionManager = ({
       },
 
       set onReceiveProgress(handler) {
-        setReceiveProgress(handler)
+        state.onReceiveProgress = handler
       }
     } satisfies RequestAction<T, R>
 

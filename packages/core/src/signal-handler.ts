@@ -166,6 +166,38 @@ const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
   }
 }
 
+export const markPeerConnected = (
+  state: PeerState,
+  physical: PeerHandle
+): void => {
+  if (
+    state.answeringPeer &&
+    state.answeringPeer !== physical &&
+    !state.answeringPeer.isDead
+  ) {
+    state.answeringPeer.destroy()
+  }
+
+  state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
+  state.answeringPeer = null
+  state.answerSent = false
+  state.answerReplay = null
+  state.connectedPeer = physical
+  state.connectedPeerUnhealthySinceMs = null
+  updateStatus(state)
+}
+
+export const detachConnectedPeer = (
+  state: PeerState | undefined,
+  physical: PeerHandle
+): void => {
+  if (state?.connectedPeer === physical) {
+    state.connectedPeer = null
+    state.connectedPeerUnhealthySinceMs = null
+    updateStatus(state)
+  }
+}
+
 export const clearConnectedPeer = (
   state: PeerState,
   peerId: string,
@@ -282,8 +314,7 @@ const scheduleOfferExpiry = (
 const ensureOffer = (
   ctx: SignalContext,
   state: PeerState,
-  peerId: string,
-  relayId: number
+  peerId: string
 ): NonNullable<PeerState['offerInitPromise']> => {
   if (state.offerPeer && state.offerId && state.offerSdp) {
     return Promise.resolve({
@@ -297,7 +328,9 @@ const ensureOffer = (
     return state.offerInitPromise
   }
 
-  const pending: NonNullable<PeerState['offerInitPromise']> = (async () => {
+  const allocateOffer = async (): NonNullable<
+    PeerState['offerInitPromise']
+  > => {
     let firstOffer: OfferRecord | undefined
 
     try {
@@ -344,7 +377,7 @@ const ensureOffer = (
     }
 
     peer.setHandlers({
-      connect: () => ctx.connectPeer(peer, peerId, relayId),
+      connect: () => ctx.connectPeer(peer, peerId),
       signal: signal => {
         if (state.offerPeer !== peer) {
           return
@@ -360,7 +393,9 @@ const ensureOffer = (
     scheduleOfferExpiry(ctx, state, peerId)
 
     return {peer, offer, offerId: state.offerId}
-  })().finally(() => {
+  }
+
+  const pending = allocateOffer().finally(() => {
     if (state.offerInitPromise === pending) {
       state.offerInitPromise = null
     }
@@ -394,7 +429,7 @@ const handleAnnouncement = async (
 
   const [peerTopic, offerInfo] = await all([
     sha1(topicPath(ctx.rootTopicPlaintext, peerId)),
-    ensureOffer(ctx, state, peerId, relayId)
+    ensureOffer(ctx, state, peerId)
   ])
 
   if (!offerInfo) {
@@ -508,7 +543,6 @@ const handleAnnouncement = async (
 
 const handleOffer = async (
   ctx: SignalContext,
-  relayId: number,
   peerId: string,
   offer: string,
   offerId: string | undefined,
@@ -580,7 +614,7 @@ const handleOffer = async (
   }
 
   answerPeer.setHandlers({
-    connect: () => ctx.connectPeer(answerPeer, peerId, relayId),
+    connect: () => ctx.connectPeer(answerPeer, peerId),
     close: onAnswerPeerClosedOrError,
     error: onAnswerPeerClosedOrError
   })
@@ -707,7 +741,6 @@ const handleCandidate = async (
 
 const handleAnswer = async (
   ctx: SignalContext,
-  relayId: number,
   peerId: string,
   answer: string,
   offerId: string | undefined,
@@ -718,6 +751,13 @@ const handleAnswer = async (
   try {
     plainAnswer = await ctx.toPlain({type: 'answer', sdp: answer})
   } catch {
+    if (peer) {
+      ctx.offerManager.reclaimLeased(peer)
+      if (!peer.isDead) {
+        peer.destroy()
+      }
+    }
+
     ctx.onJoinError?.({
       error: 'incorrect room password when decrypting answer',
       appId: ctx.appId,
@@ -730,10 +770,48 @@ const handleAnswer = async (
   DEV: log('got answer from', peerId)
 
   if (peer) {
+    const state = getState(ctx.peerStates, peerId)
     ctx.offerManager.claimLeased(peer)
+
+    if (
+      state.connectedPeer ||
+      state.offerAnswered ||
+      (state.answeringPeer && !state.answeringPeer.isDead && selfId > peerId)
+    ) {
+      peer.destroy()
+      return
+    }
+
+    if (state.answeringPeer) {
+      const answeringPeer = state.answeringPeer
+      clearAnswering(state, answeringPeer)
+
+      if (!answeringPeer.isDead) {
+        answeringPeer.destroy()
+      }
+    }
+
+    resetOfferState(state)
+    state.offerPeer = peer
+    state.offerId = offerId ?? null
+    state.offerAnswered = true
+    scheduleOfferExpiry(ctx, state, peerId, offerPostAnswerTtlMs)
+    updateStatus(state)
+
+    const onPeerClosedOrError = (): void => {
+      if (state.offerPeer === peer && !state.connectedPeer) {
+        reportSdpExchangeConnectionFailure(ctx, state, peerId)
+        resetOfferState(state)
+      }
+
+      ctx.disconnectPeer(peer, peerId)
+      ctx.checkDeactivate()
+    }
+
     peer.setHandlers({
-      connect: () => ctx.connectPeer(peer, peerId, relayId),
-      close: () => ctx.disconnectPeer(peer, peerId)
+      connect: () => ctx.connectPeer(peer, peerId),
+      close: onPeerClosedOrError,
+      error: onPeerClosedOrError
     })
 
     void peer.signal(plainAnswer)
@@ -916,7 +994,6 @@ export const createSignalHandler =
     if (offer) {
       return handleOffer(
         ctx,
-        relayId,
         peerId,
         offer,
         offerId,
@@ -930,6 +1007,6 @@ export const createSignalHandler =
     }
 
     if (answer) {
-      return handleAnswer(ctx, relayId, peerId, answer, offerId, peer)
+      return handleAnswer(ctx, peerId, answer, offerId, peer)
     }
   }

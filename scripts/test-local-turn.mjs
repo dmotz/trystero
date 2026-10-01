@@ -152,7 +152,7 @@ const createTorrentTracker = () => {
 
   wss.on('connection', socket => {
     socket.on('message', raw => {
-      const message = JSON.parse(raw.toString())
+      const message = JSON.parse(new TextDecoder().decode(raw))
 
       if (message.answer && message.to_peer_id) {
         for (const [other, peer] of peers) {

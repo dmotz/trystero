@@ -7,7 +7,9 @@ import {SharedPeerManager} from './shared-peer'
 import {
   createSignalHandler,
   clearConnectedPeer,
+  detachConnectedPeer,
   getState,
+  markPeerConnected,
   resetOfferState,
   updateStatus
 } from './signal-handler'
@@ -301,6 +303,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           )
           announceErrorStreaks[i] = 0
         } catch (error) {
+          if (didLeaveRoom) {
+            return
+          }
+
           const errorStreak = announceErrorStreaks[i] ?? 0
 
           if (
@@ -444,6 +450,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
         if (state?.connectedPeer) {
           state.connectedPeer = null
+          state.connectedPeerUnhealthySinceMs = null
           updateStatus(state)
           checkDeactivate()
         }
@@ -479,7 +486,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
           resetOfferState(state)
           state.connectedPeer = null
+          state.connectedPeerUnhealthySinceMs = null
           state.answeringPeer = null
+          state.answerSent = false
           state.answerReplay = null
           updateStatus(state)
         })
@@ -511,22 +520,25 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         active: !isPassive || ctx.isActive,
         onPeer: (proxy, peerId, physical) => {
           const state = getState(ctx.peerStates, peerId)
-          state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
-          state.answeringPeer = null
-          state.answerReplay = null
-          state.connectedPeer = physical
-          state.connectedPeerUnhealthySinceMs = null
-          updateStatus(state)
+          markPeerConnected(state, physical)
+          if (isPassive && !ctx.isActive) {
+            ctx.isActive = true
+            membership.setActive(true)
+            if (ctx.requeueAnnounce) {
+              ctx.requeueAnnounce()
+            } else {
+              passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+              passiveActivationTimeout = setTimeout(
+                checkDeactivate,
+                passiveActivationGraceMs
+              )
+            }
+          }
           onPeerConnect(proxy, peerId)
           resetOfferState(state)
         },
         onDetach: (peerId, physical) => {
-          const state = ctx.peerStates[peerId]
-          if (state?.connectedPeer === physical) {
-            state.connectedPeer = null
-            state.connectedPeerUnhealthySinceMs = null
-            updateStatus(state)
-          }
+          detachConnectedPeer(ctx.peerStates[peerId], physical)
         }
       }
     )
