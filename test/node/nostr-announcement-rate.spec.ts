@@ -537,3 +537,30 @@ void test(
     }
   }
 )
+
+void test(
+  'Nostr terminal CLOSED rejection retires the relay socket immediately',
+  {timeout: 5_000},
+  async () => {
+    const previous = globalThis.WebSocket
+    globalThis.WebSocket = MockWebSocket
+    const room = joinTestRoom(`wss://closed-terminal-${Date.now()}.test`)
+
+    try {
+      const socket = MockWebSocket.sockets.at(-1)
+      await waitFor(() => announcementCount(socket) > 0)
+      const req = socket.sent.find(msg => msg[0] === 'REQ')
+      socket.onmessage({
+        data: JSON.stringify([
+          'CLOSED',
+          req[1],
+          'auth-required: subscription requires authentication'
+        ])
+      })
+      assert.equal(socket.readyState, 3)
+    } finally {
+      await room.leave().catch(() => {})
+      globalThis.WebSocket = previous
+    }
+  }
+)

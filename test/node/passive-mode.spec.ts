@@ -1020,3 +1020,81 @@ void test(
     }
   }
 )
+
+void test(
+  'Trystero: passive peer deactivates when last peer sends graceful @_leave while shared peer stays open',
+  {timeout: 10_000},
+  async () => {
+    let deactivateCount = 0
+    const subscribers: Subscriber[] = []
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {},
+      deactivate: () => {
+        deactivateCount++
+      }
+    })
+
+    const appId = `passive-graceful-leave-${Date.now()}`
+    const config = {
+      appId,
+      passive: true,
+      rtcPolyfill: MockRTCPeerConnection
+    }
+
+    const room = joinRoom(config, 'test-room')
+    const {peerA, peerB} = await import('./peer-harness.ts').then(
+      ({BufferedPeer, linkPeers}) =>
+        linkPeers(new BufferedPeer(), new BufferedPeer())
+    )
+
+    try {
+      await waitFor(() => subscribers.length >= 1)
+
+      const sub = subscribers[0]
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
+
+      const encryptedAnswer = await encrypt(
+        genKey('', appId, 'test-room'),
+        'answer-sdp'
+      )
+      await sub.onMessage(
+        sub.rootTopic,
+        {peerId: 'active-peer', answer: encryptedAnswer, peer: peerA},
+        () => {}
+      )
+
+      const activeRoom = createStrategy({
+        init: () => ({}),
+        subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+          subscribers.push({rootTopic, selfTopic, onMessage})
+          return () => {}
+        },
+        announce: () => {}
+      })({appId, rtcPolyfill: MockRTCPeerConnection}, 'test-room')
+
+      await waitFor(() => subscribers.length >= 2)
+      await subscribers[1].onMessage(
+        subscribers[1].rootTopic,
+        {peerId: 'passive-peer', answer: encryptedAnswer, peer: peerB},
+        () => {}
+      )
+
+      await waitFor(() => 'active-peer' in room.getPeers())
+      await activeRoom.leave()
+
+      await waitFor(() => deactivateCount > 0)
+      assert.equal(peerA.isDead, false)
+      assert.equal(Object.keys(room.getPeers()).length, 0)
+    } finally {
+      await room.leave().catch(() => {})
+      peerA.destroy()
+      peerB.destroy()
+    }
+  }
+)

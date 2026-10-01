@@ -175,19 +175,6 @@ export const createMediaManager = ({
   const pendingTrackMetas: Record<string, PendingMediaMeta[]> = {}
   const peerMediaCaches: Record<string, MediaIdentityCache> = {}
   const localMedia = createMediaIdentityCache()
-  const listeners = {
-    onPeerStream: null as
-      | ((stream: MediaStream, peerId: string, metadata?: JsonValue) => void)
-      | null,
-    onPeerTrack: null as
-      | ((
-          track: MediaStreamTrack,
-          stream: MediaStream,
-          peerId: string,
-          metadata?: JsonValue
-        ) => void)
-      | null
-  }
 
   const getPeerMedia = (id: string): MediaIdentityCache =>
     getSharedMediaPeer(id)?.__trysteroMedia ??
@@ -210,6 +197,25 @@ export const createMediaManager = ({
     queue.push(parsed)
   }
 
+  const takePendingMeta = (
+    queue: PendingMediaMeta[] | undefined,
+    idValue: string | undefined,
+    getMetaId: (meta: PendingMediaMeta) => string | undefined
+  ): PendingMediaMeta | undefined => {
+    if (!queue?.length) {
+      return undefined
+    }
+
+    const index = idValue
+      ? queue.findIndex(meta => {
+          const metaId = getMetaId(meta)
+          return !metaId || metaId === idValue
+        })
+      : 0
+
+    return index >= 0 ? queue.splice(index, 1)[0] : undefined
+  }
+
   const emitStream = (
     id: string,
     key: string,
@@ -226,7 +232,7 @@ export const createMediaManager = ({
       typeof stream.id === 'string' ? stream.id : undefined
     )
 
-    listeners.onPeerStream?.(stream, id, metadata)
+    manager.onPeerStream?.(stream, id, metadata)
   }
 
   const emitTrack = (
@@ -248,7 +254,7 @@ export const createMediaManager = ({
       typeof stream.id === 'string' ? stream.id : undefined
     )
 
-    listeners.onPeerTrack?.(track, stream, id, metadata)
+    manager.onPeerTrack?.(track, stream, id, metadata)
   }
 
   const applyMediaOp = (
@@ -271,7 +277,7 @@ export const createMediaManager = ({
     })
   }
 
-  const manager = {
+  const manager: ReturnType<typeof createMediaManager> = {
     addStream: (stream, options, sendMeta) =>
       applyMediaOp(
         options.target,
@@ -347,7 +353,12 @@ export const createMediaManager = ({
 
       const cached = getPeerMedia(id).getRemoteTrack(parsed.key, parsed.trackId)
 
-      if (cached) {
+      if (
+        cached &&
+        cached.track.readyState !== 'ended' &&
+        (!cached.stream.getTracks ||
+          cached.stream.getTracks().includes(cached.track))
+      ) {
         emitTrack(id, parsed.key, cached.track, cached.stream, parsed.metadata)
         return
       }
@@ -360,7 +371,11 @@ export const createMediaManager = ({
         return
       }
 
-      const next = pendingStreamMetas[id]?.shift()
+      const next = takePendingMeta(
+        pendingStreamMetas[id],
+        typeof stream.id === 'string' ? stream.id : undefined,
+        meta => meta.streamId
+      )
 
       if (!next) {
         return
@@ -374,7 +389,17 @@ export const createMediaManager = ({
         return
       }
 
-      const next = pendingTrackMetas[id]?.shift()
+      const queue = pendingTrackMetas[id]
+      const trackId = typeof track.id === 'string' ? track.id : undefined
+      const streamId = typeof stream.id === 'string' ? stream.id : undefined
+      const byTrackIdx =
+        queue && trackId
+          ? queue.findIndex(meta => meta.trackId === trackId)
+          : -1
+      const next =
+        byTrackIdx >= 0
+          ? queue?.splice(byTrackIdx, 1)[0]
+          : takePendingMeta(queue, streamId, meta => meta.streamId)
 
       if (!next) {
         return
@@ -389,22 +414,9 @@ export const createMediaManager = ({
       delete peerMediaCaches[id]
     },
 
-    get onPeerStream() {
-      return listeners.onPeerStream
-    },
-
-    set onPeerStream(handler) {
-      listeners.onPeerStream = handler
-    },
-
-    get onPeerTrack() {
-      return listeners.onPeerTrack
-    },
-
-    set onPeerTrack(handler) {
-      listeners.onPeerTrack = handler
-    }
-  } satisfies ReturnType<typeof createMediaManager>
+    onPeerStream: null,
+    onPeerTrack: null
+  }
 
   return manager
 }

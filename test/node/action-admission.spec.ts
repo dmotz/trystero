@@ -437,3 +437,36 @@ void test('request actions report receive progress for bulk responses', async t 
   assert.equal(progresses.at(-1), 1)
   assert.ok(contexts.every(context => context.peerId === 'right'))
 })
+
+void test('attaching onReceive before onMessage runs admission for already queued messages and bulk offers', async t => {
+  const pair = linkedActions()
+  t.after(pair.close)
+
+  const sender = pair.left.makeAction('deferred')
+  await sender.send('blocked-inline')
+  await sender.send('allowed-inline-message')
+  const bulkSend = sender.send(new Uint8Array(24_000))
+
+  await turn()
+
+  const receiver = pair.right.makeAction('deferred')
+  const seenByteLengths: number[] = []
+  const delivered: unknown[] = []
+
+  receiver.onReceive = ({byteLength}) => {
+    seenByteLengths.push(byteLength)
+    return byteLength !== new TextEncoder().encode('blocked-inline').byteLength
+  }
+  receiver.onMessage = payload => {
+    delivered.push(payload)
+  }
+
+  await bulkSend
+  await turn()
+
+  assert.equal(seenByteLengths.length, 3)
+  assert.equal(delivered.length, 2)
+  assert.equal(delivered[0], 'allowed-inline-message')
+  assert.ok(delivered[1] instanceof Uint8Array)
+  assert.equal((delivered[1] as Uint8Array).byteLength, 24_000)
+})

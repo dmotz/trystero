@@ -184,3 +184,148 @@ void test('non-trickle offer resolves once gathered candidates settle without wa
     `expected non-trickle offer to settle quickly (<1500ms), got ${elapsedMs}ms`
   )
 })
+
+void test('polite peer glare offer while makingOffer in stable state answers without invalid rollback', async t => {
+  let resolveCreateOffer:
+    | ((offer: {type: string; sdp: string}) => void)
+    | null = null
+
+  class PoliteGlareRTCPeerConnection extends MockRTCPeerConnection {
+    answersCreated = 0
+
+    override async createOffer(): Promise<{type: string; sdp: string}> {
+      return new Promise(resolve => {
+        resolveCreateOffer = resolve
+      })
+    }
+
+    async createAnswer() {
+      this.answersCreated++
+      return {type: 'answer', sdp: 'polite-answer'}
+    }
+
+    override async setRemoteDescription(description) {
+      this.remoteDescription = description
+      this.signalingState =
+        description?.type === 'offer' ? 'have-remote-offer' : 'stable'
+    }
+
+    override async setLocalDescription(description) {
+      if (
+        description?.type === 'rollback' &&
+        this.signalingState === 'stable'
+      ) {
+        throw new Error('Cannot rollback in stable state')
+      }
+      if (!description && this.signalingState === 'have-remote-offer') {
+        const answer = await this.createAnswer()
+        this.localDescription = answer
+        this.signalingState = 'stable'
+        return
+      }
+      await super.setLocalDescription(description)
+    }
+  }
+
+  const peer = initPeer(false, {
+    appId: 'polite-glare-stable-test',
+    rtcPolyfill: PoliteGlareRTCPeerConnection as never
+  })
+  t.after(() => peer.destroy())
+  const errors: Error[] = []
+  const signals: Array<{type?: string; sdp?: string}> = []
+  peer.setHandlers({
+    error: error => errors.push(error),
+    signal: signal => signals.push(signal as never)
+  })
+  const pc = peer.connection as unknown as PoliteGlareRTCPeerConnection
+
+  pc.onnegotiationneeded?.()
+  assert.equal(pc.signalingState, 'stable')
+
+  await peer.signal({type: 'offer', sdp: 'v=0\r\na=ice-ufrag:newufrag\r\n'})
+  resolveCreateOffer?.({type: 'offer', sdp: 'stale-local-offer'})
+
+  assert.deepEqual(errors, [])
+  assert.equal(pc.answersCreated, 1)
+  assert.ok(signals.some(signal => signal.type === 'answer'))
+})
+
+void test('initial getOffer settles when createOffer rejects or peer is destroyed early', async () => {
+  class FailingOfferRTCPeerConnection extends MockRTCPeerConnection {
+    override async createOffer(): Promise<{type: string; sdp: string}> {
+      throw new Error('createOffer failed')
+    }
+  }
+
+  const failingPeer = initPeer(true, {
+    appId: 'failing-initial-offer-test',
+    rtcPolyfill: FailingOfferRTCPeerConnection as never
+  })
+  const failedOffer = await failingPeer.getOffer()
+  assert.equal(failedOffer, undefined)
+  failingPeer.destroy()
+
+  class HangingOfferRTCPeerConnection extends MockRTCPeerConnection {
+    override async createOffer(): Promise<{type: string; sdp: string}> {
+      return new Promise(() => {})
+    }
+  }
+
+  const destroyedPeer = initPeer(true, {
+    appId: 'destroyed-initial-offer-test',
+    rtcPolyfill: HangingOfferRTCPeerConnection as never
+  })
+  const offerPromise = destroyedPeer.getOffer()
+  destroyedPeer.destroy()
+  assert.equal(await offerPromise, undefined)
+})
+
+void test('queued remote candidates drop stale ufrags and evict oldest entries at capacity', async t => {
+  class CandidateTrackingRTCPeerConnection extends MockRTCPeerConnection {
+    addedCandidates: Array<{candidate: string; usernameFragment?: string}> = []
+
+    async addIceCandidate(candidate) {
+      this.addedCandidates.push(candidate)
+    }
+  }
+
+  const peer = initPeer(true, {
+    appId: 'candidate-queue-test',
+    rtcPolyfill: CandidateTrackingRTCPeerConnection as never
+  })
+  t.after(() => peer.destroy())
+  const pc = peer.connection as unknown as CandidateTrackingRTCPeerConnection
+
+  await peer.getOffer()
+
+  await peer.signal({
+    type: 'candidate',
+    sdp: JSON.stringify({
+      candidate: 'candidate:stale 1 udp 1 127.0.0.1 4000 typ host',
+      usernameFragment: 'stale-ufrag'
+    })
+  })
+
+  for (let i = 0; i < 260; i++) {
+    await peer.signal({
+      type: 'candidate',
+      sdp: JSON.stringify({
+        candidate: `candidate:${i} 1 udp 1 127.0.0.1 ${5000 + i} typ host`,
+        usernameFragment: 'active-ufrag'
+      })
+    })
+  }
+
+  await peer.signal({
+    type: 'answer',
+    sdp: 'v=0\r\na=ice-ufrag:active-ufrag\r\n'
+  })
+
+  assert.equal(pc.addedCandidates.length, 128)
+  assert.ok(
+    pc.addedCandidates.every(c => c.usernameFragment === 'active-ufrag')
+  )
+  assert.match(pc.addedCandidates[0].candidate, /^candidate:132 /)
+  assert.match(pc.addedCandidates.at(-1)!.candidate, /^candidate:259 /)
+})

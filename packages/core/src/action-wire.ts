@@ -8,7 +8,10 @@ import {
   type WireRejectHandler,
   type ReceiveOptions
 } from './action-receiver'
-import {maxActionFrameBytes as maxFrameBytes} from './data-limits'
+import {
+  maxActionFrameBytes as maxFrameBytes,
+  transferTimeoutMs
+} from './data-limits'
 import {
   all,
   decodeBytes,
@@ -35,12 +38,37 @@ const controlHeaderSize = 6 // version, kind, uint32 id
 const chunkHeaderSize = 14 // control header, float64 byte offset
 const chunkSize = maxFrameBytes - chunkHeaderSize
 const defaultMaxReceiveBytes = 256 * 1024 ** 2
-const transferTimeoutMs = 120_000
 const maxControlBufferedBytes = 1024 ** 2
 const buffLowEvent = 'bufferedamountlow'
 const channelCloseEvent = 'close'
 const channelErrorEvent = 'error'
 const backpressureWaitTimeoutMs = 10_000
+
+export type ActionErrorKind =
+  | 'timeout'
+  | 'disconnected'
+  | 'aborted'
+  | 'rejected'
+
+export type ActionError = Error & {
+  kind?: ActionErrorKind
+}
+
+export const makeActionError = (
+  kind: ActionErrorKind,
+  message: string
+): ActionError => {
+  const error = mkErr(message) as ActionError
+  error.kind = kind
+  error.name = kind === 'aborted' ? 'AbortError' : error.name
+  return error
+}
+
+export const throwIfAborted = (signal?: AbortSignal): void => {
+  if (signal?.aborted) {
+    throw makeActionError('aborted', 'operation aborted')
+  }
+}
 
 export type ActionOptions = ReceiveOptions & {
   sendToPending: boolean
@@ -79,7 +107,7 @@ type ActionWireManagerDeps = {
   getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
-  throwIfAborted: (signal?: AbortSignal) => void
+  throwIfAborted?: (signal?: AbortSignal) => void
   maxReceiveBytes?: number
 }
 const packet = (
@@ -93,10 +121,7 @@ const packet = (
   new DataView(bytes.buffer).setUint32(2, id)
   return bytes
 }
-const transferError = (
-  kind: 'rejected' | 'timeout' | 'disconnected',
-  message: string
-): Error => Object.assign(mkErr(message), {kind})
+const transferError = makeActionError
 const waitForBufferedAmountLow = (
   channel: RTCDataChannel,
   signal?: AbortSignal,
@@ -154,7 +179,7 @@ export const createActionWireManager = ({
   getPeerIds,
   canReceiveFromPeer,
   onPeerError,
-  throwIfAborted,
+  throwIfAborted: checkAborted = throwIfAborted,
   maxReceiveBytes = defaultMaxReceiveBytes
 }: ActionWireManagerDeps): {
   makeInternalAction: <T extends DataPayload = DataPayload>(
@@ -251,7 +276,7 @@ export const createActionWireManager = ({
       action: {
         ...receiver.register(type, normalizedOptions),
         send: async (data, targets, metadata, onProgress, signal) => {
-          throwIfAborted(signal)
+          checkAborted(signal)
           if (data === undefined) {
             throw mkErr('action data cannot be undefined')
           }
@@ -325,7 +350,7 @@ export const createActionWireManager = ({
                 if (failure) {
                   throw failure
                 }
-                throwIfAborted(signal)
+                checkAborted(signal)
                 if (
                   getPeer(peerId, normalizedOptions.sendToPending) !== peer ||
                   peer.channel?.readyState === 'closed'
@@ -342,7 +367,7 @@ export const createActionWireManager = ({
                     channel.bufferedAmount > channel.bufferedAmountLowThreshold)
                 ) {
                   if (!(await waitForBufferedAmountLow(channel, signal))) {
-                    throwIfAborted(signal)
+                    checkAborted(signal)
                     throw transferError(
                       'disconnected',
                       'data channel stopped draining'
@@ -350,7 +375,11 @@ export const createActionWireManager = ({
                   }
                   check()
                 }
-                peer.sendData(bytes)
+                try {
+                  peer.sendData(bytes)
+                } catch {
+                  throw transferError('disconnected', 'peer disconnected')
+                }
               }
               if (small) {
                 await sendFrame(start)
@@ -404,7 +433,7 @@ export const createActionWireManager = ({
               timer = setTimeout(expire, transferTimeoutMs)
               const abort = (): void => {
                 try {
-                  throwIfAborted(signal)
+                  checkAborted(signal)
                 } catch (error) {
                   state.fail(error as Error)
                 }

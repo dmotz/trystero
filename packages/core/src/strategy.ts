@@ -10,8 +10,8 @@ import {
   detachConnectedPeer,
   getState,
   markPeerConnected,
-  resetOfferState,
-  updateStatus
+  resetAnsweringState,
+  resetOfferState
 } from './signal-handler'
 import {
   all,
@@ -54,6 +54,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   const occupiedRooms: Record<
     string,
     Record<string, ReturnType<typeof room>>
+  > = {}
+  const leavingRoomCleanups: Record<
+    string,
+    Record<string, (rejoining?: boolean) => void>
   > = {}
   const sharedPeers = new SharedPeerManager()
   const hasActiveRooms = (): boolean =>
@@ -103,6 +107,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     if (occupiedRooms[appId]?.[roomId]) {
       return occupiedRooms[appId][roomId]
     }
+
+    leavingRoomCleanups[appId]?.[roomId]?.(true)
 
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
@@ -196,7 +202,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
         if (isActive) {
           hasActiveWork = true
-        } else if (state.status === 'idle') {
+        } else {
           delete ctx.peerStates[peerId]
         }
       })
@@ -419,6 +425,72 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const {compose} = createPasswordHandshake(sharedPassword, appId, roomId)
     const composedPeerHandshake = compose(onPeerHandshake)
 
+    const releaseOccupiedRoom = (): void => {
+      if (occupiedRooms[appId]?.[roomId] === joinedRoom) {
+        delete occupiedRooms[appId][roomId]
+
+        if (keys(occupiedRooms[appId]).length === 0) {
+          delete occupiedRooms[appId]
+        }
+      }
+    }
+
+    const clearLeavingCleanup = (): void => {
+      if (leavingRoomCleanups[appId]?.[roomId] === cleanupRoom) {
+        delete leavingRoomCleanups[appId][roomId]
+
+        if (keys(leavingRoomCleanups[appId]).length === 0) {
+          delete leavingRoomCleanups[appId]
+        }
+      }
+    }
+
+    const cleanupRoom = (rejoining = false): void => {
+      if (didLeaveRoom) {
+        return
+      }
+
+      didLeaveRoom = true
+      onPeerConnect = noOp
+
+      releaseOccupiedRoom()
+      clearLeavingCleanup()
+      membership.leave()
+
+      entries(ctx.peerStates).forEach(([peerId, state]) => {
+        if (state.connectedPeer && !state.connectedPeer.isDead) {
+          if (!sharedPeers.owns(appId, peerId, state.connectedPeer)) {
+            state.connectedPeer.destroy()
+          }
+        }
+
+        if (state.answeringPeer && !state.answeringPeer.isDead) {
+          state.answeringPeer.destroy()
+        }
+
+        resetOfferState(state)
+        resetAnsweringState(state)
+        state.connectedPeer = null
+        state.connectedPeerUnhealthySinceMs = null
+      })
+
+      announceTimeouts.forEach(resetTimer)
+      passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+      unsubFns.forEach(async f => {
+        const cleanup = await f
+        cleanup()
+      })
+
+      offerManager.destroy()
+
+      if (rejoining || hasActiveRooms()) {
+        return
+      }
+
+      didInit = false
+      cleanupWatchOnline()
+    }
+
     const roomOptions = {
       ...(config.maxReceiveBytes === undefined
         ? {}
@@ -428,6 +500,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         : {}),
       ...(handshakeTimeoutMs === undefined ? {} : {handshakeTimeoutMs}),
       isPassive,
+      onBeforeLeave: () => {
+        releaseOccupiedRoom()
+        ;(leavingRoomCleanups[appId] ??= {})[roomId] = cleanupRoom
+      },
       onHandshakeError: (peerId: string, error: string) =>
         onJoinError?.({
           error: error.replace(/^handshake failed: /, ''),
@@ -449,66 +525,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         const state = ctx.peerStates[id]
 
         if (state?.connectedPeer) {
-          state.connectedPeer = null
-          state.connectedPeerUnhealthySinceMs = null
-          updateStatus(state)
-          checkDeactivate()
+          detachConnectedPeer(state, state.connectedPeer)
         }
+
+        checkDeactivate()
         // Shared-peer close handlers reach the room callback, not disconnectPeer.
         reannounceAfterDisconnect()
       },
-      () => {
-        didLeaveRoom = true
-        onPeerConnect = noOp
-
-        if (occupiedRooms[appId]) {
-          delete occupiedRooms[appId][roomId]
-
-          if (keys(occupiedRooms[appId]).length === 0) {
-            delete occupiedRooms[appId]
-          }
-        }
-
-        membership.leave()
-
-        entries(ctx.peerStates).forEach(([peerId, state]) => {
-          state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
-
-          if (state.connectedPeer && !state.connectedPeer.isDead) {
-            if (!sharedPeers.owns(appId, peerId, state.connectedPeer)) {
-              state.connectedPeer.destroy()
-            }
-          }
-
-          if (state.answeringPeer && !state.answeringPeer.isDead) {
-            state.answeringPeer.destroy()
-          }
-
-          resetOfferState(state)
-          state.connectedPeer = null
-          state.connectedPeerUnhealthySinceMs = null
-          state.answeringPeer = null
-          state.answerSent = false
-          state.answerReplay = null
-          updateStatus(state)
-        })
-
-        announceTimeouts.forEach(resetTimer)
-        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
-        unsubFns.forEach(async f => {
-          const cleanup = await f
-          cleanup()
-        })
-
-        offerManager.destroy()
-
-        if (hasActiveRooms()) {
-          return
-        }
-
-        didInit = false
-        cleanupWatchOnline()
-      },
+      () => cleanupRoom(false),
       roomOptions
     )
 
@@ -539,6 +563,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         },
         onDetach: (peerId, physical) => {
           detachConnectedPeer(ctx.peerStates[peerId], physical)
+          checkDeactivate()
         }
       }
     )

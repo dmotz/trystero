@@ -16,11 +16,62 @@ const relayManager = createRelayManager<mqtt.MqttClient>(
       | WebSocket
       | undefined
 )
-const msgHandlers = relayManager.scoped<(topic: string, data: string) => void>()
-const subscriptionTokens = relayManager.scoped<symbol>()
-const subscriptionRefs = relayManager.scoped<number>()
-const announcementMessages = relayManager.scoped<string>()
-const subscriptionReady = relayManager.scoped<Promise<unknown>>()
+type TopicState = {
+  handler?: (topic: string, data: string) => void
+  token?: symbol
+  refs: number
+  announcement?: string
+  ready?: Promise<unknown>
+}
+
+const topicStates = relayManager.scoped<TopicState>()
+const pendingBatches = new WeakMap<
+  mqtt.MqttClient,
+  {topics: Set<string>; promise: Promise<unknown>}
+>()
+
+const ensureSubscribed = (
+  client: mqtt.MqttClient,
+  states: Record<string, TopicState>,
+  topic: string
+): Promise<unknown> => {
+  const state = states[topic]
+
+  if (!state) {
+    return Promise.resolve()
+  }
+
+  if (state.ready) {
+    return state.ready
+  }
+
+  let batch = pendingBatches.get(client)
+
+  if (!batch) {
+    const topics = new Set<string>()
+    const promise = new Promise<void>(resolve => {
+      queueMicrotask(() => {
+        pendingBatches.delete(client)
+        const activeTopics = [...topics].filter(t => (states[t]?.refs ?? 0) > 0)
+
+        resolve(
+          activeTopics.length > 0
+            ? client.subscribeAsync(activeTopics).then(
+                () => {},
+                err => console.error(err)
+              )
+            : undefined
+        )
+      })
+    })
+    batch = {topics, promise}
+    pendingBatches.set(client, batch)
+  }
+
+  batch.topics.add(topic)
+  return (state.ready = batch.promise)
+}
+
 export type MqttRoomConfig = JoinRoomConfig
 
 export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
@@ -29,15 +80,17 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
       const client = relayManager.register(url, () =>
         mqtt.connect(url, {queueQoSZero: false, resubscribe: false})
       )
-      const handlers = msgHandlers.forRelay(client)
+      const states = topicStates.forRelay(client)
 
       if (client.listenerCount('message') === 0) {
         client
           .on('message', (topic, buffer) =>
-            handlers[topic]?.(topic, buffer.toString())
+            states[topic]?.handler?.(topic, buffer.toString())
           )
           .on('connect', () => {
-            const topics = Object.keys(subscriptionRefs.forRelay(client))
+            const topics = Object.keys(states).filter(
+              topic => (states[topic]?.refs ?? 0) > 0
+            )
 
             if (topics.length === 0) {
               return
@@ -46,9 +99,11 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
             void client
               .subscribeAsync(topics)
               .then(() => {
-                Object.entries(announcementMessages.forRelay(client)).forEach(
-                  ([topic, msg]) => client.publish(topic, msg)
-                )
+                Object.entries(states).forEach(([topic, state]) => {
+                  if (state.announcement) {
+                    client.publish(topic, state.announcement)
+                  }
+                })
               })
               .catch(console.error)
           })
@@ -63,67 +118,61 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
     }),
 
   subscribeTopic: (client, topic, onMessage, context) => {
-    const handlers = msgHandlers.forRelay(client)
-    const tokens = subscriptionTokens.forRelay(client)
-    const refs = subscriptionRefs.forRelay(client)
+    const states = topicStates.forRelay(client)
+    const state = (states[topic] ??= {refs: 0})
     const token = Symbol(topic)
     const topicHandler = (topic: string, data: string) => onMessage(topic, data)
 
-    handlers[topic] = topicHandler
-    tokens[topic] = token
-    refs[topic] = (refs[topic] ?? 0) + 1
+    state.handler = topicHandler
+    state.token = token
+    state.refs += 1
 
-    if (refs[topic] === 1) {
-      subscriptionReady.forRelay(client)[topic] = client.subscribeAsync(topic)
-      void subscriptionReady.forRelay(client)[topic]?.catch(console.error)
-    }
+    const cleanup = () => {
+      state.refs = Math.max(0, state.refs - 1)
 
-    if (context.kind === 'root') {
-      // Queue both SUBSCRIBEs before the initial publish, without two network
-      // round trips. Replay once they're confirmed if discovery raced setup.
-      void Promise.all([
-        subscriptionReady.forRelay(client)[context.selfTopic],
-        subscriptionReady.forRelay(client)[topic]
-      ])
-        .then(() => {
-          const payload = announcementMessages.forRelay(client)[topic]
-          if (tokens[topic] === token && client.connected && payload) {
-            client.publish(topic, payload)
-          }
-        })
-        .catch(console.error)
-    }
-
-    return () => {
-      refs[topic] = Math.max(0, (refs[topic] ?? 1) - 1)
-
-      if (refs[topic] === 0) {
-        client.unsubscribe(topic)
-        delete refs[topic]
-        delete announcementMessages.forRelay(client)[topic]
-        delete subscriptionReady.forRelay(client)[topic]
+      if (state.handler === topicHandler) {
+        delete state.handler
       }
 
-      if (handlers[topic] === topicHandler) {
-        delete handlers[topic]
+      if (state.token === token) {
+        delete state.token
       }
 
-      if (tokens[topic] === token) {
-        delete tokens[topic]
+      if (state.refs === 0) {
+        if (state.ready) {
+          client.unsubscribe(topic)
+        }
+        delete states[topic]
       }
     }
+
+    // Active rooms subscribe to self before root; waiting on root batches
+    // all concurrent room SUBSCRIBEs into a single packet before announcing.
+    return context.kind === 'root'
+      ? Promise.all([
+          ensureSubscribed(client, states, context.selfTopic),
+          ensureSubscribed(client, states, topic)
+        ]).then(() => cleanup)
+      : states[context.rootTopic]
+        ? ensureSubscribed(client, states, topic).then(() => cleanup)
+        : cleanup
   },
 
   publishTopic: (client, topic, msg, {kind}) => {
     const payload = typeof msg === 'string' ? msg : toJson(msg)
 
     if (kind === 'announce') {
-      announcementMessages.forRelay(client)[topic] = payload
+      ;(topicStates.forRelay(client)[topic] ??= {refs: 0}).announcement =
+        payload
     }
 
     if (client.connected) {
       client.publish(topic, payload)
     }
+  },
+
+  unpublishTopic: (client, topic) => {
+    delete topicStates.forRelay(client)[topic]?.announcement
   }
 })
 
@@ -135,7 +184,6 @@ export const defaultRelayUrls = [
   'test.mosquitto.org:8081/mqtt',
   'broker.emqx.io:8084/mqtt',
   'public:public@public.cloud.shiftr.io',
-  'broker-cn.emqx.io:8084/mqtt',
   'broker.hivemq.com:8884/mqtt'
 ].map(url => 'wss://' + url)
 

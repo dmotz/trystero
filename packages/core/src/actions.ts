@@ -11,6 +11,10 @@ import {
 } from './utils'
 import {
   createActionWireManager,
+  makeActionError,
+  throwIfAborted,
+  type ActionError,
+  type ActionErrorKind,
   type ActionOptions,
   type InternalAction,
   type InternalActionSender
@@ -32,7 +36,12 @@ import type {
   SendOptions
 } from './types'
 
-export type {ActionOptions, InternalAction, InternalActionSender}
+export type {
+  ActionErrorKind,
+  ActionOptions,
+  InternalAction,
+  InternalActionSender
+}
 
 type PublicActionKind = 'message' | 'request'
 
@@ -65,38 +74,12 @@ type ResponseMetadata = {
   e?: string
 }
 
-export type ActionErrorKind =
-  | 'timeout'
-  | 'disconnected'
-  | 'aborted'
-  | 'rejected'
-
-type ActionError = Error & {
-  kind?: ActionErrorKind
-}
-
 type ActionManagerDeps = {
   onPeerError: (peerId: string, error: Error) => void
   maxReceiveBytes?: number
   getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
-}
-
-const makeActionError = (
-  kind: ActionErrorKind,
-  message: string
-): ActionError => {
-  const error = mkErr(message) as ActionError
-  error.kind = kind
-  error.name = kind === 'aborted' ? 'AbortError' : error.name
-  return error
-}
-
-const throwIfAborted = (signal?: AbortSignal): void => {
-  if (signal?.aborted) {
-    throw makeActionError('aborted', 'operation aborted')
-  }
 }
 
 const getEnvelopeRecord = (
@@ -152,13 +135,13 @@ export const createActionManager = ({
 } => {
   const publicActions: Record<string, PublicActionState> = Object.create(null)
   const pendingRequestWaiters: Record<string, PendingRequestWaiter> = {}
+  const activeRequestControllers = new Map<string, Set<AbortController>>()
   const wire = createActionWireManager({
     getPeer,
     getPeerIds,
     canReceiveFromPeer,
     onPeerError,
-    ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes}),
-    throwIfAborted
+    ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes})
   })
   const makeInternalAction = wire.makeInternalAction
   const handleData = wire.handleData
@@ -193,6 +176,11 @@ export const createActionManager = ({
 
   const clearPeer = (id: string, error: Error): void => {
     wire.clearPeer(id)
+    const controllers = activeRequestControllers.get(id)
+    if (controllers) {
+      activeRequestControllers.delete(id)
+      controllers.forEach(controller => controller.abort())
+    }
     rejectPendingRequestsForPeer(
       id,
       makeActionError(
@@ -424,6 +412,12 @@ export const createActionManager = ({
       }
       const handler = onRequest!
       const controller = new AbortController()
+      let peerControllers = activeRequestControllers.get(peerId)
+      if (!peerControllers) {
+        peerControllers = new Set()
+        activeRequestControllers.set(peerId, peerControllers)
+      }
+      peerControllers.add(controller)
       void Promise.resolve()
         .then(async () => {
           const response = await handler(payload as T, {
@@ -444,7 +438,14 @@ export const createActionManager = ({
             })
         )
         .catch(noOp)
-        .finally(() => controller.abort())
+        .finally(() => {
+          const controllers = activeRequestControllers.get(peerId)
+          controllers?.delete(controller)
+          if (controllers && !controllers.size) {
+            activeRequestControllers.delete(peerId)
+          }
+          controller.abort()
+        })
     }
 
     const requestOne = async (data: T, options: RequestOptions): Promise<R> => {
@@ -512,32 +513,22 @@ export const createActionManager = ({
       request: requestOne,
 
       requestMany: async (data: T, options: RequestManyOptions<R>) => {
-        throwIfAborted(options.signal)
+        const {targets, onResult, ...requestOptions} = options
+        throwIfAborted(requestOptions.signal)
 
         const results = await all(
-          options.targets.map(async target => {
+          targets.map(async target => {
             try {
               const value = await requestOne(data, {
-                target,
-                ...(options.metadata === undefined
-                  ? {}
-                  : {metadata: options.metadata}),
-                ...(options.timeoutMs === undefined
-                  ? {}
-                  : {timeoutMs: options.timeoutMs}),
-                ...(options.onProgress === undefined
-                  ? {}
-                  : {onProgress: options.onProgress}),
-                ...(options.signal === undefined
-                  ? {}
-                  : {signal: options.signal})
+                ...requestOptions,
+                target
               })
               const result = {
                 peerId: target,
                 status: 'fulfilled',
                 value
               } satisfies PeerResult<R>
-              options.onResult?.(result)
+              onResult?.(result)
               return result
             } catch (err) {
               const error = toError(err, 'request failed') as ActionError
@@ -560,7 +551,7 @@ export const createActionManager = ({
                         error
                       } as PeerResult<R>)
 
-              options.onResult?.(result)
+              onResult?.(result)
               return result
             }
           })

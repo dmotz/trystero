@@ -469,3 +469,47 @@ void test(
     }
   }
 )
+
+void test(
+  'Trystero: un-awaited room.leave() followed immediately by joinRoom creates a fresh active room',
+  {timeout: 5_000},
+  async () => {
+    let activeSubscriptions = 0
+    let announceCount = 0
+    const joinRoom = createTopicStrategy({
+      init: () => ({}),
+      subscribeTopic: () => {
+        activeSubscriptions++
+        return () => {
+          activeSubscriptions--
+        }
+      },
+      publishTopic: (_relay, _topic, _msg, {kind}) => {
+        if (kind === 'announce') {
+          announceCount++
+        }
+      }
+    })
+    const config = {
+      appId: `topic-sync-rejoin-${Date.now()}`,
+      rtcPolyfill: MockRTCPeerConnection
+    }
+
+    const firstRoom = joinRoom(config, 'room')
+    await waitFor(() => activeSubscriptions === 2 && announceCount > 0)
+
+    void firstRoom.leave()
+    const secondRoom = joinRoom(config, 'room')
+
+    try {
+      assert.notEqual(secondRoom, firstRoom)
+      const countAtRejoin = announceCount
+      await waitFor(() => announceCount > countAtRejoin)
+      assert.equal(activeSubscriptions, 2)
+    } finally {
+      await secondRoom.leave().catch(() => {})
+    }
+
+    assert.equal(activeSubscriptions, 0)
+  }
+)

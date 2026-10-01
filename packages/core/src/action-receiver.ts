@@ -1,3 +1,4 @@
+import {transferTimeoutMs} from './data-limits'
 import {decodeBytes, fromJson, libName, noOp, resetTimer} from './utils'
 import type {ActionReceiveContext, DataPayload, JsonValue} from './types'
 
@@ -5,7 +6,6 @@ const maxPendingTransfers = 1024
 const maxPendingPerPeer = 64
 const maxDecisions = 128
 const maxDecisionsPerPeer = 8
-const transferTimeoutMs = 120_000
 const emptyBytes = new Uint8Array()
 
 export const textFormat = 0
@@ -240,6 +240,9 @@ export const createActionReceiver = ({
     }
     const receive = state.scope ? state.scope.receive : action.receive
     if (!receive) {
+      if (!action.receiver) {
+        return false
+      }
       state.phase = 'ready'
       return true
     }
@@ -481,6 +484,7 @@ export const createActionReceiver = ({
         },
         onReceive: (handler: WireReceiveHandler | null): void => {
           action.receive = handler
+          drain()
         },
         onReject: (handler: WireRejectHandler): void => {
           action.reject = handler

@@ -277,3 +277,67 @@ void test('Trystero: request actions reject on abort and ignore late responses',
     await Promise.all([roomA.leave(), roomB.leave()])
   }
 })
+
+void test('Trystero: incoming request context signal aborts when requesting peer disconnects', async () => {
+  const {roomA, roomB, peerA, peerB} = await createJoinedRooms()
+
+  try {
+    let requestSignal: AbortSignal | undefined
+    let abortedPromise: Promise<void> | undefined
+    const slowA = roomA.makeAction('disconnect-abort', {kind: 'request'})
+
+    roomB.makeAction('disconnect-abort', {
+      kind: 'request',
+      onRequest: (_value, context) => {
+        requestSignal = context.signal
+        abortedPromise = new Promise(resolve => {
+          context.signal.addEventListener('abort', () => resolve(), {
+            once: true
+          })
+        })
+        return new Promise<string>(resolve => {
+          context.signal.addEventListener('abort', () => resolve('cancelled'), {
+            once: true
+          })
+        })
+      }
+    })
+
+    const pending = slowA.request('work', {target: 'peer-b'})
+    await tick()
+    assert.ok(requestSignal)
+    assert.equal(requestSignal.aborted, false)
+
+    peerA.destroy()
+    peerB.destroy()
+
+    await abortedPromise
+    assert.equal(requestSignal.aborted, true)
+    await assert.rejects(() => pending, {kind: 'disconnected'})
+  } finally {
+    await Promise.all([roomA.leave(), roomB.leave()])
+  }
+})
+
+void test('Trystero: sendData throws during send or request reject with disconnected ActionError', async () => {
+  const {roomA, roomB, peerA} = await createJoinedRooms()
+
+  try {
+    const actionA = roomA.makeAction('broken-send')
+    const reqA = roomA.makeAction('broken-req', {kind: 'request'})
+    roomB.makeAction('broken-req', {kind: 'request', onRequest: () => 'ok'})
+
+    peerA.sendData = () => {
+      throw new Error('RTCDataChannel is not open')
+    }
+
+    await assert.rejects(() => actionA.send('payload', {target: 'peer-b'}), {
+      kind: 'disconnected'
+    })
+    await assert.rejects(() => reqA.request('payload', {target: 'peer-b'}), {
+      kind: 'disconnected'
+    })
+  } finally {
+    await Promise.all([roomA.leave(), roomB.leave()])
+  }
+})

@@ -59,41 +59,16 @@ type SharedFrame =
   | {type: 'room'; roomToken: string; payload: ArrayBuffer}
   | {type: 'presence'; roomToken: string; isPresent: boolean}
 
-const unwrapFrame = (data: ArrayBuffer): SharedFrame | null => {
-  const buffer = new Uint8Array(data)
-
-  if (buffer.byteLength < 3 || buffer.byteLength > maxRoomFrameBytes) {
+const decodeRoomTokenHeader = (
+  buffer: Uint8Array,
+  offset: number
+): {roomToken: string; headerSize: number} | null => {
+  if (buffer.byteLength < offset + 2) {
     return null
   }
 
-  if (buffer[0] === roomFrameVersion) {
-    const tokenSize = ((buffer[1] ?? 0) << 8) | (buffer[2] ?? 0)
-    const headerSize = 3 + tokenSize
-
-    if (
-      tokenSize <= 0 ||
-      tokenSize > maxRoomTokenBytes ||
-      buffer.byteLength < headerSize
-    ) {
-      return null
-    }
-
-    const roomToken = decodeBytes(buffer.subarray(3, headerSize))
-    const payload = buffer.subarray(headerSize)
-
-    return {
-      type: 'room',
-      roomToken,
-      payload: payload.slice().buffer
-    }
-  }
-
-  if (buffer[0] !== roomPresenceFrameVersion || buffer.byteLength < 4) {
-    return null
-  }
-
-  const tokenSize = ((buffer[2] ?? 0) << 8) | (buffer[3] ?? 0)
-  const headerSize = 4 + tokenSize
+  const tokenSize = ((buffer[offset] ?? 0) << 8) | (buffer[offset + 1] ?? 0)
+  const headerSize = offset + 2 + tokenSize
 
   if (
     tokenSize <= 0 ||
@@ -104,10 +79,43 @@ const unwrapFrame = (data: ArrayBuffer): SharedFrame | null => {
   }
 
   return {
-    type: 'presence',
-    roomToken: decodeBytes(buffer.subarray(4, headerSize)),
-    isPresent: buffer[1] === 1
+    roomToken: decodeBytes(buffer.subarray(offset + 2, headerSize)),
+    headerSize
   }
+}
+
+const unwrapFrame = (data: ArrayBuffer): SharedFrame | null => {
+  const buffer = new Uint8Array(data)
+
+  if (buffer.byteLength < 3 || buffer.byteLength > maxRoomFrameBytes) {
+    return null
+  }
+
+  if (buffer[0] === roomFrameVersion) {
+    const header = decodeRoomTokenHeader(buffer, 1)
+
+    return header
+      ? {
+          type: 'room',
+          roomToken: header.roomToken,
+          payload: buffer.subarray(header.headerSize).slice().buffer
+        }
+      : null
+  }
+
+  if (buffer[0] === roomPresenceFrameVersion) {
+    const header = decodeRoomTokenHeader(buffer, 2)
+
+    return header
+      ? {
+          type: 'presence',
+          roomToken: header.roomToken,
+          isPresent: buffer[1] === 1
+        }
+      : null
+  }
+
+  return null
 }
 
 const isPeerUnderlyingStale = (peer: PeerHandle): boolean => {
@@ -248,7 +256,7 @@ export class SharedPeerManager {
         return true
       },
       setActive: active => {
-        if (!current()) {
+        if (!current() || registration.active === active) {
           return
         }
         registration.active = active
@@ -488,7 +496,6 @@ export class SharedPeerManager {
     }
 
     const proxy: SharedMediaPeer = {
-      created: shared.peer.created,
       get connection() {
         return shared.peer.connection
       },
@@ -510,17 +517,9 @@ export class SharedPeerManager {
       },
       destroy: () => detachBinding(),
       setHandlers: newHandlers => {
-        const {signal, ...rest} = newHandlers
-
-        Object.assign(binding.handlers, rest)
-
-        if (signal) {
-          binding.handlers.signal = signal
-        }
-
+        Object.assign(binding.handlers, newHandlers)
         this.flushBindingQueues(shared, binding)
       },
-      offerPromise: shared.peer.offerPromise,
       addStream: stream => {
         const owners = shared.streamOwners.get(stream) ?? new Set<string>()
         const shouldAttach = owners.size === 0
@@ -532,20 +531,7 @@ export class SharedPeerManager {
           shared.peer.addStream(stream)
         }
       },
-      removeStream: stream => {
-        const owners = shared.streamOwners.get(stream)
-
-        if (!owners) {
-          return
-        }
-
-        owners.delete(roomId)
-
-        if (owners.size === 0) {
-          shared.streamOwners.delete(stream)
-          shared.peer.removeStream(stream)
-        }
-      },
+      removeStream: stream => this.releaseStreamOwner(shared, stream, roomId),
       addTrack: (track, stream) => {
         const entry = shared.trackOwners.get(track) ?? {
           stream,
@@ -566,20 +552,7 @@ export class SharedPeerManager {
           shared.peer.addTrack(track, stream)
         )
       },
-      removeTrack: track => {
-        const entry = shared.trackOwners.get(track)
-
-        if (!entry) {
-          return
-        }
-
-        entry.rooms.delete(roomId)
-
-        if (entry.rooms.size === 0) {
-          shared.trackOwners.delete(track)
-          shared.peer.removeTrack(track)
-        }
-      },
+      removeTrack: track => this.releaseTrackOwner(shared, track, roomId),
       replaceTrack: (oldTrack, newTrack) => {
         const oldEntry = shared.trackOwners.get(oldTrack)
 
@@ -622,9 +595,15 @@ export class SharedPeerManager {
       }
 
       const pendingSendData = binding.pendingSendData.splice(0)
-      pendingSendData.forEach(payload =>
-        shared.peer.sendData(wrapRoomFrame(roomToken, payload))
-      )
+      if (!isPeerUnderlyingStale(shared.peer)) {
+        pendingSendData.forEach(payload => {
+          try {
+            shared.peer.sendData(wrapRoomFrame(roomToken, payload))
+          } catch {
+            /* Ignore send errors if the underlying channel is closing. */
+          }
+        })
+      }
       this.flushBindingQueues(shared, binding)
       this.discardUnboundData(shared)
     })
@@ -632,27 +611,55 @@ export class SharedPeerManager {
     return {proxy, isNew: true}
   }
 
+  private releaseStreamOwner(
+    shared: SharedPeerState,
+    stream: MediaStream,
+    roomIdToRemove: string
+  ): void {
+    const rooms = shared.streamOwners.get(stream)
+
+    if (!rooms) {
+      return
+    }
+
+    rooms.delete(roomIdToRemove)
+
+    if (rooms.size === 0) {
+      shared.streamOwners.delete(stream)
+      shared.peer.removeStream(stream)
+    }
+  }
+
+  private releaseTrackOwner(
+    shared: SharedPeerState,
+    track: MediaStreamTrack,
+    roomIdToRemove: string
+  ): void {
+    const entry = shared.trackOwners.get(track)
+
+    if (!entry) {
+      return
+    }
+
+    entry.rooms.delete(roomIdToRemove)
+
+    if (entry.rooms.size === 0) {
+      shared.trackOwners.delete(track)
+      shared.peer.removeTrack(track)
+    }
+  }
+
   private pruneRoomOwnership(
     shared: SharedPeerState,
     roomIdToRemove: string
   ): void {
-    shared.streamOwners.forEach((rooms, stream) => {
-      rooms.delete(roomIdToRemove)
+    shared.streamOwners.forEach((_, stream) =>
+      this.releaseStreamOwner(shared, stream, roomIdToRemove)
+    )
 
-      if (rooms.size === 0) {
-        shared.streamOwners.delete(stream)
-        shared.peer.removeStream(stream)
-      }
-    })
-
-    shared.trackOwners.forEach((entry, track) => {
-      entry.rooms.delete(roomIdToRemove)
-
-      if (entry.rooms.size === 0) {
-        shared.trackOwners.delete(track)
-        shared.peer.removeTrack(track)
-      }
-    })
+    shared.trackOwners.forEach((_, track) =>
+      this.releaseTrackOwner(shared, track, roomIdToRemove)
+    )
   }
 
   private scheduleIdleTimer(shared: SharedPeerState): void {

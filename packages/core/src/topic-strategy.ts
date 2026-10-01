@@ -1,65 +1,17 @@
+import {shouldActivatePassiveRoom} from './signal-handler'
 import createStrategy from './strategy'
-import {fromJson, mkErr, selfId, toJson} from './utils'
+import {mkErr, selfId, toJson} from './utils'
 import type {
   BaseRoomConfig,
   JoinRoom,
   JoinRoomConfig,
   StrategyContext,
-  StrategyMessage,
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext
 } from './types'
 
-const signalKeys = ['offer', 'answer', 'candidate'] as const
 const defaultSteadyAnnounceIntervalMs = 60_000
-
-const toPayload = (msg: StrategyMessage): Record<string, unknown> | null => {
-  if (typeof msg === 'string') {
-    try {
-      const parsed = fromJson<unknown>(msg)
-
-      return parsed && typeof parsed === 'object'
-        ? (parsed as Record<string, unknown>)
-        : null
-    } catch {
-      return null
-    }
-  }
-
-  return msg
-}
-
-const getString = (
-  payload: Record<string, unknown>,
-  key: string
-): string | undefined =>
-  typeof payload[key] === 'string' && payload[key] ? payload[key] : undefined
-
-const hasInvalidSignalField = (payload: Record<string, unknown>): boolean =>
-  signalKeys.some(
-    key =>
-      key in payload &&
-      (typeof payload[key] !== 'string' || payload[key] === '')
-  )
-
-const shouldActivatePassiveRoom = (msg: StrategyMessage): boolean => {
-  const payload = toPayload(msg)
-
-  if (!payload || hasInvalidSignalField(payload)) {
-    return false
-  }
-
-  const peerId = getString(payload, 'peerId')
-
-  return Boolean(
-    peerId &&
-    peerId !== selfId &&
-    payload['passive'] !== true &&
-    !getString(payload, 'answer') &&
-    !getString(payload, 'candidate')
-  )
-}
 
 const requireContext = <TConfig extends BaseRoomConfig>(
   context?: StrategyContext<TConfig>
@@ -71,25 +23,21 @@ const requireContext = <TConfig extends BaseRoomConfig>(
   return context
 }
 
-const subscriptionContext = <TConfig extends BaseRoomConfig>(
+const makeTopicContext = <
+  TConfig extends BaseRoomConfig,
+  TKind extends TopicSubscriptionContext['kind'] | TopicPublishContext['kind']
+>(
   context: StrategyContext<TConfig>,
-  kind: TopicSubscriptionContext['kind'],
+  kind: TKind,
   rootTopic: string,
   selfTopic: string
-): TopicSubscriptionContext => ({
-  kind,
-  appId: context.appId,
-  roomId: context.roomId,
-  rootTopic,
-  selfTopic
-})
-
-const publishContext = <TConfig extends BaseRoomConfig>(
-  context: StrategyContext<TConfig>,
-  kind: TopicPublishContext['kind'],
-  rootTopic: string,
+): {
+  kind: TKind
+  appId: string
+  roomId: string
+  rootTopic: string
   selfTopic: string
-): TopicPublishContext => ({
+} => ({
   kind,
   appId: context.appId,
   roomId: context.roomId,
@@ -122,7 +70,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           relay,
           peerTopic,
           signal,
-          publishContext(context, 'signal', rootTopic, selfTopic)
+          makeTopicContext(context, 'signal', rootTopic, selfTopic)
         )
 
       let selfCleanup: (() => void) | null = null
@@ -150,7 +98,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
                   void onMessage(topic, msg, signalPeer)
                 }
               },
-              subscriptionContext(context, 'self', rootTopic, selfTopic)
+              makeTopicContext(context, 'self', rootTopic, selfTopic)
             )
           ).then(cleanup => {
             selfCleanup = cleanup
@@ -184,7 +132,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             await onMessage(topic, msg, signalPeer)
           }
         },
-        subscriptionContext(context, 'root', rootTopic, selfTopic)
+        makeTopicContext(context, 'root', rootTopic, selfTopic)
       )
 
       return () => {
@@ -206,7 +154,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         relay,
         rootTopic,
         toJson({peerId: selfId, ...extraPayload}),
-        publishContext(context, 'announce', rootTopic, selfTopic)
+        makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )
 
       return typeof result === 'number' ||
@@ -227,7 +175,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             return unpublishTopic(
               relay,
               rootTopic,
-              publishContext(context, 'announce', rootTopic, selfTopic)
+              makeTopicContext(context, 'announce', rootTopic, selfTopic)
             )
           }
         }

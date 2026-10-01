@@ -835,3 +835,73 @@ void test(
     }
   }
 )
+
+void test(
+  'Trystero: multi-track stream emits onPeerStream once and preserves subsequent stream metadata',
+  {timeout: 10_000},
+  async () => {
+    const appId = `multi-track-stream-meta-${Date.now()}`
+    const managerA = new SharedPeerManager()
+    const managerB = new SharedPeerManager()
+    const {peerA, peerB} = linkPeers(
+      new LinkedMediaPeer(),
+      new LinkedMediaPeer()
+    )
+    const sharedA = managerA.register(appId, 'peer-b', peerA as any, 60_000)
+    const sharedB = managerB.register(appId, 'peer-a', peerB as any, 60_000)
+    let rooms = null
+
+    try {
+      rooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'multi-track-room'
+      )
+
+      const receivedStreams: Array<{
+        streamId: string
+        peerId: string
+        metadata: unknown
+      }> = []
+      rooms.roomB.onPeerStream = (stream, peerId, metadata) => {
+        receivedStreams.push({streamId: stream.id, peerId, metadata})
+      }
+
+      const avStream = {
+        id: 'av-stream',
+        getTracks: () => [{id: 'audio-track'}, {id: 'video-track'}]
+      }
+      const screenStream = {
+        id: 'screen-stream',
+        getTracks: () => [{id: 'screen-track'}]
+      }
+
+      await Promise.all([
+        ...rooms.roomA.addStream(avStream as any, {
+          target: 'peer-b',
+          metadata: {kind: 'camera'}
+        }),
+        ...rooms.roomA.addStream(screenStream as any, {
+          target: 'peer-b',
+          metadata: {kind: 'screen'}
+        })
+      ])
+
+      assert.deepEqual(receivedStreams, [
+        {streamId: 'av-stream', peerId: 'peer-a', metadata: {kind: 'camera'}},
+        {
+          streamId: 'screen-stream',
+          peerId: 'peer-a',
+          metadata: {kind: 'screen'}
+        }
+      ])
+    } finally {
+      await rooms?.roomA.leave().catch(() => {})
+      await rooms?.roomB.leave().catch(() => {})
+      managerA.clear(appId, 'peer-b', {destroyPeer: true})
+      managerB.clear(appId, 'peer-a', {destroyPeer: true})
+    }
+  }
+)

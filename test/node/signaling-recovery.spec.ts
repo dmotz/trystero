@@ -244,6 +244,15 @@ void test('a matching repeated offer replays its answer and candidates, not a ne
     initial,
     'rapid duplicates must not amplify traffic'
   )
+  const relay1Messages = []
+  await createSignalHandler(f.ctx)(1)('root', offer, (_, message) =>
+    relay1Messages.push(JSON.parse(message))
+  )
+  assert.deepEqual(
+    relay1Messages,
+    initial,
+    'distinct relays must immediately receive the replayed answer and candidates'
+  )
   t.mock.timers.tick(5000)
   await f.receive({...offer, offerId: 'wrong-exchange'})
   assert.deepEqual(f.messages, initial)
@@ -362,4 +371,32 @@ void test('pre-allocated offer answers tie-break deterministically against activ
     f.ctx.peerStates[lowerPeerId].answeringPeer,
     followerAnsweringPeer
   )
+})
+
+void test('untrusted serialized or non-handle peer fields and array payloads are ignored', async t => {
+  const f = fixture(t)
+  const peerId = `${selfId}z`
+  let claimed = 0
+  f.ctx.offerManager.claimLeased = () => {
+    claimed++
+  }
+
+  await f.receive(
+    JSON.stringify({
+      peerId,
+      offerId: 'spoofed-1',
+      answer: 'answer',
+      peer: {signal: 'not-a-function'}
+    })
+  )
+  await f.receive({
+    peerId,
+    offerId: 'spoofed-2',
+    answer: 'answer',
+    peer: {isDead: false}
+  })
+  await f.receive([{peerId, answer: 'answer'}])
+
+  assert.equal(claimed, 0)
+  assert.equal(Object.keys(f.ctx.peerStates).length, 0)
 })

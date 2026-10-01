@@ -50,12 +50,19 @@ export default (
   const pendingRemoteCandidates: RTCIceCandidateInit[] = []
   const pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}> =
     []
-  let resolveInitialOffer: ((signal: Signal) => void) | undefined
+  let resolveInitialOffer: ((signal: Signal | void) => void) | undefined
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
   let dataChannel: RTCDataChannel | null = null
   let disconnectedCloseTimer: number | null = null
   let didEmitClose = false
+
+  const settleInitialOffer = (signal?: Signal): void => {
+    if (resolveInitialOffer) {
+      resolveInitialOffer(signal)
+      resolveInitialOffer = undefined
+    }
+  }
 
   const clearDisconnectedCloseTimer = (): null =>
     (disconnectedCloseTimer = resetTimer(disconnectedCloseTimer))
@@ -74,10 +81,7 @@ export default (
 
   const emitSignal = (signal: Signal): void => {
     if (signal.type === offerType) {
-      if (resolveInitialOffer) {
-        resolveInitialOffer(signal)
-        resolveInitialOffer = undefined
-      }
+      settleInitialOffer(signal)
       // getOffer() already hands pre-connection offers to the signaling strategy.
       if (!handlers.signal && !pc.remoteDescription) {
         return
@@ -198,9 +202,10 @@ export default (
   }
 
   const queueRemoteCandidate = (candidate: RTCIceCandidateInit): void => {
-    if (pendingRemoteCandidates.length < maxPendingRemoteCandidates) {
-      pendingRemoteCandidates.push(candidate)
+    if (pendingRemoteCandidates.length >= maxPendingRemoteCandidates) {
+      pendingRemoteCandidates.shift()
     }
+    pendingRemoteCandidates.push(candidate)
   }
 
   const flushPendingRemoteCandidates = async (): Promise<void> => {
@@ -208,10 +213,19 @@ export default (
       return
     }
 
+    const remoteUfrag = getRemoteUfrag()
     const queuedCandidates = pendingRemoteCandidates.splice(0)
     const stillPending: RTCIceCandidateInit[] = []
 
     for (const candidate of queuedCandidates) {
+      if (
+        remoteUfrag &&
+        candidate.usernameFragment &&
+        candidate.usernameFragment !== remoteUfrag
+      ) {
+        continue
+      }
+
       if (!canApplyRemoteCandidate(candidate)) {
         stillPending.push(candidate)
         continue
@@ -401,6 +415,9 @@ export default (
       pc.connectionState === 'closed' ||
       (!restartIce && (makingOffer || pc.signalingState !== 'stable'))
     ) {
+      if (pc.connectionState === 'closed') {
+        settleInitialOffer()
+      }
       return
     }
 
@@ -429,6 +446,9 @@ export default (
       const offer = await emitLocalDescriptionSignal()
       return offer
     } catch (err) {
+      if (!restartIce) {
+        settleInitialOffer()
+      }
       handlers.error?.(toError(err, 'failed to create local offer'))
     } finally {
       makingOffer = false
@@ -537,8 +557,6 @@ export default (
   }
 
   return {
-    created: Date.now(),
-
     connection: pc,
 
     get channel(): RTCDataChannel | null {
@@ -604,14 +622,15 @@ export default (
         }
 
         if (sdp.type === offerType) {
-          if (
+          const isCollision =
             makingOffer ||
             (pc.signalingState !== 'stable' && !isSettingRemoteAnswerPending)
-          ) {
-            if (initiator) {
-              return
-            }
 
+          if (isCollision && initiator) {
+            return
+          }
+
+          if (isCollision && pc.signalingState !== 'stable') {
             await all([
               pc.setLocalDescription({type: 'rollback'}),
               pc.setRemoteDescription(rtcSdp)
@@ -646,6 +665,7 @@ export default (
 
     destroy: () => {
       clearDisconnectedCloseTimer()
+      settleInitialOffer()
       dataChannel?.close()
       pc.close()
       makingOffer = false
@@ -675,8 +695,6 @@ export default (
         })
       }
     },
-
-    offerPromise,
 
     addStream: stream =>
       stream.getTracks().forEach(track => pc.addTrack(track, stream)),

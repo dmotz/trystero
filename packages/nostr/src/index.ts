@@ -25,11 +25,6 @@ const tag = 'x'
 const eventMsgType = 'EVENT'
 const {secretKey, publicKey} = schnorr.keygen()
 const pubkey = toHex(publicKey)
-const subIdToTopic: Record<string, string> = {}
-const msgHandlers: Record<
-  string,
-  ((topic: string, data: string) => void) | undefined
-> = {}
 const kindCache: Record<string, number> = {}
 const maxTopicsPerSubscription = 250
 
@@ -134,10 +129,8 @@ export const createEvent = async (
   ])
 }
 
-export const subscribe = (subId: string, topic: string): string => {
-  subIdToTopic[subId] = topic
-
-  return toJson([
+export const subscribe = (subId: string, topic: string): string =>
+  toJson([
     'REQ',
     subId,
     {
@@ -146,7 +139,6 @@ export const subscribe = (subId: string, topic: string): string => {
       ['#' + tag]: [topic]
     }
   ])
-}
 
 type TopicHandler = (topic: string, data: string) => void
 
@@ -418,7 +410,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
               }
 
               if (
-                didRejectEvent &&
+                (didRejectEvent || msgType === 'CLOSED') &&
                 isTerminalRejection &&
                 !retireRelay(client)
               ) {
@@ -468,21 +460,16 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
               typeof payload === 'object' &&
               'content' in payload
             ) {
-              const {content} = payload
-              const handler = msgHandlers[subId]
-
-              if (handler) {
-                handler(subIdToTopic[subId] ?? '', content)
-                return
-              }
-
               const batcher = batchers[client.url]
 
               if (batcher?.subIds.includes(subId) && payload.tags) {
                 const topicTag = payload.tags.find(t => t[0] === tag)
 
                 if (topicTag?.[1]) {
-                  batcher.topics.get(topicTag[1])?.(topicTag[1], content)
+                  batcher.topics.get(topicTag[1])?.(
+                    topicTag[1],
+                    payload.content
+                  )
                 }
               }
             }

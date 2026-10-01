@@ -51,6 +51,7 @@ type RoomOptions = {
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs?: number
   isPassive?: boolean
+  onBeforeLeave?: () => void
 }
 
 type PendingPongWaiter = {
@@ -67,7 +68,8 @@ export default (
     onHandshakeError,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
     maxReceiveBytes,
-    isPassive = false
+    isPassive = false,
+    onBeforeLeave
   }: RoomOptions = {}
 ): Room => {
   const peerMap: Record<string, PeerHandle> = {}
@@ -78,7 +80,6 @@ export default (
     onPeerLeave: null as ((peerId: string) => void) | null
   }
   let unregisterBeforeUnloadCleanup: () => void = noOp
-  let handshakeManager: ReturnType<typeof createHandshakeManager> | null = null
   let leavePromise: Promise<void> | null = null
 
   const iterate = (
@@ -132,7 +133,7 @@ export default (
     getPeerIds: includePending =>
       keys(includePending ? peerMap : activePeerMap),
     canReceiveFromPeer: (id, receiveWhilePending) =>
-      Boolean(handshakeManager?.canReceiveFromPeer(id, receiveWhilePending))
+      handshakeManager.canReceiveFromPeer(id, receiveWhilePending)
   })
   const makeActionInternal = actionManager.makeInternalAction
   const handleData = actionManager.handleData
@@ -144,7 +145,7 @@ export default (
   ): void => {
     const err = toError(reason, 'peer disconnected')
 
-    handshakeManager?.clearPeer(id, err)
+    handshakeManager.clearPeer(id, err)
     delete peerMap[id]
     delete activePeerMap[id]
     actionManager.clearPeer(id, err)
@@ -178,6 +179,7 @@ export default (
 
   const leave = (): Promise<void> =>
     (leavePromise ??= (async () => {
+      onBeforeLeave?.()
       const controller = new AbortController()
       void leaveAction
         .send('', undefined, undefined, undefined, controller.signal)
@@ -223,7 +225,7 @@ export default (
     {sendToPending: true, receiveWhilePending: true}
   )
 
-  handshakeManager = createHandshakeManager({
+  const handshakeManager = createHandshakeManager({
     ...(onPeerHandshake === undefined ? {} : {onPeerHandshake}),
     ...(onHandshakeError === undefined ? {} : {onHandshakeError}),
     handshakeTimeoutMs,
@@ -261,11 +263,7 @@ export default (
   })
 
   signalAction.onMessage((sdp, id) => {
-    if (!activePeerMap[id]) {
-      return
-    }
-
-    void peerMap[id]?.signal(sdp as never)
+    void activePeerMap[id]?.signal(sdp as never)
   })
 
   streamMetaAction.onMessage((meta, id) =>
@@ -281,11 +279,11 @@ export default (
   )
 
   handshakeDataAction.onMessage((data, id, metadata) =>
-    handshakeManager?.receiveHandshakeData(data, id, metadata)
+    handshakeManager.receiveHandshakeData(data, id, metadata)
   )
 
   handshakeReadyAction.onMessage((_, id) =>
-    handshakeManager?.receiveHandshakeReady(id)
+    handshakeManager.receiveHandshakeReady(id)
   )
 
   onPeer((peer, id) => {
@@ -301,7 +299,7 @@ export default (
     }
 
     peerMap[id] = peer
-    handshakeManager?.addPeer(id, peer)
+    handshakeManager.addPeer(id, peer)
 
     peer.setHandlers({
       data: d => {
@@ -319,7 +317,7 @@ export default (
       }
     })
 
-    handshakeManager?.start(id, peer)
+    handshakeManager.start(id, peer)
   })
 
   if (isBrowser) {

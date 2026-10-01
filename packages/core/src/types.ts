@@ -261,7 +261,6 @@ export type PeerHandlers = {
 }
 
 export type PeerHandle = {
-  created: number
   connection: RTCPeerConnection
   channel: RTCDataChannel | null
   isDead: boolean
@@ -270,7 +269,6 @@ export type PeerHandle = {
   sendData: (data: Uint8Array) => void
   destroy: () => void
   setHandlers: (newHandlers: PeerHandlers) => void
-  offerPromise: Promise<Signal | void>
   addStream: (stream: MediaStream) => void
   removeStream: (stream: MediaStream) => void
   addTrack: (track: MediaStreamTrack, stream: MediaStream) => void
@@ -460,7 +458,6 @@ export type SharedPeerState = {
 }
 
 export type PeerState = {
-  status: 'idle' | 'offering' | 'answering' | 'connected'
   offerPeer: PeerHandle | null
   offerId: string | null
   offerSdp: string | null
@@ -484,7 +481,8 @@ export type PeerState = {
     offer: string
     offerId: string | undefined
     messages: string[]
-    lastSentAt: number
+    lastSentAt: Array<number | undefined>
+    relays: Array<((message: string) => void) | undefined>
   } | null
   connectionErrorReported: boolean
 }
