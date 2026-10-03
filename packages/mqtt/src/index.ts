@@ -181,10 +181,10 @@ export const getRelaySockets = relayManager.getSockets
 export {selfId}
 
 export const defaultRelayUrls = [
-  'test.mosquitto.org:8081/mqtt',
   'broker.emqx.io:8084/mqtt',
   'public:public@public.cloud.shiftr.io',
-  'broker.hivemq.com:8884/mqtt'
+  'broker.hivemq.com:8884/mqtt',
+  'test.mosquitto.org:8081/mqtt'
 ].map(url => 'wss://' + url)
 
 export type * from '@trystero-p2p/core'
