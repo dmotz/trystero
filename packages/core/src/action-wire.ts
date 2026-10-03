@@ -98,7 +98,7 @@ type WireAction = {
   action: InternalAction
 }
 type Outgoing = {
-  accept: () => void
+  accept: () => boolean
   fail: (error: Error, fromReceiver?: boolean) => void
   touch: () => void
 }
@@ -405,8 +405,12 @@ export const createActionWireManager = ({
               let timer: ReturnType<typeof setTimeout> | null = null
               const state: Outgoing = {
                 accept: () => {
+                  if (!timer || failure) {
+                    return false
+                  }
                   timer = resetTimer(timer)
                   accept()
+                  return true
                 },
                 fail: (error, fromReceiver = false) => {
                   if (fromReceiver) {
@@ -532,11 +536,10 @@ export const createActionWireManager = ({
       const id = view.getUint32(2)
       if (kind === accepted) {
         const transfers = outgoing.get(peerId)
-        if (transfers) {
+        if (transfers?.get(id)?.accept()) {
           for (const pending of transfers.values()) {
             pending.touch()
           }
-          transfers.get(id)?.accept()
         }
         return
       }

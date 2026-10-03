@@ -119,3 +119,60 @@ void test(
     }
   }
 )
+
+void test('Trystero: late Nostr subscription cleanup preserves a replacement room', async t => {
+  const originalTimer = globalThis.setTimeout
+  const originalSocket = globalThis.WebSocket
+  globalThis.WebSocket = MockWebSocket
+  t.after(() => {
+    globalThis.WebSocket = originalSocket
+  })
+  MockWebSocket.sockets.length = 0
+  const config = {
+    appId: 'nostr-late-cleanup',
+    passive: true,
+    relayConfig: {urls: ['wss://nostr-late-cleanup.test']}
+  }
+  const first = joinRoom(config, 'room')
+  const pending: Array<() => void> = []
+  const timer = t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
+    if (ms === 0) {
+      pending.push(() => fn(...args))
+      return originalTimer(() => {}, 0)
+    }
+    return originalTimer(fn, ms, ...args)
+  })
+  let second
+  try {
+    await waitFor(() => pending.length > 0)
+    const leaving = first.leave()
+    second = joinRoom(config, 'room')
+    // Let the replacement reach the same pending batch before resolving it.
+    await wait(30)
+    timer.mock.restore()
+    pending.splice(0).forEach(flush => flush())
+    await leaving
+    await wait(20)
+    const socket = MockWebSocket.sockets[0]
+    const requests = socket.sent.filter(message => message[0] === 'REQ')
+    assert.ok(requests.length > 0)
+    const latest = requests.at(-1)
+    assert.equal(
+      socket.sent.some(
+        message => message[0] === 'CLOSE' && message[1] === latest[1]
+      ),
+      false
+    )
+    await second.leave()
+    assert.ok(
+      socket.sent.some(
+        message => message[0] === 'CLOSE' && message[1] === latest[1]
+      )
+    )
+  } finally {
+    timer.mock.restore()
+    pending.splice(0).forEach(flush => flush())
+    await first.leave()
+    await second?.leave()
+  }
+})

@@ -329,3 +329,140 @@ void test('queued remote candidates drop stale ufrags and evict oldest entries a
   assert.match(pc.addedCandidates[0].candidate, /^candidate:132 /)
   assert.match(pc.addedCandidates.at(-1)!.candidate, /^candidate:259 /)
 })
+
+const flushMicrotasks = async () => {
+  for (let i = 0; i < 10; i++) {
+    await Promise.resolve()
+  }
+}
+
+for (const server of ['stun', 'turn'] as const) {
+  for (const type of ['offer', 'answer'] as const) {
+    void test(`non-trickle ${type} waits for a delayed ${server.toUpperCase()} candidate and then settles promptly`, async t => {
+      t.mock.timers.enable({apis: ['setTimeout']})
+      class GatheringConnection extends MockRTCPeerConnection {
+        override iceGatheringState = 'gathering'
+        override async setLocalDescription() {
+          this.localDescription = {
+            type,
+            sdp: 'v=0\r\na=candidate:1 1 udp 1 127.0.0.1 5000 typ host\r\n'
+          }
+          this.signalingState = type === 'offer' ? 'have-local-offer' : 'stable'
+        }
+      }
+      const peer = initPeer(type === 'offer', {
+        appId: 'late-turn',
+        trickleIce: false,
+        rtcPolyfill: GatheringConnection as never,
+        rtcConfig: {iceServers: [{urls: `${server}:relay.test`}]}
+      })
+      t.after(() => peer.destroy())
+      let settled = false
+      const offering = (
+        type === 'offer'
+          ? peer.getOffer()
+          : peer.signal({type: 'offer', sdp: 'mock-offer'})
+      ).then(value => {
+        settled = true
+        return value
+      })
+      await flushMicrotasks()
+      t.mock.timers.tick(800)
+      await flushMicrotasks()
+      assert.equal(
+        settled,
+        false,
+        'host-only SDP must not finish before the expected server candidate'
+      )
+      const pc = peer.connection as unknown as GatheringConnection
+      const candidateType = server === 'turn' ? 'relay' : 'srflx'
+      const candidate = `candidate:2 1 udp 1 203.0.113.1 6000 typ ${candidateType}`
+      pc.localDescription.sdp += `a=${candidate}\r\n`
+      pc.listeners['icecandidate'].forEach(fn => fn({candidate: {candidate}}))
+      t.mock.timers.tick(150)
+      await flushMicrotasks()
+      assert.equal(settled, true)
+      const offer = await offering
+      assert.ok(offer)
+      assert.equal(offer.type, type)
+      assert.ok(offer.sdp.includes(`typ ${candidateType}`))
+      assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
+      assert.equal(pc.listeners['icecandidate'].size, 0)
+    })
+  }
+}
+
+for (const localOnly of [false, true]) {
+  void test(`non-trickle host-only gathering ${localOnly ? 'without servers settles promptly' : 'with an unavailable server uses the bounded fallback deadline'}`, async t => {
+    t.mock.timers.enable({apis: ['setTimeout']})
+    class GatheringConnection extends MockRTCPeerConnection {
+      override iceGatheringState = 'gathering'
+      override async setLocalDescription() {
+        this.localDescription = {
+          type: 'offer',
+          sdp: 'v=0\r\na=candidate:1 1 udp 1 127.0.0.1 5000 typ host\r\n'
+        }
+        this.signalingState = 'have-local-offer'
+      }
+    }
+    const peer = initPeer(true, {
+      appId: 'unavailable-stun',
+      trickleIce: false,
+      rtcPolyfill: GatheringConnection as never,
+      rtcConfig: {
+        iceServers: localOnly ? [] : [{urls: 'stun:unavailable.test'}]
+      }
+    })
+    t.after(() => peer.destroy())
+    let settled = false
+    const offering = peer.getOffer().then(value => {
+      settled = true
+      return value
+    })
+    await flushMicrotasks()
+    t.mock.timers.tick(localOnly ? 149 : 14_999)
+    await flushMicrotasks()
+    assert.equal(settled, false)
+    t.mock.timers.tick(1)
+    const offer = await offering
+    assert.ok(offer)
+    assert.match(offer.sdp, /typ host/)
+    const pc = peer.connection as unknown as GatheringConnection
+    assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
+    assert.equal(pc.listeners['icecandidate'].size, 0)
+  })
+}
+
+for (const exit of ['timeout', 'destroy', 'complete'] as const) {
+  void test(`non-trickle gathering ${exit} removes listeners and settles pending work`, async t => {
+    t.mock.timers.enable({apis: ['setTimeout']})
+    class GatheringConnection extends MockRTCPeerConnection {
+      override iceGatheringState = 'gathering'
+    }
+    const peer = initPeer(true, {
+      appId: 'ice-cleanup',
+      trickleIce: false,
+      rtcPolyfill: GatheringConnection as never
+    })
+    t.after(() => peer.destroy())
+    let settled = false
+    const offering = peer.getOffer().then(() => {
+      settled = true
+    })
+    await flushMicrotasks()
+    const pc = peer.connection as unknown as GatheringConnection
+    if (exit === 'timeout') {
+      t.mock.timers.tick(15_000)
+    } else if (exit === 'destroy') {
+      peer.destroy()
+    } else {
+      pc.iceGatheringState = 'complete'
+      pc.listeners['icegatheringstatechange'].forEach(fn => fn())
+    }
+    await flushMicrotasks()
+    assert.equal(settled, true)
+    assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
+    assert.equal(pc.listeners['icecandidate'].size, 0)
+    await offering
+  })
+}

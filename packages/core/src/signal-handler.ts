@@ -192,6 +192,9 @@ export const resetAnsweringState = (state: PeerState): void => {
 const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
   if (state.answeringPeer === peer) {
     resetAnsweringState(state)
+    if (state.connectedPeer !== peer && !peer.isDead) {
+      peer.destroy()
+    }
   }
 }
 
@@ -300,7 +303,6 @@ const scheduleAnsweringExpiry = (
     if (current.answerSent) {
       reportSdpExchangeConnectionFailure(ctx, current, peerId)
     }
-    peer.destroy()
     clearAnswering(current, peer)
     ctx.checkDeactivate()
   }, answeringTtlMs)
@@ -845,10 +847,6 @@ const handleAnswer = async (
     if (state.answeringPeer) {
       const answeringPeer = state.answeringPeer
       clearAnswering(state, answeringPeer)
-
-      if (!answeringPeer.isDead) {
-        answeringPeer.destroy()
-      }
     }
 
     resetOfferState(state)

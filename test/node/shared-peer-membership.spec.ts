@@ -1,9 +1,13 @@
+// @ts-expect-error Internal source import crosses a referenced package boundary.
+import initPeer from '../../packages/core/src/peer.ts'
 import assert from 'node:assert/strict'
 import test from './test.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import {
   MockPeer,
+  MockRTCPeerConnection,
+  MockDataChannel,
   LinkedPeer,
   linkPeers,
   encodeInternalAction,
@@ -377,3 +381,53 @@ void test('active rooms retain passive-room handshakes until signaling creates t
   await tick()
   assert.equal(received, 1)
 })
+
+for (const event of [
+  'channel close',
+  'channel error',
+  'ICE failure'
+] as const) {
+  void test(`Trystero: shared ${event} closes the physical connection exactly once`, async t => {
+    const manager = new SharedPeerManager()
+    const peer = initPeer(true, {
+      appId: 'terminal',
+      rtcPolyfill: MockRTCPeerConnection as never
+    })
+    t.after(() => peer.destroy())
+    await peer.getOffer()
+    const pc = peer.connection as unknown as MockRTCPeerConnection
+    const channel = peer.channel as unknown as MockDataChannel
+    pc.connectionState = 'connected'
+    channel.readyState = 'open'
+    let closes = 0
+    const membership = manager.registerRoom(
+      'terminal',
+      'room',
+      Promise.resolve('token'),
+      {
+        active: true,
+        onPeer: proxy =>
+          proxy.setHandlers({
+            close: () => {
+              closes++
+            }
+          }),
+        onDetach: () => {}
+      }
+    )
+    membership.connect('remote', peer, 60_000)
+    if (event === 'channel close') {
+      channel.close()
+    } else if (event === 'channel error') {
+      channel.onerror({error: new Error('transport error')})
+    } else {
+      pc.iceConnectionState = 'failed'
+      pc.onconnectionstatechange()
+    }
+    assert.equal(peer.connection.connectionState, 'closed')
+    assert.equal(membership.reuse('remote'), false)
+    channel.onclose()
+    assert.equal(closes, 1)
+    membership.leave()
+  })
+}

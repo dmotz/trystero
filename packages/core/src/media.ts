@@ -78,11 +78,21 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
   const remoteStreamsById = new Map<string, MediaStream>()
   const remoteTracksByKey = new Map<string, RemoteTrackRef>()
   const remoteTracksById = new Map<string, RemoteTrackRef>()
+  const remoteStreamKeys = new WeakMap<MediaStream, string>()
+  const remoteTrackKeys = new WeakMap<MediaStreamTrack, string>()
 
   return {
     getStreamKey: makeKeyGetter(localStreamKeys),
     getTrackKey: makeKeyGetter(localTrackKeys),
     rememberRemoteStream: (key, stream, streamId) => {
+      const previous = remoteStreamKeys.get(stream)
+      if (
+        previous !== undefined &&
+        remoteStreamsByKey.get(previous) === stream
+      ) {
+        remoteStreamsByKey.delete(previous)
+      }
+      remoteStreamKeys.set(stream, key)
       remoteStreamsByKey.set(key, stream)
 
       if (streamId) {
@@ -100,7 +110,14 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
       (streamId ? remoteStreamsById.get(streamId) : undefined),
     rememberRemoteTrack: (key, track, stream, trackId, streamId) => {
       const ref = {track, stream}
-
+      const previous = remoteTrackKeys.get(track)
+      if (
+        previous !== undefined &&
+        remoteTracksByKey.get(previous)?.track === track
+      ) {
+        remoteTracksByKey.delete(previous)
+      }
+      remoteTrackKeys.set(track, key)
       remoteTracksByKey.set(key, ref)
 
       if (trackId) {
@@ -262,7 +279,7 @@ export const createMediaManager = ({
     key: string,
     metadata: JsonValue | undefined,
     sendMeta: InternalActionSender<InternalMediaMeta>,
-    op: (peer: SharedMediaPeer) => void,
+    op: (peer: SharedMediaPeer) => void | Promise<void>,
     mediaIds: Partial<InternalMediaMeta> = {}
   ): Promise<void>[] => {
     const payload = {
@@ -273,7 +290,7 @@ export const createMediaManager = ({
 
     return iterate(targets, async (id, peer) => {
       await sendMeta(payload, id)
-      op(peer)
+      await op(peer)
     })
   }
 

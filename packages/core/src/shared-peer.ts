@@ -417,7 +417,7 @@ export class SharedPeerManager {
     ;(this.byApp[appId] ??= {})[peerId] = shared
     const clearCurrent = (): void => {
       if (this.owns(appId, peerId, peer)) {
-        this.clear(appId, peerId, {destroyPeer: false})
+        this.clear(appId, peerId, {destroyPeer: true})
       }
     }
     peer.setHandlers({
@@ -553,10 +553,10 @@ export class SharedPeerManager {
         )
       },
       removeTrack: track => this.releaseTrackOwner(shared, track, roomId),
-      replaceTrack: (oldTrack, newTrack) => {
+      replaceTrack: async (oldTrack, newTrack) => {
         const oldEntry = shared.trackOwners.get(oldTrack)
-
-        if (oldEntry) {
+        await shared.peer.replaceTrack(oldTrack, newTrack)
+        if (oldEntry && shared.trackOwners.get(oldTrack) === oldEntry) {
           shared.trackOwners.delete(oldTrack)
 
           const nextEntry = shared.trackOwners.get(newTrack) ?? {
@@ -567,8 +567,6 @@ export class SharedPeerManager {
           oldEntry.rooms.forEach(room => nextEntry.rooms.add(room))
           shared.trackOwners.set(newTrack, nextEntry)
         }
-
-        return shared.peer.replaceTrack(oldTrack, newTrack)
       },
       __trysteroMedia: shared.media
     }

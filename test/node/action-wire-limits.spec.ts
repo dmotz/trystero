@@ -993,3 +993,56 @@ void test('malformed queued inline payload disconnects the peer on delivery', as
   await turn()
   assert.deepEqual(destroyed, ['peer'])
 })
+
+for (const repeated of [false, true]) {
+  void test(`${repeated ? 'duplicate' : 'unknown'} acceptance cannot extend another offer deadline`, async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']})
+    const peer = {
+      sendData: () => {},
+      channel: {
+        readyState: 'open',
+        bufferedAmount: 0,
+        bufferedAmountLowThreshold: 65535
+      }
+    }
+    const wire = createActionWireManager({
+      getPeer: () => peer as never,
+      getPeerIds: () => ['peer'],
+      canReceiveFromPeer: () => true,
+      onPeerError: () => {}
+    })
+    t.after(() => wire.clearPeer('peer'))
+    const action = wire.makeInternalAction('file')
+    const first = action
+      .send(new Uint8Array(20000), 'peer')
+      .catch(error => error.kind)
+    const second = action
+      .send(new Uint8Array(20000), 'peer')
+      .catch(error => error.kind)
+    // Let both offers enqueue, keeping accepted payload work in the microtask queue.
+    await Promise.resolve()
+    const accept = (id: number) => {
+      const bytes = new Uint8Array(6)
+      bytes[0] = 2
+      bytes[1] = 3
+      new DataView(bytes.buffer).setUint32(2, id)
+      wire.handleData('peer', bytes.buffer)
+    }
+    if (repeated) {
+      accept(0)
+    }
+    t.mock.timers.tick(119000)
+    accept(repeated ? 0 : 999)
+    t.mock.timers.tick(1000)
+    let result
+    void second.then(value => {
+      result = value
+    })
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve()
+    }
+    assert.equal(result, 'timeout')
+    await first
+    await second
+  })
+}

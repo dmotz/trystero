@@ -487,7 +487,9 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
     batchAdd(client, topic, handler)
 
     const cleanup = () => {
-      batchRemove(client, topic)
+      if (batchers[client.url]?.topics.get(topic) === handler) {
+        batchRemove(client, topic)
+      }
     }
 
     // Active rooms add the self topic before the root topic. Waiting only on

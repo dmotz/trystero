@@ -182,3 +182,53 @@ void test(
     }
   }
 )
+
+for (const failure of ['decrypt', 'remote SDP'] as const) {
+  void test(`Trystero: failed ${failure} disposes answering peers before room leave`, async () => {
+    class RejectedOfferConnection extends FailingRTCPeerConnection {
+      override async setRemoteDescription(description) {
+        if (failure === 'remote SDP') {
+          throw new Error('invalid remote SDP')
+        }
+        await super.setRemoteDescription(description)
+      }
+    }
+    FailingRTCPeerConnection.instances = []
+    const subscribers: Subscriber[] = []
+    const appId = `failed-answer-${failure}`
+    const roomId = 'room'
+    const room = createTestStrategy(subscribers)(
+      {appId, rtcPolyfill: RejectedOfferConnection as never},
+      roomId
+    )
+    try {
+      await waitFor(() => subscribers.length > 0)
+      const offer =
+        failure === 'decrypt'
+          ? 'invalid ciphertext'
+          : await encrypt(genKey('', appId, roomId), 'invalid SDP')
+      for (let i = 0; i < 3; i++) {
+        await subscribers[0].onMessage(
+          subscribers[0].rootTopic,
+          {peerId: 'remote', offer, offerId: String(i)},
+          () => {}
+        )
+      }
+      assert.equal(FailingRTCPeerConnection.instances.length, 3)
+      assert.ok(
+        FailingRTCPeerConnection.instances.every(
+          pc => pc.connectionState === 'closed'
+        )
+      )
+      await room.leave()
+      assert.ok(
+        FailingRTCPeerConnection.instances.every(
+          pc => pc.connectionState === 'closed'
+        )
+      )
+    } finally {
+      await room.leave()
+      FailingRTCPeerConnection.instances.forEach(pc => pc.close())
+    }
+  })
+}

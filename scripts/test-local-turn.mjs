@@ -231,7 +231,6 @@ const main = async strategy => {
       String(turnPort),
       '--allow-loopback-peers',
       '--no-tls',
-      '--no-dtls',
       '--no-tcp',
       '-a',
       '-r',

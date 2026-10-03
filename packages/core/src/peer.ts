@@ -8,7 +8,6 @@ import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
 const iceCandidateSettleMs = 150
-const iceHostFallbackSettleMs = 500
 const disconnectedCloseDelayMs = 5_000
 const iceCandidateEvent = 'icecandidate'
 const iceStateEvent = 'icegatheringstatechange'
@@ -43,6 +42,7 @@ export default (
   })
 
   const handlers: PeerHandlers = {}
+  const pendingIceGathering = new Set<() => void>()
   const pendingSignals: Signal[] = []
   const pendingData: ArrayBuffer[] = []
   let pendingDataTimer: ReturnType<typeof setTimeout> | null = null
@@ -73,6 +73,7 @@ export default (
     }
 
     didEmitClose = true
+    pendingIceGathering.forEach(finish => finish())
     pendingDataTimer = resetTimer(pendingDataTimer)
     pendingData.length = 0
     clearDisconnectedCloseTimer()
@@ -323,71 +324,49 @@ export default (
     : expectsStunCandidate
       ? /\btyp (?:srflx|relay|prflx)\b/
       : /\btyp (?:host|srflx|relay|prflx)\b/
-  const anyCandidatePattern = /\btyp (?:host|srflx|relay|prflx)\b/
-
   const waitForIceGathering = async (
     peerConnection: RTCPeerConnection
   ): Promise<SdpDescription> => {
-    let timeout: ReturnType<typeof setTimeout> | null = null
-    let settleTimeout: ReturnType<typeof setTimeout> | null = null
-
-    try {
-      await Promise.race([
-        new Promise<void>(res => {
-          const finish = (): void => {
-            peerConnection.removeEventListener(iceStateEvent, checkState)
-            peerConnection.removeEventListener(iceCandidateEvent, onCandidate)
-            res()
-          }
-
-          const scheduleSettle = (candidateLine = ''): void => {
-            const combinedSdp = `${peerConnection.localDescription?.sdp ?? ''}\n${candidateLine}`
-
-            if (!anyCandidatePattern.test(combinedSdp)) {
-              return
-            }
-
-            const settleDelayMs = targetCandidatePattern.test(combinedSdp)
-              ? iceCandidateSettleMs
-              : iceHostFallbackSettleMs
-
-            resetTimer(settleTimeout)
-            settleTimeout = setTimeout(finish, settleDelayMs)
-          }
-
-          const checkState = (): void => {
-            if (peerConnection.iceGatheringState === 'complete') {
-              finish()
-              return
-            }
-
-            scheduleSettle()
-          }
-
-          const onCandidate = (event: Event): void => {
-            const {candidate} = event as RTCPeerConnectionIceEvent
-
-            if (!candidate) {
-              finish()
-              return
-            }
-
-            scheduleSettle(candidate.candidate)
-          }
-
-          peerConnection.addEventListener(iceStateEvent, checkState)
-          peerConnection.addEventListener(iceCandidateEvent, onCandidate)
-          checkState()
-        }),
-        new Promise<void>(res => {
-          timeout = setTimeout(res, iceTimeout)
-        })
-      ])
-    } finally {
-      resetTimer(timeout)
-      resetTimer(settleTimeout)
-    }
-
+    await new Promise<void>(resolve => {
+      let timeout: ReturnType<typeof setTimeout> | null = null
+      let settleTimeout: ReturnType<typeof setTimeout> | null = null
+      const finish = (): void => {
+        resetTimer(timeout)
+        resetTimer(settleTimeout)
+        peerConnection.removeEventListener(iceStateEvent, checkState)
+        peerConnection.removeEventListener(iceCandidateEvent, onCandidate)
+        pendingIceGathering.delete(finish)
+        resolve()
+      }
+      const scheduleSettle = (candidateLine = ''): void => {
+        const sdp = `${peerConnection.localDescription?.sdp ?? ''}\n${candidateLine}`
+        // Nontrickle peers cannot use candidates gathered after signaling.
+        if (targetCandidatePattern.test(sdp)) {
+          resetTimer(settleTimeout)
+          settleTimeout = setTimeout(finish, iceCandidateSettleMs)
+        }
+      }
+      const checkState = (): void => {
+        if (peerConnection.iceGatheringState === 'complete' || didEmitClose) {
+          finish()
+        } else {
+          scheduleSettle()
+        }
+      }
+      const onCandidate = (event: Event): void => {
+        const {candidate} = event as RTCPeerConnectionIceEvent
+        if (candidate) {
+          scheduleSettle(candidate.candidate)
+        } else {
+          finish()
+        }
+      }
+      pendingIceGathering.add(finish)
+      timeout = setTimeout(finish, iceTimeout)
+      peerConnection.addEventListener(iceStateEvent, checkState)
+      peerConnection.addEventListener(iceCandidateEvent, onCandidate)
+      checkState()
+    })
     return localDescriptionSignal(peerConnection)
   }
 
@@ -396,7 +375,9 @@ export default (
       ? localDescriptionSignal(pc)
       : await waitForIceGathering(pc)
 
-    emitSignal(signal)
+    if (!didEmitClose) {
+      emitSignal(signal)
+    }
     return signal
   }
 
