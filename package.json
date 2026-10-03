@@ -75,7 +75,6 @@
     "oxlint": "^1.86.0",
     "oxlint-tsgolint": "^7.0.2003",
     "playwright": "^1.63.0",
-    "publint": "^0.3.25",
     "serve": "^14.2.6",
     "source-map": "^0.8.0",
     "tsdown": "^0.23.0",
