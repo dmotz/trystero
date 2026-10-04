@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/firebase",
-  "version": "0.25.4",
+  "version": "0.26.0",
   "description": "Simple, serverless WebRTC (via Firebase)",
   "keywords": [
     "chat",
