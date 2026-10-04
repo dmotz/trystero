@@ -118,8 +118,8 @@ type HandshakeManagerDeps = {
     data: DataPayload,
     peerId: string,
     metadata?: JsonValue
-  ) => Promise<void[]>
-  sendHandshakeReady: (data: string, peerId: string) => Promise<void[]>
+  ) => Promise<void>
+  sendHandshakeReady: (data: string, peerId: string) => Promise<void>
   onActivate: (peerId: string, peer: PeerHandle) => void
   onFailure: (peerId: string, peer: PeerHandle, reason: Error) => void
 }
@@ -313,6 +313,14 @@ export const createHandshakeManager = ({
         return
       }
 
+      if (state.pendingHandshakePayloads.length >= 16) {
+        failPeerHandshake(
+          id,
+          state.peer,
+          mkErr('too many pending handshake messages')
+        )
+        return
+      }
       state.pendingHandshakePayloads.push(payload)
     },
 

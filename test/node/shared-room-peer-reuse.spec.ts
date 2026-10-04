@@ -11,6 +11,7 @@ import createStrategy from '../../packages/core/src/strategy.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import {selfId} from '../../packages/core/src/utils.ts'
 import {
+  BufferedPeer,
   linkPeers,
   LinkedMediaPeer,
   MockPeer,
@@ -618,6 +619,289 @@ void test(
       assert.equal(replyCalls.length, 0, 'lower-ID peer should not reply.')
     } finally {
       await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: replaceTrack on a stream track resolves on both shared and direct rooms',
+  {timeout: 10_000},
+  async () => {
+    const appId = `replace-stream-track-${Date.now()}`
+    const managerA = new SharedPeerManager()
+    const managerB = new SharedPeerManager()
+    const {peerA, peerB} = linkPeers(
+      new LinkedMediaPeer(),
+      new LinkedMediaPeer()
+    )
+    const initialTrack = {id: 'initial-video-track'}
+    const replacementTrack = {id: 'replacement-video-track'}
+    const localStream = {id: 'video-stream', getTracks: () => [initialTrack]}
+    const sharedA = managerA.register(appId, 'peer-b', peerA as any, 60_000)
+    const sharedB = managerB.register(appId, 'peer-a', peerB as any, 60_000)
+
+    let sharedRooms = null
+    let directRoomA = null
+    let directRoomB = null
+
+    try {
+      sharedRooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'shared-replace-room'
+      )
+
+      const streamReceived = new Promise(resolve => {
+        sharedRooms.roomB.onPeerStream = (stream, peerId) =>
+          resolve({streamId: stream.id, peerId})
+      })
+
+      await Promise.all(
+        sharedRooms.roomA.addStream(localStream as any, {target: 'peer-b'})
+      )
+      assert.deepEqual(await withTimeout(streamReceived), {
+        streamId: 'video-stream',
+        peerId: 'peer-a'
+      })
+
+      const replacedOnShared = new Promise(resolve => {
+        sharedRooms.roomB.onPeerTrack = (track, stream, peerId, metadata) =>
+          resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
+      })
+
+      await Promise.all(
+        sharedRooms.roomA.replaceTrack(
+          initialTrack as any,
+          replacementTrack as any,
+          {
+            target: 'peer-b',
+            metadata: {replaced: true}
+          }
+        )
+      )
+
+      assert.deepEqual(await withTimeout(replacedOnShared), {
+        trackId: 'initial-video-track',
+        streamId: 'video-stream',
+        peerId: 'peer-a',
+        metadata: {replaced: true}
+      })
+
+      // Also verify direct rooms (without SharedPeerManager) resolve replaceTrack.
+      let registerDirectA = null
+      let registerDirectB = null
+      directRoomA = createRoom(
+        f => {
+          registerDirectA = f
+        },
+        () => {},
+        () => {}
+      )
+      directRoomB = createRoom(
+        f => {
+          registerDirectB = f
+        },
+        () => {},
+        () => {}
+      )
+      const joinDirectA = new Promise(
+        resolve => (directRoomA.onPeerJoin = resolve)
+      )
+      const joinDirectB = new Promise(
+        resolve => (directRoomB.onPeerJoin = resolve)
+      )
+      const {peerA: directPeerA, peerB: directPeerB} = linkPeers(
+        new LinkedMediaPeer(),
+        new LinkedMediaPeer()
+      )
+      registerDirectA(directPeerA, 'peer-b')
+      registerDirectB(directPeerB, 'peer-a')
+      await Promise.all([joinDirectA, joinDirectB])
+
+      const directStreamReceived = new Promise(resolve => {
+        directRoomB.onPeerStream = (stream, peerId) =>
+          resolve({streamId: stream.id, peerId})
+      })
+      await Promise.all(
+        directRoomA.addStream(localStream as any, {target: 'peer-b'})
+      )
+      assert.deepEqual(await withTimeout(directStreamReceived), {
+        streamId: 'video-stream',
+        peerId: 'peer-a'
+      })
+
+      const replacedOnDirect = new Promise(resolve => {
+        directRoomB.onPeerTrack = (track, stream, peerId, metadata) =>
+          resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
+      })
+      await Promise.all(
+        directRoomA.replaceTrack(initialTrack as any, replacementTrack as any, {
+          target: 'peer-b',
+          metadata: {direct: true}
+        })
+      )
+      assert.deepEqual(await withTimeout(replacedOnDirect), {
+        trackId: 'initial-video-track',
+        streamId: 'video-stream',
+        peerId: 'peer-a',
+        metadata: {direct: true}
+      })
+    } finally {
+      await sharedRooms?.roomA.leave().catch(() => {})
+      await sharedRooms?.roomB.leave().catch(() => {})
+      await directRoomA?.leave().catch(() => {})
+      await directRoomB?.leave().catch(() => {})
+      managerA.clear(appId, 'peer-b', {destroyPeer: true})
+      managerB.clear(appId, 'peer-a', {destroyPeer: true})
+    }
+  }
+)
+
+void test(
+  'Trystero: passive room attached via shared data-channel presence advertises presence back and activates',
+  {timeout: 10_000},
+  async () => {
+    const createSide = () => {
+      const subscribers: Subscriber[] = []
+      let announces = 0
+      const joinRoom = createStrategy({
+        init: () => ({}),
+        subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+          subscribers.push({rootTopic, selfTopic, onMessage})
+          return () => {}
+        },
+        announce: () => {
+          announces++
+        }
+      })
+      return {joinRoom, subscribers, getAnnounces: () => announces}
+    }
+
+    const sideA = createSide()
+    const sideB = createSide()
+    const {peerA, peerB} = linkPeers(new BufferedPeer(), new BufferedPeer())
+    const appId = `passive-shared-presence-${Date.now()}`
+    const config = {
+      appId,
+      rtcPolyfill: MockRTCPeerConnection as any
+    }
+
+    const lobbyA = sideA.joinRoom(config, 'lobby')
+    const lobbyB = sideB.joinRoom(config, 'lobby')
+    let passiveRoomB = null
+    let activeRoomA = null
+
+    try {
+      await waitFor(
+        () => sideA.subscribers.length >= 1 && sideB.subscribers.length >= 1
+      )
+      const answer = await encrypt(genKey('', appId, 'lobby'), 'answer-sdp')
+      await sideA.subscribers[0].onMessage(
+        sideA.subscribers[0].rootTopic,
+        {peerId: 'peer-b', answer, peer: peerA},
+        () => {}
+      )
+      await sideB.subscribers[0].onMessage(
+        sideB.subscribers[0].rootTopic,
+        {peerId: 'peer-a', answer, peer: peerB},
+        () => {}
+      )
+      await waitFor(
+        () => 'peer-b' in lobbyA.getPeers() && 'peer-a' in lobbyB.getPeers()
+      )
+
+      // Peer B joins a second room in passive mode; no relay messages are
+      // forwarded between A and B for this second room.
+      passiveRoomB = sideB.joinRoom({...config, passive: true}, 'shared-room')
+      await waitFor(() => sideB.subscribers.length >= 2)
+      const announcesBeforeJoin = sideB.getAnnounces()
+
+      activeRoomA = sideA.joinRoom(config, 'shared-room')
+      await waitFor(
+        () =>
+          'peer-b' in activeRoomA.getPeers() &&
+          'peer-a' in passiveRoomB.getPeers()
+      )
+      await waitFor(() => sideB.getAnnounces() > announcesBeforeJoin)
+    } finally {
+      await activeRoomA?.leave().catch(() => {})
+      await passiveRoomB?.leave().catch(() => {})
+      await lobbyA.leave().catch(() => {})
+      await lobbyB.leave().catch(() => {})
+      peerA.destroy()
+      peerB.destroy()
+    }
+  }
+)
+
+void test(
+  'Trystero: multi-track stream emits onPeerStream once and preserves subsequent stream metadata',
+  {timeout: 10_000},
+  async () => {
+    const appId = `multi-track-stream-meta-${Date.now()}`
+    const managerA = new SharedPeerManager()
+    const managerB = new SharedPeerManager()
+    const {peerA, peerB} = linkPeers(
+      new LinkedMediaPeer(),
+      new LinkedMediaPeer()
+    )
+    const sharedA = managerA.register(appId, 'peer-b', peerA as any, 60_000)
+    const sharedB = managerB.register(appId, 'peer-a', peerB as any, 60_000)
+    let rooms = null
+
+    try {
+      rooms = await createSharedMediaRooms(
+        managerA,
+        managerB,
+        sharedA,
+        sharedB,
+        'multi-track-room'
+      )
+
+      const receivedStreams: Array<{
+        streamId: string
+        peerId: string
+        metadata: unknown
+      }> = []
+      rooms.roomB.onPeerStream = (stream, peerId, metadata) => {
+        receivedStreams.push({streamId: stream.id, peerId, metadata})
+      }
+
+      const avStream = {
+        id: 'av-stream',
+        getTracks: () => [{id: 'audio-track'}, {id: 'video-track'}]
+      }
+      const screenStream = {
+        id: 'screen-stream',
+        getTracks: () => [{id: 'screen-track'}]
+      }
+
+      await Promise.all([
+        ...rooms.roomA.addStream(avStream as any, {
+          target: 'peer-b',
+          metadata: {kind: 'camera'}
+        }),
+        ...rooms.roomA.addStream(screenStream as any, {
+          target: 'peer-b',
+          metadata: {kind: 'screen'}
+        })
+      ])
+
+      assert.deepEqual(receivedStreams, [
+        {streamId: 'av-stream', peerId: 'peer-a', metadata: {kind: 'camera'}},
+        {
+          streamId: 'screen-stream',
+          peerId: 'peer-a',
+          metadata: {kind: 'screen'}
+        }
+      ])
+    } finally {
+      await rooms?.roomA.leave().catch(() => {})
+      await rooms?.roomB.leave().catch(() => {})
+      managerA.clear(appId, 'peer-b', {destroyPeer: true})
+      managerB.clear(appId, 'peer-a', {destroyPeer: true})
     }
   }
 )

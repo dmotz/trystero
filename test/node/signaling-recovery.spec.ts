@@ -50,8 +50,12 @@ const fixture = t => {
     isLeaving: () => leaving,
     isPassive: false,
     isActive: true,
-    sharedPeers: {get: () => undefined},
-    offerManager: {checkout: async () => [{peer: peer(), offer: 'offer'}]},
+    reusePeer: () => false,
+    offerManager: {
+      checkout: async () => [{peer: peer(), offer: 'offer'}],
+      claimLeased() {},
+      reclaimLeased() {}
+    },
     initPeer: peer,
     checkDeactivate() {},
     connectPeer() {},
@@ -240,6 +244,15 @@ void test('a matching repeated offer replays its answer and candidates, not a ne
     initial,
     'rapid duplicates must not amplify traffic'
   )
+  const relay1Messages = []
+  await createSignalHandler(f.ctx)(1)('root', offer, (_, message) =>
+    relay1Messages.push(JSON.parse(message))
+  )
+  assert.deepEqual(
+    relay1Messages,
+    initial,
+    'distinct relays must immediately receive the replayed answer and candidates'
+  )
   t.mock.timers.tick(5000)
   await f.receive({...offer, offerId: 'wrong-exchange'})
   assert.deepEqual(f.messages, initial)
@@ -303,4 +316,87 @@ void test('stray candidates do not retain peer states or offer IDs', async t => 
     candidate: 'candidate'
   })
   assert.deepEqual(incoming, [{type: 'candidate', sdp: 'candidate'}])
+})
+
+void test('pre-allocated offer answers tie-break deterministically against active answering peers', async t => {
+  const f = fixture(t)
+  const higherPeerId = `${selfId}z`
+  const lowerPeerId =
+    String.fromCharCode(selfId.charCodeAt(0) - 1) + selfId.slice(1)
+
+  // When selfId < peerId (leader), receiving an answer for our pre-allocated
+  // offer supersedes the in-flight answeringPeer.
+  await f.receive({
+    peerId: higherPeerId,
+    offerId: 'remote-offer-1',
+    offer: 'offer'
+  })
+  const leaderAnsweringPeer = f.ctx.peerStates[higherPeerId].answeringPeer
+  assert.ok(leaderAnsweringPeer)
+  assert.equal(leaderAnsweringPeer.isDead, false)
+
+  const leaderOfferPeer = f.ctx.initPeer()
+  await f.receive({
+    peerId: higherPeerId,
+    offerId: 'local-offer-1',
+    answer: 'answer',
+    peer: leaderOfferPeer
+  })
+  assert.equal(leaderAnsweringPeer.isDead, true)
+  assert.equal(leaderOfferPeer.isDead, false)
+  assert.equal(f.ctx.peerStates[higherPeerId].offerPeer, leaderOfferPeer)
+  assert.equal(f.ctx.peerStates[higherPeerId].answeringPeer, null)
+
+  // When selfId > peerId (follower), the existing answeringPeer wins and the
+  // redundant pre-allocated offer peer is destroyed.
+  await f.receive({
+    peerId: lowerPeerId,
+    offerId: 'remote-offer-2',
+    offer: 'offer'
+  })
+  const followerAnsweringPeer = f.ctx.peerStates[lowerPeerId].answeringPeer
+  assert.ok(followerAnsweringPeer)
+  assert.equal(followerAnsweringPeer.isDead, false)
+
+  const followerOfferPeer = f.ctx.initPeer()
+  await f.receive({
+    peerId: lowerPeerId,
+    offerId: 'local-offer-2',
+    answer: 'answer',
+    peer: followerOfferPeer
+  })
+  assert.equal(followerAnsweringPeer.isDead, false)
+  assert.equal(followerOfferPeer.isDead, true)
+  assert.equal(
+    f.ctx.peerStates[lowerPeerId].answeringPeer,
+    followerAnsweringPeer
+  )
+})
+
+void test('untrusted serialized or non-handle peer fields and array payloads are ignored', async t => {
+  const f = fixture(t)
+  const peerId = `${selfId}z`
+  let claimed = 0
+  f.ctx.offerManager.claimLeased = () => {
+    claimed++
+  }
+
+  await f.receive(
+    JSON.stringify({
+      peerId,
+      offerId: 'spoofed-1',
+      answer: 'answer',
+      peer: {signal: 'not-a-function'}
+    })
+  )
+  await f.receive({
+    peerId,
+    offerId: 'spoofed-2',
+    answer: 'answer',
+    peer: {isDead: false}
+  })
+  await f.receive([{peerId, answer: 'answer'}])
+
+  assert.equal(claimed, 0)
+  assert.equal(Object.keys(f.ctx.peerStates).length, 0)
 })

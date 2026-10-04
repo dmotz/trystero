@@ -255,7 +255,7 @@ void test(
   }
 )
 
-for (const recovered of [false, true])
+for (const recovered of [false, true]) {
   void test(
     `Nostr pending subscription retry respects ${recovered ? 'successful reconnect' : 'a later cooldown'}`,
     {timeout: 8000},
@@ -286,6 +286,7 @@ for (const recovered of [false, true])
       }
     }
   )
+}
 
 void test('Nostr temporary event errors do not retire the relay or cancel discovery', async () => {
   const previous = globalThis.WebSocket
@@ -533,6 +534,33 @@ void test(
     } finally {
       await firstRoom.leave().catch(() => {})
       globalThis.WebSocket = originalWebSocket
+    }
+  }
+)
+
+void test(
+  'Nostr terminal CLOSED rejection retires the relay socket immediately',
+  {timeout: 5_000},
+  async () => {
+    const previous = globalThis.WebSocket
+    globalThis.WebSocket = MockWebSocket
+    const room = joinTestRoom(`wss://closed-terminal-${Date.now()}.test`)
+
+    try {
+      const socket = MockWebSocket.sockets.at(-1)
+      await waitFor(() => announcementCount(socket) > 0)
+      const req = socket.sent.find(msg => msg[0] === 'REQ')
+      socket.onmessage({
+        data: JSON.stringify([
+          'CLOSED',
+          req[1],
+          'auth-required: subscription requires authentication'
+        ])
+      })
+      assert.equal(socket.readyState, 3)
+    } finally {
+      await room.leave().catch(() => {})
+      globalThis.WebSocket = previous
     }
   }
 )

@@ -36,6 +36,7 @@ You can see what people are building with Trystero
 - [Audio and video](#audio-and-video)
 - [Advanced](#advanced)
   - [Binary metadata](#binary-metadata)
+  - [Receiving files](#receiving-files)
   - [Action promises](#action-promises)
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
@@ -288,7 +289,9 @@ room.onPeerLeave = peerId =>
 > Actions are smart and handle serialization and chunking for you behind the
 > scenes. This means you can send very large files and whatever data you send
 > will be received on the other side as the same type (a number as a number, a
-> string as a string, an object as an object, binary as binary, etc.).
+> string as a string, an object as an object, binary as binary, etc.). See
+> [receiving files](#receiving-files) for optional size limits and acceptance
+> callbacks.
 
 ## Audio and video
 
@@ -370,11 +373,38 @@ file.send(buffer, {
 })
 ```
 
+### Receiving files
+
+Incoming data is accepted automatically. Use `onReceive` to accept or decline
+payloads based on their size, sender, or metadata:
+
+```js
+const file = room.makeAction('file', {
+  onReceive: ({byteLength}) => byteLength <= 100 * 1024 ** 2,
+  onMessage: (data, {metadata}) => saveFile(data, metadata.name)
+})
+```
+
+Return `true` or `false`, or a promise of either. Large payloads wait for
+approval before sending their contents; declined small messages are discarded
+after arrival. You can also assign `file.onReceive` later or set it to `null` to
+restore automatic acceptance.
+
+`byteLength` is the payload size in bytes (UTF-8 for strings/JSON), excluding
+metadata. The context's `signal` aborts when the transfer ends; use it to
+dismiss pending approval UI.
+
+Each room defaults to a 256 MiB receive budget. Set `maxReceiveBytes` in the
+room config to allow larger files or reduce memory use. Concurrent transfers
+queue automatically when the budget is occupied. Received files must fit in
+memory.
+
 ### Action promises
 
-Action sender functions return a promise that resolves when they're done
-sending. You can optionally use this to indicate to the user when a large
-transfer is done.
+Sender promises resolve when local sending finishes; they do not confirm
+delivery or application handling. If a receiver declines a large transfer, the
+promise rejects with `error.kind === 'rejected'`. Use request actions when you
+need a response.
 
 ```js
 await file.send(amplePayload)
@@ -754,6 +784,11 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
+  - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
+    concurrent large incoming transfers per room, in bytes. Defaults to
+    `256 * 1024 ** 2` (256 MiB). Must be a positive integer. Raise it for larger
+    files or lower it to reduce memory use.
+
   - `passive` - **(optional)** Boolean for backup or relay peers that should
     listen for active peers without announcing themselves while a room is
     dormant. Passive peers activate only after hearing a non-passive peer and
@@ -1036,10 +1071,17 @@ Returns an object with the following methods:
   - `onRequest` - Nullable callback property that returns the response.
   - `onReceiveProgress` - Nullable callback property for inbound progress.
 
+  Both kinds expose `onReceive`, a nullable callback accepting
+  `{byteLength, peerId, metadata, kind, signal}` and returning a boolean or a
+  promise of a boolean. It can also be provided in `config`. `kind` is
+  `'message'`, `'request'`, or `'response'`; request actions apply it to both
+  requests and responses. Responses have no metadata. See
+  [receiving files](#receiving-files).
+
   Send options use `target`, `metadata`, `onProgress`, and `signal`. Request
   options use `target`, `metadata`, `timeoutMs`, `onProgress`, and `signal`.
   `requestMany()` uses `targets` plus optional `onResult` for each peer result
-  as it arrives.
+  as it arrives. Request timeouts cover approval, sending, and the response.
 
   Example:
 

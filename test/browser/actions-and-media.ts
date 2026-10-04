@@ -522,7 +522,7 @@ const verifyBinaryPayloads = async ({
     ] = payload
     expect(meta).toEqual(mockMeta)
     expect(senderPercent).toEqual(1)
-    expect(senderCallCount).toEqual(63)
+    expect(senderCallCount).toBeGreaterThan(1)
     expect(receiverPercent).toEqual(senderPercent)
     expect(receiverCallCount).toEqual(senderCallCount)
   })

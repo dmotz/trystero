@@ -36,7 +36,6 @@ export const withStrategyBrowserPair = (
       test.skip()
     }
 
-    const shouldSoftFail = strategy === 'ipfs' || strategy === 'torrent'
     const initialConnectionResults = []
 
     const run = async () => {
@@ -89,10 +88,11 @@ export const withStrategyBrowserPair = (
           strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
 
         const redundancy = isRelayStrategy
-          ? Math.min(
+          ? (config.relayConfig?.urls?.length ??
+            Math.min(
               defaultRelayRedundancy,
               await page.evaluate(() => window.trystero.defaultRelayUrls.length)
-            )
+            ))
           : 0
 
         const relayConfig = {
@@ -218,30 +218,10 @@ export const withStrategyBrowserPair = (
       })
     }
 
-    if (!shouldSoftFail) {
-      try {
-        await run()
-        recordConnectionResult()
-      } catch (err) {
-        recordConnectionResult()
-        throw err
-      }
-      return
-    }
-
     try {
       await run()
+    } finally {
       recordConnectionResult()
-    } catch (err) {
-      recordConnectionResult()
-      const message =
-        err instanceof Error ? (err.stack ?? err.message) : String(err)
-
-      test.info().annotations.push({
-        type: 'flaky',
-        description: `${strategy} failure ignored (flaky)`
-      })
-      console.warn(`\n⚠️ ${strategy} failure ignored (flaky):\n${message}\n`)
     }
   })
 }

@@ -137,7 +137,7 @@ void test(
   }
 )
 
-for (const reannounce of [true, false])
+for (const reannounce of [true, false]) {
   void test(
     `Trystero: quiet-room disconnect reannouncing is ${reannounce ? 'enabled by default' : 'disabled explicitly'}`,
     {timeout: 5_000},
@@ -193,6 +193,7 @@ for (const reannounce of [true, false])
       }
     }
   )
+}
 
 void test(
   'Trystero: topic strategy uses the prompt first signaling retry',
@@ -203,11 +204,15 @@ void test(
     const joinRoom = createTopicStrategy({
       init: () => ({}),
       subscribeTopic: (_relay, topic, onMessage, {kind}) => {
-        if (kind === 'root') root = {topic, onMessage}
+        if (kind === 'root') {
+          root = {topic, onMessage}
+        }
         return () => {}
       },
       publishTopic: (_relay, _topic, message, {kind}) => {
-        if (kind === 'signal' && JSON.parse(message).offer) offers++
+        if (kind === 'signal' && JSON.parse(message).offer) {
+          offers++
+        }
       }
     })
     const room = joinRoom(
@@ -462,5 +467,49 @@ void test(
     } finally {
       await room.leave().catch(() => {})
     }
+  }
+)
+
+void test(
+  'Trystero: un-awaited room.leave() followed immediately by joinRoom creates a fresh active room',
+  {timeout: 5_000},
+  async () => {
+    let activeSubscriptions = 0
+    let announceCount = 0
+    const joinRoom = createTopicStrategy({
+      init: () => ({}),
+      subscribeTopic: () => {
+        activeSubscriptions++
+        return () => {
+          activeSubscriptions--
+        }
+      },
+      publishTopic: (_relay, _topic, _msg, {kind}) => {
+        if (kind === 'announce') {
+          announceCount++
+        }
+      }
+    })
+    const config = {
+      appId: `topic-sync-rejoin-${Date.now()}`,
+      rtcPolyfill: MockRTCPeerConnection
+    }
+
+    const firstRoom = joinRoom(config, 'room')
+    await waitFor(() => activeSubscriptions === 2 && announceCount > 0)
+
+    void firstRoom.leave()
+    const secondRoom = joinRoom(config, 'room')
+
+    try {
+      assert.notEqual(secondRoom, firstRoom)
+      const countAtRejoin = announceCount
+      await waitFor(() => announceCount > countAtRejoin)
+      assert.equal(activeSubscriptions, 2)
+    } finally {
+      await secondRoom.leave().catch(() => {})
+    }
+
+    assert.equal(activeSubscriptions, 0)
   }
 )

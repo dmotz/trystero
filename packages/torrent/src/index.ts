@@ -22,17 +22,18 @@ import {
 const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const topicToInfoHash: Record<string, string> = {}
 const infoHashToTopic: Record<string, string> = {}
-const announceFns = relayManager.scoped<() => void | Promise<void>>()
-const subscriptionTokens = relayManager.scoped<symbol>()
-const trackerAnnounceMs = relayManager.scoped<number>()
-const handledSignals: Record<string, number> = {}
-const msgHandlers = relayManager.scoped<(data: TrackerMessage) => void>()
-const topicStates = relayManager.scoped<{
+type TopicState = {
   announce: () => void | Promise<void>
+  announceMs: number
+  handler: (data: TrackerMessage) => void
   isActive: boolean
   startPassiveAnnouncements: () => void
   stopPassiveAnnouncements: () => void
-}>()
+  token: symbol
+}
+
+const handledSignals: Record<string, number> = {}
+const topicStates = relayManager.scoped<TopicState>()
 const roomOutstandingOffers: Record<
   string,
   Record<string, OfferRecord & {createdAt: number}>
@@ -110,9 +111,10 @@ const deleteRoomOfferBookkeeping = (rootTopic: string): void => {
   delete roomOfferGenerationPromises[rootTopic]
 }
 
-const claimOutstandingOffer = (
+const takeOutstandingOffer = (
   rootTopic: string,
-  offerId: string
+  offerId: string,
+  action: 'claim' | 'reclaim'
 ): OfferRecord | undefined => {
   const outstandingOffers = roomOutstandingOffers[rootTopic]
   const offer = outstandingOffers?.[offerId]
@@ -122,7 +124,7 @@ const claimOutstandingOffer = (
   }
 
   delete outstandingOffers[offerId]
-  offer.claim?.()
+  offer[action]?.()
 
   if (!keys(outstandingOffers).length && !roomSubscriberCounts[rootTopic]) {
     deleteRoomOfferBookkeeping(rootTopic)
@@ -131,25 +133,9 @@ const claimOutstandingOffer = (
   return offer
 }
 
-const reclaimOutstandingOffer = (rootTopic: string, offerId: string): void => {
-  const outstandingOffers = roomOutstandingOffers[rootTopic]
-  const offer = outstandingOffers?.[offerId]
-
-  if (!offer) {
-    return
-  }
-
-  delete outstandingOffers[offerId]
-  offer.reclaim?.()
-
-  if (!keys(outstandingOffers).length && !roomSubscriberCounts[rootTopic]) {
-    deleteRoomOfferBookkeeping(rootTopic)
-  }
-}
-
 const reclaimAllOutstandingOffers = (rootTopic: string): void => {
   keys(getRoomOutstandingOffers(rootTopic)).forEach(offerId =>
-    reclaimOutstandingOffer(rootTopic, offerId)
+    takeOutstandingOffer(rootTopic, offerId, 'reclaim')
   )
   deleteRoomOfferBookkeeping(rootTopic)
 }
@@ -159,7 +145,7 @@ const pruneOutstandingOffers = (rootTopic: string): void => {
 
   entries(getRoomOutstandingOffers(rootTopic)).forEach(([offerId, offer]) => {
     if (now - offer.createdAt > offerRetentionMs) {
-      reclaimOutstandingOffer(rootTopic, offerId)
+      takeOutstandingOffer(rootTopic, offerId, 'reclaim')
     }
   })
 }
@@ -226,8 +212,10 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
               warn(client.url, warnMsg)
             }
 
-            if (interval && topic && announceFns.forKey(rawUrl)[topic]) {
-              trackerAnnounceMs.forKey(rawUrl)[topic] = Math.min(
+            const state = topic ? topicStates.forKey(rawUrl)[topic] : undefined
+
+            if (interval && state) {
+              state.announceMs = Math.min(
                 Math.max(interval * 1000, defaultAnnounceMs),
                 offerRetentionMs
               )
@@ -258,12 +246,12 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
                 }
               })
 
-              msgHandlers.forKey(rawUrl)[topic]?.(data)
+              state?.handler(data)
             }
           },
           () =>
-            Object.values(announceFns.forKey(rawUrl)).forEach(
-              announce => void announce()
+            Object.values(topicStates.forKey(rawUrl)).forEach(
+              state => void state.announce()
             )
         )
       )
@@ -272,62 +260,19 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
     }),
 
   subscribe: (client, rootTopic, _, onMessage, getOffers, context) => {
-    const handlers = msgHandlers.forRelay(client)
-    const relayFns = announceFns.forRelay(client)
-    const relayAnnounceMs = trackerAnnounceMs.forRelay(client)
-    const activeTokens = subscriptionTokens.forRelay(client)
     const states = topicStates.forRelay(client)
     const subscriptionToken = Symbol(rootTopic)
 
-    activeTokens[rootTopic] = subscriptionToken
     roomSubscriberCounts[rootTopic] = (roomSubscriberCounts[rootTopic] ?? 0) + 1
-
-    const topicHandler = (data: TrackerMessage): void => {
-      if (data.offer && data.peer_id && data.offer_id) {
-        void onMessage(
-          rootTopic,
-          {
-            offer: data.offer.sdp,
-            peerId: data.peer_id
-          },
-          (_, signal) =>
-            void send(client, rootTopic, {
-              answer: {
-                type: 'answer',
-                sdp: fromJson<{answer: string}>(signal).answer
-              },
-              offer_id: data.offer_id,
-              to_peer_id: data.peer_id
-            })
-        )
-      } else if (data.answer && data.offer_id && data.peer_id) {
-        const offer = claimOutstandingOffer(rootTopic, data.offer_id)
-
-        if (offer) {
-          void onMessage(
-            rootTopic,
-            {
-              answer: data.answer.sdp,
-              peerId: data.peer_id,
-              peer: offer.peer
-            },
-            () => {}
-          )
-          void topicState.announce()
-        }
-      }
-    }
-
-    handlers[rootTopic] = topicHandler
 
     let passiveAnnounceTimeout: ReturnType<typeof setTimeout> | undefined
     const stopPassiveAnnouncements = (): void => {
       clearTimeout(passiveAnnounceTimeout)
       passiveAnnounceTimeout = undefined
     }
-    const topicState = {
+    const topicState: TopicState = {
       announce: async () => {
-        if (activeTokens[rootTopic] !== subscriptionToken) {
+        if (states[rootTopic]?.token !== subscriptionToken) {
           return
         }
 
@@ -340,10 +285,28 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           return
         }
 
-        const outstandingOffers = await ensureOutstandingOffers(
-          rootTopic,
-          getOffers
-        )
+        let outstandingOffers: Record<string, OfferRecord & {createdAt: number}>
+
+        try {
+          outstandingOffers = await ensureOutstandingOffers(
+            rootTopic,
+            getOffers
+          )
+        } catch (error) {
+          if (states[rootTopic]?.token !== subscriptionToken) {
+            return
+          }
+
+          throw error
+        }
+
+        if (
+          states[rootTopic]?.token !== subscriptionToken ||
+          !topicState.isActive
+        ) {
+          return
+        }
+
         const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
           offer_id: id,
           offer: {type: 'offer', sdp: offer}
@@ -354,12 +317,50 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           offers
         })
       },
+      announceMs: defaultAnnounceMs,
+      handler: (data: TrackerMessage): void => {
+        if (data.offer && data.peer_id && data.offer_id) {
+          void onMessage(
+            rootTopic,
+            {
+              offer: data.offer.sdp,
+              offerId: data.offer_id,
+              peerId: data.peer_id
+            },
+            (_, signal) =>
+              void send(client, rootTopic, {
+                answer: {
+                  type: 'answer',
+                  sdp: fromJson<{answer: string}>(signal).answer
+                },
+                offer_id: data.offer_id,
+                to_peer_id: data.peer_id
+              })
+          )
+        } else if (data.answer && data.offer_id && data.peer_id) {
+          const offer = takeOutstandingOffer(rootTopic, data.offer_id, 'claim')
+
+          if (offer) {
+            void onMessage(
+              rootTopic,
+              {
+                answer: data.answer.sdp,
+                offerId: data.offer_id,
+                peerId: data.peer_id,
+                peer: offer.peer
+              },
+              () => {}
+            )
+            void topicState.announce()
+          }
+        }
+      },
       isActive: !context?.isPassive,
       startPassiveAnnouncements: (): void => {
         stopPassiveAnnouncements()
 
         if (
-          activeTokens[rootTopic] !== subscriptionToken ||
+          states[rootTopic]?.token !== subscriptionToken ||
           topicState.isActive
         ) {
           return
@@ -368,18 +369,13 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         void topicState.announce()
         passiveAnnounceTimeout = setTimeout(
           topicState.startPassiveAnnouncements,
-          Math.max(
-            relayAnnounceMs[rootTopic] ?? dormantAnnounceMs,
-            dormantAnnounceMs
-          )
+          Math.max(topicState.announceMs, dormantAnnounceMs)
         )
       },
-      stopPassiveAnnouncements
+      stopPassiveAnnouncements,
+      token: subscriptionToken
     }
 
-    relayAnnounceMs[rootTopic] = defaultAnnounceMs
-    const {announce} = topicState
-    relayFns[rootTopic] = announce
     states[rootTopic] = topicState
 
     if (!topicState.isActive) {
@@ -395,54 +391,25 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 
       if (!roomSubscriberCounts[rootTopic]) {
         delete roomSubscriberCounts[rootTopic]
-      }
-
-      if (activeTokens[rootTopic] !== subscriptionToken) {
-        if (!roomSubscriberCounts[rootTopic]) {
-          reclaimAllOutstandingOffers(rootTopic)
-          delete states[rootTopic]
-        }
-
-        return
-      }
-
-      if (handlers[rootTopic] === topicHandler) {
-        delete handlers[rootTopic]
-      }
-
-      if (relayFns[rootTopic] === announce) {
-        delete relayFns[rootTopic]
-      }
-
-      delete relayAnnounceMs[rootTopic]
-
-      delete activeTokens[rootTopic]
-
-      if (states[rootTopic] === topicState) {
-        delete states[rootTopic]
-      }
-
-      if (!roomSubscriberCounts[rootTopic]) {
         reclaimAllOutstandingOffers(rootTopic)
+      }
+
+      if (states[rootTopic]?.token === subscriptionToken) {
+        delete states[rootTopic]
       }
     }
   },
 
-  announce: (client, rootTopic) => {
+  announce: async (client, rootTopic) => {
     const state = topicStates.forRelay(client)[rootTopic]
-    const relayFns = announceFns.forRelay(client)
-    const fn = relayFns[rootTopic]
 
     if (state) {
       state.stopPassiveAnnouncements()
       state.isActive = true
+      await state.announce()
     }
 
-    if (fn) {
-      void fn()
-    }
-
-    return trackerAnnounceMs.forRelay(client)[rootTopic] ?? defaultAnnounceMs
+    return state?.announceMs ?? defaultAnnounceMs
   },
 
   deactivate: (client, rootTopic) => {

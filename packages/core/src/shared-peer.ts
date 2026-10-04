@@ -1,8 +1,15 @@
 import {
+  maxRoomFrameBytes,
+  maxRoomTokenBytes,
+  maxQueuedDataFrames,
+  pendingDataTimeoutMs
+} from './data-limits'
+import {
   decodeBytes,
   encodeBytes,
   keys,
   libName,
+  mkErr,
   noOp,
   resetTimer,
   values
@@ -52,47 +59,63 @@ type SharedFrame =
   | {type: 'room'; roomToken: string; payload: ArrayBuffer}
   | {type: 'presence'; roomToken: string; isPresent: boolean}
 
-const unwrapFrame = (data: ArrayBuffer): SharedFrame | null => {
-  const buffer = new Uint8Array(data)
-
-  if (buffer.byteLength < 3) {
+const decodeRoomTokenHeader = (
+  buffer: Uint8Array,
+  offset: number
+): {roomToken: string; headerSize: number} | null => {
+  if (buffer.byteLength < offset + 2) {
     return null
   }
 
-  if (buffer[0] === roomFrameVersion) {
-    const tokenSize = ((buffer[1] ?? 0) << 8) | (buffer[2] ?? 0)
-    const headerSize = 3 + tokenSize
+  const tokenSize = ((buffer[offset] ?? 0) << 8) | (buffer[offset + 1] ?? 0)
+  const headerSize = offset + 2 + tokenSize
 
-    if (tokenSize <= 0 || buffer.byteLength < headerSize) {
-      return null
-    }
-
-    const roomToken = decodeBytes(buffer.subarray(3, headerSize))
-    const payload = buffer.subarray(headerSize)
-
-    return {
-      type: 'room',
-      roomToken,
-      payload: payload.slice().buffer
-    }
-  }
-
-  if (buffer[0] !== roomPresenceFrameVersion || buffer.byteLength < 4) {
-    return null
-  }
-
-  const tokenSize = ((buffer[2] ?? 0) << 8) | (buffer[3] ?? 0)
-  const headerSize = 4 + tokenSize
-
-  if (tokenSize <= 0 || buffer.byteLength < headerSize) {
+  if (
+    tokenSize <= 0 ||
+    tokenSize > maxRoomTokenBytes ||
+    buffer.byteLength < headerSize
+  ) {
     return null
   }
 
   return {
-    type: 'presence',
-    roomToken: decodeBytes(buffer.subarray(4, headerSize)),
-    isPresent: buffer[1] === 1
+    roomToken: decodeBytes(buffer.subarray(offset + 2, headerSize)),
+    headerSize
   }
+}
+
+const unwrapFrame = (data: ArrayBuffer): SharedFrame | null => {
+  const buffer = new Uint8Array(data)
+
+  if (buffer.byteLength < 3 || buffer.byteLength > maxRoomFrameBytes) {
+    return null
+  }
+
+  if (buffer[0] === roomFrameVersion) {
+    const header = decodeRoomTokenHeader(buffer, 1)
+
+    return header
+      ? {
+          type: 'room',
+          roomToken: header.roomToken,
+          payload: buffer.subarray(header.headerSize).slice().buffer
+        }
+      : null
+  }
+
+  if (buffer[0] === roomPresenceFrameVersion) {
+    const header = decodeRoomTokenHeader(buffer, 2)
+
+    return header
+      ? {
+          type: 'presence',
+          roomToken: header.roomToken,
+          isPresent: buffer[1] === 1
+        }
+      : null
+  }
+
+  return null
 }
 
 const isPeerUnderlyingStale = (peer: PeerHandle): boolean => {
@@ -125,40 +148,180 @@ export const getConnectedPeerHealth = (
   return 'live'
 }
 
-export class SharedPeerManager {
-  private byApp: Record<string, Record<string, SharedPeerState>> = {}
-  private roomPresenceHandlers: Record<
-    string,
-    (peerId: string, roomToken: string, isPresent: boolean) => void
-  > = {}
+type RoomRegistration = {
+  token: string | null
+  tokenPromise: Promise<string>
+  active: boolean
+  onPeer: (proxy: PeerHandle, peerId: string, physical: PeerHandle) => void
+  onDetach: (peerId: string, physical: PeerHandle) => void
+}
+type RoomMembership = {
+  connect: (peerId: string, peer: PeerHandle, idleMs: number) => void
+  reuse: (peerId: string) => boolean
+  setActive: (active: boolean) => void
+  leave: () => void
+}
 
-  getMap(appId: string): Record<string, SharedPeerState> {
-    return (this.byApp[appId] ??= {})
+export class SharedPeerManager {
+  private rooms = new Map<string, Map<string, RoomRegistration>>()
+  private unclaimedDataTimers = new WeakMap<
+    SharedPeerState,
+    ReturnType<typeof setTimeout>
+  >()
+  private pendingDataTimers = new WeakMap<
+    SharedPeerState,
+    ReturnType<typeof setTimeout>
+  >()
+  private byApp: Record<string, Record<string, SharedPeerState>> = {}
+
+  registerRoom(
+    appId: string,
+    roomId: string,
+    tokenPromise: Promise<string>,
+    options: {
+      active: boolean
+      onPeer: RoomRegistration['onPeer']
+      onDetach: RoomRegistration['onDetach']
+    }
+  ): RoomMembership {
+    const rooms = this.rooms.get(appId) ?? new Map<string, RoomRegistration>()
+    if (rooms.has(roomId)) {
+      throw mkErr('room membership already registered')
+    }
+    const registration: RoomRegistration = {
+      token: null,
+      tokenPromise,
+      ...options
+    }
+    rooms.set(roomId, registration)
+    this.rooms.set(appId, rooms)
+    const current = (): boolean =>
+      this.rooms.get(appId)?.get(roomId) === registration
+    const advertise = (present: boolean): void => {
+      if (!registration.token) {
+        return
+      }
+      for (const shared of values(this.byApp[appId] ?? {})) {
+        try {
+          this.sendRoomPresence(shared, registration.token, present)
+        } catch {
+          /* Presence is best effort; a closing connection cannot block cleanup. */
+        }
+      }
+    }
+    void tokenPromise.then(token => {
+      if (!current()) {
+        return
+      }
+      registration.token = token
+      for (const shared of values(this.byApp[appId] ?? {})) {
+        if (shared.remoteRoomTokens.has(token)) {
+          this.attachRoom(appId, roomId, registration, shared)
+        }
+        this.discardUnboundData(shared)
+      }
+      if (current() && registration.active) {
+        advertise(true)
+      }
+    })
+    return {
+      connect: (peerId, peer, idleMs) => {
+        if (!current()) {
+          peer.destroy()
+          return
+        }
+        const existing = this.reusable(appId, peerId)
+        if (existing && existing.peer !== peer) {
+          peer.destroy()
+        }
+        const shared = existing ?? this.register(appId, peerId, peer, idleMs)
+        this.attachRoom(appId, roomId, registration, shared)
+        if (!existing) {
+          for (const room of rooms.values()) {
+            if (room.active && room.token) {
+              this.sendRoomPresence(shared, room.token, true)
+            }
+          }
+        }
+      },
+      reuse: peerId => {
+        if (!current()) {
+          return false
+        }
+        const shared = this.reusable(appId, peerId)
+        if (!shared) {
+          return false
+        }
+        this.attachRoom(appId, roomId, registration, shared)
+        return true
+      },
+      setActive: active => {
+        if (!current() || registration.active === active) {
+          return
+        }
+        registration.active = active
+        advertise(active)
+      },
+      leave: () => {
+        if (!current()) {
+          return
+        }
+        rooms.delete(roomId)
+        if (!rooms.size) {
+          this.rooms.delete(appId)
+        }
+        advertise(false)
+        for (const shared of values(this.byApp[appId] ?? {})) {
+          const binding = shared.bindings[roomId]
+          binding?.handlers.close?.()
+          binding?.detach()
+          this.discardUnboundData(shared)
+        }
+      }
+    }
+  }
+
+  owns(appId: string, peerId: string, peer: PeerHandle): boolean {
+    return this.byApp[appId]?.[peerId]?.peer === peer
+  }
+
+  private reusable(appId: string, peerId: string): SharedPeerState | undefined {
+    const shared = this.byApp[appId]?.[peerId]
+    if (shared && isPeerUnderlyingStale(shared.peer)) {
+      this.clear(appId, peerId, {destroyPeer: true})
+      return undefined
+    }
+    return shared
+  }
+
+  private attachRoom(
+    appId: string,
+    roomId: string,
+    registration: RoomRegistration,
+    shared: SharedPeerState
+  ): void {
+    if (
+      this.rooms.get(appId)?.get(roomId) !== registration ||
+      shared.isClosing ||
+      this.get(appId, shared.peerId) !== shared
+    ) {
+      return
+    }
+    const {proxy, isNew} = this.bind(
+      roomId,
+      registration.tokenPromise,
+      shared,
+      {
+        onDetach: () => registration.onDetach(shared.peerId, shared.peer)
+      }
+    )
+    if (isNew) {
+      registration.onPeer(proxy, shared.peerId, shared.peer)
+    }
   }
 
   get(appId: string, peerId: string): SharedPeerState | undefined {
     return this.byApp[appId]?.[peerId]
-  }
-
-  isPeerStale(peer: PeerHandle): boolean {
-    return isPeerUnderlyingStale(peer)
-  }
-
-  getHealth(peer: PeerHandle): 'live' | 'stale' {
-    return this.isPeerStale(peer) ? 'stale' : 'live'
-  }
-
-  setRoomPresenceHandler(
-    appId: string,
-    handler: (peerId: string, roomToken: string, isPresent: boolean) => void
-  ): () => void {
-    this.roomPresenceHandlers[appId] = handler
-
-    return (): void => {
-      if (this.roomPresenceHandlers[appId] === handler) {
-        delete this.roomPresenceHandlers[appId]
-      }
-    }
   }
 
   sendRoomPresence(
@@ -166,7 +329,7 @@ export class SharedPeerManager {
     roomToken: string,
     isPresent: boolean
   ): void {
-    if (shared.isClosing || shared.peer.isDead) {
+    if (shared.isClosing || isPeerUnderlyingStale(shared.peer)) {
       return
     }
 
@@ -186,6 +349,7 @@ export class SharedPeerManager {
     }
 
     shared.idleTimer = resetTimer(shared.idleTimer)
+    this.clearDataTimers(shared)
     shared.isClosing = true
 
     if (destroyPeer && !shared.peer.isDead) {
@@ -220,8 +384,7 @@ export class SharedPeerManager {
     peer: PeerHandle,
     idleMs: number
   ): SharedPeerState {
-    const map = this.getMap(appId)
-    const existing = map[peerId]
+    const existing = this.byApp[appId]?.[peerId]
 
     if (existing) {
       existing.idleTimer = resetTimer(existing.idleTimer)
@@ -250,18 +413,24 @@ export class SharedPeerManager {
       isClosing: false
     }
 
+    // Installing handlers can synchronously flush buffered physical frames.
+    ;(this.byApp[appId] ??= {})[peerId] = shared
+    const clearCurrent = (): void => {
+      if (this.owns(appId, peerId, peer)) {
+        this.clear(appId, peerId, {destroyPeer: true})
+      }
+    }
     peer.setHandlers({
       data: data => this.dispatchData(shared, data),
       signal: signal => this.dispatchSignal(shared, signal),
-      close: () => this.clear(appId, peerId, {destroyPeer: false}),
+      close: clearCurrent,
       error: err => {
         console.error(`${libName} peer error:`, err)
-        this.clear(appId, peerId, {destroyPeer: false})
+        clearCurrent()
       },
       track: (track, stream) => this.dispatchTrack(shared, track, stream)
     })
 
-    map[peerId] = shared
     return shared
   }
 
@@ -317,6 +486,7 @@ export class SharedPeerManager {
         shared.controlRoomId = keys(shared.bindings)[0] ?? null
       }
 
+      this.discardUnboundData(shared)
       onDetach()
       if (shouldDestroy) {
         this.clear(shared.appId, shared.peerId, {destroyPeer: true})
@@ -326,7 +496,6 @@ export class SharedPeerManager {
     }
 
     const proxy: SharedMediaPeer = {
-      created: shared.peer.created,
       get connection() {
         return shared.peer.connection
       },
@@ -348,17 +517,9 @@ export class SharedPeerManager {
       },
       destroy: () => detachBinding(),
       setHandlers: newHandlers => {
-        const {signal, ...rest} = newHandlers
-
-        Object.assign(binding.handlers, rest)
-
-        if (signal) {
-          binding.handlers.signal = signal
-        }
-
-        this.flushBindingQueues(binding)
+        Object.assign(binding.handlers, newHandlers)
+        this.flushBindingQueues(shared, binding)
       },
-      offerPromise: shared.peer.offerPromise,
       addStream: stream => {
         const owners = shared.streamOwners.get(stream) ?? new Set<string>()
         const shouldAttach = owners.size === 0
@@ -370,20 +531,7 @@ export class SharedPeerManager {
           shared.peer.addStream(stream)
         }
       },
-      removeStream: stream => {
-        const owners = shared.streamOwners.get(stream)
-
-        if (!owners) {
-          return
-        }
-
-        owners.delete(roomId)
-
-        if (owners.size === 0) {
-          shared.streamOwners.delete(stream)
-          shared.peer.removeStream(stream)
-        }
-      },
+      removeStream: stream => this.releaseStreamOwner(shared, stream, roomId),
       addTrack: (track, stream) => {
         const entry = shared.trackOwners.get(track) ?? {
           stream,
@@ -404,24 +552,11 @@ export class SharedPeerManager {
           shared.peer.addTrack(track, stream)
         )
       },
-      removeTrack: track => {
-        const entry = shared.trackOwners.get(track)
-
-        if (!entry) {
-          return
-        }
-
-        entry.rooms.delete(roomId)
-
-        if (entry.rooms.size === 0) {
-          shared.trackOwners.delete(track)
-          shared.peer.removeTrack(track)
-        }
-      },
-      replaceTrack: (oldTrack, newTrack) => {
+      removeTrack: track => this.releaseTrackOwner(shared, track, roomId),
+      replaceTrack: async (oldTrack, newTrack) => {
         const oldEntry = shared.trackOwners.get(oldTrack)
-
-        if (oldEntry) {
+        await shared.peer.replaceTrack(oldTrack, newTrack)
+        if (oldEntry && shared.trackOwners.get(oldTrack) === oldEntry) {
           shared.trackOwners.delete(oldTrack)
 
           const nextEntry = shared.trackOwners.get(newTrack) ?? {
@@ -432,8 +567,6 @@ export class SharedPeerManager {
           oldEntry.rooms.forEach(room => nextEntry.rooms.add(room))
           shared.trackOwners.set(newTrack, nextEntry)
         }
-
-        return shared.peer.replaceTrack(oldTrack, newTrack)
       },
       __trysteroMedia: shared.media
     }
@@ -460,36 +593,71 @@ export class SharedPeerManager {
       }
 
       const pendingSendData = binding.pendingSendData.splice(0)
-      pendingSendData.forEach(payload =>
-        shared.peer.sendData(wrapRoomFrame(roomToken, payload))
-      )
-      this.flushBindingQueues(binding)
+      if (!isPeerUnderlyingStale(shared.peer)) {
+        pendingSendData.forEach(payload => {
+          try {
+            shared.peer.sendData(wrapRoomFrame(roomToken, payload))
+          } catch {
+            /* Ignore send errors if the underlying channel is closing. */
+          }
+        })
+      }
+      this.flushBindingQueues(shared, binding)
+      this.discardUnboundData(shared)
     })
 
     return {proxy, isNew: true}
+  }
+
+  private releaseStreamOwner(
+    shared: SharedPeerState,
+    stream: MediaStream,
+    roomIdToRemove: string
+  ): void {
+    const rooms = shared.streamOwners.get(stream)
+
+    if (!rooms) {
+      return
+    }
+
+    rooms.delete(roomIdToRemove)
+
+    if (rooms.size === 0) {
+      shared.streamOwners.delete(stream)
+      shared.peer.removeStream(stream)
+    }
+  }
+
+  private releaseTrackOwner(
+    shared: SharedPeerState,
+    track: MediaStreamTrack,
+    roomIdToRemove: string
+  ): void {
+    const entry = shared.trackOwners.get(track)
+
+    if (!entry) {
+      return
+    }
+
+    entry.rooms.delete(roomIdToRemove)
+
+    if (entry.rooms.size === 0) {
+      shared.trackOwners.delete(track)
+      shared.peer.removeTrack(track)
+    }
   }
 
   private pruneRoomOwnership(
     shared: SharedPeerState,
     roomIdToRemove: string
   ): void {
-    shared.streamOwners.forEach((rooms, stream) => {
-      rooms.delete(roomIdToRemove)
+    shared.streamOwners.forEach((_, stream) =>
+      this.releaseStreamOwner(shared, stream, roomIdToRemove)
+    )
 
-      if (rooms.size === 0) {
-        shared.streamOwners.delete(stream)
-        shared.peer.removeStream(stream)
-      }
-    })
-
-    shared.trackOwners.forEach((entry, track) => {
-      entry.rooms.delete(roomIdToRemove)
-
-      if (entry.rooms.size === 0) {
-        shared.trackOwners.delete(track)
-        shared.peer.removeTrack(track)
-      }
-    })
+    shared.trackOwners.forEach((_, track) =>
+      this.releaseTrackOwner(shared, track, roomIdToRemove)
+    )
   }
 
   private scheduleIdleTimer(shared: SharedPeerState): void {
@@ -532,12 +700,18 @@ export class SharedPeerManager {
     return fallback
   }
 
-  private flushBindingQueues(binding: SharedPeerBinding): void {
+  private flushBindingQueues(
+    shared: SharedPeerState,
+    binding: SharedPeerBinding
+  ): void {
     const {handlers} = binding
 
     if (handlers.data && binding.pendingData.length > 0) {
       const queued = binding.pendingData.splice(0)
+      this.syncDataTimers(shared)
       queued.forEach(payload => handlers.data?.(payload))
+    } else {
+      this.syncDataTimers(shared)
     }
 
     if ((handlers.track || handlers.stream) && binding.pendingTracks.length) {
@@ -549,45 +723,162 @@ export class SharedPeerManager {
     }
   }
 
+  private unclaimedBufferedFrameCount(shared: SharedPeerState): number {
+    let count = 0
+    for (const queue of shared.pendingDataByToken.values()) {
+      count += queue.length
+    }
+    return count
+  }
+
+  private boundBufferedFrameCount(shared: SharedPeerState): number {
+    let count = 0
+    for (const binding of values(shared.bindings)) {
+      count += binding.pendingData.length
+    }
+    return count
+  }
+
+  private bufferedFrameCount(shared: SharedPeerState): number {
+    return (
+      this.unclaimedBufferedFrameCount(shared) +
+      this.boundBufferedFrameCount(shared)
+    )
+  }
+
+  private clearDataTimers(shared: SharedPeerState): void {
+    resetTimer(this.unclaimedDataTimers.get(shared))
+    this.unclaimedDataTimers.delete(shared)
+    resetTimer(this.pendingDataTimers.get(shared))
+    this.pendingDataTimers.delete(shared)
+  }
+
+  private syncDataTimers(shared: SharedPeerState): void {
+    if (shared.isClosing) {
+      this.clearDataTimers(shared)
+      return
+    }
+
+    if (this.unclaimedBufferedFrameCount(shared) === 0) {
+      resetTimer(this.unclaimedDataTimers.get(shared))
+      this.unclaimedDataTimers.delete(shared)
+    } else if (!this.unclaimedDataTimers.has(shared)) {
+      this.unclaimedDataTimers.set(
+        shared,
+        setTimeout(() => {
+          this.unclaimedDataTimers.delete(shared)
+          // These may be late frames for rooms we left while another token
+          // was resolving. Expire them without closing unrelated bindings.
+          shared.pendingDataByToken.clear()
+        }, pendingDataTimeoutMs)
+      )
+    }
+
+    if (this.boundBufferedFrameCount(shared) === 0) {
+      resetTimer(this.pendingDataTimers.get(shared))
+      this.pendingDataTimers.delete(shared)
+    } else if (!this.pendingDataTimers.has(shared)) {
+      this.pendingDataTimers.set(
+        shared,
+        setTimeout(() => {
+          this.pendingDataTimers.delete(shared)
+          if (this.boundBufferedFrameCount(shared) > 0) {
+            this.failData(shared, 'room data handler timed out')
+          }
+        }, pendingDataTimeoutMs)
+      )
+    }
+  }
+
+  private canBindRoomToken(shared: SharedPeerState, token: string): boolean {
+    return (
+      values(shared.bindings).some(binding => !binding.roomToken) ||
+      [...(this.rooms.get(shared.appId)?.values() ?? [])].some(
+        room => !room.token || room.token === token
+      )
+    )
+  }
+
+  private discardUnboundData(shared: SharedPeerState): void {
+    for (const token of shared.pendingDataByToken.keys()) {
+      if (!this.canBindRoomToken(shared, token)) {
+        shared.pendingDataByToken.delete(token)
+      }
+    }
+    this.syncDataTimers(shared)
+  }
+
+  private failData(shared: SharedPeerState, reason: string): void {
+    console.warn(`${libName}: ${reason}; disconnecting peer ${shared.peerId}`)
+    this.clear(shared.appId, shared.peerId, {destroyPeer: true})
+  }
+
   private dispatchData(shared: SharedPeerState, data: ArrayBuffer): void {
+    if (shared.isClosing) {
+      return
+    }
     const decoded = unwrapFrame(data)
 
     if (!decoded) {
+      this.failData(shared, 'invalid or incompatible room frame')
       return
     }
 
     if (decoded.type === 'presence') {
       if (decoded.isPresent) {
+        if (
+          !shared.remoteRoomTokens.has(decoded.roomToken) &&
+          shared.remoteRoomTokens.size >= maxQueuedDataFrames
+        ) {
+          this.failData(shared, 'too many advertised rooms')
+          return
+        }
         shared.remoteRoomTokens.add(decoded.roomToken)
+        for (const [roomId, registration] of this.rooms.get(shared.appId) ??
+          []) {
+          if (registration.token === decoded.roomToken) {
+            this.attachRoom(shared.appId, roomId, registration, shared)
+          }
+        }
       } else {
         shared.remoteRoomTokens.delete(decoded.roomToken)
         shared.pendingDataByToken.delete(decoded.roomToken)
         const binding = shared.bindingsByToken[decoded.roomToken]
         binding?.handlers.close?.()
         binding?.detach()
+        this.syncDataTimers(shared)
       }
 
-      this.roomPresenceHandlers[shared.appId]?.(
-        shared.peerId,
-        decoded.roomToken,
-        decoded.isPresent
-      )
       return
     }
 
     const binding = shared.bindingsByToken[decoded.roomToken]
 
     if (!binding) {
+      // A registered room may receive its handshake before signaling binds it.
+      // Departed rooms cannot claim data once all remaining tokens are known.
+      if (
+        !this.canBindRoomToken(shared, decoded.roomToken) ||
+        this.bufferedFrameCount(shared) >= maxQueuedDataFrames
+      ) {
+        return
+      }
       const pending = shared.pendingDataByToken.get(decoded.roomToken) ?? []
       pending.push(decoded.payload)
       shared.pendingDataByToken.set(decoded.roomToken, pending)
+      this.syncDataTimers(shared)
       return
     }
 
     if (binding.handlers.data) {
       binding.handlers.data(decoded.payload)
     } else {
+      if (this.bufferedFrameCount(shared) >= maxQueuedDataFrames) {
+        this.failData(shared, 'too much data waiting for a room handler')
+        return
+      }
       binding.pendingData.push(decoded.payload)
+      this.syncDataTimers(shared)
     }
   }
 

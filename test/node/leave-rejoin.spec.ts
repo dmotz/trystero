@@ -37,14 +37,20 @@ for (const channelState of ['closed', 'connecting']) {
 
     try {
       await waitFor(() => Boolean(root))
-      const answer = await encrypt(genKey('', config.appId, 'room'), 'answer-sdp')
+      const answer = await encrypt(
+        genKey('', config.appId, 'room'),
+        'answer-sdp'
+      )
       await root.onMessage(root.topic, {peerId: 'remote-peer', answer, peer})
       await waitFor(() => Boolean(peer.handlers.data))
 
       peer.sendData = () => {
         sendCount++
         if (peer.channel.readyState !== 'open') {
-          throw new DOMException('RTCDataChannel is not open', 'InvalidStateError')
+          throw new DOMException(
+            'RTCDataChannel is not open',
+            'InvalidStateError'
+          )
         }
 
         if (channelState === 'connecting' && sendCount === 1) {
@@ -59,7 +65,7 @@ for (const channelState of ['closed', 'connecting']) {
       }
 
       await room.leave()
-      assert.equal(sendCount, channelState === 'closed' ? 1 : 2)
+      assert.equal(sendCount, channelState === 'closed' ? 0 : 2)
       rejoinedRoom = joinRoom(config, 'room')
       assert.notEqual(rejoinedRoom, room)
       assert.equal(initCount, 2)

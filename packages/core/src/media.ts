@@ -1,4 +1,5 @@
-import {genId} from './utils'
+import {maxQueuedDataFrames} from './data-limits'
+import {genId, libName, mkErr} from './utils'
 import type {
   AddMediaOptions,
   JsonValue,
@@ -24,6 +25,7 @@ type PendingMediaMeta = {
 }
 
 type MediaManagerDeps = {
+  onPeerError: (peerId: string, error: Error) => void
   iterate: (
     targets: TargetPeers,
     f: (id: string, peer: SharedMediaPeer) => Promise<void> | void
@@ -76,23 +78,46 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
   const remoteStreamsById = new Map<string, MediaStream>()
   const remoteTracksByKey = new Map<string, RemoteTrackRef>()
   const remoteTracksById = new Map<string, RemoteTrackRef>()
+  const remoteStreamKeys = new WeakMap<MediaStream, string>()
+  const remoteTrackKeys = new WeakMap<MediaStreamTrack, string>()
 
   return {
     getStreamKey: makeKeyGetter(localStreamKeys),
     getTrackKey: makeKeyGetter(localTrackKeys),
     rememberRemoteStream: (key, stream, streamId) => {
+      const previous = remoteStreamKeys.get(stream)
+      if (
+        previous !== undefined &&
+        remoteStreamsByKey.get(previous) === stream
+      ) {
+        remoteStreamsByKey.delete(previous)
+      }
+      remoteStreamKeys.set(stream, key)
       remoteStreamsByKey.set(key, stream)
 
       if (streamId) {
         remoteStreamsById.set(streamId, stream)
       }
+
+      stream.getTracks?.().forEach(track => {
+        if (typeof track.id === 'string') {
+          remoteTracksById.set(track.id, {track, stream})
+        }
+      })
     },
     getRemoteStream: (key, streamId) =>
       remoteStreamsByKey.get(key) ??
       (streamId ? remoteStreamsById.get(streamId) : undefined),
     rememberRemoteTrack: (key, track, stream, trackId, streamId) => {
       const ref = {track, stream}
-
+      const previous = remoteTrackKeys.get(track)
+      if (
+        previous !== undefined &&
+        remoteTracksByKey.get(previous)?.track === track
+      ) {
+        remoteTracksByKey.delete(previous)
+      }
+      remoteTrackKeys.set(track, key)
       remoteTracksByKey.set(key, ref)
 
       if (trackId) {
@@ -120,7 +145,8 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
 export const createMediaManager = ({
   iterate,
   isActive,
-  getSharedMediaPeer
+  getSharedMediaPeer,
+  onPeerError
 }: MediaManagerDeps): {
   addStream: (
     stream: MediaStream,
@@ -164,19 +190,47 @@ export const createMediaManager = ({
 } => {
   const pendingStreamMetas: Record<string, PendingMediaMeta[]> = {}
   const pendingTrackMetas: Record<string, PendingMediaMeta[]> = {}
+  const peerMediaCaches: Record<string, MediaIdentityCache> = {}
   const localMedia = createMediaIdentityCache()
-  const listeners = {
-    onPeerStream: null as
-      | ((stream: MediaStream, peerId: string, metadata?: JsonValue) => void)
-      | null,
-    onPeerTrack: null as
-      | ((
-          track: MediaStreamTrack,
-          stream: MediaStream,
-          peerId: string,
-          metadata?: JsonValue
-        ) => void)
-      | null
+
+  const getPeerMedia = (id: string): MediaIdentityCache =>
+    getSharedMediaPeer(id)?.__trysteroMedia ??
+    (peerMediaCaches[id] ??= createMediaIdentityCache())
+
+  const queuePendingMeta = (
+    metas: Record<string, PendingMediaMeta[]>,
+    id: string,
+    parsed: PendingMediaMeta,
+    kind: 'stream' | 'track'
+  ): void => {
+    const queue = (metas[id] ??= [])
+
+    if (queue.length >= maxQueuedDataFrames) {
+      console.warn(`${libName}: too many pending ${kind} metadata messages`)
+      onPeerError(id, mkErr('too many pending media metadata messages'))
+      return
+    }
+
+    queue.push(parsed)
+  }
+
+  const takePendingMeta = (
+    queue: PendingMediaMeta[] | undefined,
+    idValue: string | undefined,
+    getMetaId: (meta: PendingMediaMeta) => string | undefined
+  ): PendingMediaMeta | undefined => {
+    if (!queue?.length) {
+      return undefined
+    }
+
+    const index = idValue
+      ? queue.findIndex(meta => {
+          const metaId = getMetaId(meta)
+          return !metaId || metaId === idValue
+        })
+      : 0
+
+    return index >= 0 ? queue.splice(index, 1)[0] : undefined
   }
 
   const emitStream = (
@@ -189,13 +243,13 @@ export const createMediaManager = ({
       return
     }
 
-    getSharedMediaPeer(id)?.__trysteroMedia?.rememberRemoteStream(
+    getPeerMedia(id).rememberRemoteStream(
       key,
       stream,
       typeof stream.id === 'string' ? stream.id : undefined
     )
 
-    listeners.onPeerStream?.(stream, id, metadata)
+    manager.onPeerStream?.(stream, id, metadata)
   }
 
   const emitTrack = (
@@ -209,7 +263,7 @@ export const createMediaManager = ({
       return
     }
 
-    getSharedMediaPeer(id)?.__trysteroMedia?.rememberRemoteTrack(
+    getPeerMedia(id).rememberRemoteTrack(
       key,
       track,
       stream,
@@ -217,7 +271,7 @@ export const createMediaManager = ({
       typeof stream.id === 'string' ? stream.id : undefined
     )
 
-    listeners.onPeerTrack?.(track, stream, id, metadata)
+    manager.onPeerTrack?.(track, stream, id, metadata)
   }
 
   const applyMediaOp = (
@@ -225,7 +279,7 @@ export const createMediaManager = ({
     key: string,
     metadata: JsonValue | undefined,
     sendMeta: InternalActionSender<InternalMediaMeta>,
-    op: (peer: SharedMediaPeer) => void,
+    op: (peer: SharedMediaPeer) => void | Promise<void>,
     mediaIds: Partial<InternalMediaMeta> = {}
   ): Promise<void>[] => {
     const payload = {
@@ -236,11 +290,11 @@ export const createMediaManager = ({
 
     return iterate(targets, async (id, peer) => {
       await sendMeta(payload, id)
-      op(peer)
+      await op(peer)
     })
   }
 
-  const manager = {
+  const manager: ReturnType<typeof createMediaManager> = {
     addStream: (stream, options, sendMeta) =>
       applyMediaOp(
         options.target,
@@ -290,8 +344,7 @@ export const createMediaManager = ({
         return
       }
 
-      const sharedPeer = getSharedMediaPeer(id)
-      const cached = sharedPeer?.__trysteroMedia?.getRemoteStream(
+      const cached = getPeerMedia(id).getRemoteStream(
         parsed.key,
         parsed.streamId
       )
@@ -301,7 +354,7 @@ export const createMediaManager = ({
         return
       }
 
-      ;(pendingStreamMetas[id] ??= []).push(parsed)
+      queuePendingMeta(pendingStreamMetas, id, parsed, 'stream')
     },
 
     receiveTrackMeta: (meta, id) => {
@@ -315,18 +368,19 @@ export const createMediaManager = ({
         return
       }
 
-      const sharedPeer = getSharedMediaPeer(id)
-      const cached = sharedPeer?.__trysteroMedia?.getRemoteTrack(
-        parsed.key,
-        parsed.trackId
-      )
+      const cached = getPeerMedia(id).getRemoteTrack(parsed.key, parsed.trackId)
 
-      if (cached) {
+      if (
+        cached &&
+        cached.track.readyState !== 'ended' &&
+        (!cached.stream.getTracks ||
+          cached.stream.getTracks().includes(cached.track))
+      ) {
         emitTrack(id, parsed.key, cached.track, cached.stream, parsed.metadata)
         return
       }
 
-      ;(pendingTrackMetas[id] ??= []).push(parsed)
+      queuePendingMeta(pendingTrackMetas, id, parsed, 'track')
     },
 
     receiveRemoteStream: (id, stream) => {
@@ -334,7 +388,11 @@ export const createMediaManager = ({
         return
       }
 
-      const next = pendingStreamMetas[id]?.shift()
+      const next = takePendingMeta(
+        pendingStreamMetas[id],
+        typeof stream.id === 'string' ? stream.id : undefined,
+        meta => meta.streamId
+      )
 
       if (!next) {
         return
@@ -348,7 +406,17 @@ export const createMediaManager = ({
         return
       }
 
-      const next = pendingTrackMetas[id]?.shift()
+      const queue = pendingTrackMetas[id]
+      const trackId = typeof track.id === 'string' ? track.id : undefined
+      const streamId = typeof stream.id === 'string' ? stream.id : undefined
+      const byTrackIdx =
+        queue && trackId
+          ? queue.findIndex(meta => meta.trackId === trackId)
+          : -1
+      const next =
+        byTrackIdx >= 0
+          ? queue?.splice(byTrackIdx, 1)[0]
+          : takePendingMeta(queue, streamId, meta => meta.streamId)
 
       if (!next) {
         return
@@ -360,24 +428,12 @@ export const createMediaManager = ({
     clearPeer: id => {
       delete pendingStreamMetas[id]
       delete pendingTrackMetas[id]
+      delete peerMediaCaches[id]
     },
 
-    get onPeerStream() {
-      return listeners.onPeerStream
-    },
-
-    set onPeerStream(handler) {
-      listeners.onPeerStream = handler
-    },
-
-    get onPeerTrack() {
-      return listeners.onPeerTrack
-    },
-
-    set onPeerTrack(handler) {
-      listeners.onPeerTrack = handler
-    }
-  } satisfies ReturnType<typeof createMediaManager>
+    onPeerStream: null,
+    onPeerTrack: null
+  }
 
   return manager
 }

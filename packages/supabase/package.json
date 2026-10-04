@@ -37,6 +37,6 @@
     "@trystero-p2p/core": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^26.6.3"
+    "@types/node": "^26.6.4"
   }
 }

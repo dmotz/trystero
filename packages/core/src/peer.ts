@@ -1,8 +1,15 @@
-import {all, alloc, candidateType, resetTimer, toError} from './utils'
+import {
+  maxRoomFrameBytes,
+  maxQueuedDataFrames,
+  pendingDataTimeoutMs
+} from './data-limits'
+import {all, alloc, candidateType, libName, resetTimer, toError} from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
+const iceCandidateSettleMs = 150
 const disconnectedCloseDelayMs = 5_000
+const iceCandidateEvent = 'icecandidate'
 const iceStateEvent = 'icegatheringstatechange'
 const iceConnectionStateEvent = 'iceconnectionstatechange'
 const offerType = 'offer'
@@ -35,18 +42,27 @@ export default (
   })
 
   const handlers: PeerHandlers = {}
+  const pendingIceGathering = new Set<() => void>()
   const pendingSignals: Signal[] = []
   const pendingData: ArrayBuffer[] = []
+  let pendingDataTimer: ReturnType<typeof setTimeout> | null = null
   const shouldTrickleIce = trickleIce !== false
   const pendingRemoteCandidates: RTCIceCandidateInit[] = []
   const pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}> =
     []
-  let resolveInitialOffer: ((signal: Signal) => void) | undefined
+  let resolveInitialOffer: ((signal: Signal | void) => void) | undefined
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
   let dataChannel: RTCDataChannel | null = null
   let disconnectedCloseTimer: number | null = null
   let didEmitClose = false
+
+  const settleInitialOffer = (signal?: Signal): void => {
+    if (resolveInitialOffer) {
+      resolveInitialOffer(signal)
+      resolveInitialOffer = undefined
+    }
+  }
 
   const clearDisconnectedCloseTimer = (): null =>
     (disconnectedCloseTimer = resetTimer(disconnectedCloseTimer))
@@ -57,14 +73,20 @@ export default (
     }
 
     didEmitClose = true
+    pendingIceGathering.forEach(finish => finish())
+    pendingDataTimer = resetTimer(pendingDataTimer)
+    pendingData.length = 0
     clearDisconnectedCloseTimer()
     handlers.close?.()
   }
 
   const emitSignal = (signal: Signal): void => {
     if (signal.type === offerType) {
-      resolveInitialOffer?.(signal)
-      resolveInitialOffer = undefined
+      settleInitialOffer(signal)
+      // getOffer() already hands pre-connection offers to the signaling strategy.
+      if (!handlers.signal && !pc.remoteDescription) {
+        return
+      }
     }
 
     if (handlers.signal) {
@@ -181,9 +203,10 @@ export default (
   }
 
   const queueRemoteCandidate = (candidate: RTCIceCandidateInit): void => {
-    if (pendingRemoteCandidates.length < maxPendingRemoteCandidates) {
-      pendingRemoteCandidates.push(candidate)
+    if (pendingRemoteCandidates.length >= maxPendingRemoteCandidates) {
+      pendingRemoteCandidates.shift()
     }
+    pendingRemoteCandidates.push(candidate)
   }
 
   const flushPendingRemoteCandidates = async (): Promise<void> => {
@@ -191,10 +214,19 @@ export default (
       return
     }
 
+    const remoteUfrag = getRemoteUfrag()
     const queuedCandidates = pendingRemoteCandidates.splice(0)
     const stillPending: RTCIceCandidateInit[] = []
 
     for (const candidate of queuedCandidates) {
+      if (
+        remoteUfrag &&
+        candidate.usernameFragment &&
+        candidate.usernameFragment !== remoteUfrag
+      ) {
+        continue
+      }
+
       if (!canApplyRemoteCandidate(candidate)) {
         stillPending.push(candidate)
         continue
@@ -228,47 +260,113 @@ export default (
   const setupDataChannel = (channel: RTCDataChannel): void => {
     channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = 0xffff
+    const failData = (): void => {
+      console.warn(
+        `${libName}: invalid or excessive data before handler registration; disconnecting peer`
+      )
+      channel.close()
+      pc.close()
+      emitClose()
+    }
     channel.onmessage = e => {
       const data = e.data as ArrayBuffer
+      if (didEmitClose) {
+        return
+      }
+      if (
+        (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) ||
+        data.byteLength > maxRoomFrameBytes
+      ) {
+        failData()
+        return
+      }
 
       if (handlers.data) {
         handlers.data(data)
       } else {
+        if (pendingData.length >= maxQueuedDataFrames) {
+          failData()
+          return
+        }
+        if (!pendingDataTimer) {
+          pendingDataTimer = setTimeout(failData, pendingDataTimeoutMs)
+        }
         pendingData.push(data)
       }
     }
     channel.onopen = () => handlers.connect?.()
     channel.onclose = emitClose
-    channel.onerror = ({error}) =>
+    channel.onerror = ({error}) => {
+      if (
+        didEmitClose ||
+        (error?.errorDetail === 'sctp-failure' &&
+          (error.sctpCauseCode === 12 ||
+            /^User-Initiated Abort\b/.test(error.message)))
+      ) {
+        return
+      }
+
       handlers.error?.(toError(error, 'data channel error'))
+    }
   }
 
+  const configuredIceServers =
+    rtcConfig?.iceServers ?? defaultIceServers.concat(turnConfig ?? [])
+  const hasServerUrlPattern = (pattern: RegExp): boolean =>
+    configuredIceServers.some(({urls}) =>
+      (Array.isArray(urls) ? urls : [urls]).some(url => pattern.test(url))
+    )
+  const expectsTurnCandidate = hasServerUrlPattern(/^turns?:/i)
+  const expectsStunCandidate =
+    !expectsTurnCandidate && hasServerUrlPattern(/^stuns?:/i)
+  const targetCandidatePattern = expectsTurnCandidate
+    ? /\btyp relay\b/
+    : expectsStunCandidate
+      ? /\btyp (?:srflx|relay|prflx)\b/
+      : /\btyp (?:host|srflx|relay|prflx)\b/
   const waitForIceGathering = async (
     peerConnection: RTCPeerConnection
   ): Promise<SdpDescription> => {
-    let timeout: ReturnType<typeof setTimeout> | null = null
-
-    try {
-      await Promise.race([
-        new Promise<void>(res => {
-          const checkState = (): void => {
-            if (peerConnection.iceGatheringState === 'complete') {
-              peerConnection.removeEventListener(iceStateEvent, checkState)
-              res()
-            }
-          }
-
-          peerConnection.addEventListener(iceStateEvent, checkState)
-          checkState()
-        }),
-        new Promise<void>(res => {
-          timeout = setTimeout(res, iceTimeout)
-        })
-      ])
-    } finally {
-      resetTimer(timeout)
-    }
-
+    await new Promise<void>(resolve => {
+      let timeout: ReturnType<typeof setTimeout> | null = null
+      let settleTimeout: ReturnType<typeof setTimeout> | null = null
+      const finish = (): void => {
+        resetTimer(timeout)
+        resetTimer(settleTimeout)
+        peerConnection.removeEventListener(iceStateEvent, checkState)
+        peerConnection.removeEventListener(iceCandidateEvent, onCandidate)
+        pendingIceGathering.delete(finish)
+        resolve()
+      }
+      const scheduleSettle = (candidateLine = ''): void => {
+        const sdp = `${peerConnection.localDescription?.sdp ?? ''}\n${candidateLine}`
+        // Nontrickle peers cannot use candidates gathered after signaling.
+        if (targetCandidatePattern.test(sdp)) {
+          resetTimer(settleTimeout)
+          settleTimeout = setTimeout(finish, iceCandidateSettleMs)
+        }
+      }
+      const checkState = (): void => {
+        if (peerConnection.iceGatheringState === 'complete' || didEmitClose) {
+          finish()
+        } else {
+          scheduleSettle()
+        }
+      }
+      const onCandidate = (event: Event): void => {
+        const {candidate} = event as RTCPeerConnectionIceEvent
+        if (candidate) {
+          scheduleSettle(candidate.candidate)
+        } else {
+          finish()
+        }
+      }
+      pendingIceGathering.add(finish)
+      timeout = setTimeout(finish, iceTimeout)
+      peerConnection.addEventListener(iceStateEvent, checkState)
+      peerConnection.addEventListener(iceCandidateEvent, onCandidate)
+      checkState()
+    })
     return localDescriptionSignal(peerConnection)
   }
 
@@ -277,7 +375,9 @@ export default (
       ? localDescriptionSignal(pc)
       : await waitForIceGathering(pc)
 
-    emitSignal(signal)
+    if (!didEmitClose) {
+      emitSignal(signal)
+    }
     return signal
   }
 
@@ -292,7 +392,13 @@ export default (
   }
 
   const createOffer = async (restartIce = false): Promise<Signal | void> => {
-    if (pc.connectionState === 'closed') {
+    if (
+      pc.connectionState === 'closed' ||
+      (!restartIce && (makingOffer || pc.signalingState !== 'stable'))
+    ) {
+      if (pc.connectionState === 'closed') {
+        settleInitialOffer()
+      }
       return
     }
 
@@ -300,7 +406,9 @@ export default (
       makingOffer = true
 
       if (restartIce) {
+        // Rolling back the first unanswered offer can discard its data m-line.
         if (
+          pc.remoteDescription &&
           pc.signalingState !== 'stable' &&
           pc.signalingState !== 'closed' &&
           pc.localDescription?.type === offerType
@@ -319,6 +427,9 @@ export default (
       const offer = await emitLocalDescriptionSignal()
       return offer
     } catch (err) {
+      if (!restartIce) {
+        settleInitialOffer()
+      }
       handlers.error?.(toError(err, 'failed to create local offer'))
     } finally {
       makingOffer = false
@@ -427,8 +538,6 @@ export default (
   }
 
   return {
-    created: Date.now(),
-
     connection: pc,
 
     get channel(): RTCDataChannel | null {
@@ -446,6 +555,10 @@ export default (
 
       if (restartIce) {
         return createOffer(true)
+      }
+
+      if (resolveInitialOffer) {
+        return offerPromise
       }
 
       if (pc.localDescription?.type === offerType) {
@@ -490,14 +603,15 @@ export default (
         }
 
         if (sdp.type === offerType) {
-          if (
+          const isCollision =
             makingOffer ||
             (pc.signalingState !== 'stable' && !isSettingRemoteAnswerPending)
-          ) {
-            if (initiator) {
-              return
-            }
 
+          if (isCollision && initiator) {
+            return
+          }
+
+          if (isCollision && pc.signalingState !== 'stable') {
             await all([
               pc.setLocalDescription({type: 'rollback'}),
               pc.setRemoteDescription(rtcSdp)
@@ -532,6 +646,7 @@ export default (
 
     destroy: () => {
       clearDisconnectedCloseTimer()
+      settleInitialOffer()
       dataChannel?.close()
       pc.close()
       makingOffer = false
@@ -544,6 +659,7 @@ export default (
       Object.assign(handlers, restHandlers)
 
       if (handlers.data && pendingData.length > 0) {
+        pendingDataTimer = resetTimer(pendingDataTimer)
         const queued = pendingData.splice(0)
         queued.forEach(data => handlers.data?.(data))
       }
@@ -560,8 +676,6 @@ export default (
         })
       }
     },
-
-    offerPromise,
 
     addStream: stream =>
       stream.getTracks().forEach(track => pc.addTrack(track, stream)),

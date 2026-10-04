@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
+import {MockPeer, MockRTCPeerConnection, wait, waitFor} from './peer-harness.ts'
 
 type Subscriber = {
   rootTopic: string
@@ -12,150 +13,6 @@ type Subscriber = {
     msg: unknown,
     signalPeer: (peerTopic: string, signal: string) => void
   ) => Promise<void> | void
-}
-
-class MockDataChannel {
-  readyState = 'connecting'
-  binaryType = 'arraybuffer'
-  bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
-
-  close() {
-    this.readyState = 'closed'
-    this.onclose?.()
-  }
-
-  send() {}
-}
-
-class MockRTCPeerConnection {
-  iceGatheringState = 'complete'
-  connectionState = 'new'
-  iceConnectionState = 'new'
-  signalingState = 'stable'
-  localDescription = null
-  onnegotiationneeded = null
-  onconnectionstatechange = null
-  ontrack = null
-  ondatachannel = null
-  listeners = {}
-
-  createDataChannel() {
-    return new MockDataChannel()
-  }
-
-  addEventListener(event, fn) {
-    ;(this.listeners[event] ??= new Set()).add(fn)
-  }
-
-  removeEventListener(event, fn) {
-    this.listeners[event]?.delete(fn)
-  }
-
-  restartIce() {}
-
-  async createOffer() {
-    return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
-  }
-
-  async setLocalDescription(description) {
-    if (description?.type === 'rollback') {
-      this.signalingState = 'stable'
-      return
-    }
-
-    const nextDescription = description ?? (await this.createOffer())
-    this.localDescription = nextDescription
-    this.signalingState =
-      nextDescription.type === 'offer' ? 'have-local-offer' : 'stable'
-
-    this.listeners['icegatheringstatechange']?.forEach(listener => listener())
-  }
-
-  async setRemoteDescription() {
-    this.signalingState = 'stable'
-  }
-
-  close() {
-    this.connectionState = 'closed'
-    this.iceConnectionState = 'closed'
-    this.onconnectionstatechange?.()
-  }
-
-  getSenders() {
-    return []
-  }
-
-  addTrack() {
-    return {}
-  }
-
-  removeTrack() {}
-}
-
-class MockPeer {
-  created = Date.now()
-  isDead = false
-  destroyCount = 0
-  handlers = {}
-  offerPromise = Promise.resolve()
-  connection = {
-    connectionState: 'connected',
-    iceConnectionState: 'connected',
-    getSenders: () => []
-  }
-  channel = {readyState: 'open'}
-
-  async getOffer() {}
-
-  async signal() {
-    this.handlers.connect?.()
-  }
-
-  sendData() {}
-
-  destroy() {
-    if (this.isDead) {
-      return
-    }
-
-    this.isDead = true
-    this.destroyCount += 1
-    this.connection.connectionState = 'closed'
-    this.connection.iceConnectionState = 'closed'
-    this.handlers.close?.()
-  }
-
-  setHandlers(newHandlers) {
-    Object.assign(this.handlers, newHandlers)
-  }
-
-  addStream() {}
-  removeStream() {}
-  addTrack() {
-    return {}
-  }
-  removeTrack() {}
-  replaceTrack() {}
-}
-
-const wait = (ms: number) => new Promise(res => setTimeout(res, ms))
-const waitFor = async (
-  check: () => boolean,
-  timeoutMs = 2_000
-): Promise<void> => {
-  const start = Date.now()
-
-  while (!check()) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error('timed out waiting for condition')
-    }
-
-    await wait(10)
-  }
 }
 
 void test(
@@ -1160,6 +1017,84 @@ void test(
       )
     } finally {
       await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: passive peer deactivates when last peer sends graceful @_leave while shared peer stays open',
+  {timeout: 10_000},
+  async () => {
+    let deactivateCount = 0
+    const subscribers: Subscriber[] = []
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {},
+      deactivate: () => {
+        deactivateCount++
+      }
+    })
+
+    const appId = `passive-graceful-leave-${Date.now()}`
+    const config = {
+      appId,
+      passive: true,
+      rtcPolyfill: MockRTCPeerConnection
+    }
+
+    const room = joinRoom(config, 'test-room')
+    const {peerA, peerB} = await import('./peer-harness.ts').then(
+      ({BufferedPeer, linkPeers}) =>
+        linkPeers(new BufferedPeer(), new BufferedPeer())
+    )
+
+    try {
+      await waitFor(() => subscribers.length >= 1)
+
+      const sub = subscribers[0]
+      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
+
+      const encryptedAnswer = await encrypt(
+        genKey('', appId, 'test-room'),
+        'answer-sdp'
+      )
+      await sub.onMessage(
+        sub.rootTopic,
+        {peerId: 'active-peer', answer: encryptedAnswer, peer: peerA},
+        () => {}
+      )
+
+      const activeRoom = createStrategy({
+        init: () => ({}),
+        subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+          subscribers.push({rootTopic, selfTopic, onMessage})
+          return () => {}
+        },
+        announce: () => {}
+      })({appId, rtcPolyfill: MockRTCPeerConnection}, 'test-room')
+
+      await waitFor(() => subscribers.length >= 2)
+      await subscribers[1].onMessage(
+        subscribers[1].rootTopic,
+        {peerId: 'passive-peer', answer: encryptedAnswer, peer: peerB},
+        () => {}
+      )
+
+      await waitFor(() => 'active-peer' in room.getPeers())
+      await activeRoom.leave()
+
+      await waitFor(() => deactivateCount > 0)
+      assert.equal(peerA.isDead, false)
+      assert.equal(Object.keys(room.getPeers()).length, 0)
+    } finally {
+      await room.leave().catch(() => {})
+      peerA.destroy()
+      peerB.destroy()
     }
   }
 )

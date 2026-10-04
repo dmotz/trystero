@@ -171,50 +171,64 @@ const removeUnusedChannels = (client: SupabaseClient): void => {
   })
 }
 
-let client: SupabaseClient | null = null
+const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
+  createTopicStrategy({
+    init: config => createClient(config.appId, config.relayConfig.supabaseKey),
 
-export const joinRoom: JoinRoom<SupabaseRoomConfig> = createTopicStrategy({
-  init: config =>
-    (client ||= createClient(config.appId, config.relayConfig.supabaseKey)),
+    subscribeTopic: async (client, topic, onMessage, {kind}) => {
+      const entry = getOrCreateChannel(client, topic)
+      const removeListener = addListener(
+        entry,
+        kind === 'root' ? events.join : events.sdp,
+        payload => {
+          void onMessage(topic, payload as Record<string, unknown>)
+        }
+      )
 
-  subscribeTopic: async (client, topic, onMessage, {kind}) => {
-    const entry = getOrCreateChannel(client, topic)
-    const removeListener = addListener(
-      entry,
-      kind === 'root' ? events.join : events.sdp,
-      payload => {
-        void onMessage(topic, payload as Record<string, unknown>)
+      await entry.ready
+
+      return () => {
+        removeListener()
+        removeUnusedChannels(client)
       }
-    )
+    },
 
-    await entry.ready
+    publishTopic: (client, topic, msg, {kind}) => {
+      const entry = getOrCreateChannel(client, topic)
+      const payload =
+        kind === 'announce' && typeof msg === 'string'
+          ? fromJson<Record<string, unknown>>(msg)
+          : msg
 
-    return () => {
-      removeListener()
-      removeUnusedChannels(client)
-    }
-  },
+      if (kind === 'announce') {
+        entry.announcement = payload
+      }
 
-  publishTopic: (client, topic, msg, {kind}) => {
-    const entry = getOrCreateChannel(client, topic)
-    const payload =
-      kind === 'announce' && typeof msg === 'string'
-        ? fromJson<Record<string, unknown>>(msg)
-        : msg
-
-    if (kind === 'announce') {
-      entry.announcement = payload
-    }
-
-    return entry.ready.then(async chan => {
-      await chan.send({
-        type: events.broadcast,
-        event: kind === 'announce' ? events.join : events.sdp,
-        payload
+      return entry.ready.then(async chan => {
+        await chan.send({
+          type: events.broadcast,
+          event: kind === 'announce' ? events.join : events.sdp,
+          payload
+        })
       })
-    })
+    }
+  })
+
+const joins = new Map<string, JoinRoom<SupabaseRoomConfig>>()
+
+export const joinRoom: JoinRoom<SupabaseRoomConfig> = (
+  config,
+  roomId,
+  callbacks
+) => {
+  const key = JSON.stringify([config?.appId, config?.relayConfig?.supabaseKey])
+  let join = joins.get(key)
+  if (!join) {
+    join = createJoinRoom()
+    joins.set(key, join)
   }
-})
+  return join(config, roomId, callbacks)
+}
 
 export {selfId}
 

@@ -7,9 +7,11 @@ import {SharedPeerManager} from './shared-peer'
 import {
   createSignalHandler,
   clearConnectedPeer,
+  detachConnectedPeer,
   getState,
-  resetOfferState,
-  updateStatus
+  markPeerConnected,
+  resetAnsweringState,
+  resetOfferState
 } from './signal-handler'
 import {
   all,
@@ -32,7 +34,6 @@ import type {
   JoinRoomCallbacks,
   JoinRoomConfig,
   PeerHandle,
-  SharedPeerState,
   Signal,
   SignalContext,
   StrategyContext,
@@ -44,13 +45,6 @@ const announceWarmupIntervalsMs = [233, 533, 1_333] as const
 const passiveActivationGraceMs = 7_533
 const sharedPeerIdleMsDefault = 123_333
 
-type RoomRegistration = {
-  roomToken: string | null
-  roomTokenPromise: Promise<string>
-  attachSharedPeerToRoom: (peerId: string, shared: SharedPeerState) => void
-  shouldAdvertise: () => boolean
-}
-
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
   subscribe,
@@ -61,120 +55,13 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     string,
     Record<string, ReturnType<typeof room>>
   > = {}
-  const roomRegistrations: Record<string, Record<string, RoomRegistration>> = {}
-  const roomIdsByToken: Record<string, Record<string, string>> = {}
-  const roomPresenceHandlerCleanups: Record<string, () => void> = {}
+  const leavingRoomCleanups: Record<
+    string,
+    Record<string, (rejoining?: boolean) => void>
+  > = {}
   const sharedPeers = new SharedPeerManager()
-
   const hasActiveRooms = (): boolean =>
     values(occupiedRooms).some(rooms => keys(rooms).length > 0)
-
-  const getRoomRegistrations = (
-    appId: string
-  ): Record<string, RoomRegistration> => (roomRegistrations[appId] ??= {})
-
-  const getRoomIdsByToken = (appId: string): Record<string, string> =>
-    (roomIdsByToken[appId] ??= {})
-
-  const advertiseRoomPresence = (
-    shared: SharedPeerState,
-    roomToken: string,
-    isPresent: boolean
-  ): void => {
-    if (sharedPeers.getHealth(shared.peer) === 'live') {
-      sharedPeers.sendRoomPresence(shared, roomToken, isPresent)
-    }
-  }
-
-  const advertiseKnownRoomsToShared = (
-    appId: string,
-    shared: SharedPeerState
-  ): void => {
-    entries(roomRegistrations[appId] ?? {}).forEach(
-      ([roomId, registration]) => {
-        if (!registration.shouldAdvertise()) {
-          return
-        }
-
-        const {roomToken, roomTokenPromise} = registration
-
-        if (roomToken) {
-          advertiseRoomPresence(shared, roomToken, true)
-          return
-        }
-
-        void roomTokenPromise.then(token => {
-          if (roomRegistrations[appId]?.[roomId] !== registration) {
-            return
-          }
-
-          if (registration.roomToken !== token) {
-            return
-          }
-
-          if (
-            sharedPeers.get(appId, shared.peerId) !== shared ||
-            shared.isClosing
-          ) {
-            return
-          }
-
-          if (!registration.shouldAdvertise()) {
-            return
-          }
-
-          advertiseRoomPresence(shared, token, true)
-        })
-      }
-    )
-  }
-
-  const advertiseRoomPresenceToAll = (
-    appId: string,
-    roomToken: string,
-    isPresent: boolean
-  ): void =>
-    values(sharedPeers.getMap(appId)).forEach(shared =>
-      advertiseRoomPresence(shared, roomToken, isPresent)
-    )
-
-  const ensureRoomPresenceHandler = (appId: string): void => {
-    if (roomPresenceHandlerCleanups[appId]) {
-      return
-    }
-
-    roomPresenceHandlerCleanups[appId] = sharedPeers.setRoomPresenceHandler(
-      appId,
-      (peerId, roomToken, isPresent) => {
-        if (!isPresent) {
-          return
-        }
-
-        const shared = sharedPeers.get(appId, peerId)
-        const roomId = roomIdsByToken[appId]?.[roomToken]
-
-        if (!shared || !roomId) {
-          return
-        }
-
-        roomRegistrations[appId]?.[roomId]?.attachSharedPeerToRoom(
-          peerId,
-          shared
-        )
-      }
-    )
-  }
-
-  const cleanupRoomPresenceHandler = (appId: string): void => {
-    if (occupiedRooms[appId] && keys(occupiedRooms[appId]).length > 0) {
-      return
-    }
-
-    roomPresenceHandlerCleanups[appId]?.()
-    delete roomPresenceHandlerCleanups[appId]
-    delete roomRegistrations[appId]
-    delete roomIdsByToken[appId]
-  }
 
   let didInit = false
   let initPromises: Promise<TRelay>[] = []
@@ -203,6 +90,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     if (
+      config.maxReceiveBytes !== undefined &&
+      (!Number.isSafeInteger(config.maxReceiveBytes) ||
+        config.maxReceiveBytes <= 0)
+    ) {
+      throw mkErr('maxReceiveBytes must be a positive safe integer')
+    }
+
+    if (
       handshakeTimeoutMs !== undefined &&
       (!Number.isFinite(handshakeTimeoutMs) || handshakeTimeoutMs <= 0)
     ) {
@@ -213,7 +108,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       return occupiedRooms[appId][roomId]
     }
 
-    ensureRoomPresenceHandler(appId)
+    leavingRoomCleanups[appId]?.[roomId]?.(true)
 
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
@@ -234,7 +129,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const toPlain = withKey(decrypt)
     const toCipher = withKey(encrypt)
-    const sharedPeerMap = sharedPeers.getMap(appId)
     const makeOffer = (): PeerHandle => initPeer(true, config)
     let reannounceOnDisconnect = false
     const offerManager = new OfferManager(makeOffer)
@@ -249,102 +143,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       return (await toCipher(plainOffer)).sdp
     }
 
-    const attachSharedPeerToRoom = (
-      peerId: string,
-      shared: SharedPeerState
-    ): void => {
-      const state = getState(ctx.peerStates, peerId)
-
-      state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
-      state.answeringPeer = null
-      state.answerReplay = null
-
-      const {proxy, isNew} = sharedPeers.bind(
-        roomId,
-        roomNamespacePromise,
-        shared,
-        {
-          onDetach: () => {
-            const current = ctx.peerStates[peerId]
-
-            if (current?.connectedPeer === shared.peer) {
-              current.connectedPeer = null
-              current.connectedPeerUnhealthySinceMs = null
-              updateStatus(current)
-            }
-          }
-        }
-      )
-
-      state.connectedPeer = shared.peer
-      state.connectedPeerUnhealthySinceMs = null
-      updateStatus(state)
-
-      if (isNew) {
-        onPeerConnect(proxy, peerId)
-      }
-
-      resetOfferState(state)
-    }
-
-    const connectPeer = (
-      peer: PeerHandle,
-      peerId: string,
-      _relayId: number
-    ): void => {
-      if (didLeaveRoom) {
-        peer.destroy()
-        return
-      }
-
-      const state = getState(ctx.peerStates, peerId)
-
-      if (state.connectedPeer) {
-        DEV: log('already connected to', peerId, '- checking shared state')
-        const shared = sharedPeerMap[peerId]
-
-        if (
-          shared &&
-          state.connectedPeer === shared.peer &&
-          shared.bindings[roomId]
-        ) {
-          return
-        }
-
-        if (state.connectedPeer !== peer && !peer.isDead) {
-          peer.destroy()
-        }
-        return
-      }
-
-      let shared = sharedPeerMap[peerId]
-
-      if (shared && sharedPeers.getHealth(shared.peer) === 'stale') {
-        sharedPeers.clear(appId, peerId, {destroyPeer: true})
-        shared = undefined
-      }
-
-      if (shared && shared.peer !== peer) {
-        if (!peer.isDead) {
-          peer.destroy()
-        }
-
-        DEV: log('reusing existing shared peer for', peerId)
-        attachSharedPeerToRoom(peerId, shared)
-        return
-      }
-
-      const isNewShared = !shared
-
-      shared ||= sharedPeers.register(appId, peerId, peer, sharedPeerIdleMs)
-
-      DEV: log('peer connected:', peerId, _relayId)
-
-      attachSharedPeerToRoom(peerId, shared)
-
-      if (isNewShared) {
-        advertiseKnownRoomsToShared(appId, shared)
-      }
+    const connectPeer = (peer: PeerHandle, peerId: string): void => {
+      membership.connect(peerId, peer, sharedPeerIdleMs)
     }
 
     let disconnectReannounceQueued = false
@@ -379,7 +179,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const isPassive = Boolean(config.passive)
-    let roomRegistration: RoomRegistration | null = null
     let passiveActivationTimeout:
       | ReturnType<typeof setTimeout>
       | null
@@ -403,7 +202,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
         if (isActive) {
           hasActiveWork = true
-        } else if (state.status === 'idle') {
+        } else {
           delete ctx.peerStates[peerId]
         }
       })
@@ -415,9 +214,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceTimeouts.length = 0
         deactivateRelayAnnouncements()
 
-        if (roomRegistration?.roomToken) {
-          advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, false)
-        }
+        membership.setActive(false)
       }
     }
 
@@ -435,13 +232,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       isPassive,
       isActive: !isPassive,
       onJoinError,
-      sharedPeers,
       offerManager,
       encryptOffer,
       initPeer,
       connectPeer,
       disconnectPeer,
-      attachSharedPeerToRoom,
+      reusePeer: peerId => membership.reuse(peerId),
       checkDeactivate,
       announceIntervals: [],
       announceIntervalMs
@@ -513,6 +309,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           )
           announceErrorStreaks[i] = 0
         } catch (error) {
+          if (didLeaveRoom) {
+            return
+          }
+
           const errorStreak = announceErrorStreaks[i] ?? 0
 
           if (
@@ -588,9 +388,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceTimeouts.length = 0
         passiveActivationTimeout = resetTimer(passiveActivationTimeout)
 
-        if (roomRegistration?.roomToken) {
-          advertiseRoomPresenceToAll(appId, roomRegistration.roomToken, true)
-        }
+        membership.setActive(true)
 
         passiveActivationTimeout = setTimeout(
           checkDeactivate,
@@ -627,12 +425,85 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const {compose} = createPasswordHandshake(sharedPassword, appId, roomId)
     const composedPeerHandshake = compose(onPeerHandshake)
 
+    const releaseOccupiedRoom = (): void => {
+      if (occupiedRooms[appId]?.[roomId] === joinedRoom) {
+        delete occupiedRooms[appId][roomId]
+
+        if (keys(occupiedRooms[appId]).length === 0) {
+          delete occupiedRooms[appId]
+        }
+      }
+    }
+
+    const clearLeavingCleanup = (): void => {
+      if (leavingRoomCleanups[appId]?.[roomId] === cleanupRoom) {
+        delete leavingRoomCleanups[appId][roomId]
+
+        if (keys(leavingRoomCleanups[appId]).length === 0) {
+          delete leavingRoomCleanups[appId]
+        }
+      }
+    }
+
+    const cleanupRoom = (rejoining = false): void => {
+      if (didLeaveRoom) {
+        return
+      }
+
+      didLeaveRoom = true
+      onPeerConnect = noOp
+
+      releaseOccupiedRoom()
+      clearLeavingCleanup()
+      membership.leave()
+
+      entries(ctx.peerStates).forEach(([peerId, state]) => {
+        if (state.connectedPeer && !state.connectedPeer.isDead) {
+          if (!sharedPeers.owns(appId, peerId, state.connectedPeer)) {
+            state.connectedPeer.destroy()
+          }
+        }
+
+        if (state.answeringPeer && !state.answeringPeer.isDead) {
+          state.answeringPeer.destroy()
+        }
+
+        resetOfferState(state)
+        resetAnsweringState(state)
+        state.connectedPeer = null
+        state.connectedPeerUnhealthySinceMs = null
+      })
+
+      announceTimeouts.forEach(resetTimer)
+      passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+      unsubFns.forEach(async f => {
+        const cleanup = await f
+        cleanup()
+      })
+
+      offerManager.destroy()
+
+      if (rejoining || hasActiveRooms()) {
+        return
+      }
+
+      didInit = false
+      cleanupWatchOnline()
+    }
+
     const roomOptions = {
+      ...(config.maxReceiveBytes === undefined
+        ? {}
+        : {maxReceiveBytes: config.maxReceiveBytes}),
       ...(composedPeerHandshake
         ? {onPeerHandshake: composedPeerHandshake}
         : {}),
       ...(handshakeTimeoutMs === undefined ? {} : {handshakeTimeoutMs}),
       isPassive,
+      onBeforeLeave: () => {
+        releaseOccupiedRoom()
+        ;(leavingRoomCleanups[appId] ??= {})[roomId] = cleanupRoom
+      },
       onHandshakeError: (peerId: string, error: string) =>
         onJoinError?.({
           error: error.replace(/^handshake failed: /, ''),
@@ -644,7 +515,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     occupiedRooms[appId] ??= {}
 
-    const appRoomRegistrations = getRoomRegistrations(appId)
     const joinedRoom = room(
       f => (onPeerConnect = f),
       id => {
@@ -655,126 +525,48 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         const state = ctx.peerStates[id]
 
         if (state?.connectedPeer) {
-          state.connectedPeer = null
-          updateStatus(state)
-          checkDeactivate()
+          detachConnectedPeer(state, state.connectedPeer)
         }
+
+        checkDeactivate()
         // Shared-peer close handlers reach the room callback, not disconnectPeer.
         reannounceAfterDisconnect()
       },
-      () => {
-        didLeaveRoom = true
-        onPeerConnect = noOp
-
-        if (occupiedRooms[appId]) {
-          delete occupiedRooms[appId][roomId]
-
-          if (keys(occupiedRooms[appId]).length === 0) {
-            delete occupiedRooms[appId]
-          }
-        }
-
-        const registration = roomRegistrations[appId]?.[roomId]
-        const roomToken = registration?.roomToken
-
-        if (roomToken) {
-          values(sharedPeers.getMap(appId)).forEach(shared => {
-            try {
-              advertiseRoomPresence(shared, roomToken, false)
-            } catch {
-              // Departure announcements are best effort during cleanup.
-            }
-          })
-          delete roomIdsByToken[appId]?.[roomToken]
-
-          if (roomIdsByToken[appId] && !keys(roomIdsByToken[appId]).length) {
-            delete roomIdsByToken[appId]
-          }
-        }
-
-        if (roomRegistrations[appId]) {
-          delete roomRegistrations[appId][roomId]
-
-          if (!keys(roomRegistrations[appId]).length) {
-            delete roomRegistrations[appId]
-          }
-        }
-
-        entries(ctx.peerStates).forEach(([peerId, state]) => {
-          state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
-
-          if (state.connectedPeer && !state.connectedPeer.isDead) {
-            const shared = sharedPeerMap[peerId]
-
-            if (!shared || shared.peer !== state.connectedPeer) {
-              state.connectedPeer.destroy()
-            }
-          }
-
-          if (state.answeringPeer && !state.answeringPeer.isDead) {
-            state.answeringPeer.destroy()
-          }
-
-          resetOfferState(state)
-          state.connectedPeer = null
-          state.answeringPeer = null
-          state.answerReplay = null
-          updateStatus(state)
-        })
-
-        announceTimeouts.forEach(resetTimer)
-        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
-        unsubFns.forEach(async f => {
-          const cleanup = await f
-          cleanup()
-        })
-
-        offerManager.destroy()
-
-        if (hasActiveRooms()) {
-          return
-        }
-
-        didInit = false
-        cleanupWatchOnline()
-        cleanupRoomPresenceHandler(appId)
-      },
+      () => cleanupRoom(false),
       roomOptions
     )
 
-    roomRegistration = {
-      roomToken: null,
-      roomTokenPromise: roomNamespacePromise,
-      attachSharedPeerToRoom,
-      shouldAdvertise: () => !isPassive || ctx.isActive
-    }
-
-    appRoomRegistrations[roomId] = roomRegistration
-
-    void roomNamespacePromise.then(roomToken => {
-      const registration = roomRegistration
-
-      if (
-        !registration ||
-        didLeaveRoom ||
-        roomRegistrations[appId]?.[roomId] !== registration
-      ) {
-        return
-      }
-
-      registration.roomToken = roomToken
-      getRoomIdsByToken(appId)[roomToken] = roomId
-
-      values(sharedPeerMap).forEach(shared => {
-        if (shared.remoteRoomTokens.has(roomToken)) {
-          attachSharedPeerToRoom(shared.peerId, shared)
+    const membership = sharedPeers.registerRoom(
+      appId,
+      roomId,
+      roomNamespacePromise,
+      {
+        active: !isPassive || ctx.isActive,
+        onPeer: (proxy, peerId, physical) => {
+          const state = getState(ctx.peerStates, peerId)
+          markPeerConnected(state, physical)
+          if (isPassive && !ctx.isActive) {
+            ctx.isActive = true
+            membership.setActive(true)
+            if (ctx.requeueAnnounce) {
+              ctx.requeueAnnounce()
+            } else {
+              passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+              passiveActivationTimeout = setTimeout(
+                checkDeactivate,
+                passiveActivationGraceMs
+              )
+            }
+          }
+          onPeerConnect(proxy, peerId)
+          resetOfferState(state)
+        },
+        onDetach: (peerId, physical) => {
+          detachConnectedPeer(ctx.peerStates[peerId], physical)
+          checkDeactivate()
         }
-      })
-
-      if (!isPassive || ctx.isActive) {
-        advertiseRoomPresenceToAll(appId, roomToken, true)
       }
-    })
+    )
 
     return (occupiedRooms[appId][roomId] = joinedRoom)
   }

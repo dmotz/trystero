@@ -61,6 +61,7 @@ if (!process.env['TEST_WORKER_INDEX']) {
 
 export default {
   timeout: 53_333,
+  testIgnore: '**/node/**',
   reporter: [['list'], ['./test/connection-timing-reporter.ts']],
   use: {
     ignoreHTTPSErrors: true,

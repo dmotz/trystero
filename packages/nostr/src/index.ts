@@ -25,11 +25,6 @@ const tag = 'x'
 const eventMsgType = 'EVENT'
 const {secretKey, publicKey} = schnorr.keygen()
 const pubkey = toHex(publicKey)
-const subIdToTopic: Record<string, string> = {}
-const msgHandlers: Record<
-  string,
-  ((topic: string, data: string) => void) | undefined
-> = {}
 const kindCache: Record<string, number> = {}
 const maxTopicsPerSubscription = 250
 
@@ -134,10 +129,8 @@ export const createEvent = async (
   ])
 }
 
-export const subscribe = (subId: string, topic: string): string => {
-  subIdToTopic[subId] = topic
-
-  return toJson([
+export const subscribe = (subId: string, topic: string): string =>
+  toJson([
     'REQ',
     subId,
     {
@@ -146,7 +139,6 @@ export const subscribe = (subId: string, topic: string): string => {
       ['#' + tag]: [topic]
     }
   ])
-}
 
 type TopicHandler = (topic: string, data: string) => void
 
@@ -418,7 +410,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
               }
 
               if (
-                didRejectEvent &&
+                (didRejectEvent || msgType === 'CLOSED') &&
                 isTerminalRejection &&
                 !retireRelay(client)
               ) {
@@ -468,21 +460,16 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
               typeof payload === 'object' &&
               'content' in payload
             ) {
-              const {content} = payload
-              const handler = msgHandlers[subId]
-
-              if (handler) {
-                handler(subIdToTopic[subId] ?? '', content)
-                return
-              }
-
               const batcher = batchers[client.url]
 
               if (batcher?.subIds.includes(subId) && payload.tags) {
                 const topicTag = payload.tags.find(t => t[0] === tag)
 
                 if (topicTag?.[1]) {
-                  batcher.topics.get(topicTag[1])?.(topicTag[1], content)
+                  batcher.topics.get(topicTag[1])?.(
+                    topicTag[1],
+                    payload.content
+                  )
                 }
               }
             }
@@ -500,7 +487,9 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
     batchAdd(client, topic, handler)
 
     const cleanup = () => {
-      batchRemove(client, topic)
+      if (batchers[client.url]?.topics.get(topic) === handler) {
+        batchRemove(client, topic)
+      }
     }
 
     // Active rooms add the self topic before the root topic. Waiting only on
@@ -530,34 +519,33 @@ export {pauseRelayReconnection, resumeRelayReconnection, selfId}
 
 export const defaultRelayUrls = [
   '0x-nostr-relay.fly.dev',
-  'bitcoiner.social',
-  'nostr-verified.wellorder.net',
-  'nostr.azzamo.net',
+  'bendernostur.duckdns.org:8443',
+  'cdn.satellite.earth',
+  'nos.lol',
   'nostr.chaima.info',
-  'nostr.mad-social.net',
-  'nostr.purpura.cloud',
+  'nostr.christiansass.de',
+  'nostr.rblb.it',
   'nostr.red5d.dev',
   'nostr.robosats.org',
-  'nostr.rtvslawenia.com',
   'nostr.stakey.net',
-  'nostr.superfriends.online',
   'nostrcity-club.fly.dev',
-  'nostrue.com',
-  'relay-testnet.k8s.layer3.news',
-  'relay.44billion.net',
+  'relay-dev.gulugulu.moe',
+  'relay.aarpia.com',
   'relay.agentry.com',
-  'relay.aidatanorge.no',
   'relay.bitmacro.cloud',
+  'relay.bullishbounty.com',
+  'relay.degmods.com',
   'relay.flashapp.me',
-  'relay.froth.zone',
   'relay.grigic.org',
-  'relay.mappingbitcoin.com',
-  'relay.mwaters.net',
-  'relay.mypathtofire.de',
-  'relay.ngengine.org',
-  'relay.nostrfeed.com',
+  'relay.hackshed.dev',
+  'relay.kaleidoswap.com',
+  'relay.layer.systems',
+  'relay.nostr.blockhenge.com',
+  'relay.nostr.dev.br',
+  'relay.nostrmap.net',
+  'relay.novospes.com',
   'relay.piazza.today',
-  'schnorr.me',
+  'relay.routstr.com',
   'testr.nymble.world'
 ].map(url => 'wss://' + url)
 
