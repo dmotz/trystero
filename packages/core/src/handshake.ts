@@ -111,6 +111,7 @@ type PendingPeerState = {
 }
 
 type HandshakeManagerDeps = {
+  selfId?: string
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs: number
@@ -133,6 +134,7 @@ const toHandshakeErrorMessage = (error: Error): string => {
 }
 
 export const createHandshakeManager = ({
+  selfId: localSelfId = selfId,
   onPeerHandshake,
   onHandshakeError,
   handshakeTimeoutMs,
@@ -286,7 +288,7 @@ export const createHandshakeManager = ({
           })
         })
 
-      const isInitiator = selfId < id
+      const isInitiator = localSelfId < id
 
       void Promise.resolve(
         onPeerHandshake?.(id, sendHandshake, receiveHandshake, isInitiator)

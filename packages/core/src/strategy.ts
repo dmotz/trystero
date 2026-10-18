@@ -28,6 +28,7 @@ import {
   values,
   watchOnline
 } from './utils'
+import type {OverlayManager} from './overlay'
 import type {
   BaseRoomConfig,
   JoinRoom,
@@ -104,21 +105,40 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       throw mkErr('handshakeTimeoutMs must be a positive number')
     }
 
-    if (occupiedRooms[appId]?.[roomId]) {
-      return occupiedRooms[appId][roomId]
+    const localSelfId =
+      typeof config.peerId === 'string' && config.peerId
+        ? config.peerId
+        : selfId
+    const scopeAppId =
+      typeof config.peerId === 'string' && config.peerId
+        ? `${appId}:${config.peerId}`
+        : appId
+
+    if (occupiedRooms[scopeAppId]?.[roomId]) {
+      return occupiedRooms[scopeAppId][roomId]
     }
 
-    leavingRoomCleanups[appId]?.[roomId]?.(true)
+    leavingRoomCleanups[scopeAppId]?.[roomId]?.(true)
 
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const rootTopicP = sha1(rootTopicPlaintext)
-    const selfTopicP = sha1(topicPath(rootTopicPlaintext, selfId))
+    const selfTopicP = sha1(topicPath(rootTopicPlaintext, localSelfId))
     const key = genKey(config.password ?? '', appId, roomId)
     const roomNamespacePromise = deriveRoomNamespace(appId, roomId)
     const sharedPeerIdleMs =
       config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
 
     let didLeaveRoom = false
+    let overlayRef: OverlayManager | null = null
+
+    const syncOverlayNeighbors = (): void => {
+      if (didLeaveRoom || !overlayRef || !overlayRef.isOverlayActive()) {
+        return
+      }
+      for (const targetId of overlayRef.getTargetNeighbors()) {
+        ctx.dialPeer?.(targetId)
+      }
+    }
 
     const withKey =
       (f: (keyP: Promise<CryptoKey>, text: string) => Promise<string>) =>
@@ -149,6 +169,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     let disconnectReannounceQueued = false
     const reannounceAfterDisconnect = (): void => {
+      syncOverlayNeighbors()
       if (isPassive || !reannounceOnDisconnect || disconnectReannounceQueued) {
         return
       }
@@ -240,13 +261,21 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       reusePeer: peerId => membership.reuse(peerId),
       checkDeactivate,
       announceIntervals: [],
-      announceIntervalMs
+      announceIntervalMs,
+      selfId: localSelfId,
+      onPeerDiscovered: peerId => {
+        overlayRef?.notePeerDiscovered(peerId)
+        syncOverlayNeighbors()
+      },
+      shouldConnectPeer: (peerId, direction) =>
+        overlayRef ? overlayRef.shouldConnectPeer(peerId, direction) : true
     }
     const strategyContext: StrategyContext<TConfig> = {
       config,
       appId,
       roomId,
-      isPassive
+      isPassive,
+      peerId: localSelfId
     }
 
     const handleMessage = createSignalHandler(ctx)
@@ -426,21 +455,21 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const composedPeerHandshake = compose(onPeerHandshake)
 
     const releaseOccupiedRoom = (): void => {
-      if (occupiedRooms[appId]?.[roomId] === joinedRoom) {
-        delete occupiedRooms[appId][roomId]
+      if (occupiedRooms[scopeAppId]?.[roomId] === joinedRoom) {
+        delete occupiedRooms[scopeAppId][roomId]
 
-        if (keys(occupiedRooms[appId]).length === 0) {
-          delete occupiedRooms[appId]
+        if (keys(occupiedRooms[scopeAppId]).length === 0) {
+          delete occupiedRooms[scopeAppId]
         }
       }
     }
 
     const clearLeavingCleanup = (): void => {
-      if (leavingRoomCleanups[appId]?.[roomId] === cleanupRoom) {
-        delete leavingRoomCleanups[appId][roomId]
+      if (leavingRoomCleanups[scopeAppId]?.[roomId] === cleanupRoom) {
+        delete leavingRoomCleanups[scopeAppId][roomId]
 
-        if (keys(leavingRoomCleanups[appId]).length === 0) {
-          delete leavingRoomCleanups[appId]
+        if (keys(leavingRoomCleanups[scopeAppId]).length === 0) {
+          delete leavingRoomCleanups[scopeAppId]
         }
       }
     }
@@ -459,7 +488,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
       entries(ctx.peerStates).forEach(([peerId, state]) => {
         if (state.connectedPeer && !state.connectedPeer.isDead) {
-          if (!sharedPeers.owns(appId, peerId, state.connectedPeer)) {
+          if (!sharedPeers.owns(scopeAppId, peerId, state.connectedPeer)) {
             state.connectedPeer.destroy()
           }
         }
@@ -492,6 +521,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const roomOptions = {
+      selfId: localSelfId,
+      appId,
+      roomId,
+      ...(config.password === undefined ? {} : {password: config.password}),
+      ...(config.topology === undefined ? {} : {topology: config.topology}),
+      onOverlayReady: (overlay: OverlayManager) => {
+        overlayRef = overlay
+        overlay.setOnTargetsChanged(missingTargets => {
+          if (!didLeaveRoom) {
+            missingTargets.forEach(targetId => ctx.dialPeer?.(targetId))
+          }
+        })
+      },
       ...(config.maxReceiveBytes === undefined
         ? {}
         : {maxReceiveBytes: config.maxReceiveBytes}),
@@ -502,7 +544,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       isPassive,
       onBeforeLeave: () => {
         releaseOccupiedRoom()
-        ;(leavingRoomCleanups[appId] ??= {})[roomId] = cleanupRoom
+        ;(leavingRoomCleanups[scopeAppId] ??= {})[roomId] = cleanupRoom
       },
       onHandshakeError: (peerId: string, error: string) =>
         onJoinError?.({
@@ -513,7 +555,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         })
     }
 
-    occupiedRooms[appId] ??= {}
+    occupiedRooms[scopeAppId] ??= {}
 
     const joinedRoom = room(
       f => (onPeerConnect = f),
@@ -537,7 +579,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     )
 
     const membership = sharedPeers.registerRoom(
-      appId,
+      scopeAppId,
       roomId,
       roomNamespacePromise,
       {
@@ -568,6 +610,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     )
 
-    return (occupiedRooms[appId][roomId] = joinedRoom)
+    return (occupiedRooms[scopeAppId][roomId] = joinedRoom)
   }
 }

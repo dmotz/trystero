@@ -80,6 +80,11 @@ type ActionManagerDeps = {
   getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
+  broadcastInline?: (
+    frame: Uint8Array,
+    onProgress?: (peerId: string) => void,
+    signal?: AbortSignal
+  ) => Promise<boolean> | boolean
 }
 
 const getEnvelopeRecord = (
@@ -123,6 +128,7 @@ export const createActionManager = ({
   getPeerIds,
   canReceiveFromPeer,
   onPeerError,
+  broadcastInline,
   maxReceiveBytes
 }: ActionManagerDeps): {
   makeAction: Room['makeAction']
@@ -141,6 +147,7 @@ export const createActionManager = ({
     getPeerIds,
     canReceiveFromPeer,
     onPeerError,
+    ...(broadcastInline ? {broadcastInline} : {}),
     ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes})
   })
   const makeInternalAction = wire.makeInternalAction

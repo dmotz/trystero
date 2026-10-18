@@ -124,7 +124,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             return
           }
 
-          if (context.isPassive && shouldActivatePassiveRoom(msg)) {
+          if (
+            context.isPassive &&
+            shouldActivatePassiveRoom(msg, context.peerId ?? selfId)
+          ) {
             await ensureSelfSubscription()
           }
 
@@ -153,7 +156,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       const result = await publishTopic(
         relay,
         rootTopic,
-        toJson({peerId: selfId, ...extraPayload}),
+        toJson({peerId: context.peerId ?? selfId, ...extraPayload}),
         makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )
 

@@ -61,8 +61,56 @@ export type RelayConfig = BaseRelayConfig & {
   redundancy?: number
 }
 
+export type TopologyMode = 'mesh' | 'auto' | 'small-world' | 'tree'
+
+export type TopologyConfig = {
+  mode?: TopologyMode
+  maxPeers?: number
+  minPeers?: number
+  autoThreshold?: number
+  fanout?: number
+  redundancy?: number
+  maxHops?: number
+}
+
+export type TopologyRoute = {
+  nextHop: string
+  hops: number
+  backupNextHop?: string
+}
+
+export type TopologyMediaTree = {
+  broadcasterId: string
+  parentId: string | null
+  childrenIds: string[]
+}
+
+export type TopologyStats = {
+  messagesSent: number
+  messagesReceived: number
+  messagesForwarded: number
+  duplicatesDropped: number
+  signatureFailures: number
+  lazyRepairsSent: number
+  lazyRepairsResolved: number
+  treeReparents: number
+}
+
+export type TopologySnapshot = {
+  mode: TopologyMode
+  activeMode: 'mesh' | 'small-world' | 'tree'
+  selfId: string
+  directPeerIds: string[]
+  roomPeerIds: string[]
+  routes: Record<string, TopologyRoute>
+  mediaTrees: Record<string, TopologyMediaTree>
+  stats: TopologyStats
+}
+
 export type BaseRoomConfig = {
   appId: string
+  peerId?: string
+  topology?: TopologyMode | TopologyConfig
   maxReceiveBytes?: number
   password?: string
   passive?: boolean
@@ -210,6 +258,7 @@ export type Room = {
   leave: () => Promise<void>
   isPassive: () => boolean
   getPeers: () => Record<string, RTCPeerConnection>
+  getTopology: () => TopologySnapshot
   addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
   addTrack: (
@@ -297,6 +346,7 @@ export type StrategyContext<TConfig extends BaseRoomConfig = JoinRoomConfig> = {
   appId: string
   roomId: string
   isPassive: boolean
+  peerId?: string
 }
 
 export type TopicSubscriptionContext = {
@@ -511,4 +561,15 @@ export type SignalContext = {
   announceIntervals: number[]
   announceIntervalMs: number
   requeueAnnounce?: () => void
+  selfId?: string
+  onPeerDiscovered?: (
+    peerId: string,
+    relayId: number,
+    signalPeer: SignalPeer
+  ) => void
+  shouldConnectPeer?: (
+    peerId: string,
+    direction: 'outbound' | 'inbound'
+  ) => boolean
+  dialPeer?: (peerId: string) => void
 }

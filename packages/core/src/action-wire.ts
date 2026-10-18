@@ -107,6 +107,11 @@ type ActionWireManagerDeps = {
   getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
+  broadcastInline?: (
+    frame: Uint8Array,
+    onProgress?: (peerId: string) => void,
+    signal?: AbortSignal
+  ) => Promise<boolean> | boolean
   throwIfAborted?: (signal?: AbortSignal) => void
   maxReceiveBytes?: number
 }
@@ -179,6 +184,7 @@ export const createActionWireManager = ({
   getPeerIds,
   canReceiveFromPeer,
   onPeerError,
+  broadcastInline,
   throwIfAborted: checkAborted = throwIfAborted,
   maxReceiveBytes = defaultMaxReceiveBytes
 }: ActionWireManagerDeps): {
@@ -332,6 +338,19 @@ export const createActionWireManager = ({
                 : source,
               headerSize + meta.length
             )
+          }
+          if (
+            !targets &&
+            small &&
+            !normalizedOptions.sendToPending &&
+            broadcastInline &&
+            (await broadcastInline(
+              start,
+              peerId => onProgress?.(1, peerId, metadata),
+              signal
+            ))
+          ) {
+            return
           }
           const ids = targets
             ? Array.isArray(targets)

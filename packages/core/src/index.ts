@@ -23,6 +23,14 @@ export {
   values
 } from './utils'
 
+export {
+  computeMediaTreeChildren,
+  computeShortestPathRoutes,
+  computeTargetNeighbors,
+  createOverlayManager,
+  normalizeTopologyConfig
+} from './overlay'
+
 export type {
   ActionProgressContext,
   ActionProgressHandler,
@@ -71,6 +79,12 @@ export type {
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext,
+  TopologyConfig,
+  TopologyMediaTree,
+  TopologyMode,
+  TopologyRoute,
+  TopologySnapshot,
+  TopologyStats,
   RemoteTrackRef,
   SharedMediaPeer,
   TargetPeers,
