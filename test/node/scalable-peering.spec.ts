@@ -2,6 +2,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  compareStateRecords,
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  formatSelfCertifyingRoomId,
+  parseSelfCertifyingRoomId
+} from '../../packages/core/src/authority.ts'
+import {
   computeShortestPathRoutes,
   computeTargetNeighbors,
   createOverlayManager,
@@ -1172,7 +1180,8 @@ void test('Elegant API & automatic configuration: joinRoom with topology "auto" 
   const maxPeers = 6
 
   // Verify normalizeTopologyConfig supports both string shorthand and full config object
-  assert.equal(normalizeTopologyConfig().mode, 'mesh')
+  assert.equal(normalizeTopologyConfig().mode, 'auto')
+  assert.equal(normalizeTopologyConfig('mesh').mode, 'mesh')
   assert.equal(normalizeTopologyConfig('small-world').mode, 'small-world')
   assert.equal(normalizeTopologyConfig('tree').mode, 'tree')
   assert.equal(normalizeTopologyConfig('auto').mode, 'auto')
@@ -1848,4 +1857,676 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
   honestRelay.destroy()
   blackholeRelay.destroy()
   bob.destroy()
+})
+
+void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ admin: true }), createAdminRoom, and passphrase-derived keys', async () => {
+  // 1. Standalone createAdminIdentity & createAdminRoom helper
+  const provisioned = await createAdminRoom('watch-party')
+  assert.equal(provisioned.baseRoomId, 'watch-party')
+  assert.match(provisioned.fingerprint, /^[0-9A-Za-z]{16}$/)
+  assert.equal(
+    provisioned.roomId,
+    formatSelfCertifyingRoomId('watch-party', provisioned.fingerprint)
+  )
+  const parsed = parseSelfCertifyingRoomId(provisioned.roomId)
+  assert.deepEqual(parsed, {
+    baseRoomId: 'watch-party',
+    fingerprint: provisioned.fingerprint
+  })
+  assert.equal(
+    await computePublicKeyFingerprint(provisioned.identity.publicKey),
+    provisioned.fingerprint
+  )
+
+  // 2. On-the-fly admin room creation via joinRoom({ appId, admin: true }, 'lobby')
+  const topicSubs = new Map<string, Set<(topic: string, msg: string) => void>>()
+  const joinRoom = createTopicStrategy({
+    init: () => ({}),
+    subscribeTopic: (_relay, topic, onMessage) => {
+      let set = topicSubs.get(topic)
+      if (!set) {
+        set = new Set()
+        topicSubs.set(topic, set)
+      }
+      const handler = (t: string, m: string) => {
+        void onMessage(t, m)
+      }
+      set.add(handler)
+      return () => {
+        set?.delete(handler)
+      }
+    },
+    publishTopic: (_relay, topic, msg) => {
+      const handlers = topicSubs.get(topic)
+      if (handlers) {
+        const text = typeof msg === 'string' ? msg : JSON.stringify(msg)
+        for (const h of handlers) {
+          queueMicrotask(() => h(topic, text))
+        }
+      }
+    }
+  })
+
+  const createdRooms: Array<ReturnType<typeof joinRoom>> = []
+  try {
+    const hostRoom = joinRoom(
+      {
+        appId: 'auth-bootstrap-app',
+        peerId: 'host-peer',
+        admin: true,
+        rtcPolyfill: MockRTCPeerConnection as any
+      },
+      'game-lobby'
+    )
+    createdRooms.push(hostRoom)
+
+    const hostAuth = await hostRoom.getAuthority()
+    assert.equal(hostAuth.baseRoomId, 'game-lobby')
+    assert.ok(
+      hostAuth.fingerprint && /^[0-9A-Za-z]{16}$/.test(hostAuth.fingerprint)
+    )
+    assert.equal(hostAuth.roomId, `game-lobby.${hostAuth.fingerprint}`)
+    assert.equal(hostAuth.isAdmin, true)
+    assert.deepEqual(hostAuth.roles, ['admin'])
+    assert.ok(hostAuth.publicKey)
+    assert.ok(hostAuth.adminKey)
+
+    // Guest joins using the self-certifying roomId with zero admin config
+    const guestRoom = joinRoom(
+      {
+        appId: 'auth-bootstrap-app',
+        peerId: 'guest-peer',
+        rtcPolyfill: MockRTCPeerConnection as any
+      },
+      hostAuth.roomId
+    )
+    createdRooms.push(guestRoom)
+    const guestAuth = await guestRoom.getAuthority()
+    assert.equal(guestAuth.roomId, hostAuth.roomId)
+    assert.equal(guestAuth.baseRoomId, 'game-lobby')
+    assert.equal(guestAuth.fingerprint, hostAuth.fingerprint)
+    assert.equal(guestAuth.isAdmin, false)
+    assert.deepEqual(guestAuth.roles, [])
+
+    // Impostor attempts to pass freshly generated credentials on the existing self-certifying roomId
+    const impostorIdentity = await createAdminIdentity()
+    const impostorRoom = joinRoom(
+      {
+        appId: 'auth-bootstrap-app',
+        peerId: 'impostor-peer',
+        admin: {credentials: impostorIdentity.adminKey},
+        rtcPolyfill: MockRTCPeerConnection as any
+      },
+      hostAuth.roomId
+    )
+    createdRooms.push(impostorRoom)
+    const impostorAuth = await impostorRoom.getAuthority()
+    assert.equal(
+      impostorAuth.isAdmin,
+      false,
+      'credentials whose fingerprint does not match the self-certifying roomId must not grant admin status'
+    )
+
+    // Rejoining with the saved hostAuth.adminKey restores root admin status on the same roomId
+    const rejoinedHostRoom = joinRoom(
+      {
+        appId: 'auth-bootstrap-app',
+        peerId: 'host-rejoined',
+        admin: {credentials: hostAuth.adminKey!},
+        rtcPolyfill: MockRTCPeerConnection as any
+      },
+      hostAuth.roomId
+    )
+    createdRooms.push(rejoinedHostRoom)
+    const rejoinedAuth = await rejoinedHostRoom.getAuthority()
+    assert.equal(rejoinedAuth.isAdmin, true)
+    assert.equal(rejoinedAuth.roomId, hostAuth.roomId)
+
+    // 3. Mode B: Deterministic passphrase-derived admin identity
+    const passId1 = await createAdminIdentity({
+      passphrase: 'correct-horse-battery-staple',
+      appId: 'auth-bootstrap-app',
+      roomId: 'clean-slug'
+    })
+    const passId2 = await createAdminIdentity({
+      passphrase: 'correct-horse-battery-staple',
+      appId: 'auth-bootstrap-app',
+      roomId: 'clean-slug'
+    })
+    assert.equal(passId1.fingerprint, passId2.fingerprint)
+    assert.equal(passId1.publicKey, passId2.publicKey)
+  } finally {
+    await Promise.all(createdRooms.map(r => r.leave()))
+  }
+})
+
+void test('Privileged actions, role delegation, sub-delegation, and revocation across mesh and multi-hop overlays', async () => {
+  const provisioned = await createAdminRoom('raid-room')
+  const roomId = provisioned.roomId
+  const appId = 'priv-action-app'
+
+  // Set up a 4-peer multi-hop chain in small-world overlay:
+  // admin <-> bob <-> carol <-> mallory
+  const peers = ['admin', 'bob', 'carol', 'mallory'] as const
+  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
+  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+
+  for (const id of peers) {
+    const room = createRoom(
+      f => regMap.set(id, f),
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId,
+        roomId,
+        topology: {mode: 'small-world', maxPeers: 2},
+        ...(id === 'admin'
+          ? {admin: {credentials: provisioned.identity.adminKey}}
+          : {})
+      }
+    )
+    rooms.set(id, room)
+  }
+
+  try {
+    const connectDirect = (a: string, b: string) => {
+      const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+      regMap.get(a)!(peerA, b)
+      regMap.get(b)!(peerB, a)
+    }
+
+    connectDirect('admin', 'bob')
+    connectDirect('bob', 'carol')
+    connectDirect('carol', 'mallory')
+
+    await waitFor(
+      () =>
+        peers.every(
+          id =>
+            rooms.get(id)!.getTopology().roomPeerIds.length === peers.length - 1
+        ),
+      3_000
+    )
+
+    const receivedAlerts = new Map<
+      string,
+      Array<{data: any; from: string; meta: any; roles: string[]}>
+    >()
+    const actions = new Map<string, any>()
+
+    for (const id of peers) {
+      receivedAlerts.set(id, [])
+      const alertAction = rooms
+        .get(id)!
+        .makeAction<{msg: string}>('mod-alert', {
+          authority: ['admin', 'moderator'],
+          onMessage: (data, {peerId, metadata, roles}) => {
+            receivedAlerts.get(id)!.push({
+              data,
+              from: peerId,
+              meta: metadata,
+              roles: roles ?? []
+            })
+          }
+        })
+      actions.set(id, alertAction)
+    }
+
+    // 1. Admin sends a privileged broadcast across the multi-hop overlay with user metadata
+    await actions
+      .get('admin')
+      .send({msg: 'boss-phase-1'}, {metadata: {priority: 'high'}})
+    await waitFor(
+      () =>
+        receivedAlerts.get('bob')!.length === 1 &&
+        receivedAlerts.get('carol')!.length === 1 &&
+        receivedAlerts.get('mallory')!.length === 1,
+      2_000
+    )
+    assert.deepEqual(receivedAlerts.get('mallory')![0], {
+      data: {msg: 'boss-phase-1'},
+      from: 'admin',
+      meta: {priority: 'high'},
+      roles: ['admin']
+    })
+
+    // 2. Non-privileged Mallory attempts to send on 'mod-alert' -> rejected locally
+    await assert.rejects(
+      () => actions.get('mallory').send({msg: 'forged-alert'}),
+      /insufficient authority/
+    )
+
+    // Wait for initial authority sync to settle
+    await waitFor(
+      () => rooms.get('mallory')!.getPeerRoles('admin').includes('admin'),
+      2_000
+    )
+
+    // 3. Root admin grants 'moderator' with canDelegate: true to Bob
+    await rooms.get('admin')!.grantRole('bob', 'moderator', {canDelegate: true})
+    await waitFor(
+      () =>
+        rooms.get('bob')!.getPeerRoles('bob').includes('moderator') &&
+        rooms.get('carol')!.getPeerRoles('bob').includes('moderator') &&
+        rooms.get('mallory')!.getPeerRoles('bob').includes('moderator'),
+      2_000
+    )
+
+    // Bob can now broadcast on 'mod-alert'
+    await actions.get('bob').send({msg: 'mod-warning-1'})
+    await waitFor(
+      () =>
+        receivedAlerts
+          .get('admin')!
+          .some(a => a.data.msg === 'mod-warning-1') &&
+        receivedAlerts
+          .get('mallory')!
+          .some(a => a.data.msg === 'mod-warning-1'),
+      2_000
+    )
+    const bobAlertOnMallory = receivedAlerts
+      .get('mallory')!
+      .find(a => a.data.msg === 'mod-warning-1')!
+    assert.deepEqual(bobAlertOnMallory.roles, ['moderator'])
+
+    // 4. Bob sub-delegates 'moderator' to Carol (without canDelegate), and cannot escalate to 'admin'
+    await assert.rejects(
+      () => rooms.get('bob')!.grantRole('carol', 'admin'),
+      /insufficient authority/
+    )
+    await rooms.get('bob')!.grantRole('carol', 'moderator')
+    await waitFor(
+      () =>
+        rooms.get('carol')!.getPeerRoles('carol').includes('moderator') &&
+        rooms.get('admin')!.getPeerRoles('carol').includes('moderator'),
+      2_000
+    )
+
+    // Carol can now broadcast on 'mod-alert'
+    await actions.get('carol').send({msg: 'carol-mod-notice'})
+    await waitFor(
+      () =>
+        receivedAlerts
+          .get('admin')!
+          .some(a => a.data.msg === 'carol-mod-notice'),
+      2_000
+    )
+
+    // 5. Delegated moderator Bob cannot revoke root admin
+    await assert.rejects(
+      () => rooms.get('bob')!.revokeRole('admin'),
+      /cannot revoke a root admin/
+    )
+
+    // 6. Root admin revokes Carol's 'moderator' role
+    await rooms.get('admin')!.revokeRole('carol', 'moderator')
+    await waitFor(
+      () =>
+        !rooms.get('carol')!.getPeerRoles('carol').includes('moderator') &&
+        !rooms.get('admin')!.getPeerRoles('carol').includes('moderator') &&
+        !rooms.get('bob')!.getPeerRoles('carol').includes('moderator'),
+      2_000
+    )
+
+    // Carol can no longer send on 'mod-alert'
+    await assert.rejects(
+      () => actions.get('carol').send({msg: 'after-revocation'}),
+      /insufficient authority/
+    )
+  } finally {
+    await Promise.all(peers.map(id => rooms.get(id)!.leave()))
+  }
+})
+
+void test('Authoritative state (room.makeState): monotonic updates, custom validation, co-admin LWW convergence, and late-joiner sync after admin leaves', async () => {
+  const provisioned = await createAdminRoom('state-room')
+  const roomId = provisioned.roomId
+  const appId = 'state-test-app'
+
+  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
+  const makePeerRoom = (id: string, isAdmin = false) =>
+    createRoom(
+      f => regMap.set(id, f),
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId,
+        roomId,
+        topology: 'mesh',
+        ...(isAdmin
+          ? {admin: {credentials: provisioned.identity.adminKey}}
+          : {})
+      }
+    )
+
+  const connectDirect = (a: string, b: string) => {
+    const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+    regMap.get(a)!(peerA, b)
+    regMap.get(b)!(peerB, a)
+  }
+
+  const admin1 = makePeerRoom('admin-1', true)
+  const admin2 = makePeerRoom('admin-2', true)
+  const viewer1 = makePeerRoom('viewer-1', false)
+
+  type GameState = {round: number; leader: string}
+  const validateGame = (next: GameState, prev: GameState) =>
+    next.round >= prev.round
+
+  const stateAdmin1 = admin1.makeState<GameState>(
+    'game',
+    {round: 0, leader: 'none'},
+    {validate: validateGame}
+  )
+  const stateAdmin2 = admin2.makeState<GameState>(
+    'game',
+    {round: 0, leader: 'none'},
+    {validate: validateGame}
+  )
+  const stateViewer1 = viewer1.makeState<GameState>(
+    'game',
+    {round: 0, leader: 'none'},
+    {validate: validateGame}
+  )
+
+  const viewerChanges: Array<{val: GameState; prev: GameState; by: string}> = []
+  stateViewer1.onChange = (val, prev, ctx) => {
+    viewerChanges.push({val, prev, by: ctx.updatedBy})
+  }
+
+  connectDirect('admin-1', 'admin-2')
+  connectDirect('admin-1', 'viewer-1')
+  connectDirect('admin-2', 'viewer-1')
+
+  await waitFor(
+    () =>
+      admin1.getTopology().directPeerIds.length === 2 &&
+      viewer1.getTopology().directPeerIds.length === 2,
+    2_000
+  )
+
+  // 1. Non-admin viewer cannot mutate authoritative state
+  await assert.rejects(
+    () => stateViewer1.set({round: 99, leader: 'viewer-1'}),
+    /insufficient authority/
+  )
+
+  // 2. Admin 1 updates state twice (value and functional updater)
+  await stateAdmin1.set({round: 1, leader: 'admin-1'})
+  await stateAdmin1.set(prev => ({round: prev.round + 1, leader: 'admin-1'}))
+
+  await waitFor(
+    () => stateViewer1.get().round === 2 && stateAdmin2.get().round === 2,
+    2_000
+  )
+  assert.deepEqual(stateViewer1.get(), {round: 2, leader: 'admin-1'})
+  assert.equal(stateViewer1.getMeta()?.updatedBy, 'admin-1')
+  assert.equal(stateViewer1.getMeta()?.seq, 2)
+  assert.ok(viewerChanges.length >= 1)
+
+  // 3. Custom validate hook blocks regressive round update
+  await assert.rejects(
+    () => stateAdmin1.set({round: 0, leader: 'admin-1'}),
+    /state validation failed/
+  )
+
+  // 4. Co-admin concurrent updates converge deterministically across all peers
+  await Promise.all([
+    stateAdmin1.set({round: 3, leader: 'from-admin-1'}),
+    stateAdmin2.set({round: 3, leader: 'from-admin-2'})
+  ])
+  await wait(80)
+  assert.deepEqual(stateAdmin1.get(), stateAdmin2.get())
+  assert.deepEqual(stateViewer1.get(), stateAdmin1.get())
+  assert.equal(stateAdmin1.getMeta()?.hash, stateViewer1.getMeta()?.hash)
+
+  // 5. Both admins leave the room, then a late-joiner (viewer-2) connects ONLY to viewer-1!
+  // viewer-2 must still receive and verify the signed authoritative state snapshot from viewer-1.
+  const finalExpectedState = stateViewer1.get()
+  const finalExpectedHash = stateViewer1.getMeta()?.hash
+  await Promise.all([admin1.leave(), admin2.leave()])
+
+  const viewer2 = makePeerRoom('viewer-2', false)
+  const stateViewer2 = viewer2.makeState<GameState>(
+    'game',
+    {round: 0, leader: 'none'},
+    {validate: validateGame}
+  )
+  connectDirect('viewer-1', 'viewer-2')
+
+  await waitFor(() => stateViewer2.get().round === 3, 2_000)
+  assert.deepEqual(stateViewer2.get(), finalExpectedState)
+  assert.equal(stateViewer2.getMeta()?.hash, finalExpectedHash)
+
+  // Verify compareStateRecords deterministic ordering
+  assert.equal(
+    compareStateRecords(
+      {epoch: 1, seq: 2, ts: 100, updatedBy: 'a', hash: '11'} as any,
+      {epoch: 1, seq: 1, ts: 200, updatedBy: 'b', hash: '22'} as any
+    ) > 0,
+    true
+  )
+
+  await Promise.all([viewer1.leave(), viewer2.leave()])
+})
+
+void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast drop, and multi-layer room.banPeer enforcement', async () => {
+  // 1. Verify computeTargetNeighbors pins privilegedPeers to index 0 (tree root)
+  // even when the admin has a lexicographically high peerId ('zzzz-admin')
+  const roster = [
+    'aaaa-peer',
+    'bbbb-peer',
+    'cccc-peer',
+    'dddd-peer',
+    'zzzz-admin'
+  ]
+  const priv = new Set(['zzzz-admin'])
+  const rootTargets = computeTargetNeighbors(
+    'zzzz-admin',
+    roster,
+    'tree',
+    6,
+    2,
+    priv
+  )
+  // As index 0 in binary tree (fanout 2), 'zzzz-admin' has children at index 1 ('aaaa-peer') and index 2 ('bbbb-peer')
+  assert.ok(rootTargets.has('aaaa-peer'))
+  assert.ok(rootTargets.has('bbbb-peer'))
+  const child1Targets = computeTargetNeighbors(
+    'aaaa-peer',
+    roster,
+    'tree',
+    6,
+    2,
+    priv
+  )
+  assert.ok(
+    child1Targets.has('zzzz-admin'),
+    'first non-privileged peer (index 1) must select privileged root (index 0) as its tree parent'
+  )
+
+  // 2. Hop-1 relay drops unauthorized overlay broadcast before forwarding downstream
+  const forwardedToDownstream: Uint8Array[] = []
+  const malloryOverlay = createOverlayManager({
+    selfId: 'mallory-ov',
+    appId: 'hop1-app',
+    roomId: 'hop1-room',
+    topology: {mode: 'small-world', maxPeers: 2},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+  const hop1RelayOverlay = createOverlayManager({
+    selfId: 'relay-ov',
+    appId: 'hop1-app',
+    roomId: 'hop1-room',
+    topology: {mode: 'small-world', maxPeers: 2},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {},
+    canPeerSendAction: peerId => peerId === 'admin-ov'
+  })
+  hop1RelayOverlay.registerActionAuthority('admin-cmd', ['admin'])
+
+  const makeSimplePipe = (
+    fromId: string,
+    toManager: ReturnType<typeof createOverlayManager>
+  ) => ({
+    isDead: false,
+    connection: {} as any,
+    channel: {readyState: 'open'} as any,
+    getOffer: async () => undefined,
+    signal: async () => undefined,
+    sendData: (data: Uint8Array) => {
+      queueMicrotask(() =>
+        toManager.handleOverlayFrame(fromId, data.slice().buffer)
+      )
+    },
+    destroy: () => {},
+    setHandlers: () => {},
+    addStream: () => {},
+    removeStream: () => {},
+    addTrack: () => ({}) as any,
+    removeTrack: () => {},
+    replaceTrack: async () => {}
+  })
+
+  malloryOverlay.addDirectPeer(
+    'relay-ov',
+    makeSimplePipe('mallory-ov', hop1RelayOverlay)
+  )
+  hop1RelayOverlay.addDirectPeer(
+    'mallory-ov',
+    makeSimplePipe('relay-ov', malloryOverlay)
+  )
+  hop1RelayOverlay.addDirectPeer('downstream-ov', {
+    ...makeSimplePipe('relay-ov', malloryOverlay),
+    sendData: (data: Uint8Array) => {
+      const parsed = unpackOverlayBinary(data)
+      if (parsed?.kind === overlayBroadcastKind) {
+        forwardedToDownstream.push(data.slice())
+      }
+    }
+  })
+
+  await waitFor(
+    () => hop1RelayOverlay.getSnapshot().directPeerIds.includes('mallory-ov'),
+    1_000
+  )
+  await wait(40)
+
+  // Mallory broadcasts an action wire frame (v2 header: byte[0]=2, bytes[2..34]=namespace) claiming privileged action 'admin-cmd'
+  const fakePrivPayload = new Uint8Array(40)
+  fakePrivPayload[0] = 2
+  fakePrivPayload.set(encodeBytes('admin-cmd'), 2)
+  const relaySigFailBefore =
+    hop1RelayOverlay.getSnapshot().stats.signatureFailures
+  await malloryOverlay.broadcastInline(fakePrivPayload)
+  await wait(50)
+  assert.equal(
+    hop1RelayOverlay.getSnapshot().stats.signatureFailures,
+    relaySigFailBefore + 1,
+    'Hop-1 relay must reject unauthorized broadcast on privileged action and increment signatureFailures'
+  )
+  assert.equal(
+    forwardedToDownstream.length,
+    0,
+    'Hop-1 relay must NOT forward unauthorized privileged broadcast downstream'
+  )
+  malloryOverlay.destroy()
+  hop1RelayOverlay.destroy()
+
+  // 3. Multi-layer room.banPeer(peerId) enforcement
+  const provisioned = await createAdminRoom('ban-test-room')
+  const roomId = provisioned.roomId
+  const appId = 'ban-test-app'
+
+  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
+  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const peerIds = ['admin', 'honest', 'mallory']
+
+  for (const id of peerIds) {
+    const room = createRoom(
+      f => regMap.set(id, f),
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId,
+        roomId,
+        topology: 'mesh',
+        ...(id === 'admin'
+          ? {admin: {credentials: provisioned.identity.adminKey}}
+          : {})
+      }
+    )
+    rooms.set(id, room)
+  }
+
+  const connectDirect = (a: string, b: string) => {
+    const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+    regMap.get(a)!(peerA, b)
+    regMap.get(b)!(peerB, a)
+  }
+
+  try {
+    connectDirect('admin', 'honest')
+    connectDirect('admin', 'mallory')
+    connectDirect('honest', 'mallory')
+
+    await waitFor(
+      () =>
+        rooms.get('admin')!.getTopology().directPeerIds.length === 2 &&
+        rooms.get('honest')!.getTopology().directPeerIds.length === 2,
+      2_000
+    )
+
+    const honestChatReceived: Array<{msg: string; from: string}> = []
+    for (const id of peerIds) {
+      const chatAction = rooms.get(id)!.makeAction<string>('chat', {
+        onMessage: (msg, {peerId}) => {
+          if (id === 'honest') {
+            honestChatReceived.push({msg, from: peerId})
+          }
+        }
+      })
+      ;(rooms.get(id) as any).sendChat = chatAction.send
+    }
+
+    // Non-admin cannot ban a peer
+    await assert.rejects(
+      () => rooms.get('honest')!.banPeer('mallory'),
+      /only an admin can ban a peer/
+    )
+
+    // Admin bans Mallory
+    await rooms.get('admin')!.banPeer('mallory', {reason: 'abusive behavior'})
+    await waitFor(
+      () =>
+        rooms.get('admin')!.isBanned('mallory') &&
+        rooms.get('honest')!.isBanned('mallory'),
+      2_000
+    )
+
+    assert.equal(rooms.get('admin')!.isBanned('mallory'), true)
+    assert.equal(rooms.get('honest')!.isBanned('mallory'), true)
+    assert.equal(
+      rooms.get('honest')!.getTopology().directPeerIds.includes('mallory'),
+      false,
+      'banned peer must be immediately disconnected from honest peers'
+    )
+
+    // Even if Mallory tries to reconnect to Honest with a new peer connection, Honest immediately rejects/destroys it
+    connectDirect('honest', 'mallory')
+    await wait(50)
+    assert.equal(
+      rooms.get('honest')!.getTopology().directPeerIds.includes('mallory'),
+      false,
+      'banned peer reconnection attempt must be rejected'
+    )
+  } finally {
+    await Promise.all(peerIds.map(id => rooms.get(id)!.leave()))
+  }
 })

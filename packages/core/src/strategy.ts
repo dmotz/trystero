@@ -1,8 +1,9 @@
+import {parseSelfCertifyingRoomId, resolveRoomAuthority} from './authority'
 import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
 import {OfferManager} from './offer-manager'
 import {createPasswordHandshake} from './handshake'
 import initPeer from './peer'
-import room from './room'
+import room, {type RoomAuthorityBridge} from './room'
 import {SharedPeerManager} from './shared-peer'
 import {
   createSignalHandler,
@@ -120,19 +121,54 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     leavingRoomCleanups[scopeAppId]?.[roomId]?.(true)
 
+    const isAdminBacked =
+      Boolean(config.admin) ||
+      Boolean(parseSelfCertifyingRoomId(roomId).fingerprint)
+    const resolvedAuthorityP = isAdminBacked
+      ? resolveRoomAuthority(roomId, config.admin)
+      : undefined
+
+    let effectiveRoomId = roomId
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
-    const rootTopicP = sha1(rootTopicPlaintext)
-    const selfTopicP = sha1(topicPath(rootTopicPlaintext, localSelfId))
-    const key = genKey(config.password ?? '', appId, roomId)
-    const roomNamespacePromise = deriveRoomNamespace(appId, roomId)
+    const effectiveRoomIdP = resolvedAuthorityP?.then(auth => {
+      effectiveRoomId = auth.effectiveRoomId
+      ctx.roomId = auth.effectiveRoomId
+      ctx.rootTopicPlaintext = topicPath(libName, appId, auth.effectiveRoomId)
+      strategyContext.roomId = auth.effectiveRoomId
+      if (auth.effectiveRoomId !== roomId && !didLeaveRoom) {
+        ;(occupiedRooms[scopeAppId] ??= {})[auth.effectiveRoomId] = joinedRoom
+      }
+      return auth.effectiveRoomId
+    })
+
+    const rootTopicP = effectiveRoomIdP
+      ? effectiveRoomIdP.then(rid => sha1(topicPath(libName, appId, rid)))
+      : sha1(rootTopicPlaintext)
+    const selfTopicP = effectiveRoomIdP
+      ? effectiveRoomIdP.then(rid =>
+          sha1(topicPath(topicPath(libName, appId, rid), localSelfId))
+        )
+      : sha1(topicPath(rootTopicPlaintext, localSelfId))
+    const key = effectiveRoomIdP
+      ? effectiveRoomIdP.then(rid => genKey(config.password ?? '', appId, rid))
+      : genKey(config.password ?? '', appId, roomId)
+    const roomNamespacePromise = effectiveRoomIdP
+      ? effectiveRoomIdP.then(rid => deriveRoomNamespace(appId, rid))
+      : deriveRoomNamespace(appId, roomId)
     const sharedPeerIdleMs =
       config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
 
     let didLeaveRoom = false
     let overlayRef: OverlayManager | null = null
+    let authorityBridge: RoomAuthorityBridge | null = null
 
     const syncOverlayNeighbors = (): void => {
-      if (didLeaveRoom || !overlayRef || !overlayRef.isOverlayActive()) {
+      if (
+        didLeaveRoom ||
+        isPassive ||
+        !overlayRef ||
+        overlayRef.getSnapshot().activeMode === 'mesh'
+      ) {
         return
       }
       for (const targetId of overlayRef.getTargetNeighbors()) {
@@ -263,9 +299,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       announceIntervals: [],
       announceIntervalMs,
       selfId: localSelfId,
-      onPeerDiscovered: peerId => {
+      onPeerDiscovered: (peerId, _relayId, _signalPeer, payload) => {
+        const sigWait =
+          payload && authorityBridge
+            ? authorityBridge.onSignalingPayload(peerId, payload)
+            : undefined
+        if (sigWait) {
+          return sigWait.then(() => {
+            overlayRef?.notePeerDiscovered(peerId)
+            syncOverlayNeighbors()
+          })
+        }
         overlayRef?.notePeerDiscovered(peerId)
         syncOverlayNeighbors()
+        return undefined
       },
       shouldConnectPeer: (peerId, direction) =>
         overlayRef ? overlayRef.shouldConnectPeer(peerId, direction) : true
@@ -323,7 +370,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           return
         }
 
-        const extra = isPassive ? {passive: true} : undefined
+        const authExtra =
+          isAdminBacked && authorityBridge
+            ? await authorityBridge.getAnnounceExtra()
+            : undefined
+        const extra =
+          isPassive || authExtra
+            ? {...authExtra, ...(isPassive ? {passive: true} : {})}
+            : undefined
         let announceResult: Awaited<
           ReturnType<StrategyAdapter<TRelay, TConfig>['announce']>
         > = undefined
@@ -451,26 +505,46 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
     const sharedPassword = config.password ?? ''
-    const {compose} = createPasswordHandshake(sharedPassword, appId, roomId)
+    const {compose} = createPasswordHandshake(
+      sharedPassword,
+      appId,
+      effectiveRoomIdP ?? roomId
+    )
     const composedPeerHandshake = compose(onPeerHandshake)
 
     const releaseOccupiedRoom = (): void => {
       if (occupiedRooms[scopeAppId]?.[roomId] === joinedRoom) {
         delete occupiedRooms[scopeAppId][roomId]
-
-        if (keys(occupiedRooms[scopeAppId]).length === 0) {
-          delete occupiedRooms[scopeAppId]
-        }
+      }
+      if (
+        effectiveRoomId !== roomId &&
+        occupiedRooms[scopeAppId]?.[effectiveRoomId] === joinedRoom
+      ) {
+        delete occupiedRooms[scopeAppId][effectiveRoomId]
+      }
+      if (
+        occupiedRooms[scopeAppId] &&
+        keys(occupiedRooms[scopeAppId]).length === 0
+      ) {
+        delete occupiedRooms[scopeAppId]
       }
     }
 
     const clearLeavingCleanup = (): void => {
       if (leavingRoomCleanups[scopeAppId]?.[roomId] === cleanupRoom) {
         delete leavingRoomCleanups[scopeAppId][roomId]
-
-        if (keys(leavingRoomCleanups[scopeAppId]).length === 0) {
-          delete leavingRoomCleanups[scopeAppId]
-        }
+      }
+      if (
+        effectiveRoomId !== roomId &&
+        leavingRoomCleanups[scopeAppId]?.[effectiveRoomId] === cleanupRoom
+      ) {
+        delete leavingRoomCleanups[scopeAppId][effectiveRoomId]
+      }
+      if (
+        leavingRoomCleanups[scopeAppId] &&
+        keys(leavingRoomCleanups[scopeAppId]).length === 0
+      ) {
+        delete leavingRoomCleanups[scopeAppId]
       }
     }
 
@@ -526,6 +600,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       roomId,
       ...(config.password === undefined ? {} : {password: config.password}),
       ...(config.topology === undefined ? {} : {topology: config.topology}),
+      ...(config.admin === undefined ? {} : {admin: config.admin}),
+      ...(resolvedAuthorityP ? {resolvedAuthorityP} : {}),
       onOverlayReady: (overlay: OverlayManager) => {
         overlayRef = overlay
         overlay.setOnTargetsChanged(missingTargets => {
@@ -533,6 +609,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             missingTargets.forEach(targetId => ctx.dialPeer?.(targetId))
           }
         })
+      },
+      onAuthorityReady: (bridge: RoomAuthorityBridge) => {
+        authorityBridge = bridge
       },
       ...(config.maxReceiveBytes === undefined
         ? {}

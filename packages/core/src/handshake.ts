@@ -23,7 +23,7 @@ const overlapRoomPasswordErr = mkErr('incorrect password for overlapping room')
 export const createPasswordHandshake = (
   password: string,
   appId: string,
-  roomId: string
+  roomId: string | Promise<string>
 ): {
   run: (
     send: HandshakeSender,
@@ -32,9 +32,12 @@ export const createPasswordHandshake = (
   ) => Promise<void>
   compose: (userHandshake?: PeerHandshake) => PeerHandshake | undefined
 } => {
-  const hashChallenge = (challenge: string): Promise<string> =>
-    hashWith('SHA-256', `${challenge}:${password}:${appId}:${roomId}`).then(
-      toHex
+  const hashChallenge = async (challenge: string): Promise<string> =>
+    toHex(
+      await hashWith(
+        'SHA-256',
+        `${challenge}:${password}:${appId}:${await roomId}`
+      )
     )
 
   const run = async (

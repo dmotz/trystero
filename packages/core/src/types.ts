@@ -107,10 +107,119 @@ export type TopologySnapshot = {
   stats: TopologyStats
 }
 
+export type AdminIdentity = {
+  publicKey: string
+  fingerprint: string
+  adminKey: string
+  signPrivateKey: CryptoKey
+  signPublicKey: CryptoKey
+  signPubJwk: JsonWebKey
+}
+
+export type AuthorityConfig = {
+  rootPubKeys?: string[]
+  credentials?: string | AdminIdentity
+  create?: boolean
+  signalingProofs?: boolean
+}
+
+export type RoleCertificate = {
+  v: 1
+  certId: string
+  issuerPubKey: string
+  subPeerId: string
+  subPubKey: JsonWebKey
+  appId: string
+  roomId: string
+  roles: string[]
+  canDelegate?: boolean
+  isRoot?: boolean
+  iat: number
+  exp?: number
+  parentCert?: RoleCertificate
+  sig: string
+}
+
+export type RoleRevocationRecord = {
+  v: 1
+  appId: string
+  roomId: string
+  issuerPeerId: string
+  targetPeerId: string
+  role?: string
+  seq: number
+  ts: number
+  issuerCert: RoleCertificate
+  sig: string
+}
+
+export type PeerBanRecord = {
+  v: 1
+  appId: string
+  roomId: string
+  issuerPeerId: string
+  targetPeerId: string
+  targetKeyThumbprint?: string
+  reason?: string
+  seq: number
+  ts: number
+  issuerCert: RoleCertificate
+  sig: string
+}
+
+export type AuthoritativeStateRecord<T extends JsonValue = JsonValue> = {
+  v: 1
+  appId: string
+  roomId: string
+  namespace: string
+  epoch: number
+  seq: number
+  prevHash: string
+  ts: number
+  updatedBy: string
+  signerPubKey: JsonWebKey
+  cert: RoleCertificate
+  value: T
+  sig: string
+  hash: string
+}
+
+export type RoomAuthorityInfo = {
+  roomId: string
+  baseRoomId: string
+  fingerprint: string | null
+  isAdmin: boolean
+  roles: string[]
+  publicKey: string | null
+  adminKey: string | null
+}
+
+export type StateChangeContext = {
+  updatedBy: string
+  roles: string[]
+  seq: number
+  epoch: number
+  timestamp: number
+  hash: string
+}
+
+export type StateConfig<T extends JsonValue = JsonValue> = {
+  authority?: string | string[]
+  validate?: (next: T, prev: T, context: StateChangeContext) => boolean
+}
+
+export type AuthoritativeState<T extends JsonValue = JsonValue> = {
+  get: () => T
+  set: (next: T | ((prev: T) => T)) => Promise<void>
+  getMeta: () => StateChangeContext | null
+  onChange: ((value: T, prev: T, context: StateChangeContext) => void) | null
+}
+
 export type BaseRoomConfig = {
   appId: string
   peerId?: string
   topology?: TopologyMode | TopologyConfig
+  admin?: boolean | string | AuthorityConfig
   maxReceiveBytes?: number
   password?: string
   passive?: boolean
@@ -158,12 +267,14 @@ export type ActionReceiveHandler = (
 export type MessageContext = {
   peerId: string
   metadata?: JsonValue
+  roles?: string[]
 }
 
 export type RequestContext = {
   peerId: string
   metadata?: JsonValue
   signal: AbortSignal
+  roles?: string[]
 }
 
 export type PeerResult<R extends DataPayload = DataPayload> =
@@ -219,6 +330,7 @@ export type RequestAction<
 
 export type MessageActionConfig<T extends DataPayload = DataPayload> = {
   kind?: 'message'
+  authority?: string | string[]
   onMessage?: (data: T, context: MessageContext) => void | Promise<void>
   onReceiveProgress?: ActionProgressHandler
   onReceive?: ActionReceiveHandler
@@ -229,6 +341,7 @@ export type RequestActionConfig<
   R extends DataPayload = DataPayload
 > = {
   kind: 'request'
+  authority?: string | string[]
   onRequest?: (data: T, context: RequestContext) => R | Promise<R>
   onReceiveProgress?: ActionProgressHandler
   onReceive?: ActionReceiveHandler
@@ -254,6 +367,21 @@ export type Room = {
       config: RequestActionConfig<T, R>
     ): RequestAction<T, R>
   }
+  makeState: <T extends JsonValue = JsonValue>(
+    namespace: string,
+    initialValue: T,
+    config?: StateConfig<T>
+  ) => AuthoritativeState<T>
+  getAuthority: () => Promise<RoomAuthorityInfo>
+  grantRole: (
+    peerId: string,
+    role: string | string[],
+    options?: {canDelegate?: boolean; expiresInMs?: number}
+  ) => Promise<RoleCertificate>
+  revokeRole: (peerId: string, role?: string) => Promise<void>
+  getPeerRoles: (peerId?: string) => string[]
+  banPeer: (peerId: string, options?: {reason?: string}) => Promise<void>
+  isBanned: (peerId: string) => boolean
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
   isPassive: () => boolean
@@ -565,8 +693,9 @@ export type SignalContext = {
   onPeerDiscovered?: (
     peerId: string,
     relayId: number,
-    signalPeer: SignalPeer
-  ) => void
+    signalPeer: SignalPeer,
+    payload?: Record<string, unknown>
+  ) => Promise<void> | void
   shouldConnectPeer?: (
     peerId: string,
     direction: 'outbound' | 'inbound'

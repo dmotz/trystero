@@ -1010,7 +1010,15 @@ export const createSignalHandler = (ctx: SignalContext) => {
         return
       }
 
-      ctx.onPeerDiscovered?.(peerId, relayId, signalPeer)
+      const discoveredP = ctx.onPeerDiscovered?.(
+        peerId,
+        relayId,
+        signalPeer,
+        payload
+      )
+      if (discoveredP) {
+        await discoveredP
+      }
 
       if (ctx.isPassive && !ctx.isActive && !answer && !candidate) {
         ctx.isActive = true

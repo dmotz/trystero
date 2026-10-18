@@ -17,6 +17,7 @@ import type {
   JsonValue,
   PeerHandle,
   PeerHandlers,
+  RoleCertificate,
   Signal,
   TopologyConfig,
   TopologyMediaTree,
@@ -67,6 +68,7 @@ export type PeerDescriptor = {
   streams?: OverlayStreamInfo[]
   signPubKey?: JsonWebKey
   encPubKey?: JsonWebKey
+  cert?: RoleCertificate
   roomAuth?: string
   sig?: string
 }
@@ -122,7 +124,7 @@ export const normalizeTopologyConfig = (
 ): ResolvedTopologyConfig => {
   if (!topology) {
     return {
-      mode: 'mesh',
+      mode: 'auto',
       maxPeers: defaultMaxPeers,
       minPeers: defaultMinPeers,
       autoThreshold: defaultAutoThreshold,
@@ -187,11 +189,21 @@ export const computeTargetNeighbors = (
   rosterIds: Iterable<string>,
   activeMode: 'mesh' | 'small-world' | 'tree',
   maxPeers: number,
-  fanout: number
+  fanout: number,
+  privilegedPeers?: ReadonlySet<string>
 ): Set<string> => {
   const unique = new Set<string>(rosterIds)
   unique.add(localPeerId)
-  const sorted = [...unique].sort()
+  const sorted = [...unique].sort((a, b) => {
+    if (privilegedPeers && privilegedPeers.size > 0) {
+      const aPriv = privilegedPeers.has(a) ? 0 : 1
+      const bPriv = privilegedPeers.has(b) ? 0 : 1
+      if (aPriv !== bPriv) {
+        return aPriv - bPriv
+      }
+    }
+    return a < b ? -1 : a > b ? 1 : 0
+  })
   const total = sorted.length
   const selfIdx = sorted.indexOf(localPeerId)
   const targets = new Set<string>()
@@ -544,7 +556,8 @@ const descriptorCanonicalPayload = (d: PeerDescriptor): string =>
     d.streams ?? [],
     d.signPubKey ?? null,
     d.encPubKey ?? null,
-    d.roomAuth ?? null
+    d.roomAuth ?? null,
+    d.cert?.sig ?? null
   ])
 
 const computeRoomAuthToken = async (
@@ -642,6 +655,16 @@ export type OverlayManagerDeps = {
   onVirtualPeerJoin: (peerId: string, virtualPeer: PeerHandle) => void
   onVirtualPeerLeave: (peerId: string, reason?: Error) => void
   onDeliverData: (originPeerId: string, data: ArrayBuffer) => void
+  canPeerSendAction?: (
+    peerId: string,
+    requiredRoles: readonly string[],
+    inlineCert?: RoleCertificate
+  ) => Promise<boolean> | boolean
+  onPeerDescriptorCert?: (
+    peerId: string,
+    signPubKey: JsonWebKey,
+    cert?: RoleCertificate
+  ) => void
   onRelayMediaStream?: (
     broadcasterId: string,
     stream: MediaStream,
@@ -708,6 +731,16 @@ export type OverlayManager = {
   announceLeave: () => void
   destroy: () => void
   getSnapshot: () => TopologySnapshot
+  getLocalCryptoIdentity: () => Promise<CryptoIdentity>
+  getPeerSignPublicKey: (peerId: string) => JsonWebKey | undefined
+  setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
+  setLocalRoleCertificate: (cert: RoleCertificate | null) => void
+  setPrivilegedPeer: (peerId: string, isPrivileged: boolean) => void
+  markPeerBanned: (peerId: string, keyThumbprint?: string) => void
+  isPeerBanned: (peerId: string) => boolean
+  registerActionAuthority: (actionType: string, roles: string[]) => void
+  recordSignatureFailure: () => void
+  setRoomId: (effectiveRoomId: string) => void
   injectControlForTest: (fromPeerId: string, msg: OverlayControlMessage) => void
   injectBinaryForTest: (fromPeerId: string, frame: Uint8Array) => void
 }
@@ -715,20 +748,29 @@ export type OverlayManager = {
 export const createOverlayManager = ({
   selfId = defaultSelfId,
   appId = '',
-  roomId = '',
+  roomId: initialRoomId = '',
   password = '',
   topology,
   onVirtualPeerJoin,
   onVirtualPeerLeave,
   onDeliverData,
+  canPeerSendAction,
+  onPeerDescriptorCert,
   onRelayMediaStream,
   onRelayMediaTrack
 }: OverlayManagerDeps): OverlayManager => {
+  let roomId = initialRoomId
   const config = normalizeTopologyConfig(topology)
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
   const directPeers = new Map<string, PeerHandle>()
   const virtualPeers = new Map<string, PeerHandle>()
   const knownRoster = new Set<string>([selfId])
+  const privilegedPeers = new Set<string>()
+  const bannedPeers = new Set<string>()
+  const bannedKeyThumbprints = new Set<string>()
+  const peerSignPubKeys = new Map<string, JsonWebKey>()
+  const actionAuthorities = new Map<string, string[]>()
+  let localRoleCert: RoleCertificate | null = null
   const descriptors = new Map<string, PeerDescriptor>()
   const adjacency = new Map<string, Set<string>>()
   const pinnedSignKeys = new Map<string, string>()
@@ -792,7 +834,7 @@ export const createOverlayManager = ({
     treeReparents: 0
   }
 
-  if (config.mode !== 'mesh') {
+  if (config.mode === 'small-world' || config.mode === 'tree') {
     void getOrCreateCryptoIdentity(selfId).then(id => {
       if (!isDestroyed) {
         identityReady = id
@@ -828,7 +870,18 @@ export const createOverlayManager = ({
 
   const isOverlayActive = (): boolean => {
     updateActiveMode()
-    return config.mode !== 'mesh'
+    if (config.mode === 'mesh') {
+      return false
+    }
+    if (config.mode !== 'auto') {
+      return true
+    }
+    return (
+      currentActiveMode !== 'mesh' ||
+      directPeers.size >= 2 ||
+      knownRoster.size > 2 ||
+      descriptors.size > 0
+    )
   }
 
   const rememberSeenMessage = (msgId: string): boolean => {
@@ -1112,7 +1165,8 @@ export const createOverlayManager = ({
         knownRoster,
         currentActiveMode,
         config.maxPeers,
-        config.fanout
+        config.fanout,
+        privilegedPeers
       )
       const missing = [...targets].filter(id => !directPeers.has(id))
       if (missing.length > 0) {
@@ -1141,7 +1195,8 @@ export const createOverlayManager = ({
       peerId: selfId,
       seq,
       neighbors,
-      ...(streams.length > 0 ? {streams} : {})
+      ...(streams.length > 0 ? {streams} : {}),
+      ...(localRoleCert ? {cert: localRoleCert} : {})
     }
 
     if (password) {
@@ -1182,6 +1237,11 @@ export const createOverlayManager = ({
       return false
     }
 
+    if (bannedPeers.has(d.peerId)) {
+      stats.signatureFailures++
+      return false
+    }
+
     if (password) {
       if (!d.roomAuth) {
         stats.signatureFailures++
@@ -1206,6 +1266,23 @@ export const createOverlayManager = ({
     }
 
     const keyThumbprint = toJson(d.signPubKey)
+    const canonicalThumbprint =
+      typeof d.signPubKey.x === 'string' && typeof d.signPubKey.y === 'string'
+        ? toJson({
+            crv: d.signPubKey.crv ?? 'P-256',
+            kty: d.signPubKey.kty ?? 'EC',
+            x: d.signPubKey.x,
+            y: d.signPubKey.y
+          })
+        : keyThumbprint
+    if (
+      bannedKeyThumbprints.has(keyThumbprint) ||
+      bannedKeyThumbprints.has(canonicalThumbprint)
+    ) {
+      bannedPeers.add(d.peerId)
+      stats.signatureFailures++
+      return false
+    }
     const pinned = pinnedSignKeys.get(d.peerId)
     if (pinned && pinned !== keyThumbprint) {
       stats.signatureFailures++
@@ -1220,6 +1297,8 @@ export const createOverlayManager = ({
       bytesMatch(cachedVerifiedBytes, canonicalBytes)
     ) {
       pinnedSignKeys.set(d.peerId, keyThumbprint)
+      peerSignPubKeys.set(d.peerId, d.signPubKey)
+      onPeerDescriptorCert?.(d.peerId, d.signPubKey, d.cert)
       return true
     }
 
@@ -1251,6 +1330,8 @@ export const createOverlayManager = ({
       }
       rememberVerifiedSig(sigCacheKey, canonicalBytes)
       pinnedSignKeys.set(d.peerId, keyThumbprint)
+      peerSignPubKeys.set(d.peerId, d.signPubKey)
+      onPeerDescriptorCert?.(d.peerId, d.signPubKey, d.cert)
       return true
     } catch {
       stats.signatureFailures++
@@ -1911,6 +1992,11 @@ export const createOverlayManager = ({
         return
       }
 
+      if (bannedPeers.has(origin) || bannedPeers.has(fromPeerId)) {
+        stats.signatureFailures++
+        return
+      }
+
       if (seenMessages.has(msgId)) {
         stats.duplicatesDropped++
         return
@@ -1924,6 +2010,49 @@ export const createOverlayManager = ({
       )
       if (!valid || isDestroyed) {
         return
+      }
+
+      // Hop-1 / intermediate relay filtering for privileged action namespaces
+      if (payload.byteLength >= 36 && payload[0] === 2) {
+        const actionType = decodeBytes(payload.subarray(2, 34)).replaceAll(
+          '\0',
+          ''
+        )
+        const requiredRoles = actionAuthorities.get(actionType)
+        if (requiredRoles && requiredRoles.length > 0 && canPeerSendAction) {
+          let inlineCert: RoleCertificate | undefined
+          try {
+            const view = new DataView(
+              payload.buffer,
+              payload.byteOffset,
+              payload.byteLength
+            )
+            const metaLen = view.getUint16(34)
+            const headerLen = (payload[1]! & 15) === 0 ? 36 : 48
+            if (metaLen > 0 && headerLen + metaLen <= payload.byteLength) {
+              const metaObj = fromJson<Record<string, unknown>>(
+                decodeBytes(payload.subarray(headerLen, headerLen + metaLen))
+              )
+              const authEnv = metaObj?.['__trysteroAuth'] as
+                | {cert?: RoleCertificate}
+                | undefined
+              if (authEnv?.cert) {
+                inlineCert = authEnv.cert
+              }
+            }
+          } catch {
+            /* ignore metadata parse failure */
+          }
+          const allowed = await canPeerSendAction(
+            origin,
+            requiredRoles,
+            inlineCert
+          )
+          if (!allowed || isDestroyed) {
+            stats.signatureFailures++
+            return
+          }
+        }
       }
 
       if (!rememberSeenMessage(msgId)) {
@@ -1973,6 +2102,15 @@ export const createOverlayManager = ({
       const sig = typeof header['s'] === 'string' ? header['s'] : undefined
 
       if (!origin || !dest || !msgId || origin === selfId) {
+        return
+      }
+
+      if (
+        bannedPeers.has(origin) ||
+        bannedPeers.has(fromPeerId) ||
+        bannedPeers.has(dest)
+      ) {
+        stats.signatureFailures++
         return
       }
 
@@ -2082,6 +2220,10 @@ export const createOverlayManager = ({
     },
 
     handleOverlayFrame: (fromPeerId: string, data: ArrayBuffer): void => {
+      if (bannedPeers.has(fromPeerId)) {
+        stats.signatureFailures++
+        return
+      }
       const bytes = new Uint8Array(data)
       if (bytes.byteLength < 2 || bytes[0] !== overlayFrameVersion) {
         return
@@ -2107,7 +2249,7 @@ export const createOverlayManager = ({
     },
 
     addDirectPeer: (peerId: string, peer: PeerHandle): void => {
-      if (isDestroyed || peerId === selfId) {
+      if (isDestroyed || peerId === selfId || bannedPeers.has(peerId)) {
         return
       }
 
@@ -2223,7 +2365,10 @@ export const createOverlayManager = ({
     sendUnicast,
 
     getMediaTargets: (broadcasterId = selfId): string[] => {
-      if (!isOverlayActive()) {
+      if (
+        !isOverlayActive() ||
+        (currentActiveMode === 'mesh' && virtualPeers.size === 0)
+      ) {
         return [...directPeers.keys()]
       }
       for (const entry of activeStreams.values()) {
@@ -2363,7 +2508,7 @@ export const createOverlayManager = ({
     },
 
     notePeerDiscovered: (peerId: string): void => {
-      if (!peerId || peerId === selfId) {
+      if (!peerId || peerId === selfId || bannedPeers.has(peerId)) {
         return
       }
       departedPeers.delete(peerId)
@@ -2378,7 +2523,7 @@ export const createOverlayManager = ({
       peerId: string,
       direction: 'outbound' | 'inbound'
     ): boolean => {
-      if (!peerId || peerId === selfId) {
+      if (!peerId || peerId === selfId || bannedPeers.has(peerId)) {
         return false
       }
       if (directPeers.has(peerId)) {
@@ -2397,7 +2542,8 @@ export const createOverlayManager = ({
         knownRoster,
         currentActiveMode,
         config.maxPeers,
-        config.fanout
+        config.fanout,
+        privilegedPeers
       )
 
       if (targets.has(peerId)) {
@@ -2424,12 +2570,155 @@ export const createOverlayManager = ({
         knownRoster,
         currentActiveMode,
         config.maxPeers,
-        config.fanout
+        config.fanout,
+        privilegedPeers
       )
     },
 
     setOnTargetsChanged: (cb: (targetPeerIds: string[]) => void): void => {
       targetsChangedCallback = cb
+    },
+
+    getLocalCryptoIdentity: async (): Promise<CryptoIdentity> => {
+      const id = identityReady ?? (await getOrCreateCryptoIdentity(selfId))
+      identityReady = id
+      return id
+    },
+
+    getPeerSignPublicKey: (peerId: string): JsonWebKey | undefined =>
+      peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey,
+
+    setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey): void => {
+      if (!peerId || !pubKey) {
+        return
+      }
+      peerSignPubKeys.set(peerId, pubKey)
+    },
+
+    setLocalRoleCertificate: (cert: RoleCertificate | null): void => {
+      localRoleCert = cert
+      if (cert && cert.roles.includes('admin')) {
+        privilegedPeers.add(selfId)
+      } else {
+        privilegedPeers.delete(selfId)
+      }
+      if (isOverlayActive()) {
+        void publishLocalDescriptor()
+      }
+    },
+
+    setPrivilegedPeer: (peerId: string, isPrivileged: boolean): void => {
+      const changed = isPrivileged
+        ? !privilegedPeers.has(peerId)
+        : privilegedPeers.has(peerId)
+      if (isPrivileged) {
+        privilegedPeers.add(peerId)
+      } else {
+        privilegedPeers.delete(peerId)
+      }
+      if (changed && !isDestroyed) {
+        recomputeTopologyAndRoutes()
+      }
+    },
+
+    markPeerBanned: (peerId: string, keyThumbprint?: string): void => {
+      bannedPeers.add(peerId)
+      privilegedPeers.delete(peerId)
+      if (keyThumbprint) {
+        bannedKeyThumbprints.add(keyThumbprint)
+      }
+      const pinned = pinnedSignKeys.get(peerId)
+      if (pinned) {
+        bannedKeyThumbprints.add(pinned)
+      }
+      const knownPubKey =
+        peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey
+      if (
+        knownPubKey &&
+        typeof knownPubKey.x === 'string' &&
+        typeof knownPubKey.y === 'string'
+      ) {
+        bannedKeyThumbprints.add(
+          toJson({
+            crv: knownPubKey.crv ?? 'P-256',
+            kty: knownPubKey.kty ?? 'EC',
+            x: knownPubKey.x,
+            y: knownPubKey.y
+          })
+        )
+      }
+      const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
+      downPeersSeq.set(peerId, lastSeq)
+      departedPeers.add(peerId)
+      descriptors.delete(peerId)
+      adjacency.delete(peerId)
+      knownRoster.delete(peerId)
+      for (const set of adjacency.values()) {
+        set.delete(peerId)
+      }
+      const timer = unreachableTimers.get(peerId)
+      if (timer) {
+        resetTimer(timer)
+        unreachableTimers.delete(peerId)
+      }
+      if (virtualPeers.has(peerId)) {
+        virtualPeers.get(peerId)?.destroy()
+        virtualPeers.delete(peerId)
+        onVirtualPeerLeave(peerId, mkErr('peer banned'))
+      }
+      recomputeTopologyAndRoutes()
+      if (isOverlayActive()) {
+        void publishLocalDescriptor([peerId])
+      }
+    },
+
+    isPeerBanned: (peerId: string): boolean => {
+      if (bannedPeers.has(peerId)) {
+        return true
+      }
+      const thumbprint = pinnedSignKeys.get(peerId)
+      if (thumbprint && bannedKeyThumbprints.has(thumbprint)) {
+        return true
+      }
+      const knownPubKey =
+        peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey
+      if (
+        knownPubKey &&
+        typeof knownPubKey.x === 'string' &&
+        typeof knownPubKey.y === 'string'
+      ) {
+        const canonical = toJson({
+          crv: knownPubKey.crv ?? 'P-256',
+          kty: knownPubKey.kty ?? 'EC',
+          x: knownPubKey.x,
+          y: knownPubKey.y
+        })
+        if (bannedKeyThumbprints.has(canonical)) {
+          return true
+        }
+      }
+      return false
+    },
+
+    registerActionAuthority: (actionType: string, roles: string[]): void => {
+      if (roles.length > 0) {
+        actionAuthorities.set(actionType, [...roles])
+      } else {
+        actionAuthorities.delete(actionType)
+      }
+    },
+
+    recordSignatureFailure: (): void => {
+      stats.signatureFailures++
+    },
+
+    setRoomId: (effectiveRoomId: string): void => {
+      if (effectiveRoomId && effectiveRoomId !== roomId) {
+        roomId = effectiveRoomId
+        if (isOverlayActive()) {
+          void publishLocalDescriptor()
+        }
+      }
     },
 
     announceLeave: (): void => {

@@ -31,12 +31,24 @@ export {
   normalizeTopologyConfig
 } from './overlay'
 
+export {
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  formatSelfCertifyingRoomId,
+  parseSelfCertifyingRoomId
+} from './authority'
+
 export type {
   ActionProgressContext,
   ActionProgressHandler,
   ActionReceiveContext,
   ActionReceiveHandler,
   AddMediaOptions,
+  AdminIdentity,
+  AuthoritativeState,
+  AuthoritativeStateRecord,
+  AuthorityConfig,
   BaseRelayConfig,
   BaseRoomConfig,
   DataPayload,
@@ -55,6 +67,7 @@ export type {
   MessageContext,
   MaybePromise,
   OfferRecord,
+  PeerBanRecord,
   PeerHandle,
   PeerHandshake,
   PeerHandlers,
@@ -68,10 +81,15 @@ export type {
   RequestContext,
   RequestManyOptions,
   RequestOptions,
+  RoleCertificate,
+  RoleRevocationRecord,
   Room,
+  RoomAuthorityInfo,
   Signal,
   SignalPeer,
   SocketClient,
+  StateChangeContext,
+  StateConfig,
   StrategyAdapter,
   StrategyContext,
   StrategyMessage,

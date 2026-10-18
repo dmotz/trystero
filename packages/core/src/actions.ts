@@ -47,6 +47,7 @@ type PublicActionKind = 'message' | 'request'
 
 type PublicActionState = {
   kind: PublicActionKind
+  requiredRoles: string[]
   action: MessageAction | RequestAction
   onReceive: ActionReceiveHandler | null
   onReceiveProgress: ActionProgressHandler | null
@@ -85,6 +86,22 @@ type ActionManagerDeps = {
     onProgress?: (peerId: string) => void,
     signal?: AbortSignal
   ) => Promise<boolean> | boolean
+  registerActionAuthority?: (namespace: string, roles: string[]) => void
+  signActionPayload?: (
+    namespace: string,
+    requiredRoles: readonly string[],
+    data: DataPayload,
+    userMetadata?: JsonValue
+  ) => Promise<JsonValue>
+  verifyActionPayload?: (
+    namespace: string,
+    peerId: string,
+    requiredRoles: readonly string[],
+    data: DataPayload,
+    wireMetadata?: JsonValue
+  ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
+  getPeerRoles?: (peerId: string) => string[]
+  onUnauthorizedAction?: (namespace: string, peerId: string) => void
 }
 
 const getEnvelopeRecord = (
@@ -123,12 +140,35 @@ const withMetadata = <T extends {peerId: string}>(
 ): T & {metadata?: JsonValue} =>
   metadata === undefined ? context : {...context, metadata}
 
+const unwrapAuthUserMetadata = (
+  wireMeta: JsonValue | undefined,
+  hasAuthority: boolean
+): JsonValue | undefined => {
+  if (
+    hasAuthority &&
+    wireMeta &&
+    typeof wireMeta === 'object' &&
+    !Array.isArray(wireMeta) &&
+    '__trysteroAuth' in wireMeta
+  ) {
+    return Object.hasOwn(wireMeta, 'm')
+      ? (wireMeta as {m?: JsonValue}).m
+      : undefined
+  }
+  return wireMeta
+}
+
 export const createActionManager = ({
   getPeer,
   getPeerIds,
   canReceiveFromPeer,
   onPeerError,
   broadcastInline,
+  registerActionAuthority,
+  signActionPayload,
+  verifyActionPayload,
+  getPeerRoles,
+  onUnauthorizedAction,
   maxReceiveBytes
 }: ActionManagerDeps): {
   makeAction: Room['makeAction']
@@ -271,6 +311,16 @@ export const createActionManager = ({
     }
 
     const kind = config?.kind ?? 'message'
+    const requiredRoles = config?.authority
+      ? (Array.isArray(config.authority)
+          ? config.authority
+          : [config.authority]
+        ).filter(Boolean)
+      : []
+    const hasAuthority = requiredRoles.length > 0
+    if (hasAuthority) {
+      registerActionAuthority?.(type, requiredRoles)
+    }
     const rawAction = makeInternalAction<T>(type)
     const existingState = publicActions[type]
 
@@ -278,12 +328,17 @@ export const createActionManager = ({
       if (existingState.kind !== kind) {
         throw mkErr(`action type "${type}" cannot be redefined`)
       }
+      if (hasAuthority && existingState.requiredRoles.length === 0) {
+        existingState.requiredRoles = requiredRoles
+        registerActionAuthority?.(type, requiredRoles)
+      }
 
       return existingState.action as MessageAction<T> | RequestAction<T, R>
     }
 
     const state: PublicActionState = {
       kind,
+      requiredRoles,
       action: null as unknown as MessageAction | RequestAction,
       onReceive: config?.onReceive ?? null,
       onReceiveProgress: config?.onReceiveProgress ?? null
@@ -305,11 +360,13 @@ export const createActionManager = ({
     ): void => {
       const requestMetadata =
         state.kind === 'request' ? getRequestMetadata(metadata) : null
-
-      state.onReceiveProgress?.(
-        progress,
-        withMetadata({peerId}, requestMetadata ? requestMetadata.m : metadata)
+      const rawUserMeta = requestMetadata ? requestMetadata.m : metadata
+      const cleanMeta = unwrapAuthUserMetadata(
+        rawUserMeta,
+        state.requiredRoles.length > 0
       )
+
+      state.onReceiveProgress?.(progress, withMetadata({peerId}, cleanMeta))
     }
 
     const setReceive = (handler: ActionReceiveHandler | null): void => {
@@ -319,6 +376,13 @@ export const createActionManager = ({
           ? context => {
               const requestMetadata =
                 kind === 'request' ? getRequestMetadata(context.metadata) : null
+              const rawUserMeta = requestMetadata
+                ? requestMetadata.m
+                : context.metadata
+              const cleanMeta = unwrapAuthUserMetadata(
+                rawUserMeta,
+                state.requiredRoles.length > 0
+              )
               return handler(
                 withMetadata(
                   {
@@ -327,7 +391,7 @@ export const createActionManager = ({
                     signal: context.signal,
                     kind
                   },
-                  requestMetadata ? requestMetadata.m : context.metadata
+                  cleanMeta
                 )
               )
             }
@@ -347,18 +411,61 @@ export const createActionManager = ({
         peerId: string,
         metadata?: JsonValue
       ): void => {
-        const handler = onMessage!
         void Promise.resolve()
-          .then(() => handler(payload as T, withMetadata({peerId}, metadata)))
+          .then(async () => {
+            if (state.requiredRoles.length > 0 && verifyActionPayload) {
+              const verified = await verifyActionPayload(
+                type,
+                peerId,
+                state.requiredRoles,
+                payload,
+                metadata
+              )
+              if (!verified.valid) {
+                onUnauthorizedAction?.(type, peerId)
+                return
+              }
+              const handler = onMessage
+              if (!handler) {
+                return
+              }
+              const ctx = withMetadata({peerId}, verified.userMetadata)
+              if (verified.roles.length > 0) {
+                ;(ctx as {roles?: string[]}).roles = verified.roles
+              }
+              await handler(payload as T, ctx)
+              return
+            }
+
+            const handler = onMessage
+            if (!handler) {
+              return
+            }
+            const roles = getPeerRoles?.(peerId)
+            const ctx = withMetadata({peerId}, metadata)
+            if (roles && roles.length > 0) {
+              ;(ctx as {roles?: string[]}).roles = roles
+            }
+            await handler(payload as T, ctx)
+          })
           .catch(err => console.error(`${libName} action handler error:`, err))
       }
 
       const action = {
         send: async (data: T, options: SendOptions = {}) => {
+          const wireMetadata =
+            state.requiredRoles.length > 0 && signActionPayload
+              ? await signActionPayload(
+                  type,
+                  state.requiredRoles,
+                  data,
+                  options.metadata
+                )
+              : options.metadata
           await rawAction.send(
             data,
             options.target,
-            options.metadata,
+            wireMetadata,
             toProgressHandler(options.onProgress, options.metadata),
             options.signal
           )
@@ -427,10 +534,29 @@ export const createActionManager = ({
       peerControllers.add(controller)
       void Promise.resolve()
         .then(async () => {
-          const response = await handler(payload as T, {
-            ...withMetadata({peerId}, parsed.m),
-            signal: controller.signal
-          })
+          let userMeta = parsed.m
+          let roles = getPeerRoles?.(peerId)
+          if (state.requiredRoles.length > 0 && verifyActionPayload) {
+            const verified = await verifyActionPayload(
+              type,
+              peerId,
+              state.requiredRoles,
+              payload,
+              parsed.m
+            )
+            if (!verified.valid) {
+              onUnauthorizedAction?.(type, peerId)
+              throw mkErr('insufficient authority for request')
+            }
+            userMeta = verified.userMetadata
+            roles = verified.roles
+          }
+          const ctx = {
+            ...withMetadata({peerId}, userMeta),
+            signal: controller.signal,
+            ...(roles && roles.length > 0 ? {roles} : {})
+          }
+          const response = await handler(payload as T, ctx)
           if (response === undefined) {
             throw mkErr('request handler returned undefined')
           }
@@ -466,6 +592,11 @@ export const createActionManager = ({
           `no active peer with id ${target}`
         )
       }
+
+      const innerMeta =
+        state.requiredRoles.length > 0 && signActionPayload
+          ? await signActionPayload(type, state.requiredRoles, data, metadata)
+          : metadata
 
       const requestId = genId(20)
       const controller = new AbortController()
@@ -503,7 +634,9 @@ export const createActionManager = ({
         const sending = rawAction.send(
           data,
           target,
-          metadata === undefined ? {r: requestId} : {r: requestId, m: metadata},
+          innerMeta === undefined
+            ? {r: requestId}
+            : {r: requestId, m: innerMeta},
           toProgressHandler(onProgress, metadata),
           controller.signal
         )
