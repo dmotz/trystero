@@ -39,8 +39,8 @@ withStrategyBrowserPair(
       expect(
         await page.evaluate(
           ([lobby, roomId, target]) =>
-            window[lobby].getPeers()[target] ===
-            window[roomId].getPeers()[target],
+            window[lobby].getPeers()[target]?.connection ===
+            window[roomId].getPeers()[target]?.connection,
           [lobby, roomId, selfId2]
         )
       ).toBe(true)

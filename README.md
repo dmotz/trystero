@@ -19,6 +19,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
+- 🚪🎟️ Room size limits for 1v1 matches and capped lobbies
 - 🕸️🚀 Automatic scaling for large rooms with dozens or hundreds of peers
 - 👑🛡️ Room admins, custom roles, peer banning, and shared state
 - 🏭⚡ Can run peers server-side on Node, Bun, and Deno
@@ -42,6 +43,7 @@ You can see what people are building with Trystero
   - [Action promises](#action-promises)
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
+  - [Room size limits](#room-size-limits)
   - [Scalable topologies](#scalable-topologies)
   - [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)
   - [React hooks](#react-hooks)
@@ -473,6 +475,73 @@ This is a shared secret that must be known ahead of time and the password must
 match for all peers in the room for them to be able to connect. An example use
 case might be a private chat room where users learn the password via external
 means.
+
+### Room size limits
+
+Sometimes your app has a strict maximum number of seats per room. For example,
+you might be building:
+
+- **A 2-player board game** (like chess or Battleship) where a third person
+  opening the invite link shouldn't be able to barge into an active match.
+- **A 4-player co-op lobby** that locks once all four party slots are taken.
+- **A private 1-on-1 video call** where only two people can be in the room at a
+  time.
+
+To cap how many total people (including the local user) can be in a room at
+once, pass `limit` in your `joinRoom()` config and listen for `'room full'` in
+`onJoinError`:
+
+```js
+const room = joinRoom(
+  {
+    appId: 'chess-club',
+    limit: 2 // max 2 players in the room (you + 1 opponent)
+  },
+  'match-42',
+  {
+    onJoinError: ({error}) => {
+      if (error === 'room full') {
+        showBanner('Sorry, this match is already full!')
+      }
+    }
+  }
+)
+```
+
+When a room is already at capacity:
+
+- Any extra user who tries to join receives `error: 'room full'` in
+  `onJoinError` and is automatically disconnected from the room.
+- Existing players in the room are never interrupted—`onPeerJoin` and
+  `onPeerLeave` won't fire for someone who was turned away at the door.
+- If one of the current players leaves (`room.leave()` or closes their tab), a
+  seat immediately opens back up for the next person who joins.
+
+<details>
+  <summary>How it works behind the scenes</summary>
+
+- **Pre-activation admission control**: Capacity checks run during the internal
+  admission handshake before a peer is ever added to `getPeers()` or triggers
+  `onPeerJoin`. If the room is already full, existing members immediately send a
+  `'room full'` rejection and close the pending connection before running your
+  custom `onPeerHandshake` callback.
+- **Password privacy**: In password-protected rooms (`config.password`),
+  Trystero verifies the password proof _before_ checking room capacity. Users
+  with the wrong password receive a password error rather than `'room full'`, so
+  outsiders cannot probe whether a private room is full.
+- **Simultaneous burst joins**: What if 5 players click "Join" at the exact same
+  millisecond on an empty `limit: 2` room? Peers include their join metadata
+  (`limit`, join timestamp `t`, and established member status) in their
+  handshake readiness packet and coalesce concurrent arrivals over a short 25ms
+  window. Every peer deterministically selects the same winners (established
+  member > earliest join timestamp > peer ID tie-breaker) and turns away the
+  excess joiners with `'room full'`.
+- **Asymmetric configs & multi-hop rooms**: Even if only the room creator passes
+  `limit` in their config, Trystero automatically propagates the active limit to
+  other admitted peers and enforces total room capacity across multi-hop
+  `'small-world'` and `'tree'` overlay topologies.
+
+</details>
 
 ### Scalable topologies
 
@@ -1102,6 +1171,12 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
+  - `limit` - **(optional)** Positive integer capping the maximum total number
+    of peers allowed in the room at once (including the local user). When the
+    room is full, additional joiners are rejected before activation, receive
+    `error: 'room full'` via `onJoinError`, and automatically leave the room.
+    See [room size limits](#room-size-limits) for more details.
+
   - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
     concurrent large incoming transfers per room, in bytes. Defaults to
     `256 * 1024 ** 2` (256 MiB). Must be a positive integer. Raise it for larger
@@ -1219,9 +1294,10 @@ the same namespace will return the same room instance.
 
 - `callbacks` - **(optional)** Callback config object containing:
   - `onJoinError(details)` - Called when room join fails due to an incorrect
-    password, when handshake admission fails (including timeout), or when peers
-    exchange SDP but WebRTC still cannot establish a direct connection. This
-    last case usually means TURN servers are needed or misconfigured (see
+    password, when the room is at capacity (`details.error === 'room full'`),
+    when handshake admission fails (including timeout), or when peers exchange
+    SDP but WebRTC still cannot establish a direct connection. This last case
+    usually means TURN servers are needed or misconfigured (see
     [Troubleshooting connection issues](#troubleshooting-connection-issues)).
     `details` is an object containing `appId`, `roomId`, `peerId`, and `error`
     describing the failure.
@@ -1278,10 +1354,18 @@ Returns an object with the following methods:
 
 - ### `getPeers()`
 
-  Returns a map of
-  [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
-  for the peers present in room (not including the local user). The keys of this
-  object are the respective peers' IDs.
+  Returns a map of `PeerInfo` objects (`{connection, direct, hops, roles}`) for
+  the peers present in the room (not including the local user), keyed by peer
+  ID:
+  - `connection` - The underlying
+    [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)
+    if the peer is a direct WebRTC neighbor, or `null` if the peer is routed
+    across multiple hops in an overlay topology.
+  - `direct` - Boolean (`true` for direct WebRTC peers, `false` for multi-hop
+    overlay peers).
+  - `hops` - Hop distance (`1` for direct peers, `>= 2` for multi-hop overlay
+    peers).
+  - `roles` - Array of verified roles currently held by that peer.
 
 - ### `isPassive()`
 

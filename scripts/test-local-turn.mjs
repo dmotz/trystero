@@ -364,7 +364,7 @@ const main = async strategy => {
     for (const page of pages) {
       const result = await page.evaluate(async () => {
         const peers = Object.values(window.__turnTest.room.getPeers())
-        const stats = await peers[0].getStats()
+        const stats = await peers[0].connection.getStats()
         return {
           created: window.__turnTest.created.length,
           relayCandidate: [...stats.values()].some(

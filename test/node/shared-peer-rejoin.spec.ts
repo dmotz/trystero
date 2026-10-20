@@ -130,8 +130,14 @@ for (const customHandshake of [false, true]) {
           assert.equal(joinsB, 1)
           assert.equal(joinsA, previousJoins + 1)
           assert.equal(handshakesA, previousHandshakes + 2)
-          assert.equal(lobbyA.getPeers()['peer-b'], peerA.connection)
-          assert.equal(lobbyB.getPeers()['peer-a'], peerB.connection)
+          assert.equal(
+            lobbyA.getPeers()['peer-b']?.connection,
+            peerA.connection
+          )
+          assert.equal(
+            lobbyB.getPeers()['peer-a']?.connection,
+            peerB.connection
+          )
           assert.equal(peerA.isDead, false)
           assert.equal(peerB.isDead, false)
         }

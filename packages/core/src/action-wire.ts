@@ -642,3 +642,36 @@ export const createActionWireManager = ({
   }
   return {makeInternalAction, handleData, clearPeer}
 }
+
+export const inspectActionWireHeader = (
+  frame: Uint8Array
+): {type: string; metadata?: JsonValue} | null => {
+  if (frame.byteLength < inlineHeaderSize || frame[0] !== version) {
+    return null
+  }
+  const kind = frame[1]! & 15
+  if (kind !== inline && kind !== offer) {
+    return null
+  }
+  const headerLen = kind === inline ? inlineHeaderSize : offerHeaderSize
+  if (frame.byteLength < headerLen) {
+    return null
+  }
+  const type = decodeBytes(frame.subarray(2, 34)).replaceAll('\0', '')
+  if (!type) {
+    return null
+  }
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  const metaLen = view.getUint16(34)
+  if (metaLen > 0 && headerLen + metaLen <= frame.byteLength) {
+    try {
+      const metadata = fromJson<JsonValue>(
+        decodeBytes(frame.subarray(headerLen, headerLen + metaLen))
+      )
+      return {type, metadata}
+    } catch {
+      return {type}
+    }
+  }
+  return {type}
+}

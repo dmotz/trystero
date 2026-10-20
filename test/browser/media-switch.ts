@@ -47,8 +47,8 @@ export const registerMediaSwitchTests = (strategy, overrides) =>
 
       const leaveStreamSwitchRoom = roomId => window[roomId]?.leave()
       const cleanupStreamSwitchRoom = async roomId => {
-        Object.values(window[roomId]?.getPeers() ?? {}).forEach(connection =>
-          (connection as RTCPeerConnection).close()
+        Object.values(window[roomId]?.getPeers() ?? {}).forEach(peer =>
+          (peer as {connection?: RTCPeerConnection | null}).connection?.close()
         )
 
         await window[roomId]?.leave()

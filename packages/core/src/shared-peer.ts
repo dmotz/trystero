@@ -152,6 +152,7 @@ type RoomRegistration = {
   token: string | null
   tokenPromise: Promise<string>
   active: boolean
+  shouldAttach?: ((peerId: string) => boolean) | undefined
   onPeer: (proxy: PeerHandle, peerId: string, physical: PeerHandle) => void
   onDetach: (peerId: string, physical: PeerHandle) => void
 }
@@ -159,6 +160,7 @@ type RoomMembership = {
   connect: (peerId: string, peer: PeerHandle, idleMs: number) => void
   reuse: (peerId: string) => boolean
   setActive: (active: boolean) => void
+  rekey: (newRoomId: string) => void
   leave: () => void
 }
 
@@ -176,14 +178,16 @@ export class SharedPeerManager {
 
   registerRoom(
     appId: string,
-    roomId: string,
+    initialRoomId: string,
     tokenPromise: Promise<string>,
     options: {
       active: boolean
+      shouldAttach?: RoomRegistration['shouldAttach']
       onPeer: RoomRegistration['onPeer']
       onDetach: RoomRegistration['onDetach']
     }
   ): RoomMembership {
+    let roomId = initialRoomId
     const rooms = this.rooms.get(appId) ?? new Map<string, RoomRegistration>()
     if (rooms.has(roomId)) {
       throw mkErr('room membership already registered')
@@ -215,7 +219,11 @@ export class SharedPeerManager {
       }
       registration.token = token
       for (const shared of values(this.byApp[appId] ?? {})) {
-        if (shared.remoteRoomTokens.has(token)) {
+        if (
+          shared.remoteRoomTokens.has(token) &&
+          (!registration.shouldAttach ||
+            registration.shouldAttach(shared.peerId))
+        ) {
           this.attachRoom(appId, roomId, registration, shared)
         }
         this.discardUnboundData(shared)
@@ -261,6 +269,22 @@ export class SharedPeerManager {
         }
         registration.active = active
         advertise(active)
+      },
+      rekey: newRoomId => {
+        if (!current() || !newRoomId || newRoomId === roomId) {
+          return
+        }
+        rooms.delete(roomId)
+        rooms.set(newRoomId, registration)
+        for (const shared of values(this.byApp[appId] ?? {})) {
+          const binding = shared.bindings[roomId]
+          if (binding) {
+            delete shared.bindings[roomId]
+            binding.roomId = newRoomId
+            shared.bindings[newRoomId] = binding
+          }
+        }
+        roomId = newRoomId
       },
       leave: () => {
         if (!current()) {
@@ -836,7 +860,11 @@ export class SharedPeerManager {
         shared.remoteRoomTokens.add(decoded.roomToken)
         for (const [roomId, registration] of this.rooms.get(shared.appId) ??
           []) {
-          if (registration.token === decoded.roomToken) {
+          if (
+            registration.token === decoded.roomToken &&
+            (!registration.shouldAttach ||
+              registration.shouldAttach(shared.peerId))
+          ) {
             this.attachRoom(shared.appId, roomId, registration, shared)
           }
         }

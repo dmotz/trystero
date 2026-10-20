@@ -146,6 +146,7 @@ export type RoleRevocationRecord = {
   roomId: string
   issuerPeerId: string
   targetPeerId: string
+  targetCertId?: string
   role?: string
   seq: number
   ts: number
@@ -218,6 +219,7 @@ export type AuthoritativeState<T extends JsonValue = JsonValue> = {
 export type BaseRoomConfig = {
   appId: string
   peerId?: string
+  limit?: number
   topology?: TopologyMode | TopologyConfig
   admin?: boolean | string | AuthorityConfig
   maxReceiveBytes?: number
@@ -356,6 +358,13 @@ export type RemoveMediaOptions = {
   target?: PeerTarget
 }
 
+export type PeerInfo = {
+  connection: RTCPeerConnection | null
+  direct: boolean
+  hops: number
+  roles: string[]
+}
+
 export type Room = {
   makeAction: {
     <T extends DataPayload = DataPayload>(
@@ -385,7 +394,7 @@ export type Room = {
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
   isPassive: () => boolean
-  getPeers: () => Record<string, RTCPeerConnection>
+  getPeers: () => Record<string, PeerInfo>
   getTopology: () => TopologySnapshot
   addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void

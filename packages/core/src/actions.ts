@@ -93,6 +93,12 @@ type ActionManagerDeps = {
     data: DataPayload,
     userMetadata?: JsonValue
   ) => Promise<JsonValue>
+  verifyActionOffer?: (
+    namespace: string,
+    peerId: string,
+    requiredRoles: readonly string[],
+    wireMetadata?: JsonValue
+  ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
   verifyActionPayload?: (
     namespace: string,
     peerId: string,
@@ -166,6 +172,7 @@ export const createActionManager = ({
   broadcastInline,
   registerActionAuthority,
   signActionPayload,
+  verifyActionOffer,
   verifyActionPayload,
   getPeerRoles,
   onUnauthorizedAction,
@@ -371,32 +378,68 @@ export const createActionManager = ({
 
     const setReceive = (handler: ActionReceiveHandler | null): void => {
       state.onReceive = handler
-      rawAction.onReceive(
-        handler
-          ? context => {
-              const requestMetadata =
-                kind === 'request' ? getRequestMetadata(context.metadata) : null
-              const rawUserMeta = requestMetadata
-                ? requestMetadata.m
-                : context.metadata
-              const cleanMeta = unwrapAuthUserMetadata(
-                rawUserMeta,
-                state.requiredRoles.length > 0
-              )
-              return handler(
-                withMetadata(
-                  {
-                    byteLength: context.byteLength,
-                    peerId: context.peerId,
-                    signal: context.signal,
-                    kind
-                  },
-                  cleanMeta
-                )
-              )
-            }
-          : null
-      )
+      const hasRoleGuard =
+        state.requiredRoles.length > 0 && Boolean(verifyActionOffer)
+      if (!handler && !hasRoleGuard) {
+        rawAction.onReceive(null)
+        return
+      }
+      if (!hasRoleGuard && handler) {
+        rawAction.onReceive(context => {
+          const requestMetadata =
+            kind === 'request' ? getRequestMetadata(context.metadata) : null
+          const rawUserMeta = requestMetadata
+            ? requestMetadata.m
+            : context.metadata
+          const cleanMeta = unwrapAuthUserMetadata(rawUserMeta, false)
+          const roles = getPeerRoles?.(context.peerId)
+          return handler(
+            withMetadata(
+              {
+                byteLength: context.byteLength,
+                peerId: context.peerId,
+                signal: context.signal,
+                kind,
+                ...(roles && roles.length > 0 ? {roles} : {})
+              },
+              cleanMeta
+            )
+          )
+        })
+        return
+      }
+      rawAction.onReceive(async context => {
+        const requestMetadata =
+          kind === 'request' ? getRequestMetadata(context.metadata) : null
+        const rawUserMeta = requestMetadata
+          ? requestMetadata.m
+          : context.metadata
+        const offerRes = await verifyActionOffer!(
+          type,
+          context.peerId,
+          state.requiredRoles,
+          rawUserMeta
+        )
+        if (!offerRes.valid) {
+          onUnauthorizedAction?.(type, context.peerId)
+          return false
+        }
+        if (!handler) {
+          return true
+        }
+        return handler(
+          withMetadata(
+            {
+              byteLength: context.byteLength,
+              peerId: context.peerId,
+              signal: context.signal,
+              kind,
+              ...(offerRes.roles.length > 0 ? {roles: offerRes.roles} : {})
+            },
+            offerRes.userMetadata
+          )
+        )
+      })
     }
     setReceive(state.onReceive)
 

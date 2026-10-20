@@ -3,7 +3,7 @@ import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
 import {OfferManager} from './offer-manager'
 import {createPasswordHandshake} from './handshake'
 import initPeer from './peer'
-import room, {type RoomAuthorityBridge} from './room'
+import room, {getRoomSignalingBridge, type RoomSignalingBridge} from './room'
 import {SharedPeerManager} from './shared-peer'
 import {
   createSignalHandler,
@@ -29,7 +29,6 @@ import {
   values,
   watchOnline
 } from './utils'
-import type {OverlayManager} from './overlay'
 import type {
   BaseRoomConfig,
   JoinRoom,
@@ -100,6 +99,13 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     if (
+      config.limit !== undefined &&
+      (!Number.isSafeInteger(config.limit) || config.limit < 1)
+    ) {
+      throw mkErr('limit must be a positive safe integer')
+    }
+
+    if (
       handshakeTimeoutMs !== undefined &&
       (!Number.isFinite(handshakeTimeoutMs) || handshakeTimeoutMs <= 0)
     ) {
@@ -125,10 +131,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       Boolean(config.admin) ||
       Boolean(parseSelfCertifyingRoomId(roomId).fingerprint)
     const resolvedAuthorityP = isAdminBacked
-      ? resolveRoomAuthority(roomId, config.admin)
+      ? resolveRoomAuthority(roomId, config.admin, appId)
       : undefined
 
     let effectiveRoomId = roomId
+    let membershipRef: {rekey: (newRoomId: string) => void} | null = null
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const effectiveRoomIdP = resolvedAuthorityP?.then(auth => {
       effectiveRoomId = auth.effectiveRoomId
@@ -137,6 +144,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       strategyContext.roomId = auth.effectiveRoomId
       if (auth.effectiveRoomId !== roomId && !didLeaveRoom) {
         ;(occupiedRooms[scopeAppId] ??= {})[auth.effectiveRoomId] = joinedRoom
+        membershipRef?.rekey(auth.effectiveRoomId)
       }
       return auth.effectiveRoomId
     })
@@ -159,19 +167,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
 
     let didLeaveRoom = false
-    let overlayRef: OverlayManager | null = null
-    let authorityBridge: RoomAuthorityBridge | null = null
+    const bridgeRef: {current?: RoomSignalingBridge | undefined} = {}
 
     const syncOverlayNeighbors = (): void => {
+      const overlay = bridgeRef.current?.overlay
       if (
         didLeaveRoom ||
         isPassive ||
-        !overlayRef ||
-        overlayRef.getSnapshot().activeMode === 'mesh'
+        !overlay ||
+        overlay.getSnapshot().activeMode === 'mesh'
       ) {
         return
       }
-      for (const targetId of overlayRef.getTargetNeighbors()) {
+      for (const targetId of overlay.getTargetNeighbors()) {
         ctx.dialPeer?.(targetId)
       }
     }
@@ -301,21 +309,23 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       selfId: localSelfId,
       onPeerDiscovered: (peerId, _relayId, _signalPeer, payload) => {
         const sigWait =
-          payload && authorityBridge
-            ? authorityBridge.onSignalingPayload(peerId, payload)
+          payload && bridgeRef.current
+            ? bridgeRef.current.onSignalingPayload(peerId, payload)
             : undefined
         if (sigWait) {
           return sigWait.then(() => {
-            overlayRef?.notePeerDiscovered(peerId)
+            bridgeRef.current?.overlay.notePeerDiscovered(peerId)
             syncOverlayNeighbors()
           })
         }
-        overlayRef?.notePeerDiscovered(peerId)
+        bridgeRef.current?.overlay.notePeerDiscovered(peerId)
         syncOverlayNeighbors()
         return undefined
       },
       shouldConnectPeer: (peerId, direction) =>
-        overlayRef ? overlayRef.shouldConnectPeer(peerId, direction) : true
+        bridgeRef.current
+          ? bridgeRef.current.overlay.shouldConnectPeer(peerId, direction)
+          : true
     }
     const strategyContext: StrategyContext<TConfig> = {
       config,
@@ -371,8 +381,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
 
         const authExtra =
-          isAdminBacked && authorityBridge
-            ? await authorityBridge.getAnnounceExtra()
+          isAdminBacked && bridgeRef.current
+            ? await bridgeRef.current.getAnnounceExtra()
             : undefined
         const extra =
           isPassive || authExtra
@@ -508,7 +518,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const {compose} = createPasswordHandshake(
       sharedPassword,
       appId,
-      effectiveRoomIdP ?? roomId
+      effectiveRoomIdP ?? roomId,
+      sharedPassword
+        ? peerId => bridgeRef.current?.checkCapacityAfterPassword(peerId)
+        : undefined
     )
     const composedPeerHandshake = compose(onPeerHandshake)
 
@@ -599,20 +612,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       appId,
       roomId,
       ...(config.password === undefined ? {} : {password: config.password}),
+      ...(config.limit === undefined ? {} : {limit: config.limit}),
       ...(config.topology === undefined ? {} : {topology: config.topology}),
       ...(config.admin === undefined ? {} : {admin: config.admin}),
       ...(resolvedAuthorityP ? {resolvedAuthorityP} : {}),
-      onOverlayReady: (overlay: OverlayManager) => {
-        overlayRef = overlay
-        overlay.setOnTargetsChanged(missingTargets => {
-          if (!didLeaveRoom) {
-            missingTargets.forEach(targetId => ctx.dialPeer?.(targetId))
-          }
-        })
-      },
-      onAuthorityReady: (bridge: RoomAuthorityBridge) => {
-        authorityBridge = bridge
-      },
       ...(config.maxReceiveBytes === undefined
         ? {}
         : {maxReceiveBytes: config.maxReceiveBytes}),
@@ -630,7 +633,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           error: error.replace(/^handshake failed: /, ''),
           appId,
           peerId,
-          roomId
+          roomId: effectiveRoomId
         })
     }
 
@@ -657,12 +660,28 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       roomOptions
     )
 
+    const signalingBridge = getRoomSignalingBridge(joinedRoom)
+    bridgeRef.current = signalingBridge
+    signalingBridge?.overlay.setOnTargetsChanged(missingTargets => {
+      if (!didLeaveRoom) {
+        missingTargets.forEach(targetId => {
+          if (!ctx.reusePeer(targetId)) {
+            ctx.dialPeer?.(targetId)
+          }
+        })
+      }
+    })
+
     const membership = sharedPeers.registerRoom(
       scopeAppId,
-      roomId,
+      effectiveRoomId,
       roomNamespacePromise,
       {
         active: !isPassive || ctx.isActive,
+        shouldAttach: peerId =>
+          signalingBridge
+            ? signalingBridge.overlay.shouldConnectPeer(peerId, 'inbound')
+            : true,
         onPeer: (proxy, peerId, physical) => {
           const state = getState(ctx.peerStates, peerId)
           markPeerConnected(state, physical)
@@ -688,6 +707,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
       }
     )
+    membershipRef = membership
 
     return (occupiedRooms[scopeAppId][roomId] = joinedRoom)
   }

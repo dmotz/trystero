@@ -1,6 +1,7 @@
 import {hashWith} from './crypto'
 import {
   genId,
+  keys,
   mkErr,
   resetTimer,
   selfId,
@@ -19,11 +20,23 @@ import type {
 } from './types'
 
 const overlapRoomPasswordErr = mkErr('incorrect password for overlapping room')
+export const roomFullHostRejectErr = mkErr('__trystero_room_full_host_reject__')
+
+export type HandshakeReadyPayload =
+  | string
+  | {
+      ok: boolean
+      err?: string
+      limit?: number
+      t?: number
+      est?: boolean
+    }
 
 export const createPasswordHandshake = (
   password: string,
   appId: string,
-  roomId: string | Promise<string>
+  roomId: string | Promise<string>,
+  onAfterPassword?: (peerId: string) => Promise<void> | void
 ): {
   run: (
     send: HandshakeSender,
@@ -90,9 +103,10 @@ export const createPasswordHandshake = (
   }
 
   const compose = (userHandshake?: PeerHandshake): PeerHandshake | undefined =>
-    password || userHandshake
+    password || userHandshake || onAfterPassword
       ? async (peerId, send, receive, isInitiator): Promise<void> => {
           await run(send, receive, isInitiator)
+          await onAfterPassword?.(peerId)
           await userHandshake?.(peerId, send, receive, isInitiator)
         }
       : undefined
@@ -123,7 +137,21 @@ type HandshakeManagerDeps = {
     peerId: string,
     metadata?: JsonValue
   ) => Promise<void>
-  sendHandshakeReady: (data: string, peerId: string) => Promise<void>
+  sendHandshakeReady: (
+    data: HandshakeReadyPayload,
+    peerId: string
+  ) => Promise<void>
+  canAcceptBeforeHandshake?: (peerId: string) => boolean
+  onRejectFull?: (peerId: string, peer: PeerHandle) => void
+  onLocalHandshakePassed?: (
+    peerId: string,
+    peer: PeerHandle
+  ) => HandshakeReadyPayload | null
+  onRemoteHandshakeReady?: (
+    peerId: string,
+    peer: PeerHandle,
+    data: HandshakeReadyPayload
+  ) => boolean
   onActivate: (peerId: string, peer: PeerHandle) => void
   onFailure: (peerId: string, peer: PeerHandle, reason: Error) => void
 }
@@ -143,6 +171,10 @@ export const createHandshakeManager = ({
   handshakeTimeoutMs,
   sendHandshakeData,
   sendHandshakeReady,
+  canAcceptBeforeHandshake,
+  onRejectFull,
+  onLocalHandshakePassed,
+  onRemoteHandshakeReady,
   onActivate,
   onFailure
 }: HandshakeManagerDeps): {
@@ -155,7 +187,11 @@ export const createHandshakeManager = ({
     id: string,
     metadata?: JsonValue
   ) => void
-  receiveHandshakeReady: (id: string) => void
+  receiveHandshakeReady: (id: string, data?: HandshakeReadyPayload) => void
+  getReadyPendingIds: () => string[]
+  getPendingIds: () => string[]
+  getPeer: (id: string) => PeerHandle | undefined
+  activate: (id: string) => void
 } => {
   const peerStates: Record<string, PendingPeerState> = {}
 
@@ -200,8 +236,15 @@ export const createHandshakeManager = ({
     }
 
     state.didLocalHandshakePass = true
+    const payload = onLocalHandshakePassed
+      ? onLocalHandshakePassed(id, peer)
+      : ''
 
-    void sendHandshakeReady('', id).catch(err =>
+    if (payload === null) {
+      return
+    }
+
+    void sendHandshakeReady(payload, id).catch(err =>
       failPeerHandshake(
         id,
         peer,
@@ -213,7 +256,9 @@ export const createHandshakeManager = ({
         )
       )
     )
-    maybeActivatePeer(id, peer)
+    if (!payload) {
+      maybeActivatePeer(id, peer)
+    }
   }
 
   return {
@@ -252,6 +297,11 @@ export const createHandshakeManager = ({
       const state = peerStates[id]
 
       if (!state || state.peer !== peer) {
+        return
+      }
+
+      if (canAcceptBeforeHandshake && !canAcceptBeforeHandshake(id)) {
+        onRejectFull?.(id, peer)
         return
       }
 
@@ -297,9 +347,13 @@ export const createHandshakeManager = ({
         onPeerHandshake?.(id, sendHandshake, receiveHandshake, isInitiator)
       )
         .then(() => markLocalHandshakePassed(id, peer))
-        .catch(err =>
+        .catch(err => {
+          if (err === roomFullHostRejectErr) {
+            onRejectFull?.(id, peer)
+            return
+          }
           failPeerHandshake(id, peer, toError(err, 'handshake failed'))
-        )
+        })
     },
 
     receiveHandshakeData: (data, id, metadata) => {
@@ -329,7 +383,7 @@ export const createHandshakeManager = ({
       state.pendingHandshakePayloads.push(payload)
     },
 
-    receiveHandshakeReady: id => {
+    receiveHandshakeReady: (id, data = '') => {
       const state = peerStates[id]
 
       if (!state || state.isActive) {
@@ -337,7 +391,24 @@ export const createHandshakeManager = ({
       }
 
       state.didReceiveRemoteReady = true
+
+      if (onRemoteHandshakeReady?.(id, state.peer, data)) {
+        return
+      }
+
       maybeActivatePeer(id)
-    }
+    },
+
+    getReadyPendingIds: () =>
+      keys(peerStates).filter(id => {
+        const s = peerStates[id]
+        return Boolean(
+          s && !s.isActive && s.didLocalHandshakePass && s.didReceiveRemoteReady
+        )
+      }),
+    getPendingIds: () =>
+      keys(peerStates).filter(id => !peerStates[id]?.isActive),
+    getPeer: id => peerStates[id]?.peer,
+    activate: id => maybeActivatePeer(id)
   }
 }

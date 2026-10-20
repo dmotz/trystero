@@ -51,7 +51,7 @@ process.on('message', message => {
     started = performance.now()
     isRejoining = true
     Object.values(room.getPeers()).forEach(peer => {
-      void (peer as RTCPeerConnection).close()
+      void (peer as {connection?: RTCPeerConnection | null}).connection?.close()
     })
     return
   }

@@ -1,3 +1,4 @@
+import {inspectActionWireHeader} from './action-wire'
 import {hashWith, sha1} from './crypto'
 import {
   all,
@@ -692,6 +693,7 @@ export type OverlayManager = {
   removeDirectPeer: (peerId: string, peer?: PeerHandle) => boolean
   isDirectPeer: (peerId: string) => boolean
   isVirtualPeer: (peerId: string) => boolean
+  getRoute: (peerId: string) => TopologyRoute | undefined
   hasReachableRoute: (peerId: string) => boolean
   createVirtualPeer: (peerId: string) => PeerHandle
   broadcastInline: (
@@ -741,8 +743,6 @@ export type OverlayManager = {
   registerActionAuthority: (actionType: string, roles: string[]) => void
   recordSignatureFailure: () => void
   setRoomId: (effectiveRoomId: string) => void
-  injectControlForTest: (fromPeerId: string, msg: OverlayControlMessage) => void
-  injectBinaryForTest: (fromPeerId: string, frame: Uint8Array) => void
 }
 
 export const createOverlayManager = ({
@@ -838,7 +838,9 @@ export const createOverlayManager = ({
     void getOrCreateCryptoIdentity(selfId).then(id => {
       if (!isDestroyed) {
         identityReady = id
-        void publishLocalDescriptor()
+        if (directPeers.size > 0) {
+          void publishLocalDescriptor()
+        }
       }
     })
   }
@@ -1671,8 +1673,8 @@ export const createOverlayManager = ({
     }
   }
 
-  let outboundUnicastQueue: Promise<void> = Promise.resolve()
-  let inboundBinaryQueue: Promise<void> = Promise.resolve()
+  const outboundUnicastQueues = new Map<string, Promise<void>>()
+  const inboundOriginQueues = new Map<string, Promise<void>>()
 
   const sendUnicast = (targetPeerId: string, frame: Uint8Array): void => {
     if (isDestroyed) {
@@ -1691,15 +1693,20 @@ export const createOverlayManager = ({
     stats.messagesSent++
 
     const frameCopy = frame.slice()
-    outboundUnicastQueue = outboundUnicastQueue.then(async () => {
-      if (isDestroyed) {
-        return
-      }
-      let payloadToSend: Uint8Array = frameCopy
-      let ivB64: string | undefined
+    const prevQueue =
+      outboundUnicastQueues.get(targetPeerId) ?? Promise.resolve()
+    const nextQueue = prevQueue
+      .then(async () => {
+        if (isDestroyed) {
+          return
+        }
+        let payloadToSend: Uint8Array
+        let ivB64: string
 
-      const pairwiseKeyP = getPairwiseKey(targetPeerId)
-      if (pairwiseKeyP) {
+        const pairwiseKeyP = getPairwiseKey(targetPeerId)
+        if (!pairwiseKeyP) {
+          return
+        }
         try {
           const aesKey = await pairwiseKeyP
           const iv = crypto.getRandomValues(new Uint8Array(12))
@@ -1711,30 +1718,31 @@ export const createOverlayManager = ({
           payloadToSend = new Uint8Array(encrypted)
           ivB64 = toBase64(iv)
         } catch {
-          payloadToSend = frameCopy
+          return
         }
-      }
 
-      const canonical = `${selfId}:${targetPeerId}:${msgId}:${ivB64 ?? ''}`
-      const sig = await signUnicastOrBroadcast(canonical, payloadToSend)
-      if (isDestroyed) {
-        return
-      }
-      const header: UnicastEnvelopeHeader = {
-        o: selfId,
-        d: targetPeerId,
-        m: msgId,
-        ...(ivB64 ? {iv: ivB64} : {}),
-        s: sig
-      }
-      const packet = packOverlayBinary(
-        overlayUnicastKind,
-        config.maxHops,
-        header,
-        payloadToSend
-      )
-      routeUnicastPacket(targetPeerId, packet)
-    })
+        const canonical = `${selfId}:${targetPeerId}:${msgId}:${ivB64}`
+        const sig = await signUnicastOrBroadcast(canonical, payloadToSend)
+        if (isDestroyed) {
+          return
+        }
+        const header: UnicastEnvelopeHeader = {
+          o: selfId,
+          d: targetPeerId,
+          m: msgId,
+          iv: ivB64,
+          s: sig
+        }
+        const packet = packOverlayBinary(
+          overlayUnicastKind,
+          config.maxHops,
+          header,
+          payloadToSend
+        )
+        routeUnicastPacket(targetPeerId, packet)
+      })
+      .catch(noOp)
+    outboundUnicastQueues.set(targetPeerId, nextQueue)
   }
 
   const pendingGossipDescriptors = new Map<string, PeerDescriptor>()
@@ -2013,36 +2021,18 @@ export const createOverlayManager = ({
       }
 
       // Hop-1 / intermediate relay filtering for privileged action namespaces
-      if (payload.byteLength >= 36 && payload[0] === 2) {
-        const actionType = decodeBytes(payload.subarray(2, 34)).replaceAll(
-          '\0',
-          ''
-        )
-        const requiredRoles = actionAuthorities.get(actionType)
+      const wireHeader = inspectActionWireHeader(payload)
+      if (wireHeader) {
+        const requiredRoles = actionAuthorities.get(wireHeader.type)
         if (requiredRoles && requiredRoles.length > 0 && canPeerSendAction) {
-          let inlineCert: RoleCertificate | undefined
-          try {
-            const view = new DataView(
-              payload.buffer,
-              payload.byteOffset,
-              payload.byteLength
-            )
-            const metaLen = view.getUint16(34)
-            const headerLen = (payload[1]! & 15) === 0 ? 36 : 48
-            if (metaLen > 0 && headerLen + metaLen <= payload.byteLength) {
-              const metaObj = fromJson<Record<string, unknown>>(
-                decodeBytes(payload.subarray(headerLen, headerLen + metaLen))
-              )
-              const authEnv = metaObj?.['__trysteroAuth'] as
-                | {cert?: RoleCertificate}
-                | undefined
-              if (authEnv?.cert) {
-                inlineCert = authEnv.cert
-              }
-            }
-          } catch {
-            /* ignore metadata parse failure */
-          }
+          const metaObj =
+            wireHeader.metadata && typeof wireHeader.metadata === 'object'
+              ? (wireHeader.metadata as Record<string, unknown>)
+              : undefined
+          const authEnv = metaObj?.['__trysteroAuth'] as
+            | {cert?: RoleCertificate}
+            | undefined
+          const inlineCert = authEnv?.cert
           const allowed = await canPeerSendAction(
             origin,
             requiredRoles,
@@ -2162,25 +2152,27 @@ export const createOverlayManager = ({
         return
       }
 
-      let plainPayload = payload
-      if (ivB64) {
-        const pairwiseKeyP = getPairwiseKey(origin)
-        if (!pairwiseKeyP) {
-          stats.signatureFailures++
-          return
-        }
-        try {
-          const aesKey = await pairwiseKeyP
-          const decrypted = await crypto.subtle.decrypt(
-            {name: 'AES-GCM', iv: fromBase64(ivB64) as BufferSource},
-            aesKey,
-            payload as BufferSource
-          )
-          plainPayload = new Uint8Array(decrypted)
-        } catch {
-          stats.signatureFailures++
-          return
-        }
+      if (!ivB64) {
+        stats.signatureFailures++
+        return
+      }
+      const pairwiseKeyP = getPairwiseKey(origin)
+      if (!pairwiseKeyP) {
+        stats.signatureFailures++
+        return
+      }
+      let plainPayload: Uint8Array
+      try {
+        const aesKey = await pairwiseKeyP
+        const decrypted = await crypto.subtle.decrypt(
+          {name: 'AES-GCM', iv: fromBase64(ivB64) as BufferSource},
+          aesKey,
+          payload as BufferSource
+        )
+        plainPayload = new Uint8Array(decrypted)
+      } catch {
+        stats.signatureFailures++
+        return
       }
 
       if (!rememberSeenMessage(msgId)) {
@@ -2242,8 +2234,15 @@ export const createOverlayManager = ({
       }
       if (kind === overlayBroadcastKind || kind === overlayUnicastKind) {
         const copy = bytes.slice()
-        inboundBinaryQueue = inboundBinaryQueue.then(() =>
-          handleOverlayBinary(fromPeerId, copy)
+        const parsed = unpackOverlayBinary(copy)
+        const originKey =
+          parsed && typeof parsed.header['o'] === 'string' && parsed.header['o']
+            ? parsed.header['o']
+            : fromPeerId
+        const prev = inboundOriginQueues.get(originKey) ?? Promise.resolve()
+        inboundOriginQueues.set(
+          originKey,
+          prev.then(() => handleOverlayBinary(fromPeerId, copy)).catch(noOp)
         )
       }
     },
@@ -2298,6 +2297,13 @@ export const createOverlayManager = ({
     removeDirectPeer: (peerId: string, peer?: PeerHandle): boolean => {
       const current = directPeers.get(peerId)
       if (!current || (peer && current !== peer)) {
+        if (
+          !current &&
+          !virtualPeers.has(peerId) &&
+          knownRoster.delete(peerId)
+        ) {
+          recomputeTopologyAndRoutes()
+        }
         return false
       }
 
@@ -2354,6 +2360,8 @@ export const createOverlayManager = ({
     isDirectPeer: (peerId: string): boolean => directPeers.has(peerId),
 
     isVirtualPeer: (peerId: string): boolean => virtualPeers.has(peerId),
+
+    getRoute: (peerId: string): TopologyRoute | undefined => routes[peerId],
 
     hasReachableRoute: (peerId: string): boolean =>
       directPeers.has(peerId) || Boolean(routes[peerId]),
@@ -2798,20 +2806,6 @@ export const createOverlayManager = ({
         mediaTrees,
         stats: {...stats}
       }
-    },
-
-    injectControlForTest: (
-      fromPeerId: string,
-      msg: OverlayControlMessage
-    ): void => {
-      void handleControlFrame(fromPeerId, msg)
-    },
-
-    injectBinaryForTest: (fromPeerId: string, frame: Uint8Array): void => {
-      const copy = frame.slice()
-      inboundBinaryQueue = inboundBinaryQueue.then(() =>
-        handleOverlayBinary(fromPeerId, copy)
-      )
     }
   }
 }

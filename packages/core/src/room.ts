@@ -8,34 +8,19 @@ import {
   mkErr,
   noOp,
   selfId as defaultSelfId,
-  toError,
-  toJson
+  toError
 } from './utils'
 import {createActionManager} from './actions'
+import {createRoomAuthority, type ResolvedRoomAuthority} from './authority'
 import {
-  compareStateRecords,
-  decodePublicKey,
-  encodePublicKey,
-  resolveRoomAuthority,
-  signActionAuth,
-  signPeerBan,
-  signRoleCertificate,
-  signRoleRevocation,
-  signStateRecord,
-  verifyActionAuth,
-  verifyPeerBan,
-  verifyRoleCertificateChain,
-  verifyRoleRevocation,
-  verifyStateRecord,
-  type ActionAuthEnvelope,
-  type ResolvedRoomAuthority
-} from './authority'
-import {createHandshakeManager} from './handshake'
+  createHandshakeManager,
+  roomFullHostRejectErr,
+  type HandshakeReadyPayload
+} from './handshake'
 import {createMediaManager, type InternalMediaMeta} from './media'
 import {createOverlayManager, type OverlayManager} from './overlay'
 import type {
   AddMediaOptions,
-  AdminIdentity,
   AuthorityConfig,
   AuthoritativeState,
   AuthoritativeStateRecord,
@@ -49,7 +34,6 @@ import type {
   Room,
   RoomAuthorityInfo,
   SharedMediaPeer,
-  StateChangeContext,
   StateConfig,
   TargetPeers,
   TopologyConfig,
@@ -80,24 +64,31 @@ const registerBeforeUnloadCleanup = (cleanup: () => void): (() => void) => {
   }
 }
 
-export type RoomAuthorityBridge = {
+export type RoomSignalingBridge = {
+  overlay: OverlayManager
   getAnnounceExtra: () => Promise<Record<string, unknown> | undefined>
   onSignalingPayload: (
     peerId: string,
     payload: Record<string, unknown>
   ) => Promise<void> | void
+  checkCapacityAfterPassword: (peerId: string) => void
 }
+
+const roomSignalingBridges = new WeakMap<Room, RoomSignalingBridge>()
+
+export const getRoomSignalingBridge = (
+  room: Room
+): RoomSignalingBridge | undefined => roomSignalingBridges.get(room)
 
 type RoomOptions = {
   selfId?: string
   appId?: string
   roomId?: string
   password?: string
+  limit?: number
   topology?: TopologyMode | TopologyConfig
   admin?: boolean | string | AuthorityConfig
   resolvedAuthorityP?: Promise<ResolvedRoomAuthority>
-  onOverlayReady?: (overlay: OverlayManager) => void
-  onAuthorityReady?: (bridge: RoomAuthorityBridge) => void
   maxReceiveBytes?: number
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
@@ -133,16 +124,19 @@ type AuthControlMessage =
       t: 'cert'
       cert: RoleCertificate
       reqId?: string
+      ackPeers?: string[]
     }
   | {
       t: 'revoke'
       revocation: RoleRevocationRecord
       reqId?: string
+      ackPeers?: string[]
     }
   | {
       t: 'ban'
       ban: PeerBanRecord
       reqId?: string
+      ackPeers?: string[]
     }
   | {
       t: 'state'
@@ -153,16 +147,6 @@ type AuthControlMessage =
       reqId: string
     }
 
-type StateInstanceEntry<T extends JsonValue = JsonValue> = {
-  namespace: string
-  value: T
-  record: AuthoritativeStateRecord<T> | null
-  meta: StateChangeContext | null
-  requiredRoles: string[]
-  validate?: (next: T, prev: T, context: StateChangeContext) => boolean
-  onChange: ((value: T, prev: T, context: StateChangeContext) => void) | null
-}
-
 export default (
   onPeer: (f: (peer: PeerHandle, id: string) => void) => void,
   onPeerLeave: (id: string) => void,
@@ -172,11 +156,10 @@ export default (
     appId = '',
     roomId: initialRoomId = '',
     password = '',
+    limit,
     topology,
     admin,
     resolvedAuthorityP,
-    onOverlayReady,
-    onAuthorityReady,
     onPeerHandshake,
     onHandshakeError,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
@@ -185,7 +168,6 @@ export default (
     onBeforeLeave
   }: RoomOptions = {}
 ): Room => {
-  let effectiveRoomId = initialRoomId
   const peerMap: Record<string, PeerHandle> = {}
   const activePeerMap: Record<string, PeerHandle> = {}
   const pendingPongs: Record<string, PendingPongWaiter[] | undefined> = {}
@@ -201,18 +183,16 @@ export default (
   }
   let unregisterBeforeUnloadCleanup: () => void = noOp
   let leavePromise: Promise<void> | null = null
-
-  // Authority, role, ban, and authoritative state stores
-  const rootFingerprints = new Set<string>()
-  const rootPubKeys = new Set<string>()
-  const peerSignKeys = new Map<string, JsonWebKey>()
-  const pubKeyWaiters = new Map<string, Array<(jwk: JsonWebKey) => void>>()
-  const peerCerts = new Map<string, RoleCertificate>()
-  const peerRevocations = new Map<string, RoleRevocationRecord[]>()
-  const allRevocations = new Map<string, RoleRevocationRecord>()
-  const bannedPeerRecords = new Map<string, PeerBanRecord>()
-  const latestStateRecords = new Map<string, AuthoritativeStateRecord>()
-  const stateInstances = new Map<string, StateInstanceEntry>()
+  let effectiveLimit: number | undefined = limit
+  const localJoinedAt = Date.now()
+  let isEstablished = false
+  let didRejectSelfAsFull = false
+  let capacityEvalTimer: ReturnType<typeof setTimeout> | null = null
+  const peerJoinMeta = new Map<string, {t: number; est: boolean}>()
+  const pendingFullRejectTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >()
   const pendingAuthAckWaiters = new Map<
     string,
     {
@@ -221,79 +201,6 @@ export default (
       timer: ReturnType<typeof setTimeout>
     }
   >()
-  let localAdminIdentity: AdminIdentity | null = null
-  let localCert: RoleCertificate | null = null
-  let authResolved = false
-  let localAuthSeq = 0
-
-  const registerPeerPublicKey = (peerId: string, jwk: JsonWebKey): void => {
-    if (!peerId || !jwk || jwk.kty !== 'EC' || !jwk.x || !jwk.y) {
-      return
-    }
-    const cleanJwk: JsonWebKey = {
-      crv: 'P-256',
-      kty: 'EC',
-      x: jwk.x,
-      y: jwk.y
-    }
-    peerSignKeys.set(peerId, cleanJwk)
-    overlay.setPeerSignPublicKey(peerId, cleanJwk)
-    const waiters = pubKeyWaiters.get(peerId)
-    if (waiters) {
-      pubKeyWaiters.delete(peerId)
-      waiters.forEach(w => w(cleanJwk))
-    }
-  }
-
-  const getEffectiveRolesForCert = (cert: RoleCertificate): string[] => {
-    if (
-      bannedPeerRecords.has(cert.subPeerId) ||
-      overlay.isPeerBanned(cert.subPeerId)
-    ) {
-      return []
-    }
-    if (typeof cert.exp === 'number' && Date.now() > cert.exp) {
-      return []
-    }
-    const revs = peerRevocations.get(cert.subPeerId)
-    if (!revs || revs.length === 0) {
-      return [...cert.roles]
-    }
-    const revokedRoles = new Set<string>()
-    for (const r of revs) {
-      if (r.ts >= cert.iat) {
-        if (!r.role || r.role === '*') {
-          return []
-        }
-        revokedRoles.add(r.role)
-      }
-    }
-    return cert.roles.filter(role => !revokedRoles.has(role))
-  }
-
-  const getPeerRoles = (targetPeerId = localSelfId): string[] => {
-    if (
-      bannedPeerRecords.has(targetPeerId) ||
-      overlay.isPeerBanned(targetPeerId)
-    ) {
-      return []
-    }
-    const cert = peerCerts.get(targetPeerId)
-    if (cert) {
-      return getEffectiveRolesForCert(cert)
-    }
-    if (
-      !authResolved &&
-      targetPeerId === localSelfId &&
-      (admin === true ||
-        (typeof admin === 'string' && admin.length > 0) ||
-        (typeof admin === 'object' &&
-          Boolean(admin?.create || admin?.credentials)))
-    ) {
-      return ['admin']
-    }
-    return []
-  }
 
   const iterate = (
     targets: TargetPeers,
@@ -340,11 +247,11 @@ export default (
   const overlay = createOverlayManager({
     selfId: localSelfId,
     appId,
-    roomId: effectiveRoomId,
+    roomId: initialRoomId,
     password,
     ...(topology === undefined ? {} : {topology}),
     onVirtualPeerJoin: (peerId, vPeer) => {
-      if (bannedPeerRecords.has(peerId) || overlay.isPeerBanned(peerId)) {
+      if (authority.isPeerBanned(peerId)) {
         vPeer.destroy()
         return
       }
@@ -369,34 +276,18 @@ export default (
       }
     },
     onDeliverData: (originPeerId, data) => {
-      if (
-        bannedPeerRecords.has(originPeerId) ||
-        overlay.isPeerBanned(originPeerId)
-      ) {
+      if (authority.isPeerBanned(originPeerId)) {
         overlay.recordSignatureFailure()
         return
       }
       handleData(originPeerId, data)
     },
-    canPeerSendAction: async (peerId, requiredRoles, inlineCert) => {
-      await authInfoP
-      if (bannedPeerRecords.has(peerId) || overlay.isPeerBanned(peerId)) {
-        return false
-      }
-      if (inlineCert && inlineCert.subPeerId === peerId) {
-        await verifyAndApplyCert(inlineCert)
-      }
-      const roles = getPeerRoles(peerId)
-      return (
-        roles.includes('admin') ||
-        requiredRoles.includes('*') ||
-        requiredRoles.some(r => roles.includes(r))
-      )
-    },
+    canPeerSendAction: (peerId, requiredRoles, inlineCert) =>
+      authority.canPeerSendAction(peerId, requiredRoles, inlineCert),
     onPeerDescriptorCert: (peerId, signPubKey, cert) => {
-      registerPeerPublicKey(peerId, signPubKey)
+      authority.registerPeerPublicKey(peerId, signPubKey)
       if (cert) {
-        void verifyAndApplyCert(cert)
+        void authority.verifyAndApplyCert(cert)
       }
     },
     onRelayMediaStream: (
@@ -439,7 +330,29 @@ export default (
     }
   })
 
-  onOverlayReady?.(overlay)
+  const authority = createRoomAuthority({
+    selfId: localSelfId,
+    appId,
+    initialRoomId,
+    ...(admin === undefined ? {} : {admin}),
+    ...(resolvedAuthorityP === undefined ? {} : {resolvedAuthorityP}),
+    getLocalCryptoIdentity: () => overlay.getLocalCryptoIdentity(),
+    getOverlayPeerPublicKey: peerId => overlay.getPeerSignPublicKey(peerId),
+    isOverlayPeerBanned: peerId => overlay.isPeerBanned(peerId),
+    onRoomIdResolved: effectiveRoomId => overlay.setRoomId(effectiveRoomId),
+    onPeerPublicKey: (peerId, pubKey) =>
+      overlay.setPeerSignPublicKey(peerId, pubKey),
+    onLocalRoleCertificate: cert => overlay.setLocalRoleCertificate(cert),
+    onPrivilegedPeer: (peerId, isPriv) =>
+      overlay.setPrivilegedPeer(peerId, isPriv),
+    onPeerBanned: (peerId, keyThumbprint) => {
+      overlay.markPeerBanned(peerId, keyThumbprint)
+      if (peerId !== localSelfId && peerMap[peerId]) {
+        kickPeer(peerId, undefined, mkErr('peer banned'))
+      }
+    },
+    onSignatureFailure: () => overlay.recordSignatureFailure()
+  })
 
   const mediaManager = createMediaManager({
     onPeerError,
@@ -515,112 +428,40 @@ export default (
     getPeerIds: includePending =>
       keys(includePending ? peerMap : activePeerMap),
     canReceiveFromPeer: (id, receiveWhilePending) =>
-      !bannedPeerRecords.has(id) &&
-      !overlay.isPeerBanned(id) &&
+      !authority.isPeerBanned(id) &&
       (Boolean(activePeerMap[id]) ||
         handshakeManager.canReceiveFromPeer(id, receiveWhilePending)),
     broadcastInline: (frame, onProgress) =>
       overlay.broadcastInline(frame, onProgress),
     registerActionAuthority: (namespace, roles) =>
       overlay.registerActionAuthority(namespace, roles),
-    getPeerRoles: peerId => getPeerRoles(peerId),
+    getPeerRoles: peerId => authority.getPeerRoles(peerId),
     onUnauthorizedAction: () => {
       overlay.recordSignatureFailure()
     },
-    signActionPayload: async (namespace, requiredRoles, data, userMetadata) => {
-      await authInfoP
-      const myRoles = getPeerRoles(localSelfId)
-      const allowed =
-        myRoles.includes('admin') ||
-        requiredRoles.includes('*') ||
-        requiredRoles.some(r => myRoles.includes(r))
-      if (!allowed || !localCert) {
-        throw mkErr(`insufficient authority to send on action "${namespace}"`)
-      }
-      const cryptoId = await overlay.getLocalCryptoIdentity()
-      const env = await signActionAuth(cryptoId.signPrivateKey, localCert, {
-        appId,
-        roomId: effectiveRoomId,
+    signActionPayload: (namespace, requiredRoles, data, userMetadata) =>
+      authority.signActionPayload(namespace, requiredRoles, data, userMetadata),
+    verifyActionOffer: (namespace, peerId, requiredRoles, wireMetadata) =>
+      authority.verifyActionOffer(
         namespace,
-        peerId: localSelfId,
-        seq: ++localAuthSeq,
-        data,
-        ...(userMetadata === undefined ? {} : {userMetadata})
-      })
-      return {
-        __trysteroAuth: env as unknown as JsonValue,
-        ...(userMetadata === undefined ? {} : {m: userMetadata})
-      }
-    },
-    verifyActionPayload: async (
+        peerId,
+        requiredRoles,
+        wireMetadata
+      ),
+    verifyActionPayload: (
       namespace,
       peerId,
       requiredRoles,
       data,
       wireMetadata
-    ) => {
-      await authInfoP
-      if (bannedPeerRecords.has(peerId) || overlay.isPeerBanned(peerId)) {
-        return {valid: false, roles: []}
-      }
-      if (
-        !wireMetadata ||
-        typeof wireMetadata !== 'object' ||
-        Array.isArray(wireMetadata) ||
-        !('__trysteroAuth' in wireMetadata)
-      ) {
-        return {valid: false, roles: []}
-      }
-      const env = (wireMetadata as {__trysteroAuth?: unknown})
-        .__trysteroAuth as ActionAuthEnvelope | undefined
-      const userMetadata = Object.hasOwn(wireMetadata, 'm')
-        ? (wireMetadata as {m?: JsonValue}).m
-        : undefined
-      if (!env || !env.cert) {
-        return {valid: false, roles: []}
-      }
-      const certApplied = await verifyAndApplyCert(env.cert)
-      if (!certApplied && peerCerts.get(peerId)?.certId !== env.cert.certId) {
-        // Still verify chain directly in case a newer cert replaced it
-        const chainRes = await verifyRoleCertificateChain(
-          env.cert,
-          appId,
-          effectiveRoomId,
-          rootFingerprints,
-          rootPubKeys
-        )
-        if (!chainRes.valid) {
-          return {valid: false, roles: []}
-        }
-      }
-      const effectiveRoles = getEffectiveRolesForCert(env.cert)
-      const hasRole =
-        effectiveRoles.includes('admin') ||
-        requiredRoles.includes('*') ||
-        requiredRoles.some(r => effectiveRoles.includes(r))
-      if (!hasRole) {
-        return {valid: false, roles: []}
-      }
-      const verified = await verifyActionAuth(env, {
-        appId,
-        roomId: effectiveRoomId,
+    ) =>
+      authority.verifyActionPayload(
         namespace,
         peerId,
-        data,
-        ...(userMetadata === undefined ? {} : {userMetadata}),
         requiredRoles,
-        rootFingerprints,
-        rootPubKeys
-      })
-      if (!verified.valid) {
-        return {valid: false, roles: []}
-      }
-      return {
-        valid: true,
-        ...(userMetadata === undefined ? {} : {userMetadata}),
-        roles: effectiveRoles
-      }
-    }
+        data,
+        wireMetadata
+      )
   })
   const makeActionInternal = actionManager.makeInternalAction
   const handleData = actionManager.handleData
@@ -628,17 +469,28 @@ export default (
 
   const clearPeerState = (
     id: string,
-    reason: Error = mkErr('peer disconnected')
+    reason: Error = mkErr('peer disconnected'),
+    recheckCapacity = true
   ): void => {
     const err = toError(reason, 'peer disconnected')
+    const rejectTimer = pendingFullRejectTimers.get(id)
+    if (rejectTimer) {
+      clearTimeout(rejectTimer)
+      pendingFullRejectTimers.delete(id)
+    }
 
     handshakeManager.clearPeer(id, err)
     delete peerMap[id]
     delete activePeerMap[id]
+    peerJoinMeta.delete(id)
     actionManager.clearPeer(id, err)
     pendingPongs[id]?.splice(0).forEach(waiter => waiter.reject(err))
     delete pendingPongs[id]
     mediaManager.clearPeer(id)
+
+    if (recheckCapacity && effectiveLimit !== undefined && !leavePromise) {
+      scheduleCapacityCheck()
+    }
   }
 
   const exitPeer = (id: string, peer?: PeerHandle, reason?: Error): void => {
@@ -670,6 +522,8 @@ export default (
         onPeerLeave(id)
         return
       }
+    } else if (!wasVirtual) {
+      overlay.removeDirectPeer(id)
     }
 
     if (wasActive) {
@@ -684,19 +538,29 @@ export default (
   const leave = (): Promise<void> =>
     (leavePromise ??= (async () => {
       onBeforeLeave?.()
+      if (capacityEvalTimer) {
+        clearTimeout(capacityEvalTimer)
+        capacityEvalTimer = null
+      }
+      for (const timer of pendingFullRejectTimers.values()) {
+        clearTimeout(timer)
+      }
+      pendingFullRejectTimers.clear()
       overlay.announceLeave()
       const controller = new AbortController()
       void leaveAction
         .send('', undefined, undefined, undefined, controller.signal)
         .catch(noOp)
-      await new Promise<void>(res => setTimeout(res, 99))
+      if (!didRejectSelfAsFull) {
+        await new Promise<void>(res => setTimeout(res, 99))
+      }
       controller.abort()
 
       try {
         overlay.destroy()
         entries(peerMap).forEach(([id, peer]) => {
           peer.destroy()
-          clearPeerState(id, mkErr('room left'))
+          clearPeerState(id, mkErr('room left'), false)
         })
       } finally {
         try {
@@ -729,9 +593,9 @@ export default (
     internalNs('hsdata'),
     {sendToPending: true, receiveWhilePending: true, maxPayloadBytes: 64 * 1024}
   )
-  const handshakeReadyAction = makeActionInternal<string>(
+  const handshakeReadyAction = makeActionInternal<HandshakeReadyPayload>(
     internalNs('hsready'),
-    {sendToPending: true, receiveWhilePending: true}
+    {sendToPending: true, receiveWhilePending: true, maxPayloadBytes: 64 * 1024}
   )
   const rawAuthAction = makeActionInternal<JsonValue>(internalNs('auth'), {
     maxPayloadBytes: 256 * 1024
@@ -745,222 +609,6 @@ export default (
       )
   }
 
-  const authInfoP = (
-    resolvedAuthorityP ?? resolveRoomAuthority(initialRoomId, admin)
-  ).then(async resolved => {
-    if (
-      resolved.effectiveRoomId &&
-      resolved.effectiveRoomId !== effectiveRoomId
-    ) {
-      effectiveRoomId = resolved.effectiveRoomId
-      overlay.setRoomId(effectiveRoomId)
-    }
-    for (const fp of resolved.rootFingerprints) {
-      rootFingerprints.add(fp)
-    }
-    for (const pk of resolved.rootPubKeys) {
-      rootPubKeys.add(pk)
-    }
-    localAdminIdentity = resolved.localIdentity
-    if (resolved.hasAuthorityAnchor || localAdminIdentity) {
-      const cryptoId = await overlay.getLocalCryptoIdentity()
-      registerPeerPublicKey(localSelfId, cryptoId.signPubJwk)
-      if (localAdminIdentity) {
-        const rootCert = await signRoleCertificate(
-          localAdminIdentity.signPrivateKey,
-          localAdminIdentity.signPubJwk,
-          {
-            subPeerId: localSelfId,
-            subPubKey: cryptoId.signPubJwk,
-            appId,
-            roomId: effectiveRoomId,
-            roles: ['admin'],
-            canDelegate: true,
-            isRoot: true
-          }
-        )
-        localCert = rootCert
-        peerCerts.set(localSelfId, rootCert)
-        overlay.setLocalRoleCertificate(rootCert)
-        overlay.setPrivilegedPeer(localSelfId, true)
-      }
-    }
-    authResolved = true
-    return {resolved}
-  })
-
-  const verifyAndApplyCert = async (
-    cert: RoleCertificate
-  ): Promise<boolean> => {
-    if (!cert || typeof cert !== 'object') {
-      return false
-    }
-    await authInfoP
-    const res = await verifyRoleCertificateChain(
-      cert,
-      appId,
-      effectiveRoomId,
-      rootFingerprints,
-      rootPubKeys
-    )
-    if (!res.valid) {
-      return false
-    }
-    registerPeerPublicKey(cert.subPeerId, cert.subPubKey)
-    const existing = peerCerts.get(cert.subPeerId)
-    if (existing && existing.iat > cert.iat) {
-      return true
-    }
-    if (existing && existing.certId === cert.certId) {
-      return false
-    }
-    peerCerts.set(cert.subPeerId, cert)
-    const effectiveRoles = getEffectiveRolesForCert(cert)
-    overlay.setPrivilegedPeer(cert.subPeerId, effectiveRoles.includes('admin'))
-    if (cert.subPeerId === localSelfId) {
-      localCert = cert
-      overlay.setLocalRoleCertificate(cert)
-    }
-    return true
-  }
-
-  const verifyAndApplyRevocation = async (
-    rev: RoleRevocationRecord
-  ): Promise<boolean> => {
-    if (!rev || typeof rev !== 'object' || allRevocations.has(rev.sig)) {
-      return false
-    }
-    await authInfoP
-    const valid = await verifyRoleRevocation(
-      rev,
-      appId,
-      effectiveRoomId,
-      rootFingerprints,
-      rootPubKeys
-    )
-    if (!valid) {
-      return false
-    }
-    const targetCert = peerCerts.get(rev.targetPeerId)
-    if (targetCert?.isRoot && !rev.issuerCert.isRoot) {
-      return false
-    }
-    allRevocations.set(rev.sig, rev)
-    const list = peerRevocations.get(rev.targetPeerId) ?? []
-    list.push(rev)
-    peerRevocations.set(rev.targetPeerId, list)
-    const remainingRoles = getPeerRoles(rev.targetPeerId)
-    overlay.setPrivilegedPeer(
-      rev.targetPeerId,
-      remainingRoles.includes('admin')
-    )
-    if (rev.targetPeerId === localSelfId && remainingRoles.length === 0) {
-      overlay.setLocalRoleCertificate(null)
-    }
-    return true
-  }
-
-  const verifyAndApplyBan = async (ban: PeerBanRecord): Promise<boolean> => {
-    if (
-      !ban ||
-      typeof ban !== 'object' ||
-      bannedPeerRecords.get(ban.targetPeerId)?.sig === ban.sig
-    ) {
-      return false
-    }
-    await authInfoP
-    const valid = await verifyPeerBan(
-      ban,
-      appId,
-      effectiveRoomId,
-      rootFingerprints,
-      rootPubKeys
-    )
-    if (!valid) {
-      return false
-    }
-    const targetCert = peerCerts.get(ban.targetPeerId)
-    if (targetCert?.isRoot && !ban.issuerCert.isRoot) {
-      return false
-    }
-    bannedPeerRecords.set(ban.targetPeerId, ban)
-    overlay.markPeerBanned(ban.targetPeerId, ban.targetKeyThumbprint)
-    if (ban.targetPeerId !== localSelfId && peerMap[ban.targetPeerId]) {
-      kickPeer(ban.targetPeerId, undefined, mkErr('peer banned'))
-    }
-    return true
-  }
-
-  const verifyAndApplyStateRecord = async (
-    record: AuthoritativeStateRecord
-  ): Promise<boolean> => {
-    if (!record || typeof record !== 'object') {
-      return false
-    }
-    await authInfoP
-    if (
-      bannedPeerRecords.has(record.updatedBy) ||
-      overlay.isPeerBanned(record.updatedBy)
-    ) {
-      overlay.recordSignatureFailure()
-      return false
-    }
-    await verifyAndApplyCert(record.cert)
-    const effectiveRoles = getEffectiveRolesForCert(record.cert)
-    const instance = stateInstances.get(record.namespace)
-    const requiredRoles = instance?.requiredRoles ?? ['admin']
-    const hasRole =
-      effectiveRoles.includes('admin') ||
-      requiredRoles.includes('*') ||
-      requiredRoles.some(r => effectiveRoles.includes(r))
-    if (!hasRole) {
-      overlay.recordSignatureFailure()
-      return false
-    }
-    const isValid = await verifyStateRecord(
-      record,
-      appId,
-      effectiveRoomId,
-      requiredRoles,
-      rootFingerprints,
-      rootPubKeys
-    )
-    if (!isValid) {
-      overlay.recordSignatureFailure()
-      return false
-    }
-    const current = instance?.record ?? latestStateRecords.get(record.namespace)
-    if (current && compareStateRecords(record, current) <= 0) {
-      return false
-    }
-    const changeCtx: StateChangeContext = {
-      updatedBy: record.updatedBy,
-      roles: effectiveRoles,
-      seq: record.seq,
-      epoch: record.epoch,
-      timestamp: record.ts,
-      hash: record.hash
-    }
-    if (instance) {
-      if (
-        instance.validate &&
-        !instance.validate(record.value, instance.value, changeCtx)
-      ) {
-        overlay.recordSignatureFailure()
-        return false
-      }
-      const prevValue = instance.value
-      instance.value = record.value
-      instance.record = record
-      instance.meta = changeCtx
-      latestStateRecords.set(record.namespace, record)
-      instance.onChange?.(instance.value, prevValue, changeCtx)
-    } else {
-      latestStateRecords.set(record.namespace, record)
-    }
-    return true
-  }
-
   const sendAuthSyncToPeer = async (
     targetPeerId: string,
     force = false
@@ -968,40 +616,19 @@ export default (
     if (
       !targetPeerId ||
       targetPeerId === localSelfId ||
-      bannedPeerRecords.has(targetPeerId) ||
-      overlay.isPeerBanned(targetPeerId)
+      authority.isPeerBanned(targetPeerId)
     ) {
       return
     }
-    const {resolved} = await authInfoP
-    if (
-      !force &&
-      !resolved.hasAuthorityAnchor &&
-      peerCerts.size === 0 &&
-      allRevocations.size === 0 &&
-      bannedPeerRecords.size === 0 &&
-      latestStateRecords.size === 0
-    ) {
+    const syncPayload = await authority.buildSyncMessage(force)
+    if (!syncPayload || !activePeerMap[targetPeerId]) {
       return
     }
-    const cryptoId = await overlay.getLocalCryptoIdentity()
-    registerPeerPublicKey(localSelfId, cryptoId.signPubJwk)
-    if (!activePeerMap[targetPeerId]) {
-      return
-    }
-    const certs = [...peerCerts.values()]
-    const revocations = [...allRevocations.values()]
-    const bans = [...bannedPeerRecords.values()]
-    const states = [...latestStateRecords.values()]
     await authAction
       .send(
         {
           t: 'sync',
-          pubKey: cryptoId.signPubJwk,
-          ...(certs.length > 0 ? {certs} : {}),
-          ...(revocations.length > 0 ? {revocations} : {}),
-          ...(bans.length > 0 ? {bans} : {}),
-          ...(states.length > 0 ? {states} : {})
+          ...syncPayload
         },
         targetPeerId
       )
@@ -1058,7 +685,7 @@ export default (
     if (msg.t === 'sync') {
       void (async () => {
         if (msg.pubKey) {
-          registerPeerPublicKey(fromPeerId, msg.pubKey)
+          authority.registerPeerPublicKey(fromPeerId, msg.pubKey)
         }
         const newBans: PeerBanRecord[] = []
         const newRevs: RoleRevocationRecord[] = []
@@ -1067,28 +694,28 @@ export default (
 
         if (Array.isArray(msg.bans)) {
           for (const b of msg.bans) {
-            if (await verifyAndApplyBan(b)) {
+            if (await authority.verifyAndApplyBan(b)) {
               newBans.push(b)
             }
           }
         }
         if (Array.isArray(msg.revocations)) {
           for (const r of msg.revocations) {
-            if (await verifyAndApplyRevocation(r)) {
+            if (await authority.verifyAndApplyRevocation(r)) {
               newRevs.push(r)
             }
           }
         }
         if (Array.isArray(msg.certs)) {
           for (const c of msg.certs) {
-            if (await verifyAndApplyCert(c)) {
+            if (await authority.verifyAndApplyCert(c)) {
               newCerts.push(c)
             }
           }
         }
         if (Array.isArray(msg.states)) {
           for (const s of msg.states) {
-            if (await verifyAndApplyStateRecord(s)) {
+            if (await authority.verifyAndApplyStateRecord(s)) {
               newStates.push(s)
             }
           }
@@ -1100,10 +727,10 @@ export default (
           newCerts.length > 0 ||
           newStates.length > 0
         ) {
-          const otherPeers = keys(activePeerMap).filter(
-            id => id !== fromPeerId && id !== localSelfId
-          )
-          if (otherPeers.length > 0) {
+          const directNeighbors = overlay
+            .getSnapshot()
+            .directPeerIds.filter(id => id !== fromPeerId && id !== localSelfId)
+          if (directNeighbors.length > 0) {
             void authAction
               .send(
                 {
@@ -1113,7 +740,7 @@ export default (
                   ...(newBans.length > 0 ? {bans: newBans} : {}),
                   ...(newStates.length > 0 ? {states: newStates} : {})
                 },
-                otherPeers
+                directNeighbors
               )
               .catch(noOp)
           }
@@ -1122,41 +749,50 @@ export default (
       return
     }
     if (msg.t === 'cert') {
-      void verifyAndApplyCert(msg.cert).then(applied => {
-        if (msg.reqId) {
+      void authority.verifyAndApplyCert(msg.cert).then(applied => {
+        if (
+          msg.reqId &&
+          (!msg.ackPeers || msg.ackPeers.includes(localSelfId))
+        ) {
           void authAction
             .send({t: 'ack', reqId: msg.reqId}, fromPeerId)
             .catch(noOp)
         }
-        if (!applied && !peerCerts.has(msg.cert?.subPeerId)) {
+        if (!applied && !authority.hasCertForPeer(msg.cert?.subPeerId)) {
           overlay.recordSignatureFailure()
         }
       })
       return
     }
     if (msg.t === 'revoke') {
-      void verifyAndApplyRevocation(msg.revocation).then(applied => {
-        if (msg.reqId) {
+      void authority.verifyAndApplyRevocation(msg.revocation).then(applied => {
+        if (
+          msg.reqId &&
+          (!msg.ackPeers || msg.ackPeers.includes(localSelfId))
+        ) {
           void authAction
             .send({t: 'ack', reqId: msg.reqId}, fromPeerId)
             .catch(noOp)
         }
-        if (!applied && !allRevocations.has(msg.revocation?.sig)) {
+        if (!applied && !authority.hasRevocationSig(msg.revocation?.sig)) {
           overlay.recordSignatureFailure()
         }
       })
       return
     }
     if (msg.t === 'ban') {
-      void verifyAndApplyBan(msg.ban).then(applied => {
-        if (msg.reqId) {
+      void authority.verifyAndApplyBan(msg.ban).then(applied => {
+        if (
+          msg.reqId &&
+          (!msg.ackPeers || msg.ackPeers.includes(localSelfId))
+        ) {
           void authAction
             .send({t: 'ack', reqId: msg.reqId}, fromPeerId)
             .catch(noOp)
         }
         if (
           !applied &&
-          bannedPeerRecords.get(msg.ban?.targetPeerId)?.sig !== msg.ban?.sig
+          !authority.hasBanSig(msg.ban?.targetPeerId, msg.ban?.sig)
         ) {
           overlay.recordSignatureFailure()
         }
@@ -1164,52 +800,141 @@ export default (
       return
     }
     if (msg.t === 'state') {
-      void verifyAndApplyStateRecord(msg.record)
+      void authority.verifyAndApplyStateRecord(msg.record)
     }
   })
 
-  onAuthorityReady?.({
-    getAnnounceExtra: async () => {
-      const {resolved} = await authInfoP
-      if (!resolved.hasAuthorityAnchor || !resolved.signalingProofs) {
-        return undefined
-      }
-      const cryptoId = await overlay.getLocalCryptoIdentity()
-      registerPeerPublicKey(localSelfId, cryptoId.signPubJwk)
-      const bans = [...bannedPeerRecords.values()]
-      return {
-        pubKey: encodePublicKey(cryptoId.signPubJwk),
-        ...(localCert ? {authCert: localCert} : {}),
-        ...(bans.length > 0 ? {bans} : {})
-      }
-    },
-    onSignalingPayload: (peerId, payload) => {
-      if (!peerId || peerId === localSelfId) {
-        return undefined
-      }
-      if (typeof payload['pubKey'] === 'string') {
-        const jwk = decodePublicKey(payload['pubKey'])
-        if (jwk) {
-          registerPeerPublicKey(peerId, jwk)
-        }
-      }
-      const tasks: Promise<unknown>[] = []
-      if (payload['authCert'] && typeof payload['authCert'] === 'object') {
-        tasks.push(verifyAndApplyCert(payload['authCert'] as RoleCertificate))
-      }
-      if (Array.isArray(payload['bans'])) {
-        for (const b of payload['bans']) {
-          if (b && typeof b === 'object') {
-            tasks.push(verifyAndApplyBan(b as PeerBanRecord))
-          }
-        }
-      }
-      if (tasks.length > 0) {
-        return Promise.all(tasks).then(noOp)
-      }
-      return undefined
+  const isAlreadyFullForPeer = (id: string): boolean => {
+    if (activePeerMap[id] || promotedFromVirtual.has(id)) {
+      return false
     }
-  })
+    if (effectiveLimit === undefined) {
+      return false
+    }
+    return effectiveLimit === 1
+      ? isEstablished
+      : keys(activePeerMap).length + 1 >= effectiveLimit
+  }
+
+  const rejectPeerAsFull = (id: string, peer: PeerHandle): void => {
+    if (pendingFullRejectTimers.has(id) || peerMap[id] !== peer) {
+      return
+    }
+    void handshakeReadyAction
+      .send(
+        {
+          ok: false,
+          err: 'room full',
+          ...(effectiveLimit === undefined ? {} : {limit: effectiveLimit})
+        },
+        id
+      )
+      .catch(noOp)
+    handshakeManager.clearPeer(id, mkErr('room full'))
+    peerJoinMeta.delete(id)
+    const timer = setTimeout(() => {
+      pendingFullRejectTimers.delete(id)
+      exitPeer(id, peer, mkErr('room full'))
+    }, 50)
+    pendingFullRejectTimers.set(id, timer)
+  }
+
+  const handleSelfRejectedAsFull = (byPeerId: string): void => {
+    if (didRejectSelfAsFull || leavePromise) {
+      return
+    }
+    didRejectSelfAsFull = true
+    entries(peerMap).forEach(([pid]) => {
+      handshakeManager.clearPeer(pid, mkErr('room full'))
+    })
+    void leave().catch(noOp)
+    onHandshakeError?.(byPeerId, 'room full')
+  }
+
+  const evaluateCapacityAdmissions = (): void => {
+    if (effectiveLimit === undefined || didRejectSelfAsFull || leavePromise) {
+      return
+    }
+
+    const readyIds = handshakeManager
+      .getReadyPendingIds()
+      .filter(id => !pendingFullRejectTimers.has(id))
+
+    if (readyIds.length === 0) {
+      return
+    }
+
+    const rankPeer = (id: string): {id: string; est: boolean; t: number} => {
+      if (id === localSelfId) {
+        return {
+          id,
+          est: isEstablished || keys(activePeerMap).length > 0,
+          t: localJoinedAt
+        }
+      }
+      const meta = peerJoinMeta.get(id)
+      return {
+        id,
+        est: Boolean(activePeerMap[id]) || Boolean(meta?.est),
+        t: meta?.t ?? localJoinedAt
+      }
+    }
+
+    const candidateIds = new Set<string>([
+      localSelfId,
+      ...keys(activePeerMap),
+      ...readyIds
+    ])
+    const sorted = [...candidateIds].map(rankPeer).sort((a, b) => {
+      if (a.est !== b.est) {
+        return a.est ? -1 : 1
+      }
+      if (a.t !== b.t) {
+        return a.t - b.t
+      }
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    })
+
+    const winners = new Set(sorted.slice(0, effectiveLimit).map(c => c.id))
+
+    if (!winners.has(localSelfId)) {
+      const winnerPeerId =
+        sorted.find(c => c.id !== localSelfId && winners.has(c.id))?.id ??
+        readyIds[0] ??
+        localSelfId
+      handleSelfRejectedAsFull(winnerPeerId)
+      return
+    }
+
+    if (effectiveLimit === 1) {
+      isEstablished = true
+    }
+
+    for (const id of readyIds) {
+      const peer = handshakeManager.getPeer(id) ?? peerMap[id]
+      if (!peer) {
+        continue
+      }
+      if (winners.has(id) && keys(activePeerMap).length + 1 < effectiveLimit) {
+        handshakeManager.activate(id)
+      } else {
+        rejectPeerAsFull(id, peer)
+      }
+    }
+  }
+
+  const scheduleCapacityCheck = (): void => {
+    if (effectiveLimit === undefined || didRejectSelfAsFull || leavePromise) {
+      return
+    }
+    if (capacityEvalTimer) {
+      clearTimeout(capacityEvalTimer)
+    }
+    capacityEvalTimer = setTimeout(() => {
+      capacityEvalTimer = null
+      evaluateCapacityAdmissions()
+    }, 25)
+  }
 
   const handshakeManager = createHandshakeManager({
     selfId: localSelfId,
@@ -1218,15 +943,79 @@ export default (
     handshakeTimeoutMs,
     sendHandshakeData: handshakeDataAction.send,
     sendHandshakeReady: handshakeReadyAction.send,
+    canAcceptBeforeHandshake: id =>
+      Boolean(password) || !isAlreadyFullForPeer(id),
+    onRejectFull: (id, peer) => rejectPeerAsFull(id, peer),
+    onLocalHandshakePassed: (id, peer) => {
+      if (isAlreadyFullForPeer(id)) {
+        rejectPeerAsFull(id, peer)
+        return null
+      }
+      if (effectiveLimit === undefined) {
+        return ''
+      }
+      scheduleCapacityCheck()
+      return {
+        ok: true,
+        limit: effectiveLimit,
+        t: localJoinedAt,
+        est: isEstablished || keys(activePeerMap).length > 0
+      }
+    },
+    onRemoteHandshakeReady: (id, _peer, data) => {
+      if (data && typeof data === 'object') {
+        if (
+          typeof data.limit === 'number' &&
+          Number.isSafeInteger(data.limit) &&
+          data.limit >= 1
+        ) {
+          effectiveLimit =
+            effectiveLimit === undefined
+              ? data.limit
+              : Math.min(effectiveLimit, data.limit)
+        }
+        if (!data.ok && data.err === 'room full') {
+          handleSelfRejectedAsFull(id)
+          return true
+        }
+        peerJoinMeta.set(id, {
+          t: typeof data.t === 'number' ? data.t : Date.now(),
+          est: Boolean(activePeerMap[id]) || Boolean(data.est)
+        })
+      }
+      if (effectiveLimit !== undefined) {
+        scheduleCapacityCheck()
+        return true
+      }
+      return false
+    },
     onActivate: (id, peer) => {
-      if (bannedPeerRecords.has(id) || overlay.isPeerBanned(id)) {
+      if (authority.isPeerBanned(id)) {
         kickPeer(id, peer, mkErr('peer banned'))
         return
       }
+      isEstablished = true
       const alreadyJoined = promotedFromVirtual.delete(id)
       activePeerMap[id] = peer
       overlay.addDirectPeer(id, peer)
       void sendAuthSyncToPeer(id)
+      if (
+        effectiveLimit !== undefined &&
+        keys(activePeerMap).length + 1 >= effectiveLimit
+      ) {
+        for (const pendingId of handshakeManager.getPendingIds()) {
+          if (
+            !activePeerMap[pendingId] &&
+            !pendingFullRejectTimers.has(pendingId)
+          ) {
+            const pendingPeer =
+              handshakeManager.getPeer(pendingId) ?? peerMap[pendingId]
+            if (pendingPeer) {
+              rejectPeerAsFull(pendingId, pendingPeer)
+            }
+          }
+        }
+      }
       peer.setHandlers({
         signal: sdp => {
           if (activePeerMap[id] === peer) {
@@ -1290,12 +1079,12 @@ export default (
     handshakeManager.receiveHandshakeData(data, id, metadata)
   )
 
-  handshakeReadyAction.onMessage((_, id) =>
-    handshakeManager.receiveHandshakeReady(id)
+  handshakeReadyAction.onMessage((data, id) =>
+    handshakeManager.receiveHandshakeReady(id, data)
   )
 
   onPeer((peer, id) => {
-    if (bannedPeerRecords.has(id) || overlay.isPeerBanned(id)) {
+    if (authority.isPeerBanned(id)) {
       peer.destroy()
       return
     }
@@ -1348,319 +1137,98 @@ export default (
     )
   }
 
-  const waitForPeerPublicKey = (
-    peerId: string,
-    timeoutMs = 2_000
-  ): Promise<JsonWebKey> => {
-    const known =
-      peerSignKeys.get(peerId) ?? overlay.getPeerSignPublicKey(peerId)
-    if (known) {
-      return Promise.resolve(known)
-    }
-    void authAction.send({t: 'whois'}, peerId).catch(noOp)
-    return new Promise<JsonWebKey>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const list = pubKeyWaiters.get(peerId)
-        if (list) {
-          const idx = list.indexOf(onKey)
-          if (idx > -1) {
-            list.splice(idx, 1)
-          }
-        }
-        reject(mkErr(`timed out waiting for public key of peer ${peerId}`))
-      }, timeoutMs)
-      const onKey = (jwk: JsonWebKey): void => {
-        clearTimeout(timer)
-        resolve(jwk)
-      }
-      const list = pubKeyWaiters.get(peerId) ?? []
-      list.push(onKey)
-      pubKeyWaiters.set(peerId, list)
-    })
-  }
-
-  return {
+  const roomInstance: Room = {
     makeAction,
 
     makeState: <T extends JsonValue = JsonValue>(
       namespace: string,
       initialValue: T,
       config?: StateConfig<T>
-    ): AuthoritativeState<T> => {
-      if (!namespace || typeof namespace !== 'string') {
-        throw mkErr('state namespace is required')
-      }
-      const rawAuth = config?.authority ?? 'admin'
-      const requiredRoles = (
-        Array.isArray(rawAuth) ? rawAuth : [rawAuth]
-      ).filter(Boolean)
+    ): AuthoritativeState<T> =>
+      authority.makeState(namespace, initialValue, config, async record => {
+        await authAction
+          .send({
+            t: 'state',
+            record
+          })
+          .catch(noOp)
+      }),
 
-      let entry = stateInstances.get(namespace) as
-        | StateInstanceEntry<T>
-        | undefined
-      if (!entry) {
-        entry = {
-          namespace,
-          value: initialValue,
-          record: null,
-          meta: null,
-          requiredRoles: requiredRoles.length > 0 ? requiredRoles : ['admin'],
-          ...(config?.validate ? {validate: config.validate} : {}),
-          onChange: null
-        }
-        stateInstances.set(
-          namespace,
-          entry as unknown as StateInstanceEntry<JsonValue>
-        )
-
-        const cachedRecord = latestStateRecords.get(namespace) as
-          | AuthoritativeStateRecord<T>
-          | undefined
-        if (cachedRecord) {
-          latestStateRecords.delete(namespace)
-          void verifyAndApplyStateRecord(
-            cachedRecord as AuthoritativeStateRecord
-          )
-        }
-      }
-
-      return {
-        get: () => entry.value,
-
-        set: async nextOrUpdater => {
-          await authInfoP
-          const myRoles = getPeerRoles(localSelfId)
-          const allowed =
-            myRoles.includes('admin') ||
-            entry.requiredRoles.includes('*') ||
-            entry.requiredRoles.some(r => myRoles.includes(r))
-          if (!allowed || !localCert) {
-            throw mkErr(`insufficient authority to update state "${namespace}"`)
-          }
-          const prevValue = entry.value
-          const nextValue =
-            typeof nextOrUpdater === 'function'
-              ? (nextOrUpdater as (prev: T) => T)(prevValue)
-              : nextOrUpdater
-          const nextEpoch = entry.record ? entry.record.epoch : 1
-          const nextSeq = entry.record ? entry.record.seq + 1 : 1
-          const prevHash =
-            entry.record?.hash ?? '00000000000000000000000000000000'
-          const cryptoId = await overlay.getLocalCryptoIdentity()
-          const record = await signStateRecord<T>(
-            cryptoId.signPrivateKey,
-            cryptoId.signPubJwk,
-            localCert,
-            {
-              appId,
-              roomId: effectiveRoomId,
-              namespace,
-              epoch: nextEpoch,
-              seq: nextSeq,
-              prevHash,
-              updatedBy: localSelfId,
-              value: nextValue
-            }
-          )
-          const changeCtx: StateChangeContext = {
-            updatedBy: localSelfId,
-            roles: myRoles,
-            seq: record.seq,
-            epoch: record.epoch,
-            timestamp: record.ts,
-            hash: record.hash
-          }
-          if (
-            entry.validate &&
-            !entry.validate(nextValue, prevValue, changeCtx)
-          ) {
-            throw mkErr(`state validation failed for "${namespace}"`)
-          }
-          entry.value = nextValue
-          entry.record = record
-          entry.meta = changeCtx
-          latestStateRecords.set(
-            namespace,
-            record as AuthoritativeStateRecord<JsonValue>
-          )
-          entry.onChange?.(nextValue, prevValue, changeCtx)
-          await authAction
-            .send({
-              t: 'state',
-              record: record as AuthoritativeStateRecord<JsonValue>
-            })
-            .catch(noOp)
-        },
-
-        getMeta: () => (entry.meta ? {...entry.meta} : null),
-
-        get onChange() {
-          return entry.onChange
-        },
-
-        set onChange(handler) {
-          entry.onChange = handler
-          if (handler && entry.record && entry.meta) {
-            handler(entry.value, initialValue, entry.meta)
-          }
-        }
-      }
-    },
-
-    getAuthority: async (): Promise<RoomAuthorityInfo> => {
-      const {resolved} = await authInfoP
-      const roles = getPeerRoles(localSelfId)
-      return {
-        roomId: effectiveRoomId,
-        baseRoomId: resolved.baseRoomId,
-        fingerprint: resolved.roomFingerprint,
-        isAdmin: roles.includes('admin'),
-        roles,
-        publicKey: localAdminIdentity?.publicKey ?? null,
-        adminKey: localAdminIdentity?.adminKey ?? null
-      }
-    },
+    getAuthority: (): Promise<RoomAuthorityInfo> =>
+      authority.getAuthorityInfo(),
 
     grantRole: async (peerId, role, options) => {
-      if (!peerId || typeof peerId !== 'string') {
-        throw mkErr('peerId is required to grant a role')
-      }
-      await authInfoP
-      const myRoles = getPeerRoles(localSelfId)
-      const requestedRoles = (Array.isArray(role) ? role : [role]).filter(
-        Boolean
+      const cert = await authority.issueRoleCertificate(
+        peerId,
+        role,
+        options,
+        () => {
+          void authAction.send({t: 'whois'}, peerId).catch(noOp)
+        }
       )
-      if (requestedRoles.length === 0) {
-        throw mkErr('at least one role must be specified')
-      }
-      const canGrant =
-        Boolean(localAdminIdentity) ||
-        (Boolean(localCert?.canDelegate) &&
-          (myRoles.includes('admin') ||
-            requestedRoles.every(r => myRoles.includes(r))))
-      if (!canGrant) {
-        throw mkErr('insufficient authority to grant role')
-      }
-
-      const subPubKey = await waitForPeerPublicKey(peerId)
-      const currentRoles = getPeerRoles(peerId)
-      const mergedRoles = [...new Set([...currentRoles, ...requestedRoles])]
-      const cryptoId = await overlay.getLocalCryptoIdentity()
-
-      const cert = localAdminIdentity
-        ? await signRoleCertificate(
-            localAdminIdentity.signPrivateKey,
-            localAdminIdentity.signPubJwk,
-            {
-              subPeerId: peerId,
-              subPubKey,
-              appId,
-              roomId: effectiveRoomId,
-              roles: mergedRoles,
-              ...(options?.canDelegate ? {canDelegate: true} : {}),
-              ...(typeof options?.expiresInMs === 'number'
-                ? {expiresInMs: options.expiresInMs}
-                : {})
-            }
-          )
-        : await signRoleCertificate(
-            cryptoId.signPrivateKey,
-            cryptoId.signPubJwk,
-            {
-              subPeerId: peerId,
-              subPubKey,
-              appId,
-              roomId: effectiveRoomId,
-              roles: mergedRoles,
-              ...(options?.canDelegate ? {canDelegate: true} : {}),
-              ...(typeof options?.expiresInMs === 'number'
-                ? {expiresInMs: options.expiresInMs}
-                : {}),
-              parentCert: localCert!
-            }
-          )
-
-      await verifyAndApplyCert(cert)
       const reqId = genId(12)
-      const ackWait = waitForAuthAck(reqId, keys(activePeerMap))
-      await authAction.send({t: 'cert', cert, reqId}).catch(noOp)
+      const allActive = keys(activePeerMap)
+      const boundedAckPeers =
+        allActive.length > 16
+          ? [...new Set([...overlay.getSnapshot().directPeerIds, peerId])]
+          : undefined
+      const ackWait = waitForAuthAck(reqId, boundedAckPeers ?? allActive)
+      await authAction
+        .send({
+          t: 'cert',
+          cert,
+          reqId,
+          ...(boundedAckPeers ? {ackPeers: boundedAckPeers} : {})
+        })
+        .catch(noOp)
       await ackWait
       return cert
     },
 
     revokeRole: async (peerId, role) => {
-      if (!peerId || typeof peerId !== 'string') {
-        throw mkErr('peerId is required to revoke a role')
-      }
-      await authInfoP
-      const myRoles = getPeerRoles(localSelfId)
-      if (!myRoles.includes('admin') && !localCert?.canDelegate) {
-        throw mkErr('insufficient authority to revoke role')
-      }
-      const targetCert = peerCerts.get(peerId)
-      if (targetCert?.isRoot && !localCert?.isRoot) {
-        throw mkErr('delegated authority cannot revoke a root admin')
-      }
-      const cryptoId = await overlay.getLocalCryptoIdentity()
-      const revocation = await signRoleRevocation(
-        cryptoId.signPrivateKey,
-        localCert!,
-        {
-          appId,
-          roomId: effectiveRoomId,
-          issuerPeerId: localSelfId,
-          targetPeerId: peerId,
-          ...(role ? {role} : {}),
-          seq: ++localAuthSeq
-        }
-      )
-      await verifyAndApplyRevocation(revocation)
+      const revocation = await authority.issueRoleRevocation(peerId, role)
       const reqId = genId(12)
-      const ackWait = waitForAuthAck(reqId, keys(activePeerMap))
-      await authAction.send({t: 'revoke', revocation, reqId}).catch(noOp)
+      const allActive = keys(activePeerMap)
+      const boundedAckPeers =
+        allActive.length > 16
+          ? [...new Set([...overlay.getSnapshot().directPeerIds, peerId])]
+          : undefined
+      const ackWait = waitForAuthAck(reqId, boundedAckPeers ?? allActive)
+      await authAction
+        .send({
+          t: 'revoke',
+          revocation,
+          reqId,
+          ...(boundedAckPeers ? {ackPeers: boundedAckPeers} : {})
+        })
+        .catch(noOp)
       await ackWait
     },
 
-    getPeerRoles: (peerId?: string) => getPeerRoles(peerId ?? localSelfId),
+    getPeerRoles: (peerId?: string) =>
+      authority.getPeerRoles(peerId ?? localSelfId),
 
     banPeer: async (peerId, options) => {
-      if (!peerId || typeof peerId !== 'string') {
-        throw mkErr('peerId is required to ban a peer')
-      }
-      await authInfoP
-      const myRoles = getPeerRoles(localSelfId)
-      if (!myRoles.includes('admin') || !localCert) {
-        throw mkErr('only an admin can ban a peer')
-      }
-      const targetCert = peerCerts.get(peerId)
-      if (targetCert?.isRoot && !localCert.isRoot) {
-        throw mkErr('delegated admin cannot ban a root admin')
-      }
-      const targetPubKey =
-        peerSignKeys.get(peerId) ?? overlay.getPeerSignPublicKey(peerId)
-      const targetKeyThumbprint = targetPubKey
-        ? toJson(targetPubKey)
-        : undefined
-      const cryptoId = await overlay.getLocalCryptoIdentity()
-      const ban = await signPeerBan(cryptoId.signPrivateKey, localCert, {
-        appId,
-        roomId: effectiveRoomId,
-        issuerPeerId: localSelfId,
-        targetPeerId: peerId,
-        ...(targetKeyThumbprint ? {targetKeyThumbprint} : {}),
-        ...(options?.reason ? {reason: options.reason} : {}),
-        seq: ++localAuthSeq
-      })
       const otherPeers = keys(activePeerMap).filter(id => id !== peerId)
-      await verifyAndApplyBan(ban)
+      const ban = await authority.issuePeerBan(peerId, options)
       const reqId = genId(12)
-      const ackWait = waitForAuthAck(reqId, otherPeers)
-      await authAction.send({t: 'ban', ban, reqId}).catch(noOp)
+      const boundedAckPeers =
+        otherPeers.length > 16
+          ? overlay.getSnapshot().directPeerIds.filter(id => id !== peerId)
+          : undefined
+      const ackWait = waitForAuthAck(reqId, boundedAckPeers ?? otherPeers)
+      await authAction
+        .send({
+          t: 'ban',
+          ban,
+          reqId,
+          ...(boundedAckPeers ? {ackPeers: boundedAckPeers} : {})
+        })
+        .catch(noOp)
       await ackWait
     },
 
-    isBanned: peerId =>
-      bannedPeerRecords.has(peerId) || overlay.isPeerBanned(peerId),
+    isBanned: peerId => authority.isPeerBanned(peerId),
 
     leave,
 
@@ -1716,8 +1284,20 @@ export default (
 
     getPeers: () =>
       fromEntries(
-        entries(activePeerMap).map(([id, peer]) => [id, peer.connection])
-      ) as Record<string, RTCPeerConnection>,
+        entries(activePeerMap).map(([id, peer]) => {
+          const direct = !overlay.isVirtualPeer(id)
+          const hops = direct ? 1 : (overlay.getRoute(id)?.hops ?? 2)
+          return [
+            id,
+            {
+              connection: direct ? peer.connection : null,
+              direct,
+              hops,
+              roles: authority.getPeerRoles(id)
+            }
+          ]
+        })
+      ),
 
     getTopology: () => overlay.getSnapshot(),
 
@@ -1865,4 +1445,17 @@ export default (
       mediaManager.onPeerTrack = handler
     }
   }
+
+  roomSignalingBridges.set(roomInstance, {
+    overlay,
+    getAnnounceExtra: authority.getAnnounceExtra,
+    onSignalingPayload: authority.onSignalingPayload,
+    checkCapacityAfterPassword: peerId => {
+      if (isAlreadyFullForPeer(peerId)) {
+        throw roomFullHostRejectErr
+      }
+    }
+  })
+
+  return roomInstance
 }

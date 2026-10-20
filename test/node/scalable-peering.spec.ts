@@ -3,12 +3,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   compareStateRecords,
+  computePayloadDigest,
   computePublicKeyFingerprint,
   createAdminIdentity,
   createAdminRoom,
   formatSelfCertifyingRoomId,
-  parseSelfCertifyingRoomId
+  parseSelfCertifyingRoomId,
+  signRoleCertificate,
+  verifyRoleCertificateChain
 } from '../../packages/core/src/authority.ts'
+import {inspectActionWireHeader} from '../../packages/core/src/action-wire.ts'
 import {
   computeShortestPathRoutes,
   computeTargetNeighbors,
@@ -17,9 +21,11 @@ import {
   overlayBroadcastKind,
   overlayUnicastKind,
   packOverlayBinary,
+  packOverlayControl,
   unpackOverlayBinary
 } from '../../packages/core/src/overlay.ts'
 import createRoom from '../../packages/core/src/room.ts'
+import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
 import {
@@ -978,10 +984,13 @@ void test('Plumtree lazy repair (ihave / iwant) recovers broadcasts when an eage
   )
 
   // Now A sends an ihave lazy advertisement to B
-  overlayB.injectControlForTest('peer-A', {
-    t: 'ihave',
-    items: [{m: droppedMsgId, o: 'peer-A'}]
-  })
+  overlayB.handleOverlayFrame(
+    'peer-A',
+    packOverlayControl({
+      t: 'ihave',
+      items: [{m: droppedMsgId, o: 'peer-A'}]
+    }).slice().buffer
+  )
 
   await waitFor(() => delivered.length === 1, 1_000)
   assert.deepEqual(delivered[0], {
@@ -1123,7 +1132,7 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     },
     tamperedPayload
   )
-  bob.injectBinaryForTest('relay', forgedPacket)
+  bob.handleOverlayFrame('relay', forgedPacket.slice().buffer)
   await wait(40)
 
   assert.equal(
@@ -1144,24 +1153,27 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     encodeBytes('UNSIGNED-SPOOF')
   )
   const failuresBefore = bob.getSnapshot().stats.signatureFailures
-  bob.injectBinaryForTest('relay', unsignedSpoofPacket)
+  bob.handleOverlayFrame('relay', unsignedSpoofPacket.slice().buffer)
   await wait(40)
   assert.equal(bob.getSnapshot().stats.signatureFailures, failuresBefore + 1)
   assert.equal(bobDelivered.length, 1)
 
   // 4. Descriptor with wrong room password or spoofed key must be rejected
   const failuresBeforeDesc = bob.getSnapshot().stats.signatureFailures
-  bob.injectControlForTest('relay', {
-    t: 'gossip',
-    descriptors: [
-      {
-        peerId: 'mallory',
-        seq: 1,
-        neighbors: ['relay'],
-        roomAuth: 'wrong-password-hmac'
-      }
-    ]
-  })
+  bob.handleOverlayFrame(
+    'relay',
+    packOverlayControl({
+      t: 'gossip',
+      descriptors: [
+        {
+          peerId: 'mallory',
+          seq: 1,
+          neighbors: ['relay'],
+          roomAuth: 'wrong-password-hmac'
+        }
+      ]
+    }).slice().buffer
+  )
   await wait(40)
   assert.equal(
     bob.getSnapshot().stats.signatureFailures,
@@ -1435,20 +1447,23 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   )
 
   const sigFailuresBeforeHijack = bob.getSnapshot().stats.signatureFailures
-  bob.injectControlForTest('relay', {
-    t: 'gossip',
-    descriptors: [
-      {
-        peerId: 'alice',
-        seq: 999,
-        neighbors: ['relay'],
-        signPubKey: mallorySignJwk,
-        encPubKey: malloryEncJwk,
-        roomAuth: validRoomAuthForHijack,
-        sig: hijackSigB64
-      }
-    ]
-  })
+  bob.handleOverlayFrame(
+    'relay',
+    packOverlayControl({
+      t: 'gossip',
+      descriptors: [
+        {
+          peerId: 'alice',
+          seq: 999,
+          neighbors: ['relay'],
+          signPubKey: mallorySignJwk,
+          encPubKey: malloryEncJwk,
+          roomAuth: validRoomAuthForHijack,
+          sig: hijackSigB64
+        }
+      ]
+    }).slice().buffer
+  )
   await wait(40)
   assert.equal(
     bob.getSnapshot().stats.signatureFailures,
@@ -1458,17 +1473,23 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
 
   // Attack B: Forged `leave` Control Frame DoS (Unsigned & Forged-Signature Remote Kick)
   const sigFailuresBeforeLeave = bob.getSnapshot().stats.signatureFailures
-  bob.injectControlForTest('relay', {
-    t: 'leave',
-    peerId: 'alice',
-    seq: 500
-  })
-  bob.injectControlForTest('relay', {
-    t: 'leave',
-    peerId: 'alice',
-    seq: 501,
-    sig: hijackSigB64
-  })
+  bob.handleOverlayFrame(
+    'relay',
+    packOverlayControl({
+      t: 'leave',
+      peerId: 'alice',
+      seq: 500
+    }).slice().buffer
+  )
+  bob.handleOverlayFrame(
+    'relay',
+    packOverlayControl({
+      t: 'leave',
+      peerId: 'alice',
+      seq: 501,
+      sig: hijackSigB64
+    }).slice().buffer
+  )
   await wait(40)
   assert.equal(
     bob.getSnapshot().stats.signatureFailures,
@@ -1482,11 +1503,14 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
 
   // Attack C: Forged Gossip `down` List Eviction Attack
   const sigFailuresBeforeDown = bob.getSnapshot().stats.signatureFailures
-  bob.injectControlForTest('relay', {
-    t: 'gossip',
-    descriptors: [],
-    down: ['alice']
-  })
+  bob.handleOverlayFrame(
+    'relay',
+    packOverlayControl({
+      t: 'gossip',
+      descriptors: [],
+      down: ['alice']
+    }).slice().buffer
+  )
   await wait(40)
   assert.equal(
     bob.getSnapshot().stats.signatureFailures,
@@ -1551,13 +1575,13 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     encodeBytes('CORRUPTED-FAST-PATH-PACKET')
   )
   // 1. Inject forged packet with msgId first
-  carol.injectBinaryForTest('relay', poisonedSameMsgIdPacket)
+  carol.handleOverlayFrame('relay', poisonedSameMsgIdPacket.slice().buffer)
   await wait(30)
   assert.equal(carolDelivered.length, 0)
   assert.equal(carol.getSnapshot().stats.signatureFailures, 1)
 
   // 2. Now inject the genuine signed packet with the exact same msgId
-  carol.injectBinaryForTest('relay', genuineAliceBroadcast!)
+  carol.handleOverlayFrame('relay', genuineAliceBroadcast!.slice().buffer)
   await waitFor(() => carolDelivered.length === 1, 1_000)
   assert.equal(
     carolDelivered[0],
@@ -1568,7 +1592,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   // Attack E: Replay Flood (25x) & TTL = 255 Amplification Clamping
   const dupsBeforeReplay = carol.getSnapshot().stats.duplicatesDropped
   for (let i = 0; i < 25; i++) {
-    carol.injectBinaryForTest('relay', genuineAliceBroadcast!)
+    carol.handleOverlayFrame('relay', genuineAliceBroadcast!.slice().buffer)
   }
   await wait(30)
   assert.equal(
@@ -1645,7 +1669,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     anotherAliceBroadcast.header,
     anotherAliceBroadcast.payload
   )
-  relayClamp.injectBinaryForTest('upstream', amplifiedTtlPacket)
+  relayClamp.handleOverlayFrame('upstream', amplifiedTtlPacket.slice().buffer)
   await waitFor(() => clampedForwardedFrames.length === 1, 1_000)
   const forwardedParsed = unpackOverlayBinary(clampedForwardedFrames[0]!)!
   assert.equal(
@@ -1679,7 +1703,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   )
   const bobSigFailuresBeforeFlip = bob.getSnapshot().stats.signatureFailures
   const bobCountBeforeFlip = bobDelivered.length
-  bob.injectBinaryForTest('relay', tamperedUnicastPacket)
+  bob.handleOverlayFrame('relay', tamperedUnicastPacket.slice().buffer)
   await wait(40)
   assert.equal(
     bob.getSnapshot().stats.signatureFailures,
@@ -2201,8 +2225,11 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
       }
     )
 
+  const directHandles = new Map<string, LinkedPeer>()
   const connectDirect = (a: string, b: string) => {
     const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+    directHandles.set(`${a}->${b}`, peerA)
+    directHandles.set(`${b}->${a}`, peerB)
     regMap.get(a)!(peerA, b)
     regMap.get(b)!(peerB, a)
   }
@@ -2465,8 +2492,11 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
     rooms.set(id, room)
   }
 
+  const directHandles = new Map<string, LinkedPeer>()
   const connectDirect = (a: string, b: string) => {
     const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+    directHandles.set(`${a}->${b}`, peerA)
+    directHandles.set(`${b}->${a}`, peerB)
     regMap.get(a)!(peerA, b)
     regMap.get(b)!(peerB, a)
   }
@@ -2529,4 +2559,481 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
   } finally {
     await Promise.all(peerIds.map(id => rooms.get(id)!.leave()))
   }
+})
+
+void test('PeerInfo in room.getPeers(), PBKDF2 passphrase scoping, cascading delegator revocation, anti-replay, offer-time role rejection, plaintext unicast rejection, and concurrent makeState serialization', async () => {
+  // 1. PBKDF2 passphrase derivation is domain-separated by (appId, roomId)
+  const roomA1 = await createAdminRoom('lobby', {
+    credentials: 'shared-passphrase',
+    appId: 'app-one'
+  })
+  const roomB1 = await createAdminRoom('general', {
+    credentials: 'shared-passphrase',
+    appId: 'app-one'
+  })
+  const roomA2 = await createAdminRoom('lobby', {
+    credentials: 'shared-passphrase',
+    appId: 'app-two'
+  })
+  const roomA1Repeat = await createAdminRoom('lobby', {
+    credentials: 'shared-passphrase',
+    appId: 'app-one'
+  })
+  assert.equal(
+    roomA1.fingerprint,
+    roomA1Repeat.fingerprint,
+    'same (appId, roomId, passphrase) must deterministically derive the same root identity'
+  )
+  assert.notEqual(
+    roomA1.fingerprint,
+    roomB1.fingerprint,
+    'different roomIds with the same passphrase must derive distinct root keys'
+  )
+  assert.notEqual(
+    roomA1.fingerprint,
+    roomA2.fingerprint,
+    'different appIds with the same passphrase must derive distinct root keys'
+  )
+
+  // 2. Chunked computePayloadDigest (> 256 KiB) matches across Blob and Uint8Array without full-Blob copy
+  const largeBytes = new Uint8Array(300_000)
+  for (let i = 0; i < largeBytes.length; i++) {
+    largeBytes[i] = (i * 31) & 0xff
+  }
+  const largeBlob = new Blob([largeBytes])
+  const digestUint8 = await computePayloadDigest(largeBytes)
+  const digestBlob = await computePayloadDigest(largeBlob)
+  assert.equal(
+    digestBlob,
+    digestUint8,
+    'chunked Blob digest must match Uint8Array digest for payloads > 256 KiB'
+  )
+  const digestUint8Meta = await computePayloadDigest(largeBytes, {tag: 'v1'})
+  const digestBlobMeta = await computePayloadDigest(largeBlob, {tag: 'v1'})
+  assert.equal(
+    digestBlobMeta,
+    digestUint8Meta,
+    'chunked Blob digest with metadata must match Uint8Array digest with metadata'
+  )
+  assert.notEqual(digestUint8, digestUint8Meta)
+
+  // 3. Future-iat RoleCertificate rejection in verifyRoleCertificateChain
+  const rootId = await createAdminIdentity()
+  const subId = await createAdminIdentity()
+  const futureCert = await signRoleCertificate(
+    rootId.signPrivateKey,
+    rootId.signPubJwk,
+    {
+      subPeerId: 'sub-peer',
+      subPubKey: subId.signPubJwk,
+      appId: 'test-app',
+      roomId: 'test-room',
+      roles: ['moderator'],
+      now: Date.now() + 3_600_000 // 1 hour in the future (> 60s skew allowance)
+    }
+  )
+  const futureRes = await verifyRoleCertificateChain(
+    futureCert,
+    'test-app',
+    'test-room',
+    new Set([rootId.fingerprint]),
+    [rootId.signPubJwk]
+  )
+  assert.equal(
+    futureRes.valid,
+    false,
+    'certificate with far-future iat must be rejected'
+  )
+
+  // 4. Multi-hop topology: room.getPeers() PeerInfo, cascading delegator revocation,
+  //    offer-stage bulk rejection on role-protected actions, and serialized concurrent state.set()
+  //    Line topology: admin -- bob -- carol -- mallory
+  const provisioned = await createAdminRoom('audit-room', {
+    credentials: 'audit-secret',
+    appId: 'audit-app'
+  })
+  const roomId = provisioned.roomId
+  const appId = 'audit-app'
+  const peerIds = ['admin', 'bob', 'carol', 'mallory']
+  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
+  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+
+  for (const id of peerIds) {
+    const room = createRoom(
+      f => regMap.set(id, f),
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId,
+        roomId,
+        topology: {mode: 'small-world', maxPeers: 2},
+        ...(id === 'admin' ? {admin: {credentials: 'audit-secret'}} : {})
+      }
+    )
+    rooms.set(id, room)
+  }
+
+  const directHandles = new Map<string, LinkedPeer>()
+  const connectDirect = (a: string, b: string) => {
+    const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+    directHandles.set(`${a}->${b}`, peerA)
+    directHandles.set(`${b}->${a}`, peerB)
+    regMap.get(a)!(peerA, b)
+    regMap.get(b)!(peerB, a)
+  }
+
+  try {
+    connectDirect('admin', 'bob')
+    connectDirect('bob', 'carol')
+    connectDirect('carol', 'mallory')
+
+    await waitFor(
+      () =>
+        peerIds.every(
+          id =>
+            rooms.get(id)!.getTopology().roomPeerIds.length ===
+            peerIds.length - 1
+        ),
+      3_000
+    )
+
+    // Verify room.getPeers() returns PeerInfo with connection, direct, hops, and roles
+    await waitFor(
+      () => rooms.get('mallory')!.getPeerRoles('admin').includes('admin'),
+      2_000
+    )
+    const adminPeers = rooms.get('admin')!.getPeers()
+    assert.ok(adminPeers['bob'], 'direct neighbor bob must be in getPeers()')
+    assert.equal(adminPeers['bob']!.direct, true)
+    assert.equal(adminPeers['bob']!.hops, 1)
+    assert.notEqual(adminPeers['bob']!.connection, null)
+
+    assert.ok(
+      adminPeers['carol'],
+      '2-hop virtual peer carol must be in getPeers()'
+    )
+    assert.equal(adminPeers['carol']!.direct, false)
+    assert.equal(adminPeers['carol']!.hops, 2)
+    assert.equal(adminPeers['carol']!.connection, null)
+
+    assert.ok(
+      adminPeers['mallory'],
+      '3-hop virtual peer mallory must be in getPeers()'
+    )
+    assert.equal(adminPeers['mallory']!.direct, false)
+    assert.equal(adminPeers['mallory']!.hops, 3)
+    assert.equal(adminPeers['mallory']!.connection, null)
+
+    const malloryPeers = rooms.get('mallory')!.getPeers()
+    assert.deepEqual(malloryPeers['admin']?.roles, ['admin'])
+
+    // Register a role-protected action 'mod-file' (requires 'moderator' or 'admin')
+    const receivedModPayloads = new Map<string, Uint8Array[]>()
+    const modSenders = new Map<string, any>()
+    for (const id of peerIds) {
+      receivedModPayloads.set(id, [])
+      const act = rooms.get(id)!.makeAction<Uint8Array>('mod-file', {
+        authority: ['admin', 'moderator'],
+        onMessage: data => {
+          receivedModPayloads
+            .get(id)!
+            .push(
+              data instanceof Uint8Array
+                ? data
+                : new Uint8Array(data as ArrayBuffer)
+            )
+        }
+      })
+      modSenders.set(id, act.send)
+    }
+
+    // Grant 'moderator' with canDelegate: true to Bob, then Bob sub-delegates 'moderator' to Carol
+    await rooms.get('admin')!.grantRole('bob', 'moderator', {canDelegate: true})
+    await waitFor(
+      () => rooms.get('carol')!.getPeerRoles('bob').includes('moderator'),
+      2_000
+    )
+    await rooms.get('bob')!.grantRole('carol', 'moderator')
+    await waitFor(
+      () =>
+        rooms.get('admin')!.getPeerRoles('carol').includes('moderator') &&
+        rooms.get('mallory')!.getPeerRoles('carol').includes('moderator'),
+      2_000
+    )
+    assert.deepEqual(rooms.get('admin')!.getPeers()['carol']?.roles, [
+      'moderator'
+    ])
+
+    // Cascading revocation: Admin revokes BOB's 'moderator' role -> Carol's sub-delegated 'moderator' role must automatically be invalidated!
+    await rooms.get('admin')!.revokeRole('bob', 'moderator')
+    await waitFor(
+      () =>
+        !rooms.get('admin')!.getPeerRoles('bob').includes('moderator') &&
+        !rooms.get('admin')!.getPeerRoles('carol').includes('moderator') &&
+        !rooms.get('carol')!.getPeerRoles('carol').includes('moderator'),
+      2_000
+    )
+    assert.deepEqual(
+      rooms.get('admin')!.getPeers()['carol']?.roles,
+      [],
+      'revoking delegator bob must cascade and strip sub-delegated role from carol'
+    )
+
+    // Offer-stage bulk transfer rejection on role-protected action:
+    // Mallory registers 'mod-bulk' without local authority config (simulating a modified client),
+    // while Carol protects 'mod-bulk' with authority: ['admin', 'moderator'].
+    // When Mallory sends a 64 KB multi-chunk payload to Carol, Carol rejects the offer at admission time!
+    rooms.get('carol')!.makeAction<Uint8Array>('mod-bulk', {
+      authority: ['admin', 'moderator'],
+      onMessage: () =>
+        assert.fail('unauthorized bulk transfer must be rejected at offer time')
+    })
+    const malloryBulk = rooms.get('mallory')!.makeAction<Uint8Array>('mod-bulk')
+    await assert.rejects(
+      () => malloryBulk.send(new Uint8Array(64_000), {target: 'carol'}),
+      {kind: 'rejected'}
+    )
+
+    // Also verify Carol's local send on 'mod-file' is blocked after cascading revocation:
+    await assert.rejects(
+      () => modSenders.get('carol')(new Uint8Array([1, 2, 3])),
+      /insufficient authority/
+    )
+
+    // Anti-replay enforcement on ActionAuthEnvelope:
+    // Capture a valid targeted 'mod-file' action wire frame from admin -> bob, then replay the exact wire frame
+    const adminToBobPeer = directHandles.get('admin->bob')!
+    const capturedModFrames: Uint8Array[] = []
+    const origSend = adminToBobPeer.sendData.bind(adminToBobPeer)
+    adminToBobPeer.sendData = (data: Uint8Array) => {
+      const h = inspectActionWireHeader(data)
+      if (h?.type === 'mod-file') {
+        capturedModFrames.push(data.slice())
+      }
+      origSend(data)
+    }
+    await modSenders.get('admin')(new Uint8Array([42, 43]), {target: 'bob'})
+    await waitFor(() => receivedModPayloads.get('bob')!.length === 1, 1_000)
+    assert.equal(capturedModFrames.length, 1)
+
+    const bobSigFailBefore = rooms.get('bob')!.getTopology()
+      .stats.signatureFailures
+    origSend(capturedModFrames[0]!)
+    await wait(40)
+    assert.equal(
+      receivedModPayloads.get('bob')!.length,
+      1,
+      'replayed ActionAuthEnvelope frame must NOT be delivered a second time'
+    )
+    assert.equal(
+      rooms.get('bob')!.getTopology().stats.signatureFailures,
+      bobSigFailBefore + 1,
+      'replayed ActionAuthEnvelope frame must increment signatureFailures'
+    )
+
+    // Verify concurrent state.set(prev => ...) calls serialize cleanly without dropping updates
+    const counterAdmin = rooms
+      .get('admin')!
+      .makeState<{count: number; log: number[]}>('counter', {
+        count: 0,
+        log: []
+      })
+    const counterMallory = rooms
+      .get('mallory')!
+      .makeState<{count: number; log: number[]}>('counter', {
+        count: 0,
+        log: []
+      })
+
+    await Promise.all([
+      counterAdmin.set(prev => ({
+        count: prev.count + 1,
+        log: [...prev.log, 1]
+      })),
+      counterAdmin.set(prev => ({
+        count: prev.count + 1,
+        log: [...prev.log, 2]
+      })),
+      counterAdmin.set(prev => ({
+        count: prev.count + 1,
+        log: [...prev.log, 3]
+      })),
+      counterAdmin.set(prev => ({
+        count: prev.count + 1,
+        log: [...prev.log, 4]
+      })),
+      counterAdmin.set(prev => ({
+        count: prev.count + 1,
+        log: [...prev.log, 5]
+      }))
+    ])
+
+    assert.equal(counterAdmin.get().count, 5)
+    assert.deepEqual(counterAdmin.get().log, [1, 2, 3, 4, 5])
+    assert.equal(counterAdmin.getMeta()?.seq, 5)
+
+    await waitFor(() => counterMallory.get().count === 5, 2_000)
+    assert.deepEqual(counterMallory.get().log, [1, 2, 3, 4, 5])
+  } finally {
+    await Promise.all(peerIds.map(id => rooms.get(id)!.leave()))
+  }
+
+  // 5. Plaintext unicast downgrade (missing iv) is rejected by overlay
+  const ovA = createOverlayManager({
+    selfId: 'ov-a',
+    appId: 'unicast-app',
+    roomId: 'unicast-room',
+    topology: {mode: 'small-world', maxPeers: 2},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () =>
+      assert.fail('plaintext unicast must never be delivered')
+  })
+  const ovB = createOverlayManager({
+    selfId: 'ov-b',
+    appId: 'unicast-app',
+    roomId: 'unicast-room',
+    topology: {mode: 'small-world', maxPeers: 2},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () =>
+      assert.fail('plaintext unicast must never be delivered')
+  })
+  const idA = await ovA.getLocalCryptoIdentity()
+  ovB.setPeerSignPublicKey('ov-a', idA.signPubJwk)
+
+  // Craft a signed unicast packet from ov-a to ov-b WITHOUT an 'iv' header field
+  const rawPayload = encodeBytes('plaintext-attempt')
+  const msgId = 'ov-a:downgrade-1'
+  const canonical = `ov-a:ov-b:${msgId}:`
+  const canonicalBytes = encodeBytes(canonical)
+  const combined = new Uint8Array(
+    canonicalBytes.byteLength + 1 + rawPayload.byteLength
+  )
+  combined.set(canonicalBytes, 0)
+  combined[canonicalBytes.byteLength] = 0
+  combined.set(rawPayload, canonicalBytes.byteLength + 1)
+  const sigBuf = await crypto.subtle.sign(
+    {name: 'ECDSA', hash: 'SHA-256'},
+    idA.signPrivateKey,
+    combined
+  )
+  const sigB64 = Buffer.from(sigBuf).toString('base64')
+  const downgradePacket = packOverlayBinary(
+    overlayUnicastKind,
+    6,
+    {o: 'ov-a', d: 'ov-b', m: msgId, s: sigB64},
+    rawPayload
+  )
+  const sigFailBefore = ovB.getSnapshot().stats.signatureFailures
+  ovB.handleOverlayFrame('ov-a', downgradePacket.slice().buffer)
+  await wait(40)
+  assert.equal(
+    ovB.getSnapshot().stats.signatureFailures,
+    sigFailBefore + 1,
+    'unicast packet missing iv must be rejected and increment signatureFailures'
+  )
+  ovA.destroy()
+  ovB.destroy()
+
+  // 6. inspectActionWireHeader parses v2 inline/offer frames cleanly
+  const sampleMeta = encodeBytes(JSON.stringify({hello: 'world'}))
+  const sampleFrame = new Uint8Array(36 + sampleMeta.byteLength + 4)
+  sampleFrame[0] = 2
+  sampleFrame[1] = 0
+  sampleFrame.set(encodeBytes('chat'), 2)
+  new DataView(sampleFrame.buffer).setUint16(34, sampleMeta.byteLength)
+  sampleFrame.set(sampleMeta, 36)
+  const headerInfo = inspectActionWireHeader(sampleFrame)
+  assert.deepEqual(headerInfo, {type: 'chat', metadata: {hello: 'world'}})
+
+  // 7. SharedPeerManager respects shouldAttach and rekey(effectiveRoomId)
+  const localMgr = new SharedPeerManager()
+  const remoteMgr1 = new SharedPeerManager()
+  const remoteMgr2 = new SharedPeerManager()
+  const attachedInConstrainedRoom: string[] = []
+  const constrainedToken = '0123456789abcdef0123456789abcdef01234567'
+  const lobbyToken = 'fedcba9876543210fedcba9876543210fedcba98'
+
+  const localLobby = localMgr.registerRoom(
+    'shared-app',
+    'lobby-room',
+    Promise.resolve(lobbyToken),
+    {
+      active: true,
+      onPeer: () => {},
+      onDetach: () => {}
+    }
+  )
+  const localConstrained = localMgr.registerRoom(
+    'shared-app',
+    'raw-room',
+    Promise.resolve(constrainedToken),
+    {
+      active: true,
+      shouldAttach: peerId => peerId === 'peer-1',
+      onPeer: (_peer, peerId) => {
+        attachedInConstrainedRoom.push(peerId)
+      },
+      onDetach: () => {}
+    }
+  )
+  localConstrained.rekey('raw-room.0123456789abcdef')
+
+  const r1Lobby = remoteMgr1.registerRoom(
+    'shared-app',
+    'lobby-room',
+    Promise.resolve(lobbyToken),
+    {active: true, onPeer: () => {}, onDetach: () => {}}
+  )
+  const r1Constrained = remoteMgr1.registerRoom(
+    'shared-app',
+    'raw-room.0123456789abcdef',
+    Promise.resolve(constrainedToken),
+    {active: true, onPeer: () => {}, onDetach: () => {}}
+  )
+
+  const r2Lobby = remoteMgr2.registerRoom(
+    'shared-app',
+    'lobby-room',
+    Promise.resolve(lobbyToken),
+    {active: true, onPeer: () => {}, onDetach: () => {}}
+  )
+  const r2Constrained = remoteMgr2.registerRoom(
+    'shared-app',
+    'raw-room.0123456789abcdef',
+    Promise.resolve(constrainedToken),
+    {active: true, onPeer: () => {}, onDetach: () => {}}
+  )
+
+  const {peerA: p1Local, peerB: p1Remote} = linkPeers(
+    new LinkedPeer(),
+    new LinkedPeer()
+  )
+  const {peerA: p2Local, peerB: p2Remote} = linkPeers(
+    new LinkedPeer(),
+    new LinkedPeer()
+  )
+  localLobby.connect('peer-1', p1Local, 5_000)
+  r1Lobby.connect('local-peer', p1Remote, 5_000)
+  localLobby.connect('peer-2', p2Local, 5_000)
+  r2Lobby.connect('local-peer', p2Remote, 5_000)
+  await wait(40)
+
+  assert.deepEqual(
+    attachedInConstrainedRoom,
+    ['peer-1'],
+    'SharedPeerManager must only auto-attach shared peers approved by shouldAttach'
+  )
+  localLobby.leave()
+  localConstrained.leave()
+  r1Lobby.leave()
+  r1Constrained.leave()
+  r2Lobby.leave()
+  r2Constrained.leave()
+  p1Local.destroy()
+  p1Remote.destroy()
+  p2Local.destroy()
+  p2Remote.destroy()
 })

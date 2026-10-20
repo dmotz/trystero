@@ -24,14 +24,6 @@ export {
 } from './utils'
 
 export {
-  computeMediaTreeChildren,
-  computeShortestPathRoutes,
-  computeTargetNeighbors,
-  createOverlayManager,
-  normalizeTopologyConfig
-} from './overlay'
-
-export {
   computePublicKeyFingerprint,
   createAdminIdentity,
   createAdminRoom,
@@ -71,6 +63,7 @@ export type {
   PeerHandle,
   PeerHandshake,
   PeerHandlers,
+  PeerInfo,
   PeerResult,
   PeerTarget,
   ProgressHandler,
