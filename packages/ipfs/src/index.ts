@@ -92,6 +92,20 @@ export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>
     callbacks
   )
 
-export {selfId}
+export {
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  createUserIdentity,
+  derivePeerId,
+  deriveUserId,
+  exportUserIdentity,
+  formatSelfCertifyingRoomId,
+  importUserIdentity,
+  parseSelfCertifyingRoomId,
+  selfId,
+  verifyPeerIdKey,
+  verifyUserIdKey
+} from '@trystero-p2p/core'
 
 export type * from '@trystero-p2p/core'

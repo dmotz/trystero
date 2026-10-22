@@ -51,7 +51,7 @@ const timeout = setTimeout(() => {
   void done('failure', 'timed out waiting for peer communication')
 }, 60_000)
 
-room.onPeerJoin = peerId => {
+room.onPeerJoin = ({peerId}) => {
   if (role !== 'initiator' || sentPing) {
     return
   }

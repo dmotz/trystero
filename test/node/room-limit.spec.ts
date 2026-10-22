@@ -293,7 +293,7 @@ void test(
     const hostRoom = hostJoin(
       {
         appId,
-        peerId: 'peer-host',
+        _test_only_forcedPeerId: 'peer-host',
         limit: 1,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -302,8 +302,8 @@ void test(
         onJoinError: err => hostErrors.push(err)
       }
     )
-    hostRoom.onPeerJoin = id => hostJoins.push(id)
-    hostRoom.onPeerLeave = id => hostLeaves.push(id)
+    hostRoom.onPeerJoin = ({peerId}) => hostJoins.push(peerId)
+    hostRoom.onPeerLeave = ({peerId}) => hostLeaves.push(peerId)
 
     await wait(60)
 
@@ -314,7 +314,7 @@ void test(
     const lateRoom = lateJoin(
       {
         appId,
-        peerId: 'peer-late',
+        _test_only_forcedPeerId: 'peer-late',
         limit: 1,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -323,7 +323,7 @@ void test(
         onJoinError: err => lateErrors.push(err)
       }
     )
-    lateRoom.onPeerJoin = id => lateJoins.push(id)
+    lateRoom.onPeerJoin = ({peerId}) => lateJoins.push(peerId)
 
     await waitFor(() => lateErrors.length > 0, 3_000)
     await wait(120)
@@ -359,7 +359,7 @@ void test(
     const nextRoom = nextJoin(
       {
         appId,
-        peerId: 'peer-next',
+        _test_only_forcedPeerId: 'peer-next',
         limit: 1,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -409,28 +409,28 @@ void test(
     const roomA = joinA(
       {
         appId,
-        peerId: 'peer-a',
+        _test_only_forcedPeerId: 'peer-a',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,
       {onJoinError: err => errorsA.push(err)}
     )
-    roomA.onPeerJoin = id => joinsA.push(id)
-    roomA.onPeerLeave = id => leavesA.push(id)
+    roomA.onPeerJoin = ({peerId}) => joinsA.push(peerId)
+    roomA.onPeerLeave = ({peerId}) => leavesA.push(peerId)
 
     const roomB = joinB(
       {
         appId,
-        peerId: 'peer-b',
+        _test_only_forcedPeerId: 'peer-b',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,
       {onJoinError: err => errorsB.push(err)}
     )
-    roomB.onPeerJoin = id => joinsB.push(id)
-    roomB.onPeerLeave = id => leavesB.push(id)
+    roomB.onPeerJoin = ({peerId}) => joinsB.push(peerId)
+    roomB.onPeerLeave = ({peerId}) => leavesB.push(peerId)
 
     await waitFor(
       () => joinsA.includes('peer-b') && joinsB.includes('peer-a'),
@@ -441,14 +441,14 @@ void test(
     const roomC = joinC(
       {
         appId,
-        peerId: 'peer-c',
+        _test_only_forcedPeerId: 'peer-c',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,
       {onJoinError: err => errorsC.push(err)}
     )
-    roomC.onPeerJoin = id => joinsC.push(id)
+    roomC.onPeerJoin = ({peerId}) => joinsC.push(peerId)
 
     await waitFor(() => errorsC.length > 0, 3_000)
     await wait(120)
@@ -489,14 +489,14 @@ void test(
     const roomD = joinD(
       {
         appId,
-        peerId: 'peer-d',
+        _test_only_forcedPeerId: 'peer-d',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,
       {onJoinError: err => errorsD.push(err)}
     )
-    roomD.onPeerJoin = id => joinsD.push(id)
+    roomD.onPeerJoin = ({peerId}) => joinsD.push(peerId)
 
     try {
       await waitFor(
@@ -544,15 +544,15 @@ void test(
       const room = joinRoom(
         {
           appId,
-          peerId,
+          _test_only_forcedPeerId: peerId,
           limit: 2,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         roomId,
         {onJoinError: err => errors.push(err)}
       )
-      room.onPeerJoin = id => joins.push(id)
-      room.onPeerLeave = id => leaves.push(id)
+      room.onPeerJoin = ({peerId}) => joins.push(peerId)
+      room.onPeerLeave = ({peerId}) => leaves.push(peerId)
       stateByPeer.set(peerId, {room, errors, joins, leaves})
     }
 
@@ -629,7 +629,7 @@ void test(
     const hostRoom = makeJoinRoom()(
       {
         appId,
-        peerId: 'host-peer',
+        _test_only_forcedPeerId: 'host-peer',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -639,13 +639,13 @@ void test(
     const guest1Room = makeJoinRoom()(
       {
         appId,
-        peerId: 'guest-1',
+        _test_only_forcedPeerId: 'guest-1',
         // guest-1 omits limit!
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId
     )
-    guest1Room.onPeerJoin = id => guest1Joins.push(id)
+    guest1Room.onPeerJoin = ({peerId}) => guest1Joins.push(peerId)
 
     await waitFor(() => guest1Joins.includes('host-peer'), 3_000)
 
@@ -653,7 +653,7 @@ void test(
     const guest2Room = makeJoinRoom()(
       {
         appId,
-        peerId: 'guest-2',
+        _test_only_forcedPeerId: 'guest-2',
         // guest-2 also omits limit!
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -676,43 +676,33 @@ void test(
 )
 
 void test(
-  'Trystero: limit with password and onPeerHandshake checks password before capacity and capacity before custom handshake',
+  'Trystero: limit with password checks password before capacity',
   {timeout: 10_000},
   async () => {
     const {makeJoinRoom} = createMemorySignalBus()
     const appId = `limit-pw-hs-${Date.now()}`
     const roomId = 'secure-duel'
 
-    const hostHandshakePeers: string[] = []
-
     const roomA = makeJoinRoom()(
       {
         appId,
-        peerId: 'peer-a',
+        _test_only_forcedPeerId: 'peer-a',
         password: 'correct-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
-      roomId,
-      {
-        onPeerHandshake: async peerId => {
-          hostHandshakePeers.push(peerId)
-        }
-      }
+      roomId
     )
 
     const roomB = makeJoinRoom()(
       {
         appId,
-        peerId: 'peer-b',
+        _test_only_forcedPeerId: 'peer-b',
         password: 'correct-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
-      roomId,
-      {
-        onPeerHandshake: async () => {}
-      }
+      roomId
     )
 
     await waitFor(
@@ -721,14 +711,13 @@ void test(
         Object.keys(roomB.getPeers()).includes('peer-a'),
       3_000
     )
-    assert.deepEqual(hostHandshakePeers, ['peer-b'])
 
     // 1. Peer with WRONG password must NOT receive 'room full' (must fail with password error)
     const wrongPwErrors: any[] = []
     const wrongPwRoom = makeJoinRoom()(
       {
         appId,
-        peerId: 'peer-wrong-pw',
+        _test_only_forcedPeerId: 'peer-wrong-pw',
         password: 'wrong-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -742,26 +731,20 @@ void test(
       wrongPwErrors.every(e => e.error !== 'room full'),
       'wrong-password peer must not learn that the room is full'
     )
-    assert.deepEqual(
-      hostHandshakePeers,
-      ['peer-b'],
-      'custom onPeerHandshake must not run for wrong-password peer'
-    )
     await wrongPwRoom.leave().catch(() => {})
 
-    // 2. Peer with CORRECT password when room is full receives 'room full' AND skips host custom onPeerHandshake
+    // 2. Peer with CORRECT password when room is full receives 'room full'
     const fullErrors: any[] = []
     const rightPwFullRoom = makeJoinRoom()(
       {
         appId,
-        peerId: 'peer-c',
+        _test_only_forcedPeerId: 'peer-c',
         password: 'correct-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,
       {
-        onPeerHandshake: async () => {},
         onJoinError: err => fullErrors.push(err)
       }
     )
@@ -770,11 +753,6 @@ void test(
       await waitFor(() => fullErrors.length > 0, 3_000)
       assert.equal(fullErrors.length, 1)
       assert.equal(fullErrors[0].error, 'room full')
-      assert.deepEqual(
-        hostHandshakePeers,
-        ['peer-b'],
-        'host custom onPeerHandshake must not run when room is already full'
-      )
     } finally {
       await Promise.all([
         roomA.leave().catch(() => {}),
@@ -801,7 +779,7 @@ void test(
       const room = makeJoinRoom()(
         {
           appId,
-          peerId,
+          _test_only_forcedPeerId: peerId,
           limit: 4,
           topology,
           rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -821,7 +799,7 @@ void test(
     const fifthRoom = makeJoinRoom()(
       {
         appId,
-        peerId: 'node-5',
+        _test_only_forcedPeerId: 'node-5',
         limit: 4,
         topology,
         rtcPolyfill: InMemoryRTCPeerConnection as any

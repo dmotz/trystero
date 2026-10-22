@@ -32,7 +32,7 @@ withStrategyBrowserPair(
       await page.evaluate(async roomId => {
         const stream = await navigator.mediaDevices.getUserMedia({video: true})
         window.__streamSwitchLocalStream = stream
-        window[roomId].onPeerJoin = peerId => {
+        window[roomId].onPeerJoin = ({peerId}) => {
           void Promise.all(window[roomId].addStream(stream, {target: peerId}))
         }
       }, roomId)

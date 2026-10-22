@@ -138,7 +138,7 @@ const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
         10_000
       )
 
-      window[roomId].onPeerStream = (stream, peerId, meta) => {
+      window[roomId].onPeerStream = (stream, {peerId, metadata: meta}) => {
         clearTimeout(timeout)
         res({peerId, meta, streamType: stream.constructor.name})
       }
@@ -178,7 +178,7 @@ const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
         10_000
       )
 
-      window[roomId].onPeerTrack = (track, stream, peerId, meta) => {
+      window[roomId].onPeerTrack = (track, stream, {peerId, metadata: meta}) => {
         clearTimeout(timeout)
         res({
           peerId,

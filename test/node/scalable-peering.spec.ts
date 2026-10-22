@@ -162,11 +162,11 @@ const createOverlayCluster = async ({
       }
     )
 
-    room.onPeerJoin = peerId => {
+    room.onPeerJoin = ({peerId}) => {
       left.delete(peerId)
       joined.add(peerId)
     }
-    room.onPeerLeave = peerId => {
+    room.onPeerLeave = ({peerId}) => {
       joined.delete(peerId)
       left.add(peerId)
     }
@@ -674,14 +674,14 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
     for (const id of cluster.peerIds) {
       trackDeliveries.set(id, [])
       const room = cluster.rooms.get(id)!
-      room.onPeerStream = (stream, peerId, metadata) => {
+      room.onPeerStream = (stream, {peerId, metadata}) => {
         streamDeliveries.set(id, {
           streamId: stream.id,
           from: peerId,
           meta: metadata
         })
       }
-      room.onPeerTrack = (track, _stream, peerId, metadata) => {
+      room.onPeerTrack = (track, _stream, {peerId, metadata}) => {
         trackDeliveries.get(id)!.push({
           trackId: track.id,
           from: peerId,
@@ -830,7 +830,7 @@ void test('Peer dropping & mesh-breaking scenarios: 25% mass churn, targeted rel
           }
         })
       )
-      room.onPeerStream = (_stream, peerId) => {
+      room.onPeerStream = (_stream, {peerId}) => {
         if (peerId === 'peer-0000') {
           streamSeenBy.add(id)
         }
@@ -1242,7 +1242,7 @@ void test('Elegant API & automatic configuration: joinRoom with topology "auto" 
   }
 })
 
-void test('End-to-end createTopicStrategy integration with config.peerId and config.topology', async () => {
+void test('End-to-end createTopicStrategy integration with config._test_only_forcedPeerId and config.topology', async () => {
   const topicSubs = new Map<string, Set<(topic: string, msg: string) => void>>()
 
   const joinRoom = createTopicStrategy({
@@ -1275,7 +1275,7 @@ void test('End-to-end createTopicStrategy integration with config.peerId and con
   const roomA = joinRoom(
     {
       appId: 'topic-e2e-overlay',
-      peerId: 'peer-alpha',
+      _test_only_forcedPeerId: 'peer-alpha',
       topology: 'small-world',
       rtcPolyfill: MockRTCPeerConnection as any
     },
@@ -1284,7 +1284,7 @@ void test('End-to-end createTopicStrategy integration with config.peerId and con
   const roomB = joinRoom(
     {
       appId: 'topic-e2e-overlay',
-      peerId: 'peer-beta',
+      _test_only_forcedPeerId: 'peer-beta',
       topology: {mode: 'small-world', maxPeers: 6},
       rtcPolyfill: MockRTCPeerConnection as any
     },
@@ -1936,7 +1936,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const hostRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
-        peerId: 'host-peer',
+        _test_only_forcedPeerId: 'host-peer',
         admin: true,
         rtcPolyfill: MockRTCPeerConnection as any
       },
@@ -1959,7 +1959,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const guestRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
-        peerId: 'guest-peer',
+        _test_only_forcedPeerId: 'guest-peer',
         rtcPolyfill: MockRTCPeerConnection as any
       },
       hostAuth.roomId
@@ -1977,7 +1977,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const impostorRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
-        peerId: 'impostor-peer',
+        _test_only_forcedPeerId: 'impostor-peer',
         admin: {credentials: impostorIdentity.adminKey},
         rtcPolyfill: MockRTCPeerConnection as any
       },
@@ -1995,7 +1995,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const rejoinedHostRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
-        peerId: 'host-rejoined',
+        _test_only_forcedPeerId: 'host-rejoined',
         admin: {credentials: hostAuth.adminKey!},
         rtcPolyfill: MockRTCPeerConnection as any
       },

@@ -4,6 +4,7 @@ import type {
   AddMediaOptions,
   JsonValue,
   MediaIdentityCache,
+  PeerMediaContext,
   RemoteTrackRef,
   SharedMediaPeer,
   TargetPeers
@@ -34,6 +35,7 @@ type MediaManagerDeps = {
   ) => Promise<void>[]
   isActive: (id: string) => boolean
   getSharedMediaPeer: (id: string) => SharedMediaPeer | null
+  getPeerUserId?: (peerId: string) => string
   onRemoteStream?: (
     fromPeerId: string,
     originPeerId: string,
@@ -168,6 +170,7 @@ export const createMediaManager = ({
   iterate,
   isActive,
   getSharedMediaPeer,
+  getPeerUserId,
   onPeerError,
   onRemoteStream,
   onRemoteTrack
@@ -207,14 +210,13 @@ export const createMediaManager = ({
   ) => void
   clearPeer: (peerId: string) => void
   onPeerStream:
-    | ((stream: MediaStream, peerId: string, metadata?: JsonValue) => void)
+    | ((stream: MediaStream, context: PeerMediaContext) => void)
     | null
   onPeerTrack:
     | ((
         track: MediaStreamTrack,
         stream: MediaStream,
-        peerId: string,
-        metadata?: JsonValue
+        context: PeerMediaContext
       ) => void)
     | null
 } => {
@@ -281,8 +283,13 @@ export const createMediaManager = ({
     )
 
     const sourcePeerId = originPeerId ?? id
+    const userId = getPeerUserId ? getPeerUserId(sourcePeerId) : sourcePeerId
+    const ctx: PeerMediaContext =
+      metadata === undefined
+        ? {peerId: sourcePeerId, userId}
+        : {peerId: sourcePeerId, userId, metadata}
     onRemoteStream?.(id, sourcePeerId, stream, metadata, key)
-    manager.onPeerStream?.(stream, sourcePeerId, metadata)
+    manager.onPeerStream?.(stream, ctx)
   }
 
   const emitTrack = (
@@ -308,6 +315,11 @@ export const createMediaManager = ({
     )
 
     const sourcePeerId = originPeerId ?? id
+    const userId = getPeerUserId ? getPeerUserId(sourcePeerId) : sourcePeerId
+    const ctx: PeerMediaContext =
+      metadata === undefined
+        ? {peerId: sourcePeerId, userId}
+        : {peerId: sourcePeerId, userId, metadata}
     onRemoteTrack?.(
       id,
       sourcePeerId,
@@ -318,7 +330,7 @@ export const createMediaManager = ({
       metaTrackId,
       isReplace
     )
-    manager.onPeerTrack?.(track, stream, sourcePeerId, metadata)
+    manager.onPeerTrack?.(track, stream, ctx)
   }
 
   const applyMediaOp = (

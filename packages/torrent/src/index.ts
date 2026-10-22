@@ -441,7 +441,23 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = (
 
 export const getRelaySockets = relayManager.getSockets
 
-export {pauseRelayReconnection, resumeRelayReconnection, selfId}
+export {
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  createUserIdentity,
+  derivePeerId,
+  deriveUserId,
+  exportUserIdentity,
+  formatSelfCertifyingRoomId,
+  importUserIdentity,
+  parseSelfCertifyingRoomId,
+  pauseRelayReconnection,
+  resumeRelayReconnection,
+  selfId,
+  verifyPeerIdKey,
+  verifyUserIdKey
+} from '@trystero-p2p/core'
 
 export const defaultRelayUrls = [
   'open.ftorrent.com',

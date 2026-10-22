@@ -31,6 +31,16 @@ export {
   parseSelfCertifyingRoomId
 } from './authority'
 
+export {
+  createUserIdentity,
+  derivePeerId,
+  deriveUserId,
+  exportUserIdentity,
+  importUserIdentity,
+  verifyPeerIdKey,
+  verifyUserIdKey
+} from './identity'
+
 export type {
   ActionProgressContext,
   ActionProgressHandler,
@@ -44,9 +54,6 @@ export type {
   BaseRelayConfig,
   BaseRoomConfig,
   DataPayload,
-  HandshakePayload,
-  HandshakeReceiver,
-  HandshakeSender,
   JoinError,
   JoinErrorHandler,
   JoinRoom,
@@ -61,9 +68,11 @@ export type {
   OfferRecord,
   PeerBanRecord,
   PeerHandle,
-  PeerHandshake,
   PeerHandlers,
   PeerInfo,
+  PeerJoinContext,
+  PeerLeaveContext,
+  PeerMediaContext,
   PeerResult,
   PeerTarget,
   ProgressHandler,
@@ -78,6 +87,7 @@ export type {
   RoleRevocationRecord,
   Room,
   RoomAuthorityInfo,
+  SelfInfo,
   Signal,
   SignalPeer,
   SocketClient,
@@ -99,5 +109,11 @@ export type {
   RemoteTrackRef,
   SharedMediaPeer,
   TargetPeers,
-  TurnServerConfig
+  TurnServerConfig,
+  UserIdentity,
+  UserIdentityConfig,
+  UserIdentityPersistence,
+  UserInfo,
+  UserJoinContext,
+  UserLeaveContext
 } from './types'

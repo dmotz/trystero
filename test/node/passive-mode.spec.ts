@@ -911,10 +911,10 @@ void test(
       const sub = subscribers[0]
 
       // Activate the passive peer with an announcement.
-      // Use a peerId > selfId (hex) so this peer leads the offer.
+      // Use a peerId > selfId so this peer leads the offer.
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: 'zzzz-active-peer'},
+        {peerId: '~active-peer'},
         (_topic, signal) => {
           signalPayloads.push(signal)
         }
@@ -1043,11 +1043,13 @@ void test(
     const appId = `passive-graceful-leave-${Date.now()}`
     const config = {
       appId,
+      _test_only_forcedPeerId: 'passive-peer',
       passive: true,
       rtcPolyfill: MockRTCPeerConnection
     }
 
     const room = joinRoom(config, 'test-room')
+    let activeRoom: any = null
     const {peerA, peerB} = await import('./peer-harness.ts').then(
       ({BufferedPeer, linkPeers}) =>
         linkPeers(new BufferedPeer(), new BufferedPeer())
@@ -1069,14 +1071,21 @@ void test(
         () => {}
       )
 
-      const activeRoom = createStrategy({
+      activeRoom = createStrategy({
         init: () => ({}),
         subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
           subscribers.push({rootTopic, selfTopic, onMessage})
           return () => {}
         },
         announce: () => {}
-      })({appId, rtcPolyfill: MockRTCPeerConnection}, 'test-room')
+      })(
+        {
+          appId,
+          _test_only_forcedPeerId: 'active-peer',
+          rtcPolyfill: MockRTCPeerConnection
+        },
+        'test-room'
+      )
 
       await waitFor(() => subscribers.length >= 2)
       await subscribers[1].onMessage(
@@ -1092,6 +1101,7 @@ void test(
       assert.equal(peerA.isDead, false)
       assert.equal(Object.keys(room.getPeers()).length, 0)
     } finally {
+      await activeRoom?.leave().catch(() => {})
       await room.leave().catch(() => {})
       peerA.destroy()
       peerB.destroy()

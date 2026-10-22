@@ -1,3 +1,4 @@
+import {defaultSelfId} from './identity'
 import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
 
 const {floor, min, sin} = Math
@@ -9,10 +10,19 @@ export const alloc = <T>(n: number, f: (v: undefined, i: number) => T): T[] =>
 
 const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
 
-export const genId = (n: number): string =>
-  alloc(n, () => charSet[floor(Math.random() * charSet.length)] ?? '').join('')
+export const genId = (n: number): string => {
+  if (n <= 0) {
+    return ''
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(n))
+  let out = ''
+  for (let i = 0; i < n; i++) {
+    out += charSet[bytes[i]! % charSet.length]!
+  }
+  return out
+}
 
-export const selfId = genId(20)
+export const selfId = defaultSelfId
 
 export const all = Promise.all.bind(Promise)
 

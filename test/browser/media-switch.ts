@@ -10,7 +10,9 @@ export const registerMediaSwitchTests = (strategy, overrides) =>
       const joinStreamSwitchRoom = ([roomId, config]) => {
         window[roomId] = window.trystero.joinRoom(config, roomId)
 
-        return new Promise(res => (window[roomId].onPeerJoin = res))
+        return new Promise(
+          res => (window[roomId].onPeerJoin = ({peerId}) => res(peerId))
+        )
       }
 
       const addStreamAndWait = ([roomId, phase]) =>
@@ -20,7 +22,7 @@ export const registerMediaSwitchTests = (strategy, overrides) =>
             10_000
           )
 
-          window[roomId].onPeerStream = (stream, peerId, meta) => {
+          window[roomId].onPeerStream = (stream, {peerId, metadata: meta}) => {
             clearTimeout(timeout)
             res({
               peerId,

@@ -20,9 +20,11 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
     id => strategyPeerLeaves.push(id),
     () => {}
   )
-  const joinPromise = new Promise(resolve => (roomRef.onPeerJoin = resolve))
+  const joinPromise = new Promise(
+    resolve => (roomRef.onPeerJoin = ({peerId}) => resolve(peerId))
+  )
 
-  roomRef.onPeerLeave = id => roomPeerLeaves.push(id)
+  roomRef.onPeerLeave = ({peerId}) => roomPeerLeaves.push(peerId)
 
   const peer = new MockPeer()
 
@@ -151,8 +153,8 @@ void test('Trystero: room callback properties replace and clear handlers', async
   )
 
   try {
-    roomRef.onPeerJoin = id => joined.push(`first:${id}`)
-    roomRef.onPeerJoin = id => joined.push(`second:${id}`)
+    roomRef.onPeerJoin = ({peerId}) => joined.push(`first:${peerId}`)
+    roomRef.onPeerJoin = ({peerId}) => joined.push(`second:${peerId}`)
 
     assert.ok(registerPeer, 'expected room to register its peer callback')
     const peer = new MockPeer()

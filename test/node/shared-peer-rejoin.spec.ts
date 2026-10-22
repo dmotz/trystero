@@ -26,38 +26,37 @@ const createSide = () => {
   return {joinRoom, subscribers}
 }
 
-for (const customHandshake of [false, true]) {
+for (const withPassword of [false, true]) {
   void test(
-    `Trystero: issue 203 rejoins after late room signals with custom handshake ${customHandshake}`,
+    `Trystero: issue 203 rejoins after late room signals (password: ${withPassword})`,
     {timeout: 10_000},
     async () => {
       const a = createSide()
       const b = createSide()
       const {peerA, peerB} = linkPeers(new BufferedPeer(), new BufferedPeer())
       const config = {
-        appId: `rejoin-race-${customHandshake}`,
+        appId: `rejoin-race-${withPassword}`,
+        ...(withPassword ? {password: 'shared-secret'} : {}),
         rtcPolyfill: MockRTCPeerConnection as any,
         _test_only_sharedPeerIdleMs: 1
       }
       const errors = []
       const callbacks: JoinRoomCallbacks = {
-        handshakeTimeoutMs: 1_000,
-        onJoinError: error => errors.push(error.error),
-        ...(customHandshake
-          ? {
-              onPeerHandshake: async (_id, send, receive) => {
-                await send('proof')
-                assert.equal((await receive()).data, 'proof')
-              }
-            }
-          : {})
+        onJoinError: error => errors.push(error.error)
       }
-      const lobbyA = a.joinRoom(config, 'lobby', callbacks)
-      const lobbyB = b.joinRoom(config, 'lobby', callbacks)
+      const configA = {
+        ...config,
+        _test_only_forcedPeerId: 'peer-a'
+      }
+      const configB = {
+        ...config,
+        _test_only_forcedPeerId: 'peer-b'
+      }
+      const lobbyA = a.joinRoom(configA, 'lobby', callbacks)
+      const lobbyB = b.joinRoom(configB, 'lobby', callbacks)
       let roomA = null
       let roomB = null
       let joinsA = 0
-      let handshakesA = 0
       let onLeaveA = () => {}
 
       try {
@@ -65,7 +64,7 @@ for (const customHandshake of [false, true]) {
           () => a.subscribers.length > 0 && b.subscribers.length > 0
         )
         const answer = await encrypt(
-          genKey('', config.appId, 'lobby'),
+          genKey(config.password ?? '', config.appId, 'lobby'),
           'answer-sdp'
         )
 
@@ -83,23 +82,16 @@ for (const customHandshake of [false, true]) {
             Object.keys(lobbyB.getPeers()).length === 1
         )
 
-        roomA = a.joinRoom(config, 'room', {
-          ...callbacks,
-          onPeerHandshake: async (id, send, receive, isInitiator) => {
-            handshakesA++
-            await callbacks.onPeerHandshake?.(id, send, receive, isInitiator)
-          }
-        })
+        roomA = a.joinRoom(configA, 'room', callbacks)
         roomA.onPeerJoin = () => joinsA++
         roomA.onPeerLeave = () => onLeaveA()
-        roomB = b.joinRoom(config, 'room', callbacks)
+        roomB = b.joinRoom(configB, 'room', callbacks)
         await waitFor(
           () => joinsA === 1 && Object.keys(roomB.getPeers()).length === 1
         )
 
         for (const kind of ['announcement', 'offer', 'answer', 'candidate']) {
           const previousJoins = joinsA
-          const previousHandshakes = handshakesA
           const remoteLeft = new Promise<void>(resolve => {
             onLeaveA = resolve
           })
@@ -117,11 +109,10 @@ for (const customHandshake of [false, true]) {
             },
             () => {}
           )
-          await waitFor(() => handshakesA === previousHandshakes + 1)
           await leaving
           assert.equal(joinsA, previousJoins)
 
-          roomB = b.joinRoom(config, 'room', callbacks)
+          roomB = b.joinRoom(configB, 'room', callbacks)
           let joinsB = 0
           roomB.onPeerJoin = () => joinsB++
           await waitFor(() => joinsB === 1 || errors.length > 0)
@@ -129,7 +120,6 @@ for (const customHandshake of [false, true]) {
           assert.deepEqual(errors, [], `late ${kind} must not stall the rejoin`)
           assert.equal(joinsB, 1)
           assert.equal(joinsA, previousJoins + 1)
-          assert.equal(handshakesA, previousHandshakes + 2)
           assert.equal(
             lobbyA.getPeers()['peer-b']?.connection,
             peerA.connection

@@ -1,6 +1,13 @@
 import {inspectActionWireHeader} from './action-wire'
 import {hashWith, sha1} from './crypto'
 import {
+  canonicalizePubJwk,
+  getOrCreateEndpointIdentitySync,
+  signUserEndpointProof,
+  verifyPeerIdKey,
+  verifyUserEndpointProof
+} from './identity'
+import {
   all,
   decodeBytes,
   encodeBytes,
@@ -25,7 +32,8 @@ import type {
   TopologyMode,
   TopologyRoute,
   TopologySnapshot,
-  TopologyStats
+  TopologyStats,
+  UserIdentity
 } from './types'
 
 export const overlayFrameVersion = 3
@@ -69,6 +77,9 @@ export type PeerDescriptor = {
   streams?: OverlayStreamInfo[]
   signPubKey?: JsonWebKey
   encPubKey?: JsonWebKey
+  userId?: string
+  userPubKey?: JsonWebKey
+  userProof?: string
   cert?: RoleCertificate
   roomAuth?: string
   sig?: string
@@ -312,15 +323,11 @@ export const computeTargetNeighbors = (
   return targets
 }
 
-export const computeShortestPathRoutes = (
-  localPeerId: string,
+const buildUndirectedGraph = (
   adjacency: Map<string, Set<string>>,
-  directPeerIds: Iterable<string>
-): Record<string, TopologyRoute> => {
-  const routes: Record<string, TopologyRoute> = {}
-  const directSet = new Set(directPeerIds)
-
-  // Undirected view of the graph
+  localPeerId?: string,
+  directSet?: Iterable<string>
+): Map<string, Set<string>> => {
   const graph = new Map<string, Set<string>>()
   const ensureNode = (u: string): Set<string> => {
     let set = graph.get(u)
@@ -331,9 +338,11 @@ export const computeShortestPathRoutes = (
     return set
   }
 
-  for (const d of directSet) {
-    ensureNode(localPeerId).add(d)
-    ensureNode(d).add(localPeerId)
+  if (localPeerId && directSet) {
+    for (const d of directSet) {
+      ensureNode(localPeerId).add(d)
+      ensureNode(d).add(localPeerId)
+    }
   }
 
   for (const [u, neighbors] of adjacency.entries()) {
@@ -342,6 +351,18 @@ export const computeShortestPathRoutes = (
       ensureNode(v).add(u)
     }
   }
+
+  return graph
+}
+
+export const computeShortestPathRoutes = (
+  localPeerId: string,
+  adjacency: Map<string, Set<string>>,
+  directPeerIds: Iterable<string>
+): Record<string, TopologyRoute> => {
+  const routes: Record<string, TopologyRoute> = {}
+  const directSet = new Set(directPeerIds)
+  const graph = buildUndirectedGraph(adjacency, localPeerId, directSet)
 
   const visited = new Map<string, {nextHop: string; hops: number}>()
   const backupNextHops = new Map<string, string>()
@@ -394,22 +415,7 @@ export const computeMediaTreeChildren = (
   adjacency: Map<string, Set<string>>,
   fanout: number
 ): {parentId: string | null; childrenIds: string[]} => {
-  const graph = new Map<string, Set<string>>()
-  const ensureNode = (u: string): Set<string> => {
-    let set = graph.get(u)
-    if (!set) {
-      set = new Set()
-      graph.set(u, set)
-    }
-    return set
-  }
-
-  for (const [u, neighbors] of adjacency.entries()) {
-    for (const v of neighbors) {
-      ensureNode(u).add(v)
-      ensureNode(v).add(u)
-    }
-  }
+  const graph = buildUndirectedGraph(adjacency)
 
   const parentMap = new Map<string, string | null>([[broadcasterId, null]])
   const childrenMap = new Map<string, string[]>()
@@ -558,7 +564,8 @@ const descriptorCanonicalPayload = (d: PeerDescriptor): string =>
     d.signPubKey ?? null,
     d.encPubKey ?? null,
     d.roomAuth ?? null,
-    d.cert?.sig ?? null
+    d.cert?.sig ?? null,
+    ...(d.userId ? [d.userId, d.userPubKey ?? null, d.userProof ?? null] : [])
   ])
 
 const computeRoomAuthToken = async (
@@ -618,25 +625,46 @@ const rememberVerifiedSig = (cacheKey: string, bytes: Uint8Array): void => {
 const getOrCreateCryptoIdentity = (peerId: string): Promise<CryptoIdentity> => {
   let cached = identityCache.get(peerId)
   if (!cached) {
+    const endpointId = getOrCreateEndpointIdentitySync(peerId)
     cached = (async () => {
-      const [signPair, encPair] = await all([
-        crypto.subtle.generateKey({name: 'ECDSA', namedCurve: 'P-256'}, true, [
-          'sign',
-          'verify'
-        ]),
+      const signPrivJwk: JsonWebKey = {
+        ...endpointId.signPrivateJwk,
+        ext: true,
+        key_ops: ['sign']
+      }
+      const signPubJwk: JsonWebKey = {
+        ...endpointId.signPubJwk,
+        ext: true,
+        key_ops: ['verify']
+      }
+      const [signPrivateKey, signPublicKey, encPair] = await all([
+        crypto.subtle.importKey(
+          'jwk',
+          signPrivJwk,
+          {name: 'ECDSA', namedCurve: 'P-256'},
+          true,
+          ['sign']
+        ),
+        crypto.subtle.importKey(
+          'jwk',
+          signPubJwk,
+          {name: 'ECDSA', namedCurve: 'P-256'},
+          true,
+          ['verify']
+        ),
         crypto.subtle.generateKey({name: 'ECDH', namedCurve: 'P-256'}, true, [
           'deriveKey',
           'deriveBits'
         ])
       ])
-      const [signPubJwk, encPubJwk] = await all([
-        crypto.subtle.exportKey('jwk', signPair.publicKey),
+      const [exportedSignPubJwk, encPubJwk] = await all([
+        crypto.subtle.exportKey('jwk', signPublicKey),
         crypto.subtle.exportKey('jwk', encPair.publicKey)
       ])
       return {
-        signPrivateKey: signPair.privateKey,
-        signPublicKey: signPair.publicKey,
-        signPubJwk,
+        signPrivateKey,
+        signPublicKey,
+        signPubJwk: exportedSignPubJwk,
         encPrivateKey: encPair.privateKey,
         encPublicKey: encPair.publicKey,
         encPubJwk
@@ -653,6 +681,7 @@ export type OverlayManagerDeps = {
   roomId?: string
   password?: string
   topology?: TopologyMode | TopologyConfig
+  getLocalUserIdentity?: () => Promise<UserIdentity> | UserIdentity
   onVirtualPeerJoin: (peerId: string, virtualPeer: PeerHandle) => void
   onVirtualPeerLeave: (peerId: string, reason?: Error) => void
   onDeliverData: (originPeerId: string, data: ArrayBuffer) => void
@@ -664,7 +693,9 @@ export type OverlayManagerDeps = {
   onPeerDescriptorCert?: (
     peerId: string,
     signPubKey: JsonWebKey,
-    cert?: RoleCertificate
+    cert?: RoleCertificate,
+    userId?: string,
+    userPubKey?: JsonWebKey
   ) => void
   onRelayMediaStream?: (
     broadcasterId: string,
@@ -751,6 +782,7 @@ export const createOverlayManager = ({
   roomId: initialRoomId = '',
   password = '',
   topology,
+  getLocalUserIdentity,
   onVirtualPeerJoin,
   onVirtualPeerLeave,
   onDeliverData,
@@ -759,6 +791,7 @@ export const createOverlayManager = ({
   onRelayMediaStream,
   onRelayMediaTrack
 }: OverlayManagerDeps): OverlayManager => {
+  getOrCreateEndpointIdentitySync(selfId)
   let roomId = initialRoomId
   const config = normalizeTopologyConfig(topology)
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
@@ -1074,6 +1107,15 @@ export const createOverlayManager = ({
     }
   }
 
+  const purgePeerFromGraph = (peerId: string): void => {
+    descriptors.delete(peerId)
+    adjacency.delete(peerId)
+    knownRoster.delete(peerId)
+    for (const set of adjacency.values()) {
+      set.delete(peerId)
+    }
+  }
+
   const recomputeTopologyAndRoutes = (): void => {
     if (isDestroyed) {
       return
@@ -1081,12 +1123,7 @@ export const createOverlayManager = ({
 
     for (const downId of departedPeers) {
       if (!directPeers.has(downId)) {
-        descriptors.delete(downId)
-        adjacency.delete(downId)
-        knownRoster.delete(downId)
-        for (const set of adjacency.values()) {
-          set.delete(downId)
-        }
+        purgePeerFromGraph(downId)
       }
     }
 
@@ -1136,9 +1173,7 @@ export const createOverlayManager = ({
           }
           virtualPeers.get(peerId)?.destroy()
           virtualPeers.delete(peerId)
-          descriptors.delete(peerId)
-          adjacency.delete(peerId)
-          knownRoster.delete(peerId)
+          purgePeerFromGraph(peerId)
           onVirtualPeerLeave(peerId, mkErr('peer left room'))
         } else if (!unreachableTimers.has(peerId)) {
           unreachableTimers.set(
@@ -1148,9 +1183,7 @@ export const createOverlayManager = ({
               if (!isDestroyed && !directPeers.has(peerId) && !routes[peerId]) {
                 virtualPeers.get(peerId)?.destroy()
                 virtualPeers.delete(peerId)
-                descriptors.delete(peerId)
-                adjacency.delete(peerId)
-                knownRoster.delete(peerId)
+                purgePeerFromGraph(peerId)
                 onVirtualPeerLeave(peerId, mkErr('peer disconnected'))
               }
             }, unreachableGraceMs)
@@ -1215,6 +1248,18 @@ export const createOverlayManager = ({
     identityReady = id
     descriptor.signPubKey = id.signPubJwk
     descriptor.encPubKey = id.encPubJwk
+    if (getLocalUserIdentity) {
+      const userIdentity = await getLocalUserIdentity()
+      descriptor.userId = userIdentity.userId
+      descriptor.userPubKey = userIdentity.signPubJwk
+      descriptor.userProof = await signUserEndpointProof(userIdentity, {
+        appId,
+        roomId,
+        peerId: selfId,
+        peerPubJwk: id.signPubJwk,
+        seq
+      })
+    }
     const canonicalBytes = encodeBytes(descriptorCanonicalPayload(descriptor))
     const sigBuffer = await crypto.subtle.sign(
       {name: 'ECDSA', hash: 'SHA-256'},
@@ -1267,15 +1312,41 @@ export const createOverlayManager = ({
       return false
     }
 
+    if (!verifyPeerIdKey(d.peerId, d.signPubKey)) {
+      stats.signatureFailures++
+      return false
+    }
+
+    if (
+      Boolean(getLocalUserIdentity) ||
+      d.userId !== undefined ||
+      d.userPubKey !== undefined ||
+      d.userProof !== undefined
+    ) {
+      if (
+        !d.userId ||
+        !d.userPubKey ||
+        !d.userProof ||
+        !verifyUserEndpointProof({
+          appId,
+          roomId,
+          peerId: d.peerId,
+          peerPubJwk: d.signPubKey,
+          userId: d.userId,
+          userPubJwk: d.userPubKey,
+          proof: d.userProof,
+          seq: d.seq
+        })
+      ) {
+        stats.signatureFailures++
+        return false
+      }
+    }
+
     const keyThumbprint = toJson(d.signPubKey)
     const canonicalThumbprint =
       typeof d.signPubKey.x === 'string' && typeof d.signPubKey.y === 'string'
-        ? toJson({
-            crv: d.signPubKey.crv ?? 'P-256',
-            kty: d.signPubKey.kty ?? 'EC',
-            x: d.signPubKey.x,
-            y: d.signPubKey.y
-          })
+        ? canonicalizePubJwk(d.signPubKey)
         : keyThumbprint
     if (
       bannedKeyThumbprints.has(keyThumbprint) ||
@@ -1300,7 +1371,13 @@ export const createOverlayManager = ({
     ) {
       pinnedSignKeys.set(d.peerId, keyThumbprint)
       peerSignPubKeys.set(d.peerId, d.signPubKey)
-      onPeerDescriptorCert?.(d.peerId, d.signPubKey, d.cert)
+      onPeerDescriptorCert?.(
+        d.peerId,
+        d.signPubKey,
+        d.cert,
+        d.userId,
+        d.userPubKey
+      )
       return true
     }
 
@@ -1333,7 +1410,13 @@ export const createOverlayManager = ({
       rememberVerifiedSig(sigCacheKey, canonicalBytes)
       pinnedSignKeys.set(d.peerId, keyThumbprint)
       peerSignPubKeys.set(d.peerId, d.signPubKey)
-      onPeerDescriptorCert?.(d.peerId, d.signPubKey, d.cert)
+      onPeerDescriptorCert?.(
+        d.peerId,
+        d.signPubKey,
+        d.cert,
+        d.userId,
+        d.userPubKey
+      )
       return true
     } catch {
       stats.signatureFailures++
@@ -1830,12 +1913,7 @@ export const createOverlayManager = ({
         )
         downPeersSeq.set(leavingId, lastSeq)
         departedPeers.add(leavingId)
-        descriptors.delete(leavingId)
-        adjacency.delete(leavingId)
-        knownRoster.delete(leavingId)
-        for (const neighbors of adjacency.values()) {
-          neighbors.delete(leavingId)
-        }
+        purgePeerFromGraph(leavingId)
         recomputeTopologyAndRoutes()
         const fwd = packOverlayControl(msg)
         for (const neighborId of directPeers.keys()) {
@@ -1962,12 +2040,7 @@ export const createOverlayManager = ({
             const lastSeq = descriptors.get(downId)?.seq ?? 0
             downPeersSeq.set(downId, lastSeq)
             departedPeers.add(downId)
-            descriptors.delete(downId)
-            adjacency.delete(downId)
-            knownRoster.delete(downId)
-            for (const set of adjacency.values()) {
-              set.delete(downId)
-            }
+            purgePeerFromGraph(downId)
             newDown.push(downId)
           }
         }
@@ -1976,6 +2049,20 @@ export const createOverlayManager = ({
       if (newlyUpdated.length > 0 || newDown.length > 0) {
         scheduleGossipFlush(newlyUpdated, newDown, fromPeerId)
       }
+    }
+  }
+
+  const ensureOriginVirtualPeer = (
+    origin: string,
+    fromPeerId: string
+  ): void => {
+    if (!directPeers.has(origin) && !virtualPeers.has(origin)) {
+      knownRoster.add(origin)
+      if (!routes[origin]) {
+        routes[origin] = {nextHop: fromPeerId, hops: 2}
+      }
+      const vPeer = createVirtualPeer(origin)
+      onVirtualPeerJoin(origin, vPeer)
     }
   }
 
@@ -2057,14 +2144,7 @@ export const createOverlayManager = ({
       }
 
       // Ensure origin is registered as a virtual peer if not already known
-      if (!directPeers.has(origin) && !virtualPeers.has(origin)) {
-        knownRoster.add(origin)
-        if (!routes[origin]) {
-          routes[origin] = {nextHop: fromPeerId, hops: 2}
-        }
-        const vPeer = createVirtualPeer(origin)
-        onVirtualPeerJoin(origin, vPeer)
-      }
+      ensureOriginVirtualPeer(origin, fromPeerId)
 
       stats.messagesReceived++
       const copy = payload.slice().buffer
@@ -2180,14 +2260,7 @@ export const createOverlayManager = ({
         return
       }
 
-      if (!directPeers.has(origin) && !virtualPeers.has(origin)) {
-        knownRoster.add(origin)
-        if (!routes[origin]) {
-          routes[origin] = {nextHop: fromPeerId, hops: 2}
-        }
-        const vPeer = createVirtualPeer(origin)
-        onVirtualPeerJoin(origin, vPeer)
-      }
+      ensureOriginVirtualPeer(origin, fromPeerId)
 
       stats.messagesReceived++
       onDeliverData(origin, plainPayload.slice().buffer)
@@ -2333,12 +2406,7 @@ export const createOverlayManager = ({
         const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
         downPeersSeq.set(peerId, lastSeq)
         departedPeers.add(peerId)
-        descriptors.delete(peerId)
-        adjacency.delete(peerId)
-        knownRoster.delete(peerId)
-        for (const set of adjacency.values()) {
-          set.delete(peerId)
-        }
+        purgePeerFromGraph(peerId)
       } else {
         // Only the direct edge between selfId and peerId was pruned
         adjacency.get(peerId)?.delete(selfId)
@@ -2379,29 +2447,18 @@ export const createOverlayManager = ({
       ) {
         return [...directPeers.keys()]
       }
-      for (const entry of activeStreams.values()) {
-        if (
-          entry.broadcasterId === broadcasterId &&
-          entry.forwardedTo.size > 0
-        ) {
-          const activeForwarded = [...entry.forwardedTo].filter(id =>
-            directPeers.has(id)
-          )
-          if (activeForwarded.length > 0) {
-            return activeForwarded
-          }
-        }
-      }
-      for (const entry of activeTracks.values()) {
-        if (
-          entry.broadcasterId === broadcasterId &&
-          entry.forwardedTo.size > 0
-        ) {
-          const activeForwarded = [...entry.forwardedTo].filter(id =>
-            directPeers.has(id)
-          )
-          if (activeForwarded.length > 0) {
-            return activeForwarded
+      for (const map of [activeStreams, activeTracks]) {
+        for (const entry of map.values()) {
+          if (
+            entry.broadcasterId === broadcasterId &&
+            entry.forwardedTo.size > 0
+          ) {
+            const activeForwarded = [...entry.forwardedTo].filter(id =>
+              directPeers.has(id)
+            )
+            if (activeForwarded.length > 0) {
+              return activeForwarded
+            }
           }
         }
       }
@@ -2597,7 +2654,7 @@ export const createOverlayManager = ({
       peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey,
 
     setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey): void => {
-      if (!peerId || !pubKey) {
+      if (!peerId || !pubKey || !verifyPeerIdKey(peerId, pubKey)) {
         return
       }
       peerSignPubKeys.set(peerId, pubKey)
@@ -2646,24 +2703,12 @@ export const createOverlayManager = ({
         typeof knownPubKey.x === 'string' &&
         typeof knownPubKey.y === 'string'
       ) {
-        bannedKeyThumbprints.add(
-          toJson({
-            crv: knownPubKey.crv ?? 'P-256',
-            kty: knownPubKey.kty ?? 'EC',
-            x: knownPubKey.x,
-            y: knownPubKey.y
-          })
-        )
+        bannedKeyThumbprints.add(canonicalizePubJwk(knownPubKey))
       }
       const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
       downPeersSeq.set(peerId, lastSeq)
       departedPeers.add(peerId)
-      descriptors.delete(peerId)
-      adjacency.delete(peerId)
-      knownRoster.delete(peerId)
-      for (const set of adjacency.values()) {
-        set.delete(peerId)
-      }
+      purgePeerFromGraph(peerId)
       const timer = unreachableTimers.get(peerId)
       if (timer) {
         resetTimer(timer)
@@ -2693,17 +2738,10 @@ export const createOverlayManager = ({
       if (
         knownPubKey &&
         typeof knownPubKey.x === 'string' &&
-        typeof knownPubKey.y === 'string'
+        typeof knownPubKey.y === 'string' &&
+        bannedKeyThumbprints.has(canonicalizePubJwk(knownPubKey))
       ) {
-        const canonical = toJson({
-          crv: knownPubKey.crv ?? 'P-256',
-          kty: knownPubKey.kty ?? 'EC',
-          x: knownPubKey.x,
-          y: knownPubKey.y
-        })
-        if (bannedKeyThumbprints.has(canonical)) {
-          return true
-        }
+        return true
       }
       return false
     },

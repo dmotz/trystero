@@ -33,7 +33,8 @@ import type {
   RequestManyOptions,
   RequestOptions,
   Room,
-  SendOptions
+  SendOptions,
+  TargetPeers
 } from './types'
 
 export type {
@@ -107,6 +108,9 @@ type ActionManagerDeps = {
     wireMetadata?: JsonValue
   ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
   getPeerRoles?: (peerId: string) => string[]
+  getPeerUserId?: (peerId: string) => string
+  resolveSendTarget?: (target?: TargetPeers) => TargetPeers
+  resolveRequestTarget?: (target: string) => string
   onUnauthorizedAction?: (namespace: string, peerId: string) => void
 }
 
@@ -175,6 +179,9 @@ export const createActionManager = ({
   verifyActionOffer,
   verifyActionPayload,
   getPeerRoles,
+  getPeerUserId,
+  resolveSendTarget,
+  resolveRequestTarget,
   onUnauthorizedAction,
   maxReceiveBytes
 }: ActionManagerDeps): {
@@ -186,6 +193,8 @@ export const createActionManager = ({
   handleData: (id: string, data: ArrayBuffer) => void
   clearPeer: (id: string, error: Error) => void
 } => {
+  const userIdOf = (peerId: string): string =>
+    getPeerUserId ? getPeerUserId(peerId) : peerId
   const publicActions: Record<string, PublicActionState> = Object.create(null)
   const pendingRequestWaiters: Record<string, PendingRequestWaiter> = {}
   const activeRequestControllers = new Map<string, Set<AbortController>>()
@@ -260,6 +269,7 @@ export const createActionManager = ({
               receive({
                 byteLength: context.byteLength,
                 peerId: context.peerId,
+                userId: userIdOf(context.peerId),
                 kind: 'response',
                 signal: context.signal
               })
@@ -279,7 +289,10 @@ export const createActionManager = ({
     const waiter = parsed && pendingRequestWaiters[parsed.r]
 
     if (waiter && waiter.peerId === id && parsed?.e === undefined) {
-      waiter.getReceiveProgress()?.(progress, {peerId: id})
+      waiter.getReceiveProgress()?.(progress, {
+        peerId: id,
+        userId: userIdOf(id)
+      })
     }
   })
 
@@ -357,7 +370,10 @@ export const createActionManager = ({
     ) =>
       handler
         ? (progress: number, peerId: string) =>
-            handler(progress, withMetadata({peerId}, metadata))
+            handler(
+              progress,
+              withMetadata({peerId, userId: userIdOf(peerId)}, metadata)
+            )
         : undefined
 
     const dispatchReceiveProgress = (
@@ -373,7 +389,10 @@ export const createActionManager = ({
         state.requiredRoles.length > 0
       )
 
-      state.onReceiveProgress?.(progress, withMetadata({peerId}, cleanMeta))
+      state.onReceiveProgress?.(
+        progress,
+        withMetadata({peerId, userId: userIdOf(peerId)}, cleanMeta)
+      )
     }
 
     const setReceive = (handler: ActionReceiveHandler | null): void => {
@@ -398,6 +417,7 @@ export const createActionManager = ({
               {
                 byteLength: context.byteLength,
                 peerId: context.peerId,
+                userId: userIdOf(context.peerId),
                 signal: context.signal,
                 kind,
                 ...(roles && roles.length > 0 ? {roles} : {})
@@ -432,6 +452,7 @@ export const createActionManager = ({
             {
               byteLength: context.byteLength,
               peerId: context.peerId,
+              userId: userIdOf(context.peerId),
               signal: context.signal,
               kind,
               ...(offerRes.roles.length > 0 ? {roles: offerRes.roles} : {})
@@ -456,6 +477,8 @@ export const createActionManager = ({
       ): void => {
         void Promise.resolve()
           .then(async () => {
+            let effectiveMetadata = metadata
+            let roles = getPeerRoles?.(peerId)
             if (state.requiredRoles.length > 0 && verifyActionPayload) {
               const verified = await verifyActionPayload(
                 type,
@@ -468,24 +491,18 @@ export const createActionManager = ({
                 onUnauthorizedAction?.(type, peerId)
                 return
               }
-              const handler = onMessage
-              if (!handler) {
-                return
-              }
-              const ctx = withMetadata({peerId}, verified.userMetadata)
-              if (verified.roles.length > 0) {
-                ;(ctx as {roles?: string[]}).roles = verified.roles
-              }
-              await handler(payload as T, ctx)
-              return
+              effectiveMetadata = verified.userMetadata
+              roles = verified.roles
             }
 
             const handler = onMessage
             if (!handler) {
               return
             }
-            const roles = getPeerRoles?.(peerId)
-            const ctx = withMetadata({peerId}, metadata)
+            const ctx = withMetadata(
+              {peerId, userId: userIdOf(peerId)},
+              effectiveMetadata
+            )
             if (roles && roles.length > 0) {
               ;(ctx as {roles?: string[]}).roles = roles
             }
@@ -505,9 +522,12 @@ export const createActionManager = ({
                   options.metadata
                 )
               : options.metadata
+          const resolvedTarget = resolveSendTarget
+            ? resolveSendTarget(options.target)
+            : options.target
           await rawAction.send(
             data,
-            options.target,
+            resolvedTarget,
             wireMetadata,
             toProgressHandler(options.onProgress, options.metadata),
             options.signal
@@ -595,7 +615,7 @@ export const createActionManager = ({
             roles = verified.roles
           }
           const ctx = {
-            ...withMetadata({peerId}, userMeta),
+            ...withMetadata({peerId, userId: userIdOf(peerId)}, userMeta),
             signal: controller.signal,
             ...(roles && roles.length > 0 ? {roles} : {})
           }
@@ -629,7 +649,11 @@ export const createActionManager = ({
 
       throwIfAborted(signal)
 
-      if (!getPeer(target, false)) {
+      const resolvedTarget = resolveRequestTarget
+        ? resolveRequestTarget(target)
+        : target
+
+      if (!getPeer(resolvedTarget, false)) {
         throw makeActionError(
           'disconnected',
           `no active peer with id ${target}`
@@ -648,7 +672,7 @@ export const createActionManager = ({
           controller,
           getReceive: () => state.onReceive,
           getReceiveProgress: () => state.onReceiveProgress,
-          peerId: target,
+          peerId: resolvedTarget,
           resolve,
           reject,
           timer: null,
@@ -676,7 +700,7 @@ export const createActionManager = ({
       try {
         const sending = rawAction.send(
           data,
-          target,
+          resolvedTarget,
           innerMeta === undefined
             ? {r: requestId}
             : {r: requestId, m: innerMeta},
@@ -701,13 +725,18 @@ export const createActionManager = ({
 
         const results = await all(
           targets.map(async target => {
+            const resolvedTarget =
+              (resolveRequestTarget ? resolveRequestTarget(target) : target) ??
+              target
+            const targetUserId = userIdOf(resolvedTarget) || target
             try {
               const value = await requestOne(data, {
                 ...requestOptions,
                 target
               })
               const result = {
-                peerId: target,
+                peerId: resolvedTarget,
+                userId: targetUserId,
                 status: 'fulfilled',
                 value
               } satisfies PeerResult<R>
@@ -722,14 +751,20 @@ export const createActionManager = ({
 
               const result =
                 error.kind === 'timeout'
-                  ? ({peerId: target, status: 'timeout'} as PeerResult<R>)
+                  ? ({
+                      peerId: resolvedTarget,
+                      userId: targetUserId,
+                      status: 'timeout'
+                    } as PeerResult<R>)
                   : error.kind === 'disconnected'
                     ? ({
-                        peerId: target,
+                        peerId: resolvedTarget,
+                        userId: targetUserId,
                         status: 'disconnected'
                       } as PeerResult<R>)
                     : ({
-                        peerId: target,
+                        peerId: resolvedTarget,
+                        userId: targetUserId,
                         status: 'rejected',
                         error
                       } as PeerResult<R>)

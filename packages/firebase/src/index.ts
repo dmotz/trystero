@@ -226,6 +226,20 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
   }
 })
 
-export {selfId}
+export {
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  createUserIdentity,
+  derivePeerId,
+  deriveUserId,
+  exportUserIdentity,
+  formatSelfCertifyingRoomId,
+  importUserIdentity,
+  parseSelfCertifyingRoomId,
+  selfId,
+  verifyPeerIdKey,
+  verifyUserIdKey
+} from '@trystero-p2p/core'
 
 export type * from '@trystero-p2p/core'

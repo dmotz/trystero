@@ -1,5 +1,116 @@
 # Changelog
 
+## [0.27.0-beta1](https://github.com/dmotz/trystero/releases/tag/0.27.0-beta1) - 2026-10-20
+
+### Improvements
+
+- 🕸️ **Scalable room topologies** - rooms now default to `topology: 'auto'`,
+  connecting peers directly in small groups (`<= 12` peers) and automatically
+  switching to a bounded-degree `'small-world'` relay overlay (`maxPeers: 8` by
+  default) as rooms grow to dozens or hundreds of peers. You can also opt into
+  `'mesh'`, `'small-world'`, or `'tree'` (for one-to-many broadcasts) or pass a
+  `TopologyConfig` object to customize connection and routing limits.
+- All room APIs (`makeAction`, `makeState`, `addStream`, `addTrack`,
+  `replaceTrack`, `ping`, `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work
+  transparently across both direct and multi-hop peers. Media streams in
+  scalable topologies automatically route through a branching broadcast tree
+  with automatic reparenting if an upstream peer disconnects, and multi-hop
+  messages are ECDSA-signed (with ECDH + AES-GCM end-to-end encryption for
+  targeted sends) so intermediate relays cannot forge or read traffic.
+- Added `room.getTopology()` to inspect the active topology mode, direct and
+  multi-hop peer lists, routing paths, media broadcast trees, and forwarding
+  stats.
+- 👑 **Room admins, custom roles, and peer banning** - added `admin` to room
+  config (`true`, a passphrase/`adminKey` string, or an `AuthorityConfig`
+  object) for zero-trust public-key room administration. Passing `admin: true`
+  appends a 16-character Base62 public-key fingerprint suffix to the room ID
+  (`<roomId>.<fingerprint>`) so guests automatically verify the room creator
+  from the invite room ID alone.
+- Added `room.grantRole()`, `room.revokeRole()`, `room.getPeerRoles()`,
+  `room.banPeer()`, `room.isBanned()`, and `room.getAuthority()`, plus top-level
+  helpers `createAdminIdentity()`, `createAdminRoom()`,
+  `parseSelfCertifyingRoomId()`, `formatSelfCertifyingRoomId()`, and
+  `computePublicKeyFingerprint()`.
+- Actions now accept an `authority` option (`makeAction(name, {authority})`) to
+  restrict sending or requesting to `'admin'` or specific custom roles, with the
+  sender's verified `roles` included in `onMessage` and `onRequest` contexts.
+- 🛡️ **Authoritative shared state** - added
+  `room.makeState(namespace, initialValue, [config])` for official room state
+  that any peer can read (`get()`, `onChange`, `getMeta()`) and only authorized
+  roles can update (`set()`), with optional custom `validate` rules. Existing
+  peers automatically sync the latest signed state snapshot to late joiners even
+  after the admin has left the room.
+- 🚪 **Room size limits** - added `limit` to room config to cap the maximum
+  number of peers in a room (including the local user). When a room is at
+  capacity, additional joiners are rejected during handshake before triggering
+  `onPeerJoin` on existing members, receive `error: 'room full'` via
+  `onJoinError`, and automatically leave the room.
+- 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every
+  peer now has both a self-certifying 20-character Base62 endpoint `peerId`
+  (`selfId`, derived from its ECDSA P-256 public key and verified with DTLS
+  fingerprint binding during handshake and across multi-hop overlays) and a
+  persistent 43-character Base64url `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)
+  public-key thumbprint).
+- Added `identity` to room config (`'session'` default in browsers, `'local'`
+  stored in IndexedDB with `localStorage` fallback across tabs and future
+  visits, `'none'` for ephemeral runtime, or a custom `UserIdentity` /
+  `trystero_uk_...` key / loader function), plus top-level helpers
+  `createUserIdentity()`, `importUserIdentity()`, `exportUserIdentity()`,
+  `derivePeerId()`, `deriveUserId()`, `verifyPeerIdKey()`, and
+  `verifyUserIdKey()`.
+- 👥 **Multi-tab user presence & targeting** - added `room.onUserJoin`,
+  `room.onUserLeave`, `room.getUsers()`, and `room.getSelf()`. Every `target` /
+  `targets` option (`send`, `request`, `requestMany`, `ping`, media methods, and
+  role/ban methods) now accepts either a `peerId` or a `userId` (fanning out to
+  all of a user's open tabs on `send`/media, and deterministically routing to
+  one tab on `request`/`requestMany`/`ping`). `userId` is also included in all
+  action, state, and progress callback contexts.
+
+### ⚠️ Breaking changes
+
+Room event handlers now receive `{peerId, userId, ...}` context objects instead
+of a bare `peerId` string (with `stream` / `track, stream` remaining first on
+media handlers):
+
+```js
+room.onPeerJoin = ({peerId, userId, roles}) => console.log(`${peerId} (${userId}) joined`)
+room.onPeerLeave = ({peerId, userId}) => console.log(`${peerId} (${userId}) left`)
+room.onPeerStream = (stream, {peerId, userId, metadata}) => {}
+room.onPeerTrack = (track, stream, {peerId, userId, metadata}) => {}
+```
+
+`room.getPeers()` now returns a map of `PeerInfo` objects
+(`{userId, connection, direct, hops, roles}`) instead of raw `RTCPeerConnection`
+instances, since peers in scalable topologies may be routed across multiple hops
+(`connection: null, direct: false, hops >= 2`):
+
+```js
+const peers = room.getPeers()
+
+// Before:
+const connection = peers[peerId]
+
+// Now:
+const {userId, connection, direct, hops, roles} = peers[peerId]
+```
+
+Arbitrary `config.peerId` strings are no longer supported because all `peerId`s
+and `userId`s are now cryptographically self-certifying. Use `config.identity`
+(`'session'`, `'local'`, `'none'`, or a custom `UserIdentity` / loader) to
+persist or supply a custom identity.
+
+`onPeerHandshake` and `handshakeTimeoutMs` have been removed from `joinRoom()`
+callbacks. Peer and user identity verification, password verification, room
+capacity enforcement (`config.limit`), and role/admin authorization
+(`config.admin`, `authority`, `banPeer`) are now handled automatically across
+both direct and multi-hop topologies; for per-message/request payload filtering,
+use `action.onReceive`.
+
+Rooms now default to `topology: 'auto'`, which switches from `'mesh'` to
+`'small-world'` multi-hop routing when a room exceeds 12 peers. Pass
+`topology: 'mesh'` in `joinRoom()` if your app requires every peer to maintain a
+direct `RTCPeerConnection` regardless of room size.
+
 ## [0.26.0](https://github.com/dmotz/trystero/releases/tag/0.26.0) - 2026-10-04
 
 ### Improvements

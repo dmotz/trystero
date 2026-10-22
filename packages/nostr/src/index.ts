@@ -515,7 +515,23 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
 
 export const getRelaySockets = relayManager.getSockets
 
-export {pauseRelayReconnection, resumeRelayReconnection, selfId}
+export {
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  createUserIdentity,
+  derivePeerId,
+  deriveUserId,
+  exportUserIdentity,
+  formatSelfCertifyingRoomId,
+  importUserIdentity,
+  parseSelfCertifyingRoomId,
+  pauseRelayReconnection,
+  resumeRelayReconnection,
+  selfId,
+  verifyPeerIdKey,
+  verifyUserIdKey
+} from '@trystero-p2p/core'
 
 export const defaultRelayUrls = [
   '0x-nostr-relay.fly.dev',

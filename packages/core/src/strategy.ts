@@ -1,7 +1,13 @@
 import {parseSelfCertifyingRoomId, resolveRoomAuthority} from './authority'
 import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
+import {
+  getOrCreateEndpointIdentitySync,
+  registerTestForcedPeerId,
+  resolveUserIdentity,
+  validateIdentityConfig
+} from './identity'
 import {OfferManager} from './offer-manager'
-import {createPasswordHandshake} from './handshake'
+import {createIdentityHandshake, createPasswordHandshake} from './handshake'
 import initPeer from './peer'
 import room, {getRoomSignalingBridge, type RoomSignalingBridge} from './room'
 import {SharedPeerManager} from './shared-peer'
@@ -79,8 +85,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const {appId} = config
     const onJoinError = callbacks?.onJoinError
-    const onPeerHandshake = callbacks?.onPeerHandshake
-    const handshakeTimeoutMs = callbacks?.handshakeTimeoutMs
 
     if (!appId) {
       throw mkErr('config map is missing appId field')
@@ -105,20 +109,23 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       throw mkErr('limit must be a positive safe integer')
     }
 
-    if (
-      handshakeTimeoutMs !== undefined &&
-      (!Number.isFinite(handshakeTimeoutMs) || handshakeTimeoutMs <= 0)
-    ) {
-      throw mkErr('handshakeTimeoutMs must be a positive number')
-    }
+    validateIdentityConfig(config)
 
     const localSelfId =
-      typeof config.peerId === 'string' && config.peerId
-        ? config.peerId
+      typeof config._test_only_forcedPeerId === 'string' &&
+      config._test_only_forcedPeerId
+        ? config._test_only_forcedPeerId
         : selfId
+    if (
+      typeof config._test_only_forcedPeerId === 'string' &&
+      config._test_only_forcedPeerId
+    ) {
+      registerTestForcedPeerId(config._test_only_forcedPeerId)
+    }
     const scopeAppId =
-      typeof config.peerId === 'string' && config.peerId
-        ? `${appId}:${config.peerId}`
+      typeof config._test_only_forcedPeerId === 'string' &&
+      config._test_only_forcedPeerId
+        ? `${appId}:${config._test_only_forcedPeerId}`
         : appId
 
     if (occupiedRooms[scopeAppId]?.[roomId]) {
@@ -167,6 +174,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
 
     let didLeaveRoom = false
+    let isLeavingRoom = false
     const bridgeRef: {current?: RoomSignalingBridge | undefined} = {}
 
     const syncOverlayNeighbors = (): void => {
@@ -293,7 +301,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       selfTopicP,
       toPlain,
       toCipher,
-      isLeaving: () => didLeaveRoom,
+      isLeaving: () => didLeaveRoom || isLeavingRoom,
       isPassive,
       isActive: !isPassive,
       onJoinError,
@@ -514,16 +522,41 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     })
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
+    const userIdentityP = (
+      effectiveRoomIdP
+        ? effectiveRoomIdP.then(rid =>
+            resolveUserIdentity(appId, rid, config, localSelfId)
+          )
+        : resolveUserIdentity(appId, roomId, config, localSelfId)
+    ).catch(err => {
+      onJoinError?.({
+        error: toErrorMessage(err, 'identity resolution failed'),
+        appId,
+        peerId: localSelfId,
+        roomId: effectiveRoomId
+      })
+      throw err
+    })
+    void userIdentityP.catch(noOp)
+
     const sharedPassword = config.password ?? ''
-    const {compose} = createPasswordHandshake(
+    const {compose: composePassword} = createPasswordHandshake(
       sharedPassword,
       appId,
-      effectiveRoomIdP ?? roomId,
-      sharedPassword
-        ? peerId => bridgeRef.current?.checkCapacityAfterPassword(peerId)
-        : undefined
+      effectiveRoomIdP ?? roomId
     )
-    const composedPeerHandshake = compose(onPeerHandshake)
+    const {compose: composeIdentity} = createIdentityHandshake({
+      selfId: localSelfId,
+      appId,
+      roomId: effectiveRoomIdP ?? roomId,
+      getUserIdentity: () => userIdentityP,
+      getPeerHandle: peerId => bridgeRef.current?.getPeerHandle(peerId),
+      onVerified: (peerId, verified) => {
+        bridgeRef.current?.onPeerIdentityVerified(peerId, verified)
+        bridgeRef.current?.checkCapacityAfterPassword(peerId)
+      }
+    })
+    const composedPeerHandshake = composePassword(composeIdentity())
 
     const releaseOccupiedRoom = (): void => {
       if (occupiedRooms[scopeAppId]?.[roomId] === joinedRoom) {
@@ -616,15 +649,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       ...(config.topology === undefined ? {} : {topology: config.topology}),
       ...(config.admin === undefined ? {} : {admin: config.admin}),
       ...(resolvedAuthorityP ? {resolvedAuthorityP} : {}),
+      userIdentityP,
+      verifyPeerIdentity: true,
       ...(config.maxReceiveBytes === undefined
         ? {}
         : {maxReceiveBytes: config.maxReceiveBytes}),
       ...(composedPeerHandshake
         ? {onPeerHandshake: composedPeerHandshake}
         : {}),
-      ...(handshakeTimeoutMs === undefined ? {} : {handshakeTimeoutMs}),
       isPassive,
       onBeforeLeave: () => {
+        isLeavingRoom = true
+        announceTimeouts.forEach(resetTimer)
+        announceTimeouts.length = 0
         releaseOccupiedRoom()
         ;(leavingRoomCleanups[scopeAppId] ??= {})[roomId] = cleanupRoom
       },

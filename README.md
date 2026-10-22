@@ -19,6 +19,7 @@ on top of WebRTC:
 - ✂️⏳ Automatic chunking and throttling of large data
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
+- 🪪🔑 Self-certifying peer & user identities with multi-tab presence
 - 🚪🎟️ Room size limits for 1v1 matches and capped lobbies
 - 🕸️🚀 Automatic scaling for large rooms with dozens or hundreds of peers
 - 👑🛡️ Room admins, custom roles, peer banning, and shared state
@@ -43,6 +44,7 @@ You can see what people are building with Trystero
   - [Action promises](#action-promises)
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
+  - [Persistent user identity and multi-tab presence](#persistent-user-identity-and-multi-tab-presence)
   - [Room size limits](#room-size-limits)
   - [Scalable topologies](#scalable-topologies)
   - [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)
@@ -56,6 +58,13 @@ You can see what people are building with Trystero
 - [API](#api)
   - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
   - [`selfId`](#selfid)
+  - [`createUserIdentity()`](#createuseridentity)
+  - [`importUserIdentity(input)`](#importuseridentityinput)
+  - [`exportUserIdentity(identity)`](#exportuseridentityidentity)
+  - [`derivePeerId(publicKey)`](#derivepeeridpublickey)
+  - [`deriveUserId(publicKey)`](#deriveuseridpublickey)
+  - [`verifyPeerIdKey(peerId, publicKey)`](#verifypeeridkeypeerid-publickey)
+  - [`verifyUserIdKey(userId, publicKey)`](#verifyuseridkeyuserid-publickey)
   - [`createAdminIdentity([options])`](#createadminidentityoptions)
   - [`createAdminRoom(baseRoomId, [options])`](#createadminroombaseroomid-options)
   - [`parseSelfCertifyingRoomId(roomId)`](#parseselfcertifyingroomidroomid)
@@ -154,19 +163,19 @@ Supabase, it should be your project URL.
 Listen for peers joining the room:
 
 ```js
-room.onPeerJoin = peerId => console.log(`${peerId} joined`)
+room.onPeerJoin = ({peerId, userId}) => console.log(`${peerId} (${userId}) joined`)
 ```
 
 Listen for peers leaving the room:
 
 ```js
-room.onPeerLeave = peerId => console.log(`${peerId} left`)
+room.onPeerLeave = ({peerId, userId}) => console.log(`${peerId} (${userId}) left`)
 ```
 
 Listen for peers sending their audio/video streams:
 
 ```js
-room.onPeerStream = (stream, peerId) =>
+room.onPeerStream = (stream, {peerId}) =>
   (peerElements[peerId].video.srcObject = stream)
 ```
 
@@ -176,12 +185,17 @@ To unsubscribe from events, leave the room:
 room.leave()
 ```
 
-You can access the local user's peer ID by importing `selfId` like so:
+You can access the local endpoint's peer ID synchronously by importing `selfId`,
+or inspect both your endpoint `peerId` and persistent `userId` with
+`room.getSelf()`:
 
 ```js
 import {selfId} from 'trystero'
 
 console.log(`my peer ID is ${selfId}`)
+
+const {peerId, userId} = await room.getSelf()
+console.log(`my peer ID is ${peerId} and my user ID is ${userId}`)
 ```
 
 ## Broadcast events
@@ -285,7 +299,7 @@ const idsToNames = {}
 const name = room.makeAction('name')
 
 // tell new peers your name when they connect
-room.onPeerJoin = peerId => name.send('Oedipa', {target: peerId})
+room.onPeerJoin = ({peerId}) => name.send('Oedipa', {target: peerId})
 
 // listen for peers naming themselves
 name.onMessage = (value, {peerId}) => (idsToNames[peerId] = value)
@@ -293,7 +307,7 @@ name.onMessage = (value, {peerId}) => (idsToNames[peerId] = value)
 // tell all peers at once when your name changes
 nameInput.addEventListener('change', e => name.send(e.target.value))
 
-room.onPeerLeave = peerId =>
+room.onPeerLeave = ({peerId}) =>
   console.log(`${idsToNames[peerId] || 'a weird stranger'} left`)
 ```
 
@@ -322,10 +336,10 @@ const selfStream = await navigator.mediaDevices.getUserMedia({
 room.addStream(selfStream)
 
 // send stream to peers who join later
-room.onPeerJoin = peerId => room.addStream(selfStream, {target: peerId})
+room.onPeerJoin = ({peerId}) => room.addStream(selfStream, {target: peerId})
 
 // handle streams from other peers
-room.onPeerStream = (stream, peerId) => {
+room.onPeerStream = (stream, {peerId}) => {
   // create an audio instance and set the incoming stream
   const audio = new Audio()
   audio.srcObject = stream
@@ -344,7 +358,7 @@ video elements in the DOM:
 const peerVideos = {}
 const videoContainer = document.getElementById('videos')
 
-room.onPeerStream = (stream, peerId) => {
+room.onPeerStream = (stream, {peerId}) => {
   let video = peerVideos[peerId]
 
   // if this peer hasn't sent a stream before, create a video element
@@ -476,6 +490,101 @@ match for all peers in the room for them to be able to connect. An example use
 case might be a private chat room where users learn the password via external
 means.
 
+### Persistent user identity and multi-tab presence
+
+In peer-to-peer apps, you often need to know two things:
+
+1. **Are peer IDs unforgeable?** Can another peer pretend to have someone else's
+   ID?
+2. **What happens when a user refreshes the page or opens your app in two tabs
+   at once?**
+
+Out of the box, Trystero gives every participant two cryptographically verified,
+self-certifying IDs—no accounts, servers, or custom crypto required:
+
+- **`peerId` (`selfId`)** – A 20-character Base62 ID generated fresh for each
+  tab or process runtime and derived directly from its ECDSA P-256 public key.
+  Every WebRTC connection is cryptographically bound to its DTLS fingerprint, so
+  a `peerId` can never be forged or hijacked.
+- **`userId`** – A 43-character Base64url public-key thumbprint ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html))
+  representing the logical user across page reloads or multiple open tabs.
+
+#### Configuring `userId` persistence (`config.identity`)
+
+Pass `identity` in your `joinRoom()` config to choose how long a user's
+`userId` lasts:
+
+| `identity` value | `userId` lifetime |
+| --- | --- |
+| `'session'` _(browser default)_ | Stored in `sessionStorage` (scoped to `appId`). Keeps the same `userId` when the user refreshes the page in that tab. |
+| `'local'` | Stored in IndexedDB (as a non-extractable WebCrypto key) with `localStorage` fallback. Reused across all open tabs and future visits on the same device until browser storage is cleared. |
+| `'none'` _(non-browser default)_ | Ephemeral for the current runtime; a page reload or process restart generates a new `userId`. |
+| Custom (`UserIdentity`, `userKey`, or async loader) | Controlled by your app (e.g. loaded from disk in Node/Bun/Deno or an external vault). |
+
+```js
+// Persist user identity across tabs and future visits on the same device
+const room = joinRoom(
+  {
+    appId: 'co-op-RPG',
+    identity: 'local'
+  },
+  'tavern-1'
+)
+
+const {peerId, userId} = await room.getSelf()
+```
+
+#### Managing user presence across tabs (`onUserJoin`, `onUserLeave`, `getUsers`)
+
+When a user with `identity: 'local'` opens your app in two browser tabs at the
+same time, both tabs join the room with their own unique `peerId`s while sharing
+the same verified `userId`.
+
+Instead of manually deduplicating tabs yourself, you can use `onUserJoin`,
+`onUserLeave`, and `getUsers()`:
+
+```js
+// Track logical users in your UI participant list
+room.onUserJoin = ({userId, peerId, roles}) => addParticipant(userId)
+room.onUserLeave = ({userId, peerId}) => removeParticipant(userId)
+
+console.log(room.getUsers())
+// {
+//   [userId]: {
+//     peerIds: ['peerA', 'peerB'],
+//     roles: []
+//   }
+// }
+```
+
+| Endpoint change | `onPeerJoin` / `onPeerLeave` | `onUserJoin` / `onUserLeave` |
+| --- | --- | --- |
+| Alice's first tab joins | `onPeerJoin` (`{peerId, userId, roles}`) | `onUserJoin` (`{userId, peerId, roles}`) |
+| Alice's second tab joins | `onPeerJoin` (`{peerId, userId, roles}`) | _None_ |
+| One of Alice's two tabs leaves | `onPeerLeave` (`{peerId, userId}`) | _None_ |
+| Alice's last tab leaves | `onPeerLeave` (`{peerId, userId}`) | `onUserLeave` (`{userId, peerId}`) |
+
+#### Targeting a `userId` vs a `peerId`
+
+Every `target` and `targets` option across Trystero (`action.send`,
+`action.request`, `action.requestMany`, `room.ping`, `room.addStream`,
+`room.addTrack`, `room.replaceTrack`, `room.grantRole`, `room.banPeer`, etc.)
+accepts either a 20-character `peerId` or a 43-character `userId`:
+
+- **One-way sends (`send`, `addStream`, `addTrack`)**: Passing a `userId`
+  automatically **fans out** to all active tabs (`peerIds`) owned by that user.
+- **Request/response & latency (`request`, `requestMany`, `ping`)**: Passing a
+  `userId` **deterministically routes to one tab** owned by that user
+  (preferring a direct 1-hop connection, breaking ties by lowest `peerId`).
+
+```js
+// Fan out a direct message to all of Alice's open tabs
+dm.send('Hey Alice!', {target: aliceUserId})
+
+// Request state from a single deterministic tab of Alice
+const profile = await getProfile.request(null, {target: aliceUserId})
+```
+
 ### Room size limits
 
 Sometimes your app has a strict maximum number of seats per room. For example,
@@ -487,9 +596,9 @@ you might be building:
 - **A private 1-on-1 video call** where only two people can be in the room at a
   time.
 
-To cap how many total people (including the local user) can be in a room at
-once, pass `limit` in your `joinRoom()` config and listen for `'room full'` in
-`onJoinError`:
+To cap how many unique users (`userId`s, including the local user) can be in a
+room at once, pass `limit` in your `joinRoom()` config and listen for
+`'room full'` in `onJoinError`:
 
 ```js
 const room = joinRoom(
@@ -512,19 +621,22 @@ When a room is already at capacity:
 
 - Any extra user who tries to join receives `error: 'room full'` in
   `onJoinError` and is automatically disconnected from the room.
+- Because `limit` counts unique `userId`s rather than raw tabs, an admitted
+  player who refreshes the page or opens a second tab (with `'session'` or
+  `'local'` identity) shares their existing seat and is not turned away.
 - Existing players in the room are never interrupted—`onPeerJoin` and
   `onPeerLeave` won't fire for someone who was turned away at the door.
-- If one of the current players leaves (`room.leave()` or closes their tab), a
-  seat immediately opens back up for the next person who joins.
+- If one of the current players leaves (`room.leave()` or closes their last
+  tab), a seat immediately opens back up for the next person who joins.
 
 <details>
   <summary>How it works behind the scenes</summary>
 
 - **Pre-activation admission control**: Capacity checks run during the internal
-  admission handshake before a peer is ever added to `getPeers()` or triggers
-  `onPeerJoin`. If the room is already full, existing members immediately send a
-  `'room full'` rejection and close the pending connection before running your
-  custom `onPeerHandshake` callback.
+  admission handshake (after `userId` verification) before a peer is ever added
+  to `getPeers()` or triggers `onPeerJoin`. If the room is already full for a
+  new `userId`, existing members immediately send a `'room full'` rejection and
+  close the pending connection.
 - **Password privacy**: In password-protected rooms (`config.password`),
   Trystero verifies the password proof _before_ checking room capacity. Users
   with the wrong password receive a password error rather than `'room full'`, so
@@ -533,9 +645,9 @@ When a room is already at capacity:
   millisecond on an empty `limit: 2` room? Peers include their join metadata
   (`limit`, join timestamp `t`, and established member status) in their
   handshake readiness packet and coalesce concurrent arrivals over a short 25ms
-  window. Every peer deterministically selects the same winners (established
-  member > earliest join timestamp > peer ID tie-breaker) and turns away the
-  excess joiners with `'room full'`.
+  window. Every peer deterministically selects the same winning `userId`s
+  (established member > earliest join timestamp > peer ID tie-breaker) and turns
+  away the excess joiners with `'room full'`.
 - **Asymmetric configs & multi-hop rooms**: Even if only the room creator passes
   `limit` in their config, Trystero automatically propagates the active limit to
   other admitted peers and enforces total room capacity across multi-hop
@@ -558,7 +670,7 @@ rooms use `topology: 'auto'`:
   everyone else for the lowest possible latency.
 - If more people join, Trystero automatically switches the room to a scalable
   relay network where each browser only maintains a handful of direct
-  connections (8 by default) and passes messages and media streams along to the
+  connections (6 by default) and passes messages and media streams along to the
   rest of the room.
 
 All of your code (`makeAction`, `makeState`, `addStream`, `addTrack`, `ping`,
@@ -832,10 +944,14 @@ await room.banPeer(maliciousPeerId, {reason: 'spam'})
   it impossible for another user or a malicious signaling relay to impersonate
   the room creator.
 - **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
-  `RoleCertificate` binding the recipient's peer ID and ephemeral public key to
-  the granted role(s), optional expiration timestamp, and `canDelegate` flag.
-  Peers verify the full signature chain back to a root admin key and check
-  against signed `RoleRevocationRecord`s.
+  `RoleCertificate` binding the recipient's `peerId`, `userId`, and public key
+  to the granted role(s), optional expiration timestamp, and `canDelegate` flag.
+  Because the certificate binds `subUserId`, a promoted user retains their roles
+  across page reloads and multiple open tabs by presenting a signed `userProof`
+  linking their new endpoint `peerId` to their `userId`. Peers verify the full
+  signature chain back to a root admin key and check against signed
+  `RoleRevocationRecord`s. Likewise, `room.banPeer()` bans both the target
+  `peerId` and `userId` across all current and future tabs.
 - **Tamper-proof state syncing (`makeState`)**: Each state update is signed with
   a monotonically increasing sequence number (`seq`) and chained to the SHA-256
   hash of the previous state record (`prevHash`). This prevents replay or
@@ -873,7 +989,7 @@ export default function App({roomId}) {
   const [peerColors, setPeerColors] = useState({})
 
   // whenever new peers join the room, send my color to them:
-  room.onPeerJoin = peer => colorAction.send(myColor, {target: peer})
+  room.onPeerJoin = ({peerId}) => colorAction.send(myColor, {target: peerId})
 
   // listen for peers sending their colors and update the state accordingly:
   colorAction.onMessage = (color, {peerId}) =>
@@ -1172,10 +1288,11 @@ the same namespace will return the same room instance.
     connect. See [encryption](#encryption) for more details.
 
   - `limit` - **(optional)** Positive integer capping the maximum total number
-    of peers allowed in the room at once (including the local user). When the
-    room is full, additional joiners are rejected before activation, receive
-    `error: 'room full'` via `onJoinError`, and automatically leave the room.
-    See [room size limits](#room-size-limits) for more details.
+    of unique users (`userId`s) allowed in the room at once (including the local
+    user). When the room is full, additional joiners with a new `userId` are
+    rejected before activation, receive `error: 'room full'` via `onJoinError`,
+    and automatically leave the room. See [room size limits](#room-size-limits)
+    for more details.
 
   - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
     concurrent large incoming transfers per room, in bytes. Defaults to
@@ -1190,17 +1307,30 @@ the same namespace will return the same room instance.
     (`left: 0`) without offers, which avoids passive-to-passive discovery while
     keeping tracker load low.
 
-  - `peerId` - **(optional)** Custom peer ID string for the local user in this
-    room. Defaults to the global `selfId`.
+  - `identity` - **(optional)** Controls how the local user's persistent
+    43-character `userId` is loaded and saved (see
+    [Persistent user identity and multi-tab presence](#persistent-user-identity-and-multi-tab-presence)):
+    - `'session'` _(default in browsers)_ - Persists the user identity in
+      `sessionStorage` scoped to `appId` so page reloads in the same tab keep
+      the same `userId`.
+    - `'local'` - Persists the user identity across tabs and future visits on
+      the same device using IndexedDB (with a non-extractable WebCrypto
+      `CryptoKey`) and `localStorage` fallback.
+    - `'none'` _(default outside browsers)_ - Generates a fresh runtime
+      `userId` that is discarded when the page reloads or process exits.
+    - `UserIdentity | string | JsonWebKey | ((context: {appId: string, roomId: string}) => UserIdentity | string | JsonWebKey | Promise<...>)` -
+      Supplies a pre-created `UserIdentity` (from `createUserIdentity()` or
+      `importUserIdentity()`), an exported `trystero_uk_...` key string, a
+      P-256 private `JsonWebKey`, or a custom sync/async loader function.
 
   - `topology` - **(optional)** How peers connect and route data as the room
     grows (see [Scalable topologies](#scalable-topologies)): `'auto'` (default),
     `'mesh'`, `'small-world'`, `'tree'`, or a `TopologyConfig` object:
     - `mode` - `'auto' | 'mesh' | 'small-world' | 'tree'` (default: `'auto'`).
     - `maxPeers` - Maximum target direct WebRTC connections per browser in
-      scalable modes (default: `8`).
+      scalable modes (default: `6`, or `fanout + 3` in `'tree'` mode).
     - `minPeers` - Minimum direct connections maintained before closing extra
-      links (default: `4`).
+      links (default: `3`).
     - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
       `'small-world'` (default: `12`).
     - `fanout` - Number of downstream peers each node forwards to in `'tree'`
@@ -1208,7 +1338,7 @@ the same namespace will return the same room instance.
     - `redundancy` - Number of separate paths used when routing messages across
       hops (default: `1`).
     - `maxHops` - Maximum number of hops a relayed packet can travel (default:
-      `6`).
+      `8`).
 
   - `admin` - **(optional)** Configures room admins and roles (see
     [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)):
@@ -1295,56 +1425,12 @@ the same namespace will return the same room instance.
 - `callbacks` - **(optional)** Callback config object containing:
   - `onJoinError(details)` - Called when room join fails due to an incorrect
     password, when the room is at capacity (`details.error === 'room full'`),
-    when handshake admission fails (including timeout), or when peers exchange
-    SDP but WebRTC still cannot establish a direct connection. This last case
-    usually means TURN servers are needed or misconfigured (see
+    when peer identity verification fails, or when peers exchange SDP but WebRTC
+    still cannot establish a direct connection. This last case usually means
+    TURN servers are needed or misconfigured (see
     [Troubleshooting connection issues](#troubleshooting-connection-issues)).
     `details` is an object containing `appId`, `roomId`, `peerId`, and `error`
     describing the failure.
-
-  - `onPeerHandshake(peerId, send, receive, isInitiator)` - Async predicate that
-    runs after the transport connects but before the peer becomes active.
-    Return/resolve to accept the peer, throw/reject to deny the peer.
-    - `peerId` - ID of the pending peer.
-    - `send(data, [metadata])` - Sends handshake payloads to the pending peer.
-    - `receive()` - Resolves to the next handshake message from the peer as
-      `{data, metadata}`.
-    - `isInitiator` - Deterministic role flag for avoiding protocol deadlocks.
-
-  - `handshakeTimeoutMs` - Timeout for pending handshakes in milliseconds
-    (`10000` by default). If exceeded, the peer is denied and `onJoinError` is
-    called.
-
-  During handshake, the peer remains pending and is not included in `getPeers()`
-  and does not trigger Trystero API events (`onPeerJoin`, action receivers,
-  stream/track callbacks). Non-handshake data received while pending is dropped.
-
-  Minimal handshake example:
-
-  ```js
-  import {joinRoom} from 'trystero'
-
-  const room = joinRoom({appId: 'my-app'}, 'secure-room', {
-    onPeerHandshake: async (_, send, receive, isInitiator) => {
-      if (isInitiator) {
-        await send({challenge: 'prove-you-know-the-secret'})
-        const {data} = await receive()
-
-        if (data?.response !== 'shared-secret') {
-          throw new Error('handshake rejected')
-        }
-      } else {
-        const {data} = await receive()
-
-        if (data?.challenge !== 'prove-you-know-the-secret') {
-          throw new Error('handshake rejected')
-        }
-
-        await send({response: 'shared-secret'})
-      }
-    }
-  })
-  ```
 
 Returns an object with the following methods:
 
@@ -1352,11 +1438,18 @@ Returns an object with the following methods:
 
   Remove local user from room and unsubscribe from room events.
 
+- ### `getSelf()`
+
+  Returns a promise resolving to `{peerId, userId}` for the local participant in
+  this room, where `peerId` is the 20-character Base62 endpoint ID (`selfId`)
+  and `userId` is the 43-character Base64url user identity thumbprint.
+
 - ### `getPeers()`
 
-  Returns a map of `PeerInfo` objects (`{connection, direct, hops, roles}`) for
-  the peers present in the room (not including the local user), keyed by peer
-  ID:
+  Returns a map of `PeerInfo` objects
+  (`{userId, connection, direct, hops, roles}`) for the peers present in the
+  room (not including the local endpoint), keyed by `peerId`:
+  - `userId` - The 43-character Base64url user ID that owns this endpoint.
   - `connection` - The underlying
     [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)
     if the peer is a direct WebRTC neighbor, or `null` if the peer is routed
@@ -1366,6 +1459,14 @@ Returns an object with the following methods:
   - `hops` - Hop distance (`1` for direct peers, `>= 2` for multi-hop overlay
     peers).
   - `roles` - Array of verified roles currently held by that peer.
+
+- ### `getUsers()`
+
+  Returns a map of `UserInfo` objects (`{peerIds, roles}`) for the remote users
+  present in the room (excluding the local user), keyed by `userId`:
+  - `peerIds` - Array of active `peerId`s currently connected for that user
+    (e.g. when a user has multiple tabs open in the same room).
+  - `roles` - Array of verified roles currently held by that user.
 
 - ### `isPassive()`
 
@@ -1415,41 +1516,43 @@ Returns an object with the following methods:
     `(prev) => next`). Rejects if the local user lacks permission or validation
     fails.
   - `getMeta()` - Returns metadata about the latest update (`updatedBy`,
-    `roles`, `seq`, `epoch`, `timestamp`, `hash`) or `null` if still at
-    `initialValue`.
+    `userId`, `roles`, `seq`, `epoch`, `timestamp`, `hash`) or `null` if still
+    at `initialValue`.
   - `onChange` - Nullable callback `(value, prev, context) => void` called
     whenever a verified state update arrives.
 
-- ### `grantRole(peerId, role, [options])`
+- ### `grantRole(targetId, role, [options])`
 
-  Grants `role` (a role name string or array of strings) to `peerId`. Requires
-  the local user to be an `'admin'` or to hold that role with
-  `canDelegate: true`.
+  Grants `role` (a role name string or array of strings) to `targetId` (which
+  can be either a `peerId` or a `userId`). Requires the local user to be an
+  `'admin'` or to hold that role with `canDelegate: true`.
   - `options.canDelegate` - **(optional)** Boolean allowing the recipient to
     grant those role(s) to other peers as well.
   - `options.expiresInMs` - **(optional)** How long the role remains valid in
     milliseconds.
 
-- ### `revokeRole(peerId, [role])`
+- ### `revokeRole(targetId, [role])`
 
-  Revokes `role` (or all roles if omitted) from `peerId`. Delegated moderators
-  cannot revoke a root `'admin'`.
+  Revokes `role` (or all roles if omitted) from `targetId` (`peerId` or
+  `userId`). Delegated moderators cannot revoke a root `'admin'`.
 
-- ### `getPeerRoles([peerId])`
+- ### `getPeerRoles([targetId])`
 
-  Returns the array of verified roles currently held by `peerId` (or by the
-  local user if `peerId` is omitted).
+  Returns the array of verified roles currently held by `targetId` (`peerId` or
+  `userId`, or by the local user if `targetId` is omitted).
 
-- ### `banPeer(peerId, [options])`
+- ### `banPeer(targetId, [options])`
 
-  Permanently bans `peerId` from the room (requires `'admin'` role). Immediately
-  disconnects the peer, removes any roles they held, and blocks future
-  connection offers or messages from them.
+  Permanently bans `targetId` (`peerId` or `userId`) from the room (requires
+  `'admin'` role). Immediately disconnects all endpoints belonging to that peer
+  or user, removes any roles they held, and blocks future connection offers or
+  messages from them.
   - `options.reason` - **(optional)** Optional reason string for the ban.
 
-- ### `isBanned(peerId)`
+- ### `isBanned(targetId)`
 
-  Returns `true` if `peerId` has been banned from the room.
+  Returns `true` if `targetId` (`peerId` or `userId`) has been banned from the
+  room.
 
 - ### `addStream(stream, [options])`
 
@@ -1458,8 +1561,9 @@ Returns an object with the following methods:
     room.
 
   - `options.target` - **(optional)** If specified, the stream is sent only to
-    the target peer ID (string) or list of peer IDs (array). Passing `null` or
-    omitting this option sends to all peers in the room.
+    the target `peerId` or `userId` (string) or list of `peerId`s / `userId`s
+    (array). Passing a `userId` fans out to all active tabs owned by that user.
+    Passing `null` or omitting this option sends to all peers in the room.
 
   - `options.metadata` - **(optional)** Additional metadata (any serializable
     type) to be sent with the stream. This is useful when sending multiple
@@ -1472,7 +1576,7 @@ Returns an object with the following methods:
   - `stream` - A previously sent `MediaStream` to stop sending.
 
   - `options.target` - **(optional)** If specified, the stream is removed only
-    from the target peer ID (string) or list of peer IDs (array).
+    from the target `peerId` or `userId` (string) or list of IDs (array).
 
 - ### `addTrack(track, stream, [options])`
 
@@ -1482,7 +1586,7 @@ Returns an object with the following methods:
   - `stream` - The target `MediaStream` to attach the new track to.
 
   - `options.target` - **(optional)** If specified, the track is sent only to
-    the target peer ID (string) or list of peer IDs (array).
+    the target `peerId` or `userId` (string) or list of IDs (array).
 
   - `options.metadata` - **(optional)** Additional metadata (any serializable
     type) to be sent with the track. See `metadata` notes for `addStream()`
@@ -1494,7 +1598,7 @@ Returns an object with the following methods:
   - `track` - The `MediaStreamTrack` to remove.
 
   - `options.target` - **(optional)** If specified, the track is removed only
-    from the target peer ID (string) or list of peer IDs (array).
+    from the target `peerId` or `userId` (string) or list of IDs (array).
 
 - ### `replaceTrack(oldTrack, newTrack, [options])`
 
@@ -1504,36 +1608,72 @@ Returns an object with the following methods:
   - `newTrack` - A `MediaStreamTrack` to attach.
 
   - `options.target` - **(optional)** If specified, the track is replaced only
-    for the target peer ID (string) or list of peer IDs (array).
+    for the target `peerId` or `userId` (string) or list of IDs (array).
 
   - `options.metadata` - **(optional)** Additional metadata (any serializable
     type) to be sent with the replacement track.
 
 - ### `onPeerJoin`
 
-  A callback property that will be called when a peer joins the room. Assigning
-  a new function replaces the previous handler; assigning `null` clears it.
-  Existing active peers are immediately replayed to a newly assigned handler.
-  - `callback(peerId)` - Function to run whenever a peer joins, called with the
-    peer's ID.
+  A callback property that will be called when a peer endpoint joins the room.
+  Assigning a new function replaces the previous handler; assigning `null`
+  clears it. Existing active peers are immediately replayed to a newly assigned
+  handler.
+  - `callback({peerId, userId, roles})` - Function to run whenever a peer
+    endpoint joins, called with the peer's endpoint `peerId`, persistent
+    `userId`, and verified `roles`.
 
   Example:
 
   ```js
-  room.onPeerJoin = peerId => console.log(`${peerId} joined`)
+  room.onPeerJoin = ({peerId, userId}) =>
+    console.log(`${peerId} (${userId}) joined`)
   ```
 
 - ### `onPeerLeave`
 
-  A callback property that will be called when a peer leaves the room. Assigning
-  a new function replaces the previous handler; assigning `null` clears it.
-  - `callback(peerId)` - Function to run whenever a peer leaves, called with the
-    peer's ID.
+  A callback property that will be called when a peer endpoint leaves the room.
+  Assigning a new function replaces the previous handler; assigning `null`
+  clears it.
+  - `callback({peerId, userId})` - Function to run whenever a peer endpoint
+    leaves, called with the peer's `peerId` and `userId`.
 
   Example:
 
   ```js
-  room.onPeerLeave = peerId => console.log(`${peerId} left`)
+  room.onPeerLeave = ({peerId, userId}) =>
+    console.log(`${peerId} (${userId}) left`)
+  ```
+
+- ### `onUserJoin`
+
+  A callback property that will be called when a remote user's **first**
+  instance joins the room (does not fire again if that same `userId` opens a
+  second tab while already in the room). Assigning a new function replaces the
+  previous handler and replays currently active remote users; assigning `null`
+  clears it.
+  - `callback({userId, peerId, roles})` - Called with the user's `userId`, the
+    `peerId` of their joining instance, and their verified `roles`.
+
+  Example:
+
+  ```js
+  room.onUserJoin = ({userId}) => addParticipant(userId)
+  ```
+
+- ### `onUserLeave`
+
+  A callback property that will be called when a remote user's **last**
+  remaining instance leaves the room (does not fire if the user still has
+  another tab open in the room). Assigning a new function replaces the previous
+  handler; assigning `null` clears it.
+  - `callback({userId, peerId})` - Called with the departing user's `userId` and
+    the `peerId` of their last instance.
+
+  Example:
+
+  ```js
+  room.onUserLeave = ({userId}) => removeParticipant(userId)
   ```
 
 - ### `onPeerStream`
@@ -1541,15 +1681,16 @@ Returns an object with the following methods:
   A callback property that will be called when a peer sends a media stream.
   Assigning a new function replaces the previous handler; assigning `null`
   clears it.
-  - `callback(stream, peerId, metadata)` - Function to run whenever a peer sends
-    a media stream, called with the the peer's stream, ID, and optional metadata
-    (see `addStream()` above for details).
+  - `callback(stream, {peerId, userId, metadata})` - Function to run whenever a
+    peer sends a media stream, called with the `MediaStream` first and a context
+    object containing `peerId`, `userId`, and optional `metadata` (see
+    `addStream()` above for details).
 
   Example:
 
   ```js
-  room.onPeerStream = (stream, peerId) =>
-    console.log(`got stream from ${peerId}`, stream)
+  room.onPeerStream = (stream, {peerId, userId, metadata}) =>
+    console.log(`got stream from ${peerId} (${userId})`, stream, metadata)
   ```
 
 - ### `onPeerTrack`
@@ -1557,15 +1698,16 @@ Returns an object with the following methods:
   A callback property that will be called when a peer sends a media track.
   Assigning a new function replaces the previous handler; assigning `null`
   clears it.
-  - `callback(track, stream, peerId, metadata)` - Function to run whenever a
-    peer sends a media track, called with the the peer's track, attached stream,
-    ID, and optional metadata (see `addTrack()` above for details).
+  - `callback(track, stream, {peerId, userId, metadata})` - Function to run
+    whenever a peer sends a media track, called with the `MediaStreamTrack`,
+    attached `MediaStream`, and a context object containing `peerId`, `userId`,
+    and optional `metadata` (see `addTrack()` above for details).
 
   Example:
 
   ```js
-  room.onPeerTrack = (track, stream, peerId) =>
-    console.log(`got track from ${peerId}`, track)
+  room.onPeerTrack = (track, stream, {peerId, userId, metadata}) =>
+    console.log(`got track from ${peerId} (${userId})`, track, metadata)
   ```
 
 - ### `makeAction(actionId, [config])`
@@ -1578,23 +1720,29 @@ Returns an object with the following methods:
 
   Message actions expose:
   - `send(data, [options])` - Sends data to peers and resolves when local
-    sending is complete. To cancel an in-progress send, pass an
-    `AbortController`'s `signal` in the options (e.g.
-    `send(data, {signal: controller.signal})`) and call `controller.abort()`.
-  - `onMessage` - Nullable callback property for received messages.
-  - `onReceiveProgress` - Nullable callback property for inbound progress.
+    sending is complete. `options.target` accepts a `peerId`, a `userId` (which
+    fans out to all active tabs of that user), or an array of either. To cancel
+    an in-progress send, pass an `AbortController`'s `signal` in the options
+    (e.g. `send(data, {signal: controller.signal})`) and call
+    `controller.abort()`.
+  - `onMessage` - Nullable callback property `(data, {peerId, userId, metadata, roles}) => void` for received messages.
+  - `onReceiveProgress` - Nullable callback property `(percent, {peerId, userId, metadata}) => void` for inbound progress.
 
   Request actions expose:
-  - `request(data, options)` - Sends to one peer and resolves with its response.
-  - `requestMany(data, options)` - Sends to many peers and resolves with
-    peer-labeled settled results.
-  - `onRequest` - Nullable callback property that returns the response.
-  - `onReceiveProgress` - Nullable callback property for inbound progress.
+  - `request(data, options)` - Sends to one peer (`options.target` can be a
+    `peerId` or `userId`; when given a `userId`, it deterministically routes to
+    one active tab of that user, preferring a direct 1-hop connection and
+    breaking ties by lowest `peerId`) and resolves with its response.
+  - `requestMany(data, options)` - Sends to many peers (`options.targets`
+    accepts `peerId`s and/or `userId`s) and resolves with peer-labeled settled
+    results (`{peerId, userId, status, value | error}`).
+  - `onRequest` - Nullable callback property `(data, {peerId, userId, metadata, signal, roles}) => response` that returns the response.
+  - `onReceiveProgress` - Nullable callback property `(percent, {peerId, userId, metadata}) => void` for inbound progress.
 
   Both kinds expose `onReceive`, a nullable callback accepting
-  `{byteLength, peerId, metadata, kind, signal, roles}` and returning a boolean
-  or a promise of a boolean. It can also be provided in `config`. `kind` is
-  `'message'`, `'request'`, or `'response'`; request actions apply it to both
+  `{byteLength, peerId, userId, metadata, kind, signal, roles}` and returning a
+  boolean or a promise of a boolean. It can also be provided in `config`. `kind`
+  is `'message'`, `'request'`, or `'response'`; request actions apply it to both
   requests and responses. Responses have no metadata. See
   [receiving files](#receiving-files).
 
@@ -1602,7 +1750,7 @@ Returns an object with the following methods:
   strings) to restrict who can send or make requests on this action. When set,
   messages from unauthorized peers are rejected and the verified sender's roles
   are passed as `roles` in the `onMessage` / `onRequest` context
-  (`{peerId, metadata, roles}`).
+  (`{peerId, userId, metadata, roles}`).
 
   Send options use `target`, `metadata`, `onProgress`, and `signal`. Request
   options use `target`, `metadata`, `timeoutMs`, `onProgress`, and `signal`.
@@ -1616,24 +1764,26 @@ Returns an object with the following methods:
 
   window.addEventListener('mousemove', e => cursor.send([e.clientX, e.clientY]))
 
-  cursor.onMessage = ([x, y], {peerId}) => {
+  cursor.onMessage = ([x, y], {peerId, userId}) => {
     const peerCursor = cursorMap[peerId]
     peerCursor.style.left = x + 'px'
     peerCursor.style.top = y + 'px'
   }
   ```
 
-- ### `ping(peerId)`
+- ### `ping(targetId)`
 
-  Takes a peer ID and returns a promise that resolves to the milliseconds the
-  round-trip to that peer took. Use this for measuring latency.
-  - `peerId` - Peer ID string of the target peer.
+  Takes a `peerId` or `userId` and returns a promise that resolves to the
+  milliseconds the round-trip took. When given a `userId`, it deterministically
+  pings one active endpoint of that user (matching `request()` target
+  selection).
+  - `targetId` - `peerId` or `userId` string of the target peer/user.
 
   Example:
 
   ```js
   // log round-trip time every 2 seconds
-  room.onPeerJoin = peerId =>
+  room.onPeerJoin = ({peerId}) =>
     setInterval(
       async () => console.log(`took ${await room.ping(peerId)}ms`),
       2000
@@ -1642,8 +1792,43 @@ Returns an object with the following methods:
 
 ### `selfId`
 
-A unique ID string other peers will know the local user as globally across
-rooms.
+A synchronous, self-certifying 20-character Base62 ID string derived from the
+local runtime's ECDSA P-256 public key.
+
+### `createUserIdentity()`
+
+Generates a fresh self-certifying ECDSA P-256 `UserIdentity`
+(`{userId, publicKey, userKey, signPubJwk, sign}`).
+
+### `importUserIdentity(input)`
+
+Imports a `UserIdentity` from an exported `trystero_uk_...` string or a P-256
+private `JsonWebKey`. Throws if the input is not high-entropy P-256 key
+material.
+
+### `exportUserIdentity(identity)`
+
+Exports a `UserIdentity` as a compact `trystero_uk_...` string suitable for
+persisting in custom storage. Throws if the identity's private key is
+non-extractable (e.g. when backed by IndexedDB WebCrypto storage).
+
+### `derivePeerId(publicKey)`
+
+Deterministically derives the 20-character Base62 `peerId` (`sha256(canonicalPubJwk) mod 62²⁰`)
+from a public key string or `JsonWebKey`.
+
+### `deriveUserId(publicKey)`
+
+Deterministically derives the 43-character Base64url `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)
+JWK thumbprint) from a public key string or `JsonWebKey`.
+
+### `verifyPeerIdKey(peerId, publicKey)`
+
+Returns `true` if `publicKey` cryptographically derives `peerId`.
+
+### `verifyUserIdKey(userId, publicKey)`
+
+Returns `true` if `publicKey` cryptographically derives `userId`.
 
 ### `createAdminIdentity([options])`
 

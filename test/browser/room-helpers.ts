@@ -11,7 +11,7 @@ export const joinEagerRoom = ([roomId, config, payload]) => {
       clearInterval(sendInterval)
       res([payload, ctx.peerId, ctx.metadata])
     }
-    window[roomId].onPeerJoin = peerId => {
+    window[roomId].onPeerJoin = ({peerId}) => {
       if (!didSend) {
         const send = () =>
           eagerAction.send(payload, {target: peerId}).catch(() => {})
@@ -42,7 +42,7 @@ export const joinRoomAndWaitForPeer = ([roomId, config, timeoutMs = 10_000]) =>
       timeoutMs
     )
 
-    room.onPeerJoin = peerId => {
+    room.onPeerJoin = ({peerId}) => {
       clearTimeout(timeout)
       res(peerId)
     }
@@ -70,7 +70,7 @@ export const rejoinRoomAndWaitForPeer = async ([
         timeoutMs
       )
 
-      room.onPeerJoin = peerId => {
+      room.onPeerJoin = ({peerId}) => {
         clearTimeout(timeout)
         res(peerId)
       }

@@ -178,7 +178,21 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
 
 export const getRelaySockets = relayManager.getSockets
 
-export {selfId}
+export {
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  createUserIdentity,
+  derivePeerId,
+  deriveUserId,
+  exportUserIdentity,
+  formatSelfCertifyingRoomId,
+  importUserIdentity,
+  parseSelfCertifyingRoomId,
+  selfId,
+  verifyPeerIdKey,
+  verifyUserIdKey
+} from '@trystero-p2p/core'
 
 export const defaultRelayUrls = [
   'broker.emqx.io:8084/mqtt',

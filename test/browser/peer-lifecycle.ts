@@ -44,7 +44,10 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
       const disconnectedPing = page.evaluate(pendingPing, [roomNs, peer2Id])
 
       const peer1onLeaveId = page.evaluate(
-        roomId => new Promise(res => (window[roomId].onPeerLeave = res)),
+        roomId =>
+          new Promise(
+            res => (window[roomId].onPeerLeave = ({peerId}) => res(peerId))
+          ),
         roomNs
       )
 

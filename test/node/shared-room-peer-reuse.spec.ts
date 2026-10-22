@@ -254,7 +254,7 @@ void test(
       )
 
       const firstStream = new Promise(resolve => {
-        firstRooms.roomB.onPeerStream = (stream, peerId, metadata) =>
+        firstRooms.roomB.onPeerStream = (stream, {peerId, metadata}) =>
           resolve({streamId: stream.id, peerId, metadata})
       })
 
@@ -280,7 +280,7 @@ void test(
       )
 
       const secondStream = new Promise(resolve => {
-        secondRooms.roomB.onPeerStream = (stream, peerId, metadata) =>
+        secondRooms.roomB.onPeerStream = (stream, {peerId, metadata}) =>
           resolve({streamId: stream.id, peerId, metadata})
       })
 
@@ -313,7 +313,7 @@ void test(
       )
 
       const restoredStream = new Promise(resolve => {
-        thirdRooms.roomB.onPeerStream = (stream, peerId, metadata) =>
+        thirdRooms.roomB.onPeerStream = (stream, {peerId, metadata}) =>
           resolve({
             streamId: stream.id,
             trackCount: stream.getTracks().length,
@@ -378,7 +378,7 @@ void test(
       )
 
       const firstTrack = new Promise(resolve => {
-        firstRooms.roomB.onPeerTrack = (track, stream, peerId, metadata) =>
+        firstRooms.roomB.onPeerTrack = (track, stream, {peerId, metadata}) =>
           resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
       })
 
@@ -405,7 +405,7 @@ void test(
       )
 
       const secondTrack = new Promise(resolve => {
-        secondRooms.roomB.onPeerTrack = (track, stream, peerId, metadata) =>
+        secondRooms.roomB.onPeerTrack = (track, stream, {peerId, metadata}) =>
           resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
       })
 
@@ -654,7 +654,7 @@ void test(
       )
 
       const streamReceived = new Promise(resolve => {
-        sharedRooms.roomB.onPeerStream = (stream, peerId) =>
+        sharedRooms.roomB.onPeerStream = (stream, {peerId}) =>
           resolve({streamId: stream.id, peerId})
       })
 
@@ -667,7 +667,7 @@ void test(
       })
 
       const replacedOnShared = new Promise(resolve => {
-        sharedRooms.roomB.onPeerTrack = (track, stream, peerId, metadata) =>
+        sharedRooms.roomB.onPeerTrack = (track, stream, {peerId, metadata}) =>
           resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
       })
 
@@ -721,7 +721,7 @@ void test(
       await Promise.all([joinDirectA, joinDirectB])
 
       const directStreamReceived = new Promise(resolve => {
-        directRoomB.onPeerStream = (stream, peerId) =>
+        directRoomB.onPeerStream = (stream, {peerId}) =>
           resolve({streamId: stream.id, peerId})
       })
       await Promise.all(
@@ -733,7 +733,7 @@ void test(
       })
 
       const replacedOnDirect = new Promise(resolve => {
-        directRoomB.onPeerTrack = (track, stream, peerId, metadata) =>
+        directRoomB.onPeerTrack = (track, stream, {peerId, metadata}) =>
           resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
       })
       await Promise.all(
@@ -788,8 +788,17 @@ void test(
       rtcPolyfill: MockRTCPeerConnection as any
     }
 
-    const lobbyA = sideA.joinRoom(config, 'lobby')
-    const lobbyB = sideB.joinRoom(config, 'lobby')
+    const configA = {
+      ...config,
+      _test_only_forcedPeerId: 'peer-a'
+    }
+    const configB = {
+      ...config,
+      _test_only_forcedPeerId: 'peer-b'
+    }
+
+    const lobbyA = sideA.joinRoom(configA, 'lobby')
+    const lobbyB = sideB.joinRoom(configB, 'lobby')
     let passiveRoomB = null
     let activeRoomA = null
 
@@ -814,11 +823,11 @@ void test(
 
       // Peer B joins a second room in passive mode; no relay messages are
       // forwarded between A and B for this second room.
-      passiveRoomB = sideB.joinRoom({...config, passive: true}, 'shared-room')
+      passiveRoomB = sideB.joinRoom({...configB, passive: true}, 'shared-room')
       await waitFor(() => sideB.subscribers.length >= 2)
       const announcesBeforeJoin = sideB.getAnnounces()
 
-      activeRoomA = sideA.joinRoom(config, 'shared-room')
+      activeRoomA = sideA.joinRoom(configA, 'shared-room')
       await waitFor(
         () =>
           'peer-b' in activeRoomA.getPeers() &&
@@ -865,7 +874,7 @@ void test(
         peerId: string
         metadata: unknown
       }> = []
-      rooms.roomB.onPeerStream = (stream, peerId, metadata) => {
+      rooms.roomB.onPeerStream = (stream, {peerId, metadata}) => {
         receivedStreams.push({streamId: stream.id, peerId, metadata})
       }
 

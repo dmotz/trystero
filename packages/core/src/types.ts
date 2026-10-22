@@ -40,8 +40,6 @@ export type PeerHandshake = (
 
 export type JoinRoomCallbacks = {
   onJoinError?: JoinErrorHandler
-  onPeerHandshake?: PeerHandshake
-  handshakeTimeoutMs?: number
 }
 
 export type TurnServerConfig = {
@@ -116,6 +114,32 @@ export type AdminIdentity = {
   signPubJwk: JsonWebKey
 }
 
+export type UserIdentityPersistence = 'none' | 'session' | 'local'
+
+export type UserIdentity = {
+  userId: string
+  publicKey: string
+  userKey: string
+  signPubJwk: JsonWebKey
+  sign: (payload: Uint8Array) => MaybePromise<Uint8Array>
+}
+
+export type UserIdentityLoaderContext = {
+  appId: string
+  roomId: string
+}
+
+export type UserIdentityLoader = (
+  context: UserIdentityLoaderContext
+) => MaybePromise<UserIdentity | JsonWebKey | string>
+
+export type UserIdentityConfig =
+  | UserIdentityPersistence
+  | UserIdentity
+  | JsonWebKey
+  | string
+  | UserIdentityLoader
+
 export type AuthorityConfig = {
   rootPubKeys?: string[]
   credentials?: string | AdminIdentity
@@ -128,6 +152,7 @@ export type RoleCertificate = {
   certId: string
   issuerPubKey: string
   subPeerId: string
+  subUserId?: string
   subPubKey: JsonWebKey
   appId: string
   roomId: string
@@ -146,6 +171,7 @@ export type RoleRevocationRecord = {
   roomId: string
   issuerPeerId: string
   targetPeerId: string
+  targetUserId?: string
   targetCertId?: string
   role?: string
   seq: number
@@ -160,6 +186,7 @@ export type PeerBanRecord = {
   roomId: string
   issuerPeerId: string
   targetPeerId: string
+  targetUserId?: string
   targetKeyThumbprint?: string
   reason?: string
   seq: number
@@ -178,6 +205,9 @@ export type AuthoritativeStateRecord<T extends JsonValue = JsonValue> = {
   prevHash: string
   ts: number
   updatedBy: string
+  userId?: string
+  userPubKey?: JsonWebKey
+  userProof?: string
   signerPubKey: JsonWebKey
   cert: RoleCertificate
   value: T
@@ -197,6 +227,7 @@ export type RoomAuthorityInfo = {
 
 export type StateChangeContext = {
   updatedBy: string
+  userId?: string
   roles: string[]
   seq: number
   epoch: number
@@ -218,7 +249,7 @@ export type AuthoritativeState<T extends JsonValue = JsonValue> = {
 
 export type BaseRoomConfig = {
   appId: string
-  peerId?: string
+  identity?: UserIdentityConfig
   limit?: number
   topology?: TopologyMode | TopologyConfig
   admin?: boolean | string | AuthorityConfig
@@ -230,6 +261,7 @@ export type BaseRoomConfig = {
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
   turnConfig?: TurnServerConfig[]
+  _test_only_forcedPeerId?: string
   _test_only_mdnsHostFallbackToLoopback?: boolean
   _test_only_sharedPeerIdleMs?: number
 }
@@ -246,6 +278,7 @@ export type ProgressHandler = (
 
 export type ActionProgressContext = {
   peerId: string
+  userId: string
   metadata?: JsonValue
 }
 
@@ -256,10 +289,12 @@ export type ActionProgressHandler = (
 
 export type ActionReceiveContext = {
   peerId: string
+  userId: string
   byteLength: number
   kind: 'message' | 'request' | 'response'
   signal: AbortSignal
   metadata?: JsonValue
+  roles?: string[]
 }
 
 export type ActionReceiveHandler = (
@@ -268,22 +303,24 @@ export type ActionReceiveHandler = (
 
 export type MessageContext = {
   peerId: string
+  userId: string
   metadata?: JsonValue
   roles?: string[]
 }
 
 export type RequestContext = {
   peerId: string
+  userId: string
   metadata?: JsonValue
   signal: AbortSignal
   roles?: string[]
 }
 
 export type PeerResult<R extends DataPayload = DataPayload> =
-  | {peerId: string; status: 'fulfilled'; value: R}
-  | {peerId: string; status: 'timeout'}
-  | {peerId: string; status: 'rejected'; error: Error}
-  | {peerId: string; status: 'disconnected'}
+  | {peerId: string; userId: string; status: 'fulfilled'; value: R}
+  | {peerId: string; userId: string; status: 'timeout'}
+  | {peerId: string; userId: string; status: 'rejected'; error: Error}
+  | {peerId: string; userId: string; status: 'disconnected'}
 
 export type SendOptions = {
   target?: PeerTarget
@@ -358,11 +395,50 @@ export type RemoveMediaOptions = {
   target?: PeerTarget
 }
 
+export type PeerJoinContext = {
+  peerId: string
+  userId: string
+  roles: string[]
+}
+
+export type PeerLeaveContext = {
+  peerId: string
+  userId: string
+}
+
+export type UserJoinContext = {
+  userId: string
+  peerId: string
+  roles: string[]
+}
+
+export type UserLeaveContext = {
+  userId: string
+  peerId: string
+}
+
+export type PeerMediaContext = {
+  peerId: string
+  userId: string
+  metadata?: JsonValue
+}
+
 export type PeerInfo = {
+  userId: string
   connection: RTCPeerConnection | null
   direct: boolean
   hops: number
   roles: string[]
+}
+
+export type UserInfo = {
+  peerIds: string[]
+  roles: string[]
+}
+
+export type SelfInfo = {
+  peerId: string
+  userId: string
 }
 
 export type Room = {
@@ -383,18 +459,20 @@ export type Room = {
   ) => AuthoritativeState<T>
   getAuthority: () => Promise<RoomAuthorityInfo>
   grantRole: (
-    peerId: string,
+    targetId: string,
     role: string | string[],
     options?: {canDelegate?: boolean; expiresInMs?: number}
   ) => Promise<RoleCertificate>
-  revokeRole: (peerId: string, role?: string) => Promise<void>
-  getPeerRoles: (peerId?: string) => string[]
-  banPeer: (peerId: string, options?: {reason?: string}) => Promise<void>
-  isBanned: (peerId: string) => boolean
+  revokeRole: (targetId: string, role?: string) => Promise<void>
+  getPeerRoles: (targetId?: string) => string[]
+  banPeer: (targetId: string, options?: {reason?: string}) => Promise<void>
+  isBanned: (targetId: string) => boolean
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
   isPassive: () => boolean
+  getSelf: () => Promise<SelfInfo>
   getPeers: () => Record<string, PeerInfo>
+  getUsers: () => Record<string, UserInfo>
   getTopology: () => TopologySnapshot
   addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
@@ -409,17 +487,18 @@ export type Room = {
     newTrack: MediaStreamTrack,
     options?: AddMediaOptions
   ) => Promise<void>[]
-  onPeerJoin: ((peerId: string) => void) | null
-  onPeerLeave: ((peerId: string) => void) | null
+  onPeerJoin: ((context: PeerJoinContext) => void) | null
+  onPeerLeave: ((context: PeerLeaveContext) => void) | null
+  onUserJoin: ((context: UserJoinContext) => void) | null
+  onUserLeave: ((context: UserLeaveContext) => void) | null
   onPeerStream:
-    | ((stream: MediaStream, peerId: string, metadata?: JsonValue) => void)
+    | ((stream: MediaStream, context: PeerMediaContext) => void)
     | null
   onPeerTrack:
     | ((
         track: MediaStreamTrack,
         stream: MediaStream,
-        peerId: string,
-        metadata?: JsonValue
+        context: PeerMediaContext
       ) => void)
     | null
 }

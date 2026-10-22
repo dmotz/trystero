@@ -230,6 +230,20 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = (
   return join(config, roomId, callbacks)
 }
 
-export {selfId}
+export {
+  computePublicKeyFingerprint,
+  createAdminIdentity,
+  createAdminRoom,
+  createUserIdentity,
+  derivePeerId,
+  deriveUserId,
+  exportUserIdentity,
+  formatSelfCertifyingRoomId,
+  importUserIdentity,
+  parseSelfCertifyingRoomId,
+  selfId,
+  verifyPeerIdKey,
+  verifyUserIdKey
+} from '@trystero-p2p/core'
 
 export type * from '@trystero-p2p/core'

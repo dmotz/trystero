@@ -15,8 +15,10 @@ import {createRoomAuthority, type ResolvedRoomAuthority} from './authority'
 import {
   createHandshakeManager,
   roomFullHostRejectErr,
-  type HandshakeReadyPayload
+  type HandshakeReadyPayload,
+  type VerifiedPeerIdentity
 } from './handshake'
+import {getDefaultTestUserIdentitySync} from './identity'
 import {createMediaManager, type InternalMediaMeta} from './media'
 import {createOverlayManager, type OverlayManager} from './overlay'
 import type {
@@ -29,15 +31,22 @@ import type {
   PeerBanRecord,
   PeerHandle,
   PeerHandshake,
+  PeerJoinContext,
+  PeerLeaveContext,
   RoleCertificate,
   RoleRevocationRecord,
   Room,
   RoomAuthorityInfo,
+  SelfInfo,
   SharedMediaPeer,
   StateConfig,
   TargetPeers,
   TopologyConfig,
-  TopologyMode
+  TopologyMode,
+  UserIdentity,
+  UserInfo,
+  UserJoinContext,
+  UserLeaveContext
 } from './types'
 
 const unloadEvent = 'beforeunload'
@@ -72,6 +81,8 @@ export type RoomSignalingBridge = {
     payload: Record<string, unknown>
   ) => Promise<void> | void
   checkCapacityAfterPassword: (peerId: string) => void
+  onPeerIdentityVerified: (peerId: string, verified: VerifiedPeerIdentity) => void
+  getPeerHandle: (peerId: string) => PeerHandle | undefined
 }
 
 const roomSignalingBridges = new WeakMap<Room, RoomSignalingBridge>()
@@ -89,6 +100,8 @@ type RoomOptions = {
   topology?: TopologyMode | TopologyConfig
   admin?: boolean | string | AuthorityConfig
   resolvedAuthorityP?: Promise<ResolvedRoomAuthority>
+  userIdentityP?: Promise<UserIdentity>
+  verifyPeerIdentity?: boolean
   maxReceiveBytes?: number
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
@@ -103,7 +116,7 @@ type PendingPongWaiter = {
 }
 
 type MediaControlMessage = {
-  op: 'rmStream' | 'rmTrack'
+  op: 'rmStream'
   o: string
   id: string
 }
@@ -160,6 +173,8 @@ export default (
     topology,
     admin,
     resolvedAuthorityP,
+    userIdentityP,
+    verifyPeerIdentity = false,
     onPeerHandshake,
     onHandshakeError,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
@@ -170,6 +185,111 @@ export default (
 ): Room => {
   const peerMap: Record<string, PeerHandle> = {}
   const activePeerMap: Record<string, PeerHandle> = {}
+  const peerUserIds = new Map<string, string>()
+  const activeUserPeers = new Map<string, Set<string>>()
+  let localUserId = getDefaultTestUserIdentitySync(localSelfId).userId
+  const resolvedUserIdentityP = (
+    userIdentityP ??
+    Promise.resolve(getDefaultTestUserIdentitySync(localSelfId))
+  ).then(identity => {
+    localUserId = identity.userId
+    return identity
+  })
+
+  const getPeerUserId = (peerId: string): string =>
+    peerId === localSelfId
+      ? localUserId
+      : (peerUserIds.get(peerId) ??
+        getDefaultTestUserIdentitySync(peerId).userId)
+
+  const getUserPeerIds = (userId: string): string[] => {
+    const set = activeUserPeers.get(userId)
+    if (set && set.size > 0) {
+      return [...set]
+    }
+    const matching: string[] = []
+    for (const pid of keys(peerMap)) {
+      if (getPeerUserId(pid) === userId) {
+        matching.push(pid)
+      }
+    }
+    return matching
+  }
+
+  const resolveSendTarget = (
+    targets: TargetPeers,
+    includePending = false
+  ): TargetPeers => {
+    if (!targets) {
+      return undefined
+    }
+    const map = includePending ? peerMap : activePeerMap
+    const list = Array.isArray(targets) ? targets : [targets]
+    const resolved: string[] = []
+    const seen = new Set<string>()
+    const addPeer = (pid: string): void => {
+      if (!seen.has(pid)) {
+        seen.add(pid)
+        resolved.push(pid)
+      }
+    }
+
+    for (const id of list) {
+      if (map[id]) {
+        addPeer(id)
+        continue
+      }
+      const userPeers = activeUserPeers.get(id)
+      if (userPeers && userPeers.size > 0) {
+        for (const pid of userPeers) {
+          if (map[pid]) {
+            addPeer(pid)
+          }
+        }
+        continue
+      }
+      let matchedByUser = false
+      for (const pid of keys(map)) {
+        if (getPeerUserId(pid) === id) {
+          addPeer(pid)
+          matchedByUser = true
+        }
+      }
+      if (!matchedByUser) {
+        addPeer(id)
+      }
+    }
+    return resolved
+  }
+
+  const resolveRequestTarget = (
+    target: string,
+    includePending = false
+  ): string | undefined => {
+    const map = includePending ? peerMap : activePeerMap
+    if (map[target]) {
+      return target
+    }
+    const candidates: string[] = []
+    for (const pid of keys(map)) {
+      if (getPeerUserId(pid) === target) {
+        candidates.push(pid)
+      }
+    }
+    if (candidates.length === 0) {
+      return undefined
+    }
+    candidates.sort((a, b) => {
+      const aDirect = !overlay.isVirtualPeer(a)
+      const bDirect = !overlay.isVirtualPeer(b)
+      if (aDirect !== bDirect) {
+        return aDirect ? -1 : 1
+      }
+      return a < b ? -1 : a > b ? 1 : 0
+    })
+    return candidates[0]
+  }
+
   const pendingPongs: Record<string, PendingPongWaiter[] | undefined> = {}
   const promotedFromVirtual = new Set<string>()
   const suppressVirtualJoin = new Set<string>()
@@ -178,9 +298,46 @@ export default (
     {track: MediaStreamTrack; stream: MediaStream}
   >()
   const listeners = {
-    onPeerJoin: null as ((peerId: string) => void) | null,
-    onPeerLeave: null as ((peerId: string) => void) | null
+    onPeerJoin: null as ((context: PeerJoinContext) => void) | null,
+    onPeerLeave: null as ((context: PeerLeaveContext) => void) | null,
+    onUserJoin: null as ((context: UserJoinContext) => void) | null,
+    onUserLeave: null as ((context: UserLeaveContext) => void) | null
   }
+
+  const notifyPeerActivated = (peerId: string): void => {
+    const userId = getPeerUserId(peerId)
+    peerUserIds.set(peerId, userId)
+    let peers = activeUserPeers.get(userId)
+    const isFirstForUser = !peers || peers.size === 0
+    if (!peers) {
+      peers = new Set()
+      activeUserPeers.set(userId, peers)
+    }
+    peers.add(peerId)
+    const roles = authority.getPeerRoles(peerId)
+    listeners.onPeerJoin?.({peerId, userId, roles})
+    if (isFirstForUser && userId !== localUserId) {
+      listeners.onUserJoin?.({userId, peerId, roles})
+    }
+  }
+
+  const notifyPeerDeactivated = (peerId: string): void => {
+    const userId = getPeerUserId(peerId)
+    const peers = activeUserPeers.get(userId)
+    let isLastForUser = false
+    if (peers) {
+      peers.delete(peerId)
+      if (peers.size === 0) {
+        activeUserPeers.delete(userId)
+        isLastForUser = true
+      }
+    }
+    listeners.onPeerLeave?.({peerId, userId})
+    if (isLastForUser && userId !== localUserId) {
+      listeners.onUserLeave?.({userId, peerId})
+    }
+  }
+
   let unregisterBeforeUnloadCleanup: () => void = noOp
   let leavePromise: Promise<void> | null = null
   let effectiveLimit: number | undefined = limit
@@ -205,12 +362,14 @@ export default (
   const iterate = (
     targets: TargetPeers,
     f: (id: string, peer: PeerHandle) => Promise<void> | void
-  ): Promise<void>[] =>
-    (targets
-      ? Array.isArray(targets)
-        ? targets
-        : [targets]
-      : keys(activePeerMap)
+  ): Promise<void>[] => {
+    const resolvedTargets = resolveSendTarget(targets)
+    return (
+      resolvedTargets
+        ? Array.isArray(resolvedTargets)
+          ? resolvedTargets
+          : [resolvedTargets]
+        : keys(activePeerMap)
     ).flatMap(id => {
       const peer = activePeerMap[id]
 
@@ -221,6 +380,7 @@ export default (
 
       return [Promise.resolve(f(id, peer))]
     })
+  }
 
   const kickPeer = (id: string, peer?: PeerHandle, reason?: Error): void => {
     const current = peerMap[id]
@@ -250,6 +410,7 @@ export default (
     roomId: initialRoomId,
     password,
     ...(topology === undefined ? {} : {topology}),
+    getLocalUserIdentity: () => resolvedUserIdentityP,
     onVirtualPeerJoin: (peerId, vPeer) => {
       if (authority.isPeerBanned(peerId)) {
         vPeer.destroy()
@@ -260,7 +421,7 @@ export default (
       peerMap[peerId] = vPeer
       activePeerMap[peerId] = vPeer
       if (!alreadyActive) {
-        listeners.onPeerJoin?.(peerId)
+        notifyPeerActivated(peerId)
       }
     },
     onVirtualPeerLeave: (peerId, reason) => {
@@ -272,7 +433,7 @@ export default (
       clearPeerState(peerId, reason)
       current.destroy()
       if (wasActive) {
-        listeners.onPeerLeave?.(peerId)
+        notifyPeerDeactivated(peerId)
       }
     },
     onDeliverData: (originPeerId, data) => {
@@ -284,7 +445,17 @@ export default (
     },
     canPeerSendAction: (peerId, requiredRoles, inlineCert) =>
       authority.canPeerSendAction(peerId, requiredRoles, inlineCert),
-    onPeerDescriptorCert: (peerId, signPubKey, cert) => {
+    onPeerDescriptorCert: (peerId, signPubKey, cert, userId, _userPubKey) => {
+      if (userId) {
+        peerUserIds.set(peerId, userId)
+      }
+      if (
+        authority.isPeerBanned(peerId) ||
+        (userId && authority.isPeerBanned(userId))
+      ) {
+        overlay.markPeerBanned(peerId)
+        return
+      }
       authority.registerPeerPublicKey(peerId, signPubKey)
       if (cert) {
         void authority.verifyAndApplyCert(cert)
@@ -337,18 +508,35 @@ export default (
     ...(admin === undefined ? {} : {admin}),
     ...(resolvedAuthorityP === undefined ? {} : {resolvedAuthorityP}),
     getLocalCryptoIdentity: () => overlay.getLocalCryptoIdentity(),
+    getLocalUserIdentity: () => resolvedUserIdentityP,
     getOverlayPeerPublicKey: peerId => overlay.getPeerSignPublicKey(peerId),
     isOverlayPeerBanned: peerId => overlay.isPeerBanned(peerId),
+    getPeerUserId: peerId =>
+      peerId === localSelfId
+        ? localUserId
+        : (peerUserIds.get(peerId) ??
+          (peerId in peerMap
+            ? getDefaultTestUserIdentitySync(peerId).userId
+            : undefined)),
+    getUserPeerIds: userId => getUserPeerIds(userId),
     onRoomIdResolved: effectiveRoomId => overlay.setRoomId(effectiveRoomId),
     onPeerPublicKey: (peerId, pubKey) =>
       overlay.setPeerSignPublicKey(peerId, pubKey),
     onLocalRoleCertificate: cert => overlay.setLocalRoleCertificate(cert),
     onPrivilegedPeer: (peerId, isPriv) =>
       overlay.setPrivilegedPeer(peerId, isPriv),
-    onPeerBanned: (peerId, keyThumbprint) => {
+    onPeerBanned: (peerId, keyThumbprint, targetUserId) => {
       overlay.markPeerBanned(peerId, keyThumbprint)
       if (peerId !== localSelfId && peerMap[peerId]) {
         kickPeer(peerId, undefined, mkErr('peer banned'))
+      }
+      if (targetUserId) {
+        for (const pid of keys(peerMap)) {
+          if (pid !== localSelfId && getPeerUserId(pid) === targetUserId) {
+            overlay.markPeerBanned(pid)
+            kickPeer(pid, undefined, mkErr('peer banned'))
+          }
+        }
       }
     },
     onSignatureFailure: () => overlay.recordSignatureFailure()
@@ -356,6 +544,7 @@ export default (
 
   const mediaManager = createMediaManager({
     onPeerError,
+    getPeerUserId,
     iterate: (targets, f) =>
       iterate(targets, (id, peer) => f(id, peer as SharedMediaPeer)),
     isActive: id => Boolean(activePeerMap[id]),
@@ -427,6 +616,9 @@ export default (
       (includePending ? peerMap : activePeerMap)[id],
     getPeerIds: includePending =>
       keys(includePending ? peerMap : activePeerMap),
+    getPeerUserId,
+    resolveSendTarget,
+    resolveRequestTarget,
     canReceiveFromPeer: (id, receiveWhilePending) =>
       !authority.isPeerBanned(id) &&
       (Boolean(activePeerMap[id]) ||
@@ -527,7 +719,7 @@ export default (
     }
 
     if (wasActive) {
-      listeners.onPeerLeave?.(id)
+      notifyPeerDeactivated(id)
     }
 
     if (!wasVirtual) {
@@ -546,6 +738,9 @@ export default (
         clearTimeout(timer)
       }
       pendingFullRejectTimers.clear()
+      entries(peerMap).forEach(([id]) => {
+        handshakeManager.clearPeer(id, mkErr('room left'))
+      })
       overlay.announceLeave()
       const controller = new AbortController()
       void leaveAction
@@ -562,6 +757,7 @@ export default (
           peer.destroy()
           clearPeerState(id, mkErr('room left'), false)
         })
+        activeUserPeers.clear()
       } finally {
         try {
           unregisterBeforeUnloadCleanup()
@@ -750,14 +946,7 @@ export default (
     }
     if (msg.t === 'cert') {
       void authority.verifyAndApplyCert(msg.cert).then(applied => {
-        if (
-          msg.reqId &&
-          (!msg.ackPeers || msg.ackPeers.includes(localSelfId))
-        ) {
-          void authAction
-            .send({t: 'ack', reqId: msg.reqId}, fromPeerId)
-            .catch(noOp)
-        }
+        sendAuthAckIfRequested(msg, fromPeerId)
         if (!applied && !authority.hasCertForPeer(msg.cert?.subPeerId)) {
           overlay.recordSignatureFailure()
         }
@@ -766,14 +955,7 @@ export default (
     }
     if (msg.t === 'revoke') {
       void authority.verifyAndApplyRevocation(msg.revocation).then(applied => {
-        if (
-          msg.reqId &&
-          (!msg.ackPeers || msg.ackPeers.includes(localSelfId))
-        ) {
-          void authAction
-            .send({t: 'ack', reqId: msg.reqId}, fromPeerId)
-            .catch(noOp)
-        }
+        sendAuthAckIfRequested(msg, fromPeerId)
         if (!applied && !authority.hasRevocationSig(msg.revocation?.sig)) {
           overlay.recordSignatureFailure()
         }
@@ -782,14 +964,7 @@ export default (
     }
     if (msg.t === 'ban') {
       void authority.verifyAndApplyBan(msg.ban).then(applied => {
-        if (
-          msg.reqId &&
-          (!msg.ackPeers || msg.ackPeers.includes(localSelfId))
-        ) {
-          void authAction
-            .send({t: 'ack', reqId: msg.reqId}, fromPeerId)
-            .catch(noOp)
-        }
+        sendAuthAckIfRequested(msg, fromPeerId)
         if (
           !applied &&
           !authority.hasBanSig(msg.ban?.targetPeerId, msg.ban?.sig)
@@ -804,6 +979,55 @@ export default (
     }
   })
 
+  const sendAuthAckIfRequested = (
+    msg: {reqId?: string; ackPeers?: string[]},
+    fromPeerId: string
+  ): void => {
+    if (msg.reqId && (!msg.ackPeers || msg.ackPeers.includes(localSelfId))) {
+      void authAction.send({t: 'ack', reqId: msg.reqId}, fromPeerId).catch(noOp)
+    }
+  }
+
+  const broadcastAuthWithAck = async (
+    payload:
+      | {t: 'cert'; cert: RoleCertificate}
+      | {t: 'revoke'; revocation: RoleRevocationRecord}
+      | {t: 'ban'; ban: PeerBanRecord},
+    allCandidatePeers: string[],
+    extraAckPeer?: string,
+    excludePeers?: ReadonlySet<string>
+  ): Promise<void> => {
+    const reqId = genId(12)
+    const boundedAckPeers =
+      allCandidatePeers.length > 16
+        ? [
+            ...new Set([
+              ...overlay
+                .getSnapshot()
+                .directPeerIds.filter(id => !excludePeers?.has(id)),
+              ...(extraAckPeer ? [extraAckPeer] : [])
+            ])
+          ]
+        : undefined
+    const ackWait = waitForAuthAck(reqId, boundedAckPeers ?? allCandidatePeers)
+    await authAction
+      .send({
+        ...payload,
+        reqId,
+        ...(boundedAckPeers ? {ackPeers: boundedAckPeers} : {})
+      })
+      .catch(noOp)
+    await ackWait
+  }
+
+  const getActiveUniqueUsers = (): Set<string> => {
+    const users = new Set<string>([localUserId])
+    for (const pid of keys(activePeerMap)) {
+      users.add(getPeerUserId(pid))
+    }
+    return users
+  }
+
   const isAlreadyFullForPeer = (id: string): boolean => {
     if (activePeerMap[id] || promotedFromVirtual.has(id)) {
       return false
@@ -811,9 +1035,14 @@ export default (
     if (effectiveLimit === undefined) {
       return false
     }
+    const peerUserId = getPeerUserId(id)
+    const activeUsers = getActiveUniqueUsers()
+    if (activeUsers.has(peerUserId)) {
+      return false
+    }
     return effectiveLimit === 1
       ? isEstablished
-      : keys(activePeerMap).length + 1 >= effectiveLimit
+      : activeUsers.size >= effectiveLimit
   }
 
   const rejectPeerAsFull = (id: string, peer: PeerHandle): void => {
@@ -843,6 +1072,12 @@ export default (
     if (didRejectSelfAsFull || leavePromise) {
       return
     }
+    if (isEstablished || keys(activePeerMap).length > 0) {
+      if (peerMap[byPeerId]) {
+        exitPeer(byPeerId, peerMap[byPeerId], mkErr('room full'))
+      }
+      return
+    }
     didRejectSelfAsFull = true
     entries(peerMap).forEach(([pid]) => {
       handshakeManager.clearPeer(pid, mkErr('room full'))
@@ -864,11 +1099,14 @@ export default (
       return
     }
 
+    const localAlreadyEstablished =
+      isEstablished || keys(activePeerMap).length > 0
+
     const rankPeer = (id: string): {id: string; est: boolean; t: number} => {
       if (id === localSelfId) {
         return {
           id,
-          est: isEstablished || keys(activePeerMap).length > 0,
+          est: localAlreadyEstablished,
           t: localJoinedAt
         }
       }
@@ -895,7 +1133,26 @@ export default (
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     })
 
-    const winners = new Set(sorted.slice(0, effectiveLimit).map(c => c.id))
+    const winningUsers = new Set<string>()
+    const winners = new Set<string>()
+    if (localAlreadyEstablished) {
+      winningUsers.add(localUserId)
+      winners.add(localSelfId)
+      for (const activeId of keys(activePeerMap)) {
+        const uid = getPeerUserId(activeId)
+        if (winningUsers.has(uid) || winningUsers.size < effectiveLimit) {
+          winningUsers.add(uid)
+          winners.add(activeId)
+        }
+      }
+    }
+    for (const c of sorted) {
+      const uid = getPeerUserId(c.id)
+      if (winningUsers.has(uid) || winningUsers.size < effectiveLimit) {
+        winningUsers.add(uid)
+        winners.add(c.id)
+      }
+    }
 
     if (!winners.has(localSelfId)) {
       const winnerPeerId =
@@ -915,7 +1172,12 @@ export default (
       if (!peer) {
         continue
       }
-      if (winners.has(id) && keys(activePeerMap).length + 1 < effectiveLimit) {
+      const uid = getPeerUserId(id)
+      const currentUsers = getActiveUniqueUsers()
+      if (
+        winners.has(id) &&
+        (currentUsers.has(uid) || currentUsers.size < effectiveLimit)
+      ) {
         handshakeManager.activate(id)
       } else {
         rejectPeerAsFull(id, peer)
@@ -944,38 +1206,57 @@ export default (
     sendHandshakeData: handshakeDataAction.send,
     sendHandshakeReady: handshakeReadyAction.send,
     canAcceptBeforeHandshake: id =>
-      Boolean(password) || !isAlreadyFullForPeer(id),
+      Boolean(password) || verifyPeerIdentity || !isAlreadyFullForPeer(id),
     onRejectFull: (id, peer) => rejectPeerAsFull(id, peer),
     onLocalHandshakePassed: (id, peer) => {
       if (isAlreadyFullForPeer(id)) {
         rejectPeerAsFull(id, peer)
         return null
       }
-      if (effectiveLimit === undefined) {
-        return ''
+      if (effectiveLimit !== undefined) {
+        scheduleCapacityCheck()
       }
-      scheduleCapacityCheck()
       return {
         ok: true,
-        limit: effectiveLimit,
+        ...(effectiveLimit === undefined ? {} : {limit: effectiveLimit}),
         t: localJoinedAt,
         est: isEstablished || keys(activePeerMap).length > 0
       }
     },
-    onRemoteHandshakeReady: (id, _peer, data) => {
+    onRemoteHandshakeReady: (id, peer, data) => {
+      const localAlreadyEstablished =
+        isEstablished || keys(activePeerMap).length > 0
       if (data && typeof data === 'object') {
         if (
           typeof data.limit === 'number' &&
           Number.isSafeInteger(data.limit) &&
           data.limit >= 1
         ) {
-          effectiveLimit =
-            effectiveLimit === undefined
-              ? data.limit
-              : Math.min(effectiveLimit, data.limit)
+          if (localAlreadyEstablished) {
+            const activeUsers = getActiveUniqueUsers()
+            const peerUserId = getPeerUserId(id)
+            if (
+              !activeUsers.has(peerUserId) &&
+              activeUsers.size >= data.limit
+            ) {
+              rejectPeerAsFull(id, peer)
+              return true
+            }
+          } else {
+            effectiveLimit =
+              effectiveLimit === undefined
+                ? data.limit
+                : Math.min(effectiveLimit, data.limit)
+          }
         }
         if (!data.ok && data.err === 'room full') {
           handleSelfRejectedAsFull(id)
+          return true
+        }
+        if (!data.ok && data.err === 'peer banned') {
+          handshakeManager.clearPeer(id, mkErr('peer banned'))
+          onHandshakeError?.(id, 'peer banned')
+          kickPeer(id, peer, mkErr('peer banned'))
           return true
         }
         peerJoinMeta.set(id, {
@@ -1001,12 +1282,14 @@ export default (
       void sendAuthSyncToPeer(id)
       if (
         effectiveLimit !== undefined &&
-        keys(activePeerMap).length + 1 >= effectiveLimit
+        getActiveUniqueUsers().size >= effectiveLimit
       ) {
         for (const pendingId of handshakeManager.getPendingIds()) {
           if (
             !activePeerMap[pendingId] &&
-            !pendingFullRejectTimers.has(pendingId)
+            !pendingFullRejectTimers.has(pendingId) &&
+            (!verifyPeerIdentity || peerUserIds.has(pendingId)) &&
+            isAlreadyFullForPeer(pendingId)
           ) {
             const pendingPeer =
               handshakeManager.getPeer(pendingId) ?? peerMap[pendingId]
@@ -1026,10 +1309,25 @@ export default (
         }
       })
       if (!alreadyJoined) {
-        listeners.onPeerJoin?.(id)
+        notifyPeerActivated(id)
       }
     },
-    onFailure: (id, peer, reason) => kickPeer(id, peer, reason)
+    onFailure: (id, peer, reason) => {
+      if (/peer banned/.test(reason.message)) {
+        void handshakeReadyAction
+          .send({ok: false, err: 'peer banned'}, id)
+          .catch(noOp)
+        handshakeManager.clearPeer(id, reason)
+        peerJoinMeta.delete(id)
+        const timer = setTimeout(() => {
+          pendingFullRejectTimers.delete(id)
+          kickPeer(id, peer, reason)
+        }, 50)
+        pendingFullRejectTimers.set(id, timer)
+        return
+      }
+      kickPeer(id, peer, reason)
+    }
   })
 
   pingAction.onMessage((_, id) => {
@@ -1075,15 +1373,22 @@ export default (
     exitPeer(id, undefined, mkErr('peer left room'))
   )
 
-  handshakeDataAction.onMessage((data, id, metadata) =>
-    handshakeManager.receiveHandshakeData(data, id, metadata)
-  )
+  handshakeDataAction.onMessage((data, id, metadata) => {
+    if (!leavePromise) {
+      handshakeManager.receiveHandshakeData(data, id, metadata)
+    }
+  })
 
-  handshakeReadyAction.onMessage((data, id) =>
-    handshakeManager.receiveHandshakeReady(id, data)
-  )
+  handshakeReadyAction.onMessage((data, id) => {
+    if (!leavePromise) {
+      handshakeManager.receiveHandshakeReady(id, data)
+    }
+  })
 
   onPeer((peer, id) => {
+    if (leavePromise) {
+      return
+    }
     if (authority.isPeerBanned(id)) {
       peer.destroy()
       return
@@ -1110,17 +1415,26 @@ export default (
 
     peer.setHandlers({
       data: d => {
-        if (peerMap[id] === peer) {
+        if (peerMap[id] === peer && !authority.isPeerBanned(id)) {
           if (overlay.isOverlayFrame(d)) {
-            overlay.handleOverlayFrame(id, d)
+            if (activePeerMap[id]) {
+              overlay.handleOverlayFrame(id, d)
+            }
           } else {
             handleData(id, d)
           }
         }
       },
-      stream: stream => mediaManager.receiveRemoteStream(id, stream),
-      track: (track, stream) =>
-        mediaManager.receiveRemoteTrack(id, track, stream),
+      stream: stream => {
+        if (!authority.isPeerBanned(id)) {
+          mediaManager.receiveRemoteStream(id, stream)
+        }
+      },
+      track: (track, stream) => {
+        if (!authority.isPeerBanned(id)) {
+          mediaManager.receiveRemoteTrack(id, track, stream)
+        }
+      },
       close: () => exitPeer(id, peer, mkErr('peer disconnected')),
       error: (err: Error) => {
         console.error(`${libName} peer error:`, err)
@@ -1158,74 +1472,50 @@ export default (
       authority.getAuthorityInfo(),
 
     grantRole: async (peerId, role, options) => {
+      const targetPeerId = resolveRequestTarget(peerId) ?? peerId
       const cert = await authority.issueRoleCertificate(
         peerId,
         role,
         options,
         () => {
-          void authAction.send({t: 'whois'}, peerId).catch(noOp)
+          void authAction.send({t: 'whois'}, targetPeerId).catch(noOp)
         }
       )
-      const reqId = genId(12)
-      const allActive = keys(activePeerMap)
-      const boundedAckPeers =
-        allActive.length > 16
-          ? [...new Set([...overlay.getSnapshot().directPeerIds, peerId])]
-          : undefined
-      const ackWait = waitForAuthAck(reqId, boundedAckPeers ?? allActive)
-      await authAction
-        .send({
-          t: 'cert',
-          cert,
-          reqId,
-          ...(boundedAckPeers ? {ackPeers: boundedAckPeers} : {})
-        })
-        .catch(noOp)
-      await ackWait
+      await broadcastAuthWithAck(
+        {t: 'cert', cert},
+        keys(activePeerMap),
+        targetPeerId
+      )
       return cert
     },
 
     revokeRole: async (peerId, role) => {
+      const targetPeerId = resolveRequestTarget(peerId) ?? peerId
       const revocation = await authority.issueRoleRevocation(peerId, role)
-      const reqId = genId(12)
-      const allActive = keys(activePeerMap)
-      const boundedAckPeers =
-        allActive.length > 16
-          ? [...new Set([...overlay.getSnapshot().directPeerIds, peerId])]
-          : undefined
-      const ackWait = waitForAuthAck(reqId, boundedAckPeers ?? allActive)
-      await authAction
-        .send({
-          t: 'revoke',
-          revocation,
-          reqId,
-          ...(boundedAckPeers ? {ackPeers: boundedAckPeers} : {})
-        })
-        .catch(noOp)
-      await ackWait
+      await broadcastAuthWithAck(
+        {t: 'revoke', revocation},
+        keys(activePeerMap),
+        targetPeerId
+      )
     },
 
     getPeerRoles: (peerId?: string) =>
       authority.getPeerRoles(peerId ?? localSelfId),
 
     banPeer: async (peerId, options) => {
-      const otherPeers = keys(activePeerMap).filter(id => id !== peerId)
+      const targetPeers = new Set(
+        Array.isArray(resolveSendTarget(peerId))
+          ? (resolveSendTarget(peerId) as string[])
+          : [peerId]
+      )
+      const otherPeers = keys(activePeerMap).filter(id => !targetPeers.has(id))
       const ban = await authority.issuePeerBan(peerId, options)
-      const reqId = genId(12)
-      const boundedAckPeers =
-        otherPeers.length > 16
-          ? overlay.getSnapshot().directPeerIds.filter(id => id !== peerId)
-          : undefined
-      const ackWait = waitForAuthAck(reqId, boundedAckPeers ?? otherPeers)
-      await authAction
-        .send({
-          t: 'ban',
-          ban,
-          reqId,
-          ...(boundedAckPeers ? {ackPeers: boundedAckPeers} : {})
-        })
-        .catch(noOp)
-      await ackWait
+      await broadcastAuthWithAck(
+        {t: 'ban', ban},
+        otherPeers,
+        undefined,
+        targetPeers
+      )
     },
 
     isBanned: peerId => authority.isPeerBanned(peerId),
@@ -1233,17 +1523,18 @@ export default (
     leave,
 
     ping: async id => {
-      if (!activePeerMap[id]) {
+      const targetId = resolveRequestTarget(id) ?? id
+      if (!activePeerMap[targetId]) {
         throw mkErr(`no active peer with id ${id}`)
       }
 
       const start = Date.now()
 
       await new Promise<void>((resolve, reject) => {
-        const queue = (pendingPongs[id] ??= [])
+        const queue = (pendingPongs[targetId] ??= [])
 
         const clearFromQueue = (): void => {
-          const currentQueue = pendingPongs[id]
+          const currentQueue = pendingPongs[targetId]
 
           if (!currentQueue) {
             return
@@ -1256,7 +1547,7 @@ export default (
           }
 
           if (!currentQueue.length) {
-            delete pendingPongs[id]
+            delete pendingPongs[targetId]
           }
         }
 
@@ -1273,7 +1564,7 @@ export default (
 
         queue.push(waiter)
         void pingAction
-          .send('', id)
+          .send('', targetId)
           .catch(err => waiter.reject(toError(err, 'peer disconnected')))
       })
 
@@ -1281,6 +1572,11 @@ export default (
     },
 
     isPassive: () => isPassive,
+
+    getSelf: async (): Promise<SelfInfo> => ({
+      peerId: localSelfId,
+      userId: (await resolvedUserIdentityP).userId
+    }),
 
     getPeers: () =>
       fromEntries(
@@ -1290,6 +1586,7 @@ export default (
           return [
             id,
             {
+              userId: getPeerUserId(id),
               connection: direct ? peer.connection : null,
               direct,
               hops,
@@ -1298,6 +1595,26 @@ export default (
           ]
         })
       ),
+
+    getUsers: () => {
+      const result: Record<string, UserInfo> = {}
+      for (const peerId of keys(activePeerMap)) {
+        const userId = getPeerUserId(peerId)
+        if (userId === localUserId) {
+          continue
+        }
+        let entry = result[userId]
+        if (!entry) {
+          entry = {
+            peerIds: [],
+            roles: authority.getPeerRoles(userId)
+          }
+          result[userId] = entry
+        }
+        entry.peerIds.push(peerId)
+      }
+      return result
+    },
 
     getTopology: () => overlay.getSnapshot(),
 
@@ -1417,7 +1734,13 @@ export default (
       listeners.onPeerJoin = handler
 
       if (handler) {
-        keys(activePeerMap).forEach(peerId => handler(peerId))
+        keys(activePeerMap).forEach(peerId =>
+          handler({
+            peerId,
+            userId: getPeerUserId(peerId),
+            roles: authority.getPeerRoles(peerId)
+          })
+        )
       }
     },
 
@@ -1427,6 +1750,38 @@ export default (
 
     set onPeerLeave(handler) {
       listeners.onPeerLeave = handler
+    },
+
+    get onUserJoin() {
+      return listeners.onUserJoin
+    },
+
+    set onUserJoin(handler) {
+      listeners.onUserJoin = handler
+
+      if (handler) {
+        for (const [userId, peerIds] of activeUserPeers.entries()) {
+          if (userId === localUserId) {
+            continue
+          }
+          const firstPeerId = [...peerIds][0]
+          if (firstPeerId) {
+            handler({
+              userId,
+              peerId: firstPeerId,
+              roles: authority.getPeerRoles(userId)
+            })
+          }
+        }
+      }
+    },
+
+    get onUserLeave() {
+      return listeners.onUserLeave
+    },
+
+    set onUserLeave(handler) {
+      listeners.onUserLeave = handler
     },
 
     get onPeerStream() {
@@ -1454,7 +1809,20 @@ export default (
       if (isAlreadyFullForPeer(peerId)) {
         throw roomFullHostRejectErr
       }
-    }
+    },
+    onPeerIdentityVerified: (peerId, verified) => {
+      peerUserIds.set(peerId, verified.userId)
+      if (
+        authority.isPeerBanned(peerId) ||
+        authority.isPeerBanned(verified.userId)
+      ) {
+        overlay.markPeerBanned(peerId)
+        throw mkErr('peer banned')
+      }
+      authority.registerPeerPublicKey(peerId, verified.peerPubKey)
+    },
+    getPeerHandle: peerId =>
+      handshakeManager.getPeer(peerId) ?? peerMap[peerId]
   })
 
   return roomInstance
