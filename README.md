@@ -38,16 +38,16 @@ You can see what people are building with Trystero
 - [Listen for events](#listen-for-events)
 - [Broadcast events](#broadcast-events)
 - [Audio and video](#audio-and-video)
+- [User identity](#user-identity)
 - [Advanced](#advanced)
   - [Binary metadata](#binary-metadata)
   - [Receiving files](#receiving-files)
   - [Action promises](#action-promises)
   - [Progress updates](#progress-updates)
   - [Encryption](#encryption)
-  - [Persistent user identity and multi-tab presence](#persistent-user-identity-and-multi-tab-presence)
   - [Room size limits](#room-size-limits)
-  - [Scalable topologies](#scalable-topologies)
   - [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)
+  - [Scalable topologies](#scalable-topologies)
   - [React hooks](#react-hooks)
   - [Troubleshooting connection issues](#troubleshooting-connection-issues)
   - [Running server-side (Node, Bun, Deno)](#running-server-side-node-bun-deno)
@@ -160,23 +160,23 @@ Supabase, it should be your project URL.
 
 ## Listen for events
 
-Listen for peers joining the room:
+Listen for users joining the room:
 
 ```js
-room.onPeerJoin = ({peerId, userId}) => console.log(`${peerId} (${userId}) joined`)
+room.onUserJoin = ({userId}) => console.log(`${userId} joined`)
 ```
 
-Listen for peers leaving the room:
+Listen for users leaving the room:
 
 ```js
-room.onPeerLeave = ({peerId, userId}) => console.log(`${peerId} (${userId}) left`)
+room.onUserLeave = ({userId}) => console.log(`${userId} left`)
 ```
 
-Listen for peers sending their audio/video streams:
+Listen for users sending their audio/video streams:
 
 ```js
-room.onPeerStream = (stream, {peerId}) =>
-  (peerElements[peerId].video.srcObject = stream)
+room.onPeerStream = (stream, {userId}) =>
+  (userElements[userId].video.srcObject = stream)
 ```
 
 To unsubscribe from events, leave the room:
@@ -185,22 +185,16 @@ To unsubscribe from events, leave the room:
 room.leave()
 ```
 
-You can access the local endpoint's peer ID synchronously by importing `selfId`,
-or inspect both your endpoint `peerId` and persistent `userId` with
-`room.getSelf()`:
+You can inspect your own `userId` with `room.getSelf()`:
 
 ```js
-import {selfId} from 'trystero'
-
-console.log(`my peer ID is ${selfId}`)
-
-const {peerId, userId} = await room.getSelf()
-console.log(`my peer ID is ${peerId} and my user ID is ${userId}`)
+const {userId} = await room.getSelf()
+console.log(`my user ID is ${userId}`)
 ```
 
 ## Broadcast events
 
-Send peers your video stream:
+Send users your video stream:
 
 ```js
 const stream = await navigator.mediaDevices.getUserMedia({
@@ -222,9 +216,9 @@ drink.send({drink: 'negroni', withIce: true}, {target: friendId})
 drink.send({drink: 'mezcal', withIce: false})
 
 // listen for drinks sent to you
-drink.onMessage = (data, {peerId}) =>
+drink.onMessage = (data, {userId}) =>
   console.log(
-    `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${peerId}`
+    `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${userId}`
   )
 ```
 
@@ -242,9 +236,8 @@ const result = await isEven.request(42, {
 })
 ```
 
-To ask multiple peers at once, use `requestMany()`. It resolves with a
-peer-labeled result for every target, while `onResult` lets you react as each
-peer answers:
+To ask multiple users at once, use `requestMany()`. It resolves with a labeled
+result for every target, while `onResult` lets you react as each user answers:
 
 ```js
 const availability = room.makeAction('availability', {
@@ -259,15 +252,15 @@ const results = await availability.requestMany(
     timeoutMs: 1000,
     onResult: result => {
       if (result.status === 'fulfilled') {
-        updateAvailabilityBadge(result.peerId, result.value)
+        updateAvailabilityBadge(result.userId, result.value)
       }
     }
   }
 )
 
-const freePeers = results
+const freeUsers = results
   .filter(result => result.status === 'fulfilled' && result.value)
-  .map(result => result.peerId)
+  .map(result => result.userId)
 ```
 
 If you're using TypeScript, you can add a type hint to the action:
@@ -288,8 +281,8 @@ canvas.toBlob(blob => pic.send(blob))
 
 // binary data is received as raw ArrayBuffers so your handling code should
 // interpret it in a way that makes sense
-pic.onMessage = (data, {peerId}) =>
-  (imgs[peerId].src = URL.createObjectURL(new Blob([data])))
+pic.onMessage = (data, {userId}) =>
+  (imgs[userId].src = URL.createObjectURL(new Blob([data])))
 ```
 
 Let's say we want users to be able to name themselves:
@@ -298,17 +291,17 @@ Let's say we want users to be able to name themselves:
 const idsToNames = {}
 const name = room.makeAction('name')
 
-// tell new peers your name when they connect
-room.onPeerJoin = ({peerId}) => name.send('Oedipa', {target: peerId})
+// tell new users your name when they connect
+room.onUserJoin = ({userId}) => name.send('Oedipa', {target: userId})
 
-// listen for peers naming themselves
-name.onMessage = (value, {peerId}) => (idsToNames[peerId] = value)
+// listen for users naming themselves
+name.onMessage = (value, {userId}) => (idsToNames[userId] = value)
 
-// tell all peers at once when your name changes
+// tell all users at once when your name changes
 nameInput.addEventListener('change', e => name.send(e.target.value))
 
-room.onPeerLeave = ({peerId}) =>
-  console.log(`${idsToNames[peerId] || 'a weird stranger'} left`)
+room.onUserLeave = ({userId}) =>
+  console.log(`${idsToNames[userId] || 'a weird stranger'} left`)
 ```
 
 > Actions are smart and handle serialization and chunking for you behind the
@@ -324,7 +317,7 @@ Here's a simple example of how you could create an audio chatroom:
 
 ```js
 // this object can store audio instances for later
-const peerAudios = {}
+const userAudios = {}
 
 // get a local audio stream from the microphone
 const selfStream = await navigator.mediaDevices.getUserMedia({
@@ -332,22 +325,22 @@ const selfStream = await navigator.mediaDevices.getUserMedia({
   video: false
 })
 
-// send stream to peers currently in the room
+// send stream to users currently in the room
 room.addStream(selfStream)
 
-// send stream to peers who join later
-room.onPeerJoin = ({peerId}) => room.addStream(selfStream, {target: peerId})
+// send stream to users who join later
+room.onUserJoin = ({userId}) => room.addStream(selfStream, {target: userId})
 
-// handle streams from other peers
-room.onPeerStream = (stream, {peerId}) => {
+// handle streams from other users
+room.onPeerStream = (stream, {userId}) => {
   // create an audio instance and set the incoming stream
   const audio = new Audio()
   audio.srcObject = stream
   audio.autoplay = true
 
-  // add the audio to peerAudios object if you want to address it for something
+  // add the audio to userAudios object if you want to address it for something
   // later (volume, etc.)
-  peerAudios[peerId] = audio
+  userAudios[userId] = audio
 }
 ```
 
@@ -355,13 +348,13 @@ Doing the same with video is similar, just be sure to add incoming streams to
 video elements in the DOM:
 
 ```js
-const peerVideos = {}
+const userVideos = {}
 const videoContainer = document.getElementById('videos')
 
-room.onPeerStream = (stream, {peerId}) => {
-  let video = peerVideos[peerId]
+room.onPeerStream = (stream, {userId}) => {
+  let video = userVideos[userId]
 
-  // if this peer hasn't sent a stream before, create a video element
+  // if this user hasn't sent a stream before, create a video element
   if (!video) {
     video = document.createElement('video')
     video.autoplay = true
@@ -371,9 +364,118 @@ room.onPeerStream = (stream, {peerId}) => {
   }
 
   video.srcObject = stream
-  peerVideos[peerId] = video
+  userVideos[userId] = video
 }
 ```
+
+## User identity
+
+Every user in Trystero gets a unique, unforgeable `userId` out of the box—no
+accounts, login screens, or backend servers required. Because every `userId` is
+cryptographically verified during connection setup, no one can spoof or hijack
+another user's ID.
+
+### Semi-ephemeral by default, persistent with a one-line change
+
+By default in the browser, `userId` is **semi-ephemeral** (`identity: 'session'`):
+if a user refreshes the page, they come right back with the same `userId`, and
+closing the tab starts fresh next time.
+
+If you want users to keep the same `userId` across all open tabs and future
+visits on that device, set `identity: 'local'`:
+
+```js
+const room = joinRoom(
+  {
+    appId: 'co-op-RPG',
+    identity: 'local'
+  },
+  'tavern-1'
+)
+```
+
+Or pass a custom identity or loader function if you want to save and load user
+identity keys from your own backend, file system, or account system:
+
+```js
+const room = joinRoom(
+  {
+    appId: 'co-op-RPG',
+    identity: () => fetchUserKeyFromBackend()
+  },
+  'tavern-1'
+)
+```
+
+| `identity` value | `userId` lifetime |
+| --- | --- |
+| `'session'` _(browser default)_ | Reused across page reloads in the same tab (`sessionStorage`), reset when the tab closes. |
+| `'local'` | Reused across all open tabs and future visits on the same device (`IndexedDB` / `localStorage`) until browser storage is cleared. |
+| `'none'` _(non-browser default)_ | Ephemeral for the current runtime; a reload or process restart generates a new `userId`. |
+| Custom (`UserIdentity`, `userKey`, or loader) | Controlled by your app (e.g. synced from your backend or loaded from disk in Node/Bun/Deno). |
+
+### Multiple connections for a single user (`userId` vs `peerId`)
+
+Why does Trystero have both a `userId` and a `peerId`?
+
+Because a single user (`userId`) might open your app in **two browser tabs at
+the same time**, or connect from both their laptop and phone using a synced
+identity. Each open tab or device is its own WebRTC connection with a unique
+**`peerId`**, while sharing the same **`userId`**.
+
+For most apps, you only need **`userId`**:
+
+- `room.onUserJoin` fires once when a user's first tab joins, and
+  `room.onUserLeave` only fires when their last remaining tab leaves.
+- `room.getUsers()` returns the active users in the room (`{ [userId]: { peerIds, roles } }`).
+- Passing a `userId` as `target` in `send()` or `addStream()` automatically
+  **fans out** to every open tab owned by that user, while `request()` and
+  `ping()` automatically route to a single tab.
+
+```js
+// Sends to all of Alice's open tabs
+dm.send('Hey Alice!', {target: aliceUserId})
+
+// Requests a response from one of Alice's tabs
+const profile = await getProfile.request(null, {target: aliceUserId})
+```
+
+When you _do_ want to distinguish or target individual tabs—for example,
+sending a message only to the tab that requested it, showing a multi-device
+indicator, or tracking individual WebRTC connections—every event also provides
+`peerId`, `room.onPeerJoin` and `room.onPeerLeave` fire for every individual tab
+connection, and any `target` option accepts a `peerId` to address that specific
+tab alone:
+
+| Connection event | `onUserJoin` / `onUserLeave` | `onPeerJoin` / `onPeerLeave` |
+| --- | --- | --- |
+| Alice's first tab joins | `onUserJoin` (`{userId}`) | `onPeerJoin` (`{peerId}`) |
+| Alice's second tab joins | _None_ | `onPeerJoin` (`{peerId}`) |
+| One of Alice's two tabs leaves | _None_ | `onPeerLeave` (`{peerId}`) |
+| Alice's last tab leaves | `onUserLeave` (`{userId}`) | `onPeerLeave` (`{peerId}`) |
+
+<details>
+  <summary>How it works behind the scenes</summary>
+
+- **Self-certifying IDs**: Each tab generates a fresh ECDSA P-256 endpoint
+  keypair (`peerId`, a 20-character Base62 digest `sha256(pubJwk) mod 62²⁰`)
+  alongside the user's ECDSA P-256 identity keypair (`userId`, a 43-character
+  Base64url [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) JWK
+  thumbprint). Because `peerId` and `userId` have distinct formats and lengths,
+  any `target` option unambiguously recognizes which one you passed.
+- **Connection-bound handshake**: Before any peer or user join event fires, both
+  sides exchange fresh cryptographic nonces and sign a transcript binding the
+  `appId`, `roomId`, both `peerId`s, both `userId`s, and the WebRTC connection's
+  DTLS certificate fingerprints ([RFC 8827](https://www.rfc-editor.org/rfc/rfc8827.html)).
+  This prevents replay attacks and stops a man-in-the-middle on the signaling
+  channel from forwarding someone else's identity proof onto a different
+  connection.
+- **Atomic browser storage**: In `identity: 'local'` mode, Trystero coordinates
+  first-time key creation across concurrent tabs using `navigator.locks` and
+  atomic `IndexedDB` transactions storing a non-extractable WebCrypto
+  `CryptoKey` (with `localStorage` fallback).
+
+</details>
 
 ## Advanced
 
@@ -387,9 +489,9 @@ simply pass a metadata argument in the sender action for your binary payload:
 ```js
 const file = room.makeAction('file')
 
-file.onMessage = (data, {peerId, metadata}) =>
+file.onMessage = (data, {userId, metadata}) =>
   console.log(
-    `got a file (${metadata.name}) from ${peerId} with type ${metadata.type}`,
+    `got a file (${metadata.name}) from ${userId} with type ${metadata.type}`,
     data
   )
 
@@ -433,7 +535,7 @@ need a response.
 
 ```js
 await file.send(amplePayload)
-console.log('done sending to all peers')
+console.log('done sending to all users')
 ```
 
 ### Progress updates
@@ -441,13 +543,13 @@ console.log('done sending to all peers')
 Action sender functions also take an optional callback function that will be
 continuously called as the transmission progresses. This can be used for showing
 a progress bar to the sender for large transfers. The callback is called with a
-percentage value between 0 and 1 and the receiving peer's ID:
+percentage value between 0 and 1 and the receiver's context:
 
 ```js
 file.send(payload, {
-  target: [peerIdA, peerIdB, peerIdC],
+  target: [userA, userB, userC],
   metadata: {filename: 'paranoids.flac'},
-  onProgress: (percent, {peerId}) => (loadingBars[peerId].value = percent)
+  onProgress: (percent, {userId}) => (loadingBars[userId].value = percent)
 })
 ```
 
@@ -456,9 +558,9 @@ Similarly you can listen for progress events as a receiver like this:
 ```js
 const file = room.makeAction('file')
 
-file.onReceiveProgress = (percent, {peerId, metadata}) =>
+file.onReceiveProgress = (percent, {userId, metadata}) =>
   console.log(
-    `${percent * 100}% done receiving ${metadata.filename} from ${peerId}`
+    `${percent * 100}% done receiving ${metadata.filename} from ${userId}`
   )
 ```
 
@@ -466,12 +568,12 @@ Notice that any metadata is sent with progress events so you can show the
 receiving user that there is a transfer in progress with perhaps the name of the
 incoming file.
 
-Since a peer can send multiple transmissions in parallel, you can also use
+Since a user can send multiple transmissions in parallel, you can also use
 metadata to differentiate between them, e.g. by sending a unique ID.
 
 ### Encryption
 
-Once peers are connected to each other all of their communications are
+Once users are connected to each other all of their communications are
 end-to-end encrypted. During the initial connection / discovery process, peers'
 [SDPs](https://en.wikipedia.org/wiki/Session_Description_Protocol) are sent via
 the chosen peering strategy medium. By default the SDP is encrypted using a key
@@ -486,104 +588,9 @@ joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
 ```
 
 This is a shared secret that must be known ahead of time and the password must
-match for all peers in the room for them to be able to connect. An example use
+match for all users in the room for them to be able to connect. An example use
 case might be a private chat room where users learn the password via external
 means.
-
-### Persistent user identity and multi-tab presence
-
-In peer-to-peer apps, you often need to know two things:
-
-1. **Are peer IDs unforgeable?** Can another peer pretend to have someone else's
-   ID?
-2. **What happens when a user refreshes the page or opens your app in two tabs
-   at once?**
-
-Out of the box, Trystero gives every participant two cryptographically verified,
-self-certifying IDs—no accounts, servers, or custom crypto required:
-
-- **`peerId` (`selfId`)** – A 20-character Base62 ID generated fresh for each
-  tab or process runtime and derived directly from its ECDSA P-256 public key.
-  Every WebRTC connection is cryptographically bound to its DTLS fingerprint, so
-  a `peerId` can never be forged or hijacked.
-- **`userId`** – A 43-character Base64url public-key thumbprint ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html))
-  representing the logical user across page reloads or multiple open tabs.
-
-#### Configuring `userId` persistence (`config.identity`)
-
-Pass `identity` in your `joinRoom()` config to choose how long a user's
-`userId` lasts:
-
-| `identity` value | `userId` lifetime |
-| --- | --- |
-| `'session'` _(browser default)_ | Stored in `sessionStorage` (scoped to `appId`). Keeps the same `userId` when the user refreshes the page in that tab. |
-| `'local'` | Stored in IndexedDB (as a non-extractable WebCrypto key) with `localStorage` fallback. Reused across all open tabs and future visits on the same device until browser storage is cleared. |
-| `'none'` _(non-browser default)_ | Ephemeral for the current runtime; a page reload or process restart generates a new `userId`. |
-| Custom (`UserIdentity`, `userKey`, or async loader) | Controlled by your app (e.g. loaded from disk in Node/Bun/Deno or an external vault). |
-
-```js
-// Persist user identity across tabs and future visits on the same device
-const room = joinRoom(
-  {
-    appId: 'co-op-RPG',
-    identity: 'local'
-  },
-  'tavern-1'
-)
-
-const {peerId, userId} = await room.getSelf()
-```
-
-#### Managing user presence across tabs (`onUserJoin`, `onUserLeave`, `getUsers`)
-
-When a user with `identity: 'local'` opens your app in two browser tabs at the
-same time, both tabs join the room with their own unique `peerId`s while sharing
-the same verified `userId`.
-
-Instead of manually deduplicating tabs yourself, you can use `onUserJoin`,
-`onUserLeave`, and `getUsers()`:
-
-```js
-// Track logical users in your UI participant list
-room.onUserJoin = ({userId, peerId, roles}) => addParticipant(userId)
-room.onUserLeave = ({userId, peerId}) => removeParticipant(userId)
-
-console.log(room.getUsers())
-// {
-//   [userId]: {
-//     peerIds: ['peerA', 'peerB'],
-//     roles: []
-//   }
-// }
-```
-
-| Endpoint change | `onPeerJoin` / `onPeerLeave` | `onUserJoin` / `onUserLeave` |
-| --- | --- | --- |
-| Alice's first tab joins | `onPeerJoin` (`{peerId, userId, roles}`) | `onUserJoin` (`{userId, peerId, roles}`) |
-| Alice's second tab joins | `onPeerJoin` (`{peerId, userId, roles}`) | _None_ |
-| One of Alice's two tabs leaves | `onPeerLeave` (`{peerId, userId}`) | _None_ |
-| Alice's last tab leaves | `onPeerLeave` (`{peerId, userId}`) | `onUserLeave` (`{userId, peerId}`) |
-
-#### Targeting a `userId` vs a `peerId`
-
-Every `target` and `targets` option across Trystero (`action.send`,
-`action.request`, `action.requestMany`, `room.ping`, `room.addStream`,
-`room.addTrack`, `room.replaceTrack`, `room.grantRole`, `room.banPeer`, etc.)
-accepts either a 20-character `peerId` or a 43-character `userId`:
-
-- **One-way sends (`send`, `addStream`, `addTrack`)**: Passing a `userId`
-  automatically **fans out** to all active tabs (`peerIds`) owned by that user.
-- **Request/response & latency (`request`, `requestMany`, `ping`)**: Passing a
-  `userId` **deterministically routes to one tab** owned by that user
-  (preferring a direct 1-hop connection, breaking ties by lowest `peerId`).
-
-```js
-// Fan out a direct message to all of Alice's open tabs
-dm.send('Hey Alice!', {target: aliceUserId})
-
-// Request state from a single deterministic tab of Alice
-const profile = await getProfile.request(null, {target: aliceUserId})
-```
 
 ### Room size limits
 
@@ -652,105 +659,6 @@ When a room is already at capacity:
   `limit` in their config, Trystero automatically propagates the active limit to
   other admitted peers and enforces total room capacity across multi-hop
   `'small-world'` and `'tree'` overlay topologies.
-
-</details>
-
-### Scalable topologies
-
-Normally in WebRTC, every browser in a room opens a direct connection to every
-other browser. That works great for small groups, but once a room grows past a
-dozen people—like a busy game lobby, a collaborative canvas with 50 cursors, or
-a live watch party—maintaining that many connections at once can slow down or
-overwhelm a user's browser.
-
-**Out of the box, Trystero handles this for you automatically.** By default,
-rooms use `topology: 'auto'`:
-
-- When a room is small (`12` peers or fewer), everyone connects directly to
-  everyone else for the lowest possible latency.
-- If more people join, Trystero automatically switches the room to a scalable
-  relay network where each browser only maintains a handful of direct
-  connections (6 by default) and passes messages and media streams along to the
-  rest of the room.
-
-All of your code (`makeAction`, `makeState`, `addStream`, `addTrack`, `ping`,
-`onPeerJoin`, `onPeerLeave`, and `getPeers()`) works the exact same way no
-matter how many people are in the room or whether two users are connected
-directly or through other peers.
-
-If you want to customize how peers connect for your specific app, pass a
-`topology` option to `joinRoom()`:
-
-- `'auto'` _(default)_ – Best for most apps. Uses direct connections for small
-  groups and automatically scales up when a room exceeds `autoThreshold`
-  (default: `12` peers).
-- `'mesh'` – Everyone always connects directly to everyone else. Useful when
-  building a small, latency-critical app (like a 4-player fighting game) where
-  you never want messages relayed through other peers.
-- `'small-world'` – Always uses the scalable relay network, even in small rooms.
-  Useful when building a massive multiplayer world or public town square where
-  you want every user's connection count capped from the start.
-- `'tree'` – Organizes peers into a branching broadcast tree. Ideal when one or
-  a few hosts are streaming video, audio, or live updates to a large audience
-  (like a webinar, live DJ set, or stage presentation).
-
-```js
-// Example: a live stage app where a presenter streams video to a large audience
-const room = joinRoom(
-  {
-    appId: 'live-stage',
-    topology: 'tree'
-  },
-  'main-hall'
-)
-```
-
-You can also fine-tune connection limits by passing an object:
-
-```js
-const room = joinRoom(
-  {
-    appId: 'massive-canvas',
-    topology: {
-      mode: 'auto',
-      autoThreshold: 12, // switch to 'small-world' above 12 peers
-      maxPeers: 8 // max direct WebRTC connections per browser
-    }
-  },
-  'lobby-1'
-)
-```
-
-At any time, you can call `room.getTopology()` to see which mode is active,
-which peers are connected directly vs. through relays, and how data and media
-streams are being routed.
-
-<details>
-  <summary>How it works behind the scenes</summary>
-
-- **Small-world overlay (`'small-world'`)**: Peers arrange themselves by ID on a
-  bounded-degree circulant ring with deterministic multi-scale logarithmic
-  chords, keeping the network diameter to $O(\log N)$ hops even as rooms grow to
-  hundreds of peers. Broadcasts use a Plumtree-style epidemic push tree combined
-  with lazy `ihave`/`iwant` gossip repair so messages reach every peer reliably
-  without flooding redundant copies. Point-to-point messages (`target: peerId`)
-  route along shortest paths with disjoint backup next-hops for instant
-  failover.
-- **Broadcast trees (`'tree'` and media streaming)**: In `'tree'` mode—and
-  whenever any peer calls `addStream()` in `'small-world'` mode—Trystero builds
-  a deterministic $k$-ary application-layer multicast (ALM) tree rooted at the
-  broadcaster. Each internal peer receives the stream once and clones the
-  `MediaStreamTrack`s to its downstream children (`fanout: 3` by default), so a
-  broadcaster can stream audio or video to dozens of viewers while only
-  uploading to 3 peers. If an upstream peer disconnects, downstream viewers
-  automatically reparent to a healthy branch.
-- **End-to-end security across hops**: When messages travel through intermediate
-  peers, you don't have to trust the relays. Every peer automatically generates
-  an ephemeral WebCrypto signing keypair (ECDSA P-256) and encryption keypair
-  (ECDH P-256). Link-state routing announcements and broadcasts are digitally
-  signed and TOFU-pinned (Trust On First Use) so intermediate peers cannot forge
-  or alter messages, and targeted messages (`target: peerId`) are end-to-end
-  encrypted with AES-GCM so intermediate peers cannot read them.
 
 </details>
 
@@ -858,8 +766,8 @@ send. Just pass `authority` when creating the action:
 ```js
 const announce = room.makeAction('announce', {
   authority: ['admin', 'moderator'],
-  onMessage: (data, {peerId, roles}) => {
-    console.log(`Verified ${roles.join(', ')} (${peerId}) announced:`, data)
+  onMessage: (data, {userId, roles}) => {
+    console.log(`Verified ${roles.join(', ')} (${userId}) announced:`, data)
   }
 })
 
@@ -878,9 +786,9 @@ authorized roles can update—like the current question in a quiz game, the acti
 video URL in a watch party, or the current slide in a presentation.
 
 With `room.makeState()`, whenever an authorized user updates the state, every
-peer in the room receives the verified update. Better yet, **if a new user joins
+user in the room receives the verified update. Better yet, **if a new user joins
 the room late—or even after the host has closed their laptop and left—existing
-peers in the room automatically sync the latest official state to the newcomer**
+users in the room automatically sync the latest official state to the newcomer**
 without being able to tamper with it:
 
 ```js
@@ -898,8 +806,8 @@ const roundState = room.makeState(
 console.log(roundState.get())
 
 // Listen for official state updates
-roundState.onChange = (value, prev, {updatedBy, roles}) => {
-  console.log(`Updated by ${updatedBy} (${roles}):`, value)
+roundState.onChange = (value, prev, {userId, roles}) => {
+  console.log(`Updated by ${userId} (${roles}):`, value)
 }
 
 // Only an 'admin' or 'host' can update the state
@@ -913,20 +821,20 @@ roles (like `'moderator'` or `'dj'`), revoke those roles later, or permanently
 ban a disruptive user from the room:
 
 ```js
-// Promote a peer to 'moderator' for 1 hour (and let them promote others too)
-await room.grantRole(peerId, 'moderator', {
+// Promote a user to 'moderator' for 1 hour (and let them promote others too)
+await room.grantRole(userId, 'moderator', {
   canDelegate: true,
   expiresInMs: 60 * 60 * 1000
 })
 
-// Check which verified roles a peer currently has
-console.log(room.getPeerRoles(peerId)) // => ['moderator']
+// Check which verified roles a user currently has
+console.log(room.getPeerRoles(userId)) // => ['moderator']
 
-// Remove the 'moderator' role from a peer
-await room.revokeRole(peerId, 'moderator')
+// Remove the 'moderator' role from a user
+await room.revokeRole(userId, 'moderator')
 
-// Kick and ban a disruptive peer from the room
-await room.banPeer(maliciousPeerId, {reason: 'spam'})
+// Kick and ban a disruptive user from the room
+await room.banPeer(maliciousUserId, {reason: 'spam'})
 ```
 
 <details>
@@ -968,12 +876,110 @@ await room.banPeer(maliciousPeerId, {reason: 'spam'})
 
 </details>
 
+### Scalable topologies
+
+Normally in WebRTC, every browser in a room opens a direct connection to every
+other browser. That works great for small groups, but once a room grows past a
+dozen people—like a busy game lobby, a collaborative canvas with 50 cursors, or
+a live watch party—maintaining that many connections at once can slow down or
+overwhelm a user's browser.
+
+**Out of the box, Trystero handles this for you automatically.** By default,
+rooms use `topology: 'auto'`:
+
+- When a room is small (`12` peers or fewer), everyone connects directly to
+  everyone else for the lowest possible latency.
+- If more people join, Trystero automatically switches the room to a scalable
+  relay network where each browser only maintains a handful of direct
+  connections (6 by default) and passes messages and media streams along to the
+  rest of the room.
+
+All of your code (`makeAction`, `makeState`, `addStream`, `addTrack`, `ping`,
+`onUserJoin`, `onUserLeave`, and `getUsers()`) works the exact same way no
+matter how many people are in the room or whether two users are connected
+directly or through other peers.
+
+If you want to customize how peers connect for your specific app, pass a
+`topology` option to `joinRoom()`:
+
+- `'auto'` _(default)_ – Best for most apps. Uses direct connections for small
+  groups and automatically scales up when a room exceeds `autoThreshold`
+  (default: `12` peers).
+- `'mesh'` – Everyone always connects directly to everyone else. Useful when
+  building a small, latency-critical app (like a 4-player fighting game) where
+  you never want messages relayed through other peers.
+- `'small-world'` – Always uses the scalable relay network, even in small rooms.
+  Useful when building a massive multiplayer world or public town square where
+  you want every user's connection count capped from the start.
+- `'tree'` – Organizes peers into a branching broadcast tree. Ideal when one or
+  a few hosts are streaming video, audio, or live updates to a large audience
+  (like a webinar, live DJ set, or stage presentation).
+
+```js
+// Example: a live stage app where a presenter streams video to a large audience
+const room = joinRoom(
+  {
+    appId: 'live-stage',
+    topology: 'tree'
+  },
+  'main-hall'
+)
+```
+
+You can also fine-tune connection limits by passing an object:
+
+```js
+const room = joinRoom(
+  {
+    appId: 'massive-canvas',
+    topology: {
+      mode: 'auto',
+      autoThreshold: 12, // switch to 'small-world' above 12 peers
+      maxPeers: 6 // max direct WebRTC connections per browser
+    }
+  },
+  'lobby-1'
+)
+```
+
+At any time, you can call `room.getTopology()` to see which mode is active,
+which peers are connected directly vs. through relays, and how data and media
+streams are being routed.
+
+<details>
+  <summary>How it works behind the scenes</summary>
+
+- **Small-world overlay (`'small-world'`)**: Peers arrange themselves by ID on a
+  bounded-degree circulant ring with deterministic multi-scale logarithmic
+  chords, keeping the network diameter to $O(\log N)$ hops even as rooms grow to
+  hundreds of peers. Broadcasts use a Plumtree-style epidemic push tree combined
+  with lazy `ihave`/`iwant` gossip repair so messages reach every peer reliably
+  without flooding redundant copies. Point-to-point messages (`target`) route
+  along shortest paths with disjoint backup next-hops for instant failover.
+- **Broadcast trees (`'tree'` and media streaming)**: In `'tree'` mode—and
+  whenever any peer calls `addStream()` in `'small-world'` mode—Trystero builds
+  a deterministic $k$-ary application-layer multicast (ALM) tree rooted at the
+  broadcaster. Each internal peer receives the stream once and clones the
+  `MediaStreamTrack`s to its downstream children (`fanout: 3` by default), so a
+  broadcaster can stream audio or video to dozens of viewers while only
+  uploading to 3 peers. If an upstream peer disconnects, downstream viewers
+  automatically reparent to a healthy branch.
+- **End-to-end security across hops**: When messages travel through intermediate
+  peers, you don't have to trust the relays. Every peer automatically generates
+  an ephemeral WebCrypto signing keypair (ECDSA P-256) and encryption keypair
+  (ECDH P-256). Link-state routing announcements and broadcasts are digitally
+  signed and TOFU-pinned (Trust On First Use) so intermediate peers cannot forge
+  or alter messages, and targeted messages (`target`) are end-to-end encrypted
+  with AES-GCM so intermediate peers cannot read them.
+
+</details>
+
 ### React hooks
 
 Trystero functions are idempotent so they already work out of the box as React
 hooks.
 
-Here's a simple example component where each peer syncs their favorite color to
+Here's a simple example component where each user syncs their favorite color to
 everyone else:
 
 ```jsx
@@ -986,19 +992,19 @@ export default function App({roomId}) {
   const room = joinRoom(trysteroConfig, roomId)
   const colorAction = room.makeAction('color')
   const [myColor, setMyColor] = useState('#c0ffee')
-  const [peerColors, setPeerColors] = useState({})
+  const [userColors, setUserColors] = useState({})
 
-  // whenever new peers join the room, send my color to them:
-  room.onPeerJoin = ({peerId}) => colorAction.send(myColor, {target: peerId})
+  // whenever new users join the room, send my color to them:
+  room.onUserJoin = ({userId}) => colorAction.send(myColor, {target: userId})
 
-  // listen for peers sending their colors and update the state accordingly:
-  colorAction.onMessage = (color, {peerId}) =>
-    setPeerColors(peerColors => ({...peerColors, [peerId]: color}))
+  // listen for users sending their colors and update the state accordingly:
+  colorAction.onMessage = (color, {userId}) =>
+    setUserColors(userColors => ({...userColors, [userId]: color}))
 
   const updateColor = e => {
     const {value} = e.target
 
-    // when updating my own color, broadcast it to all peers:
+    // when updating my own color, broadcast it to all users:
     colorAction.send(value)
     setMyColor(value)
   }
@@ -1010,11 +1016,11 @@ export default function App({roomId}) {
       <h2>My color:</h2>
       <input type="color" value={myColor} onChange={updateColor} />
 
-      <h2>Peer colors:</h2>
+      <h2>User colors:</h2>
       <ul>
-        {Object.entries(peerColors).map(([peerId, color]) => (
-          <li key={peerId} style={{backgroundColor: color}}>
-            {peerId}: {color}
+        {Object.entries(userColors).map(([userId, color]) => (
+          <li key={userId} style={{backgroundColor: color}}>
+            {userId}: {color}
           </li>
         ))}
       </ul>
@@ -1307,9 +1313,8 @@ the same namespace will return the same room instance.
     (`left: 0`) without offers, which avoids passive-to-passive discovery while
     keeping tracker load low.
 
-  - `identity` - **(optional)** Controls how the local user's persistent
-    43-character `userId` is loaded and saved (see
-    [Persistent user identity and multi-tab presence](#persistent-user-identity-and-multi-tab-presence)):
+  - `identity` - **(optional)** Controls how the local user's `userId` is
+    loaded and saved (see [User identity](#user-identity)):
     - `'session'` _(default in browsers)_ - Persists the user identity in
       `sessionStorage` scoped to `appId` so page reloads in the same tab keep
       the same `userId`.
@@ -1322,23 +1327,6 @@ the same namespace will return the same room instance.
       Supplies a pre-created `UserIdentity` (from `createUserIdentity()` or
       `importUserIdentity()`), an exported `trystero_uk_...` key string, a
       P-256 private `JsonWebKey`, or a custom sync/async loader function.
-
-  - `topology` - **(optional)** How peers connect and route data as the room
-    grows (see [Scalable topologies](#scalable-topologies)): `'auto'` (default),
-    `'mesh'`, `'small-world'`, `'tree'`, or a `TopologyConfig` object:
-    - `mode` - `'auto' | 'mesh' | 'small-world' | 'tree'` (default: `'auto'`).
-    - `maxPeers` - Maximum target direct WebRTC connections per browser in
-      scalable modes (default: `6`, or `fanout + 3` in `'tree'` mode).
-    - `minPeers` - Minimum direct connections maintained before closing extra
-      links (default: `3`).
-    - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
-      `'small-world'` (default: `12`).
-    - `fanout` - Number of downstream peers each node forwards to in `'tree'`
-      mode and media broadcast trees (default: `3`).
-    - `redundancy` - Number of separate paths used when routing messages across
-      hops (default: `1`).
-    - `maxHops` - Maximum number of hops a relayed packet can travel (default:
-      `8`).
 
   - `admin` - **(optional)** Configures room admins and roles (see
     [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)):
@@ -1357,6 +1345,23 @@ the same namespace will return the same room instance.
       - `signalingProofs` - Boolean (default: `true` for admin-backed rooms)
         controlling whether signed role certificates and ban records are
         included in initial discovery announcements.
+
+  - `topology` - **(optional)** How peers connect and route data as the room
+    grows (see [Scalable topologies](#scalable-topologies)): `'auto'` (default),
+    `'mesh'`, `'small-world'`, `'tree'`, or a `TopologyConfig` object:
+    - `mode` - `'auto' | 'mesh' | 'small-world' | 'tree'` (default: `'auto'`).
+    - `maxPeers` - Maximum target direct WebRTC connections per browser in
+      scalable modes (default: `6`, or `fanout + 3` in `'tree'` mode).
+    - `minPeers` - Minimum direct connections maintained before closing extra
+      links (default: `3`).
+    - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
+      `'small-world'` (default: `12`).
+    - `fanout` - Number of downstream peers each node forwards to in `'tree'`
+      mode and media broadcast trees (default: `3`).
+    - `redundancy` - Number of separate paths used when routing messages across
+      hops (default: `1`).
+    - `maxHops` - Maximum number of hops a relayed packet can travel (default:
+      `8`).
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
     Object containing strategy-specific relay settings:
@@ -1444,11 +1449,20 @@ Returns an object with the following methods:
   this room, where `peerId` is the 20-character Base62 endpoint ID (`selfId`)
   and `userId` is the 43-character Base64url user identity thumbprint.
 
+- ### `getUsers()`
+
+  Returns a map of `UserInfo` objects (`{peerIds, roles}`) for the remote users
+  present in the room (excluding the local user), keyed by `userId`:
+  - `peerIds` - Array of active `peerId`s currently connected for that user
+    (e.g. when a user has multiple tabs open in the same room).
+  - `roles` - Array of verified roles currently held by that user.
+
 - ### `getPeers()`
 
   Returns a map of `PeerInfo` objects
-  (`{userId, connection, direct, hops, roles}`) for the peers present in the
-  room (not including the local endpoint), keyed by `peerId`:
+  (`{userId, connection, direct, hops, roles}`) for the individual peer
+  connections present in the room (not including the local endpoint), keyed by
+  `peerId`:
   - `userId` - The 43-character Base64url user ID that owns this endpoint.
   - `connection` - The underlying
     [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)
@@ -1459,14 +1473,6 @@ Returns an object with the following methods:
   - `hops` - Hop distance (`1` for direct peers, `>= 2` for multi-hop overlay
     peers).
   - `roles` - Array of verified roles currently held by that peer.
-
-- ### `getUsers()`
-
-  Returns a map of `UserInfo` objects (`{peerIds, roles}`) for the remote users
-  present in the room (excluding the local user), keyed by `userId`:
-  - `peerIds` - Array of active `peerId`s currently connected for that user
-    (e.g. when a user has multiple tabs open in the same room).
-  - `roles` - Array of verified roles currently held by that user.
 
 - ### `isPassive()`
 
@@ -1613,134 +1619,132 @@ Returns an object with the following methods:
   - `options.metadata` - **(optional)** Additional metadata (any serializable
     type) to be sent with the replacement track.
 
-- ### `onPeerJoin`
-
-  A callback property that will be called when a peer endpoint joins the room.
-  Assigning a new function replaces the previous handler; assigning `null`
-  clears it. Existing active peers are immediately replayed to a newly assigned
-  handler.
-  - `callback({peerId, userId, roles})` - Function to run whenever a peer
-    endpoint joins, called with the peer's endpoint `peerId`, persistent
-    `userId`, and verified `roles`.
-
-  Example:
-
-  ```js
-  room.onPeerJoin = ({peerId, userId}) =>
-    console.log(`${peerId} (${userId}) joined`)
-  ```
-
-- ### `onPeerLeave`
-
-  A callback property that will be called when a peer endpoint leaves the room.
-  Assigning a new function replaces the previous handler; assigning `null`
-  clears it.
-  - `callback({peerId, userId})` - Function to run whenever a peer endpoint
-    leaves, called with the peer's `peerId` and `userId`.
-
-  Example:
-
-  ```js
-  room.onPeerLeave = ({peerId, userId}) =>
-    console.log(`${peerId} (${userId}) left`)
-  ```
-
 - ### `onUserJoin`
 
-  A callback property that will be called when a remote user's **first**
-  instance joins the room (does not fire again if that same `userId` opens a
-  second tab while already in the room). Assigning a new function replaces the
-  previous handler and replays currently active remote users; assigning `null`
-  clears it.
+  A callback property that will be called when a remote user joins the room
+  (fires on their **first** connected instance, and does not fire again if that
+  same `userId` opens a second tab while already in the room). Assigning a new
+  function replaces the previous handler and replays currently active remote
+  users; assigning `null` clears it.
   - `callback({userId, peerId, roles})` - Called with the user's `userId`, the
     `peerId` of their joining instance, and their verified `roles`.
 
   Example:
 
   ```js
-  room.onUserJoin = ({userId}) => addParticipant(userId)
+  room.onUserJoin = ({userId}) => console.log(`${userId} joined`)
   ```
 
 - ### `onUserLeave`
 
-  A callback property that will be called when a remote user's **last**
-  remaining instance leaves the room (does not fire if the user still has
-  another tab open in the room). Assigning a new function replaces the previous
-  handler; assigning `null` clears it.
+  A callback property that will be called when a remote user leaves the room
+  (fires when their **last** remaining instance leaves, and does not fire if the
+  user still has another tab open in the room). Assigning a new function
+  replaces the previous handler; assigning `null` clears it.
   - `callback({userId, peerId})` - Called with the departing user's `userId` and
     the `peerId` of their last instance.
 
   Example:
 
   ```js
-  room.onUserLeave = ({userId}) => removeParticipant(userId)
+  room.onUserLeave = ({userId}) => console.log(`${userId} left`)
+  ```
+
+- ### `onPeerJoin`
+
+  A lower-level callback property that will be called whenever an individual
+  peer connection (tab/device) joins the room. Assigning a new function replaces
+  the previous handler; assigning `null` clears it. Existing active peer
+  connections are immediately replayed to a newly assigned handler.
+  - `callback({peerId, userId, roles})` - Function to run whenever a peer
+    endpoint joins, called with the endpoint's `peerId`, `userId`, and verified
+    `roles`.
+
+  Example:
+
+  ```js
+  room.onPeerJoin = ({peerId}) => console.log(`tab ${peerId} connected`)
+  ```
+
+- ### `onPeerLeave`
+
+  A lower-level callback property that will be called whenever an individual
+  peer connection (tab/device) leaves the room. Assigning a new function
+  replaces the previous handler; assigning `null` clears it.
+  - `callback({peerId, userId})` - Function to run whenever a peer endpoint
+    leaves, called with the endpoint's `peerId` and `userId`.
+
+  Example:
+
+  ```js
+  room.onPeerLeave = ({peerId}) => console.log(`tab ${peerId} disconnected`)
   ```
 
 - ### `onPeerStream`
 
-  A callback property that will be called when a peer sends a media stream.
+  A callback property that will be called when a user sends a media stream.
   Assigning a new function replaces the previous handler; assigning `null`
   clears it.
-  - `callback(stream, {peerId, userId, metadata})` - Function to run whenever a
-    peer sends a media stream, called with the `MediaStream` first and a context
-    object containing `peerId`, `userId`, and optional `metadata` (see
+  - `callback(stream, {userId, peerId, metadata})` - Function to run whenever a
+    user sends a media stream, called with the `MediaStream` first and a context
+    object containing `userId`, `peerId`, and optional `metadata` (see
     `addStream()` above for details).
 
   Example:
 
   ```js
-  room.onPeerStream = (stream, {peerId, userId, metadata}) =>
-    console.log(`got stream from ${peerId} (${userId})`, stream, metadata)
+  room.onPeerStream = (stream, {userId, metadata}) =>
+    console.log(`got stream from ${userId}`, stream, metadata)
   ```
 
 - ### `onPeerTrack`
 
-  A callback property that will be called when a peer sends a media track.
+  A callback property that will be called when a user sends a media track.
   Assigning a new function replaces the previous handler; assigning `null`
   clears it.
-  - `callback(track, stream, {peerId, userId, metadata})` - Function to run
-    whenever a peer sends a media track, called with the `MediaStreamTrack`,
-    attached `MediaStream`, and a context object containing `peerId`, `userId`,
+  - `callback(track, stream, {userId, peerId, metadata})` - Function to run
+    whenever a user sends a media track, called with the `MediaStreamTrack`,
+    attached `MediaStream`, and a context object containing `userId`, `peerId`,
     and optional `metadata` (see `addTrack()` above for details).
 
   Example:
 
   ```js
-  room.onPeerTrack = (track, stream, {peerId, userId, metadata}) =>
-    console.log(`got track from ${peerId} (${userId})`, track, metadata)
+  room.onPeerTrack = (track, stream, {userId, metadata}) =>
+    console.log(`got track from ${userId}`, track, metadata)
   ```
 
 - ### `makeAction(actionId, [config])`
 
   Listen for and send custom data actions.
-  - `actionId` - A string to register this action consistently among all peers.
+  - `actionId` - A string to register this action consistently among all users.
 
   If `config.kind` is omitted, the action is a one-way message action. Passing
   `kind: 'request'` creates a request/response action.
 
   Message actions expose:
-  - `send(data, [options])` - Sends data to peers and resolves when local
-    sending is complete. `options.target` accepts a `peerId`, a `userId` (which
-    fans out to all active tabs of that user), or an array of either. To cancel
+  - `send(data, [options])` - Sends data to users and resolves when local
+    sending is complete. `options.target` accepts a `userId` (which fans out to
+    all active tabs of that user), a `peerId`, or an array of either. To cancel
     an in-progress send, pass an `AbortController`'s `signal` in the options
     (e.g. `send(data, {signal: controller.signal})`) and call
     `controller.abort()`.
-  - `onMessage` - Nullable callback property `(data, {peerId, userId, metadata, roles}) => void` for received messages.
-  - `onReceiveProgress` - Nullable callback property `(percent, {peerId, userId, metadata}) => void` for inbound progress.
+  - `onMessage` - Nullable callback property `(data, {userId, peerId, metadata, roles}) => void` for received messages.
+  - `onReceiveProgress` - Nullable callback property `(percent, {userId, peerId, metadata}) => void` for inbound progress.
 
   Request actions expose:
-  - `request(data, options)` - Sends to one peer (`options.target` can be a
-    `peerId` or `userId`; when given a `userId`, it deterministically routes to
-    one active tab of that user, preferring a direct 1-hop connection and
+  - `request(data, options)` - Sends to one user or tab (`options.target` can be
+    a `userId` or `peerId`; when given a `userId`, it deterministically routes
+    to one active tab of that user, preferring a direct 1-hop connection and
     breaking ties by lowest `peerId`) and resolves with its response.
-  - `requestMany(data, options)` - Sends to many peers (`options.targets`
-    accepts `peerId`s and/or `userId`s) and resolves with peer-labeled settled
-    results (`{peerId, userId, status, value | error}`).
-  - `onRequest` - Nullable callback property `(data, {peerId, userId, metadata, signal, roles}) => response` that returns the response.
-  - `onReceiveProgress` - Nullable callback property `(percent, {peerId, userId, metadata}) => void` for inbound progress.
+  - `requestMany(data, options)` - Sends to many users or tabs (`options.targets`
+    accepts `userId`s and/or `peerId`s) and resolves with labeled settled
+    results (`{userId, peerId, status, value | error}`).
+  - `onRequest` - Nullable callback property `(data, {userId, peerId, metadata, signal, roles}) => response` that returns the response.
+  - `onReceiveProgress` - Nullable callback property `(percent, {userId, peerId, metadata}) => void` for inbound progress.
 
   Both kinds expose `onReceive`, a nullable callback accepting
-  `{byteLength, peerId, userId, metadata, kind, signal, roles}` and returning a
+  `{byteLength, userId, peerId, metadata, kind, signal, roles}` and returning a
   boolean or a promise of a boolean. It can also be provided in `config`. `kind`
   is `'message'`, `'request'`, or `'response'`; request actions apply it to both
   requests and responses. Responses have no metadata. See
@@ -1748,14 +1752,14 @@ Returns an object with the following methods:
 
   Pass `config.authority` (`'admin'`, a custom role string, or an array of role
   strings) to restrict who can send or make requests on this action. When set,
-  messages from unauthorized peers are rejected and the verified sender's roles
-  are passed as `roles` in the `onMessage` / `onRequest` context
-  (`{peerId, userId, metadata, roles}`).
+  messages from unauthorized senders are rejected and the verified sender's
+  roles are passed as `roles` in the `onMessage` / `onRequest` context
+  (`{userId, peerId, metadata, roles}`).
 
   Send options use `target`, `metadata`, `onProgress`, and `signal`. Request
   options use `target`, `metadata`, `timeoutMs`, `onProgress`, and `signal`.
-  `requestMany()` uses `targets` plus optional `onResult` for each peer result
-  as it arrives. Request timeouts cover approval, sending, and the response.
+  `requestMany()` uses `targets` plus optional `onResult` for each result as it
+  arrives. Request timeouts cover approval, sending, and the response.
 
   Example:
 
@@ -1764,28 +1768,28 @@ Returns an object with the following methods:
 
   window.addEventListener('mousemove', e => cursor.send([e.clientX, e.clientY]))
 
-  cursor.onMessage = ([x, y], {peerId, userId}) => {
-    const peerCursor = cursorMap[peerId]
-    peerCursor.style.left = x + 'px'
-    peerCursor.style.top = y + 'px'
+  cursor.onMessage = ([x, y], {userId}) => {
+    const userCursor = cursorMap[userId]
+    userCursor.style.left = x + 'px'
+    userCursor.style.top = y + 'px'
   }
   ```
 
 - ### `ping(targetId)`
 
-  Takes a `peerId` or `userId` and returns a promise that resolves to the
+  Takes a `userId` or `peerId` and returns a promise that resolves to the
   milliseconds the round-trip took. When given a `userId`, it deterministically
   pings one active endpoint of that user (matching `request()` target
   selection).
-  - `targetId` - `peerId` or `userId` string of the target peer/user.
+  - `targetId` - `userId` or `peerId` string of the target user or tab.
 
   Example:
 
   ```js
   // log round-trip time every 2 seconds
-  room.onPeerJoin = ({peerId}) =>
+  room.onUserJoin = ({userId}) =>
     setInterval(
-      async () => console.log(`took ${await room.ping(peerId)}ms`),
+      async () => console.log(`took ${await room.ping(userId)}ms`),
       2000
     )
   ```
