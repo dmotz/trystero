@@ -377,9 +377,9 @@ another user's ID.
 
 ### Semi-ephemeral by default, persistent with a one-line change
 
-By default in the browser, `userId` is **semi-ephemeral** (`identity: 'session'`):
-if a user refreshes the page, they come right back with the same `userId`, and
-closing the tab starts fresh next time.
+By default in the browser, `userId` is **semi-ephemeral**
+(`identity: 'session'`): if a user refreshes the page, they come right back with
+the same `userId`, and closing the tab starts fresh next time.
 
 If you want users to keep the same `userId` across all open tabs and future
 visits on that device, set `identity: 'local'`:
@@ -407,12 +407,12 @@ const room = joinRoom(
 )
 ```
 
-| `identity` value | `userId` lifetime |
-| --- | --- |
-| `'session'` _(browser default)_ | Reused across page reloads in the same tab (`sessionStorage`), reset when the tab closes. |
-| `'local'` | Reused across all open tabs and future visits on the same device (`IndexedDB` / `localStorage`) until browser storage is cleared. |
-| `'none'` _(non-browser default)_ | Ephemeral for the current runtime; a reload or process restart generates a new `userId`. |
-| Custom (`UserIdentity`, `userKey`, or loader) | Controlled by your app (e.g. synced from your backend or loaded from disk in Node/Bun/Deno). |
+| `identity` value                              | `userId` lifetime                                                                                                                 |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `'session'` _(browser default)_               | Reused across page reloads in the same tab (`sessionStorage`), reset when the tab closes.                                         |
+| `'local'`                                     | Reused across all open tabs and future visits on the same device (`IndexedDB` / `localStorage`) until browser storage is cleared. |
+| `'none'` _(non-browser default)_              | Ephemeral for the current runtime; a reload or process restart generates a new `userId`.                                          |
+| Custom (`UserIdentity`, `userKey`, or loader) | Controlled by your app (e.g. synced from your backend or loaded from disk in Node/Bun/Deno).                                      |
 
 ### Multiple connections for a single user (`userId` vs `peerId`)
 
@@ -427,7 +427,8 @@ For most apps, you only need **`userId`**:
 
 - `room.onUserJoin` fires once when a user's first tab joins, and
   `room.onUserLeave` only fires when their last remaining tab leaves.
-- `room.getUsers()` returns the active users in the room (`{ [userId]: { peerIds, roles } }`).
+- `room.getUsers()` returns the active users in the room
+  (`{ [userId]: { peerIds, roles } }`).
 - Passing a `userId` as `target` in `send()` or `addStream()` automatically
   **fans out** to every open tab owned by that user, while `request()` and
   `ping()` automatically route to a single tab.
@@ -440,19 +441,19 @@ dm.send('Hey Alice!', {target: aliceUserId})
 const profile = await getProfile.request(null, {target: aliceUserId})
 ```
 
-When you _do_ want to distinguish or target individual tabs—for example,
-sending a message only to the tab that requested it, showing a multi-device
-indicator, or tracking individual WebRTC connections—every event also provides
-`peerId`, `room.onPeerJoin` and `room.onPeerLeave` fire for every individual tab
+When you _do_ want to distinguish or target individual tabs—for example, sending
+a message only to the tab that requested it, showing a multi-device indicator,
+or tracking individual WebRTC connections—every event also provides `peerId`,
+`room.onPeerJoin` and `room.onPeerLeave` fire for every individual tab
 connection, and any `target` option accepts a `peerId` to address that specific
 tab alone:
 
-| Connection event | `onUserJoin` / `onUserLeave` | `onPeerJoin` / `onPeerLeave` |
-| --- | --- | --- |
-| Alice's first tab joins | `onUserJoin` (`{userId}`) | `onPeerJoin` (`{peerId}`) |
-| Alice's second tab joins | _None_ | `onPeerJoin` (`{peerId}`) |
-| One of Alice's two tabs leaves | _None_ | `onPeerLeave` (`{peerId}`) |
-| Alice's last tab leaves | `onUserLeave` (`{userId}`) | `onPeerLeave` (`{peerId}`) |
+| Connection event               | `onUserJoin` / `onUserLeave` | `onPeerJoin` / `onPeerLeave` |
+| ------------------------------ | ---------------------------- | ---------------------------- |
+| Alice's first tab joins        | `onUserJoin` (`{userId}`)    | `onPeerJoin` (`{peerId}`)    |
+| Alice's second tab joins       | _None_                       | `onPeerJoin` (`{peerId}`)    |
+| One of Alice's two tabs leaves | _None_                       | `onPeerLeave` (`{peerId}`)   |
+| Alice's last tab leaves        | `onUserLeave` (`{userId}`)   | `onPeerLeave` (`{peerId}`)   |
 
 <details>
   <summary>How it works behind the scenes</summary>
@@ -466,10 +467,10 @@ tab alone:
 - **Connection-bound handshake**: Before any peer or user join event fires, both
   sides exchange fresh cryptographic nonces and sign a transcript binding the
   `appId`, `roomId`, both `peerId`s, both `userId`s, and the WebRTC connection's
-  DTLS certificate fingerprints ([RFC 8827](https://www.rfc-editor.org/rfc/rfc8827.html)).
-  This prevents replay attacks and stops a man-in-the-middle on the signaling
-  channel from forwarding someone else's identity proof onto a different
-  connection.
+  DTLS certificate fingerprints
+  ([RFC 8827](https://www.rfc-editor.org/rfc/rfc8827.html)). This prevents
+  replay attacks and stops a man-in-the-middle on the signaling channel from
+  forwarding someone else's identity proof onto a different connection.
 - **Atomic browser storage**: In `identity: 'local'` mode, Trystero coordinates
   first-time key creation across concurrent tabs using `navigator.locks` and
   atomic `IndexedDB` transactions storing a non-extractable WebCrypto
@@ -629,8 +630,8 @@ When a room is already at capacity:
 - Any extra user who tries to join receives `error: 'room full'` in
   `onJoinError` and is automatically disconnected from the room.
 - Because `limit` counts unique `userId`s rather than raw tabs, an admitted
-  player who refreshes the page or opens a second tab (with `'session'` or
-  `'local'` identity) shares their existing seat and is not turned away.
+  player who refreshes the page shares their existing seat. Use `'local'`
+  identity or an explicitly shared identity to share that seat across tabs.
 - Existing players in the room are never interrupted—`onPeerJoin` and
   `onPeerLeave` won't fire for someone who was turned away at the door.
 - If one of the current players leaves (`room.leave()` or closes their last
@@ -833,9 +834,13 @@ console.log(room.getPeerRoles(userId)) // => ['moderator']
 // Remove the 'moderator' role from a user
 await room.revokeRole(userId, 'moderator')
 
-// Kick and ban a disruptive user from the room
+// As an admin, kick and ban a disruptive user from the room
 await room.banPeer(maliciousUserId, {reason: 'spam'})
 ```
+
+Delegators may revoke only roles they still hold. Revoked or banned admins
+cannot issue new moderation commands. Only the root authority can issue root
+admin certificates.
 
 <details>
   <summary>How it works behind the scenes</summary>
@@ -899,6 +904,13 @@ All of your code (`makeAction`, `makeState`, `addStream`, `addTrack`, `ping`,
 matter how many people are in the room or whether two users are connected
 directly or through other peers.
 
+Broadcast media travels through the relay tree. Targeted media establishes a
+direct WebRTC connection to each selected endpoint, so other participants do not
+receive or relay its audio/video. These connections can exceed the overlay's
+`maxPeers` target and remain available until the peer or room disconnects. Await
+the promises returned by `addStream`, `addTrack`, and `replaceTrack` to handle
+connection failures.
+
 If you want to customize how peers connect for your specific app, pass a
 `topology` option to `joinRoom()`:
 
@@ -935,7 +947,7 @@ const room = joinRoom(
     topology: {
       mode: 'auto',
       autoThreshold: 12, // switch to 'small-world' above 12 peers
-      maxPeers: 6 // max direct WebRTC connections per browser
+      maxPeers: 6 // target degree for the routing overlay
     }
   },
   'lobby-1'
@@ -1313,20 +1325,20 @@ the same namespace will return the same room instance.
     (`left: 0`) without offers, which avoids passive-to-passive discovery while
     keeping tracker load low.
 
-  - `identity` - **(optional)** Controls how the local user's `userId` is
-    loaded and saved (see [User identity](#user-identity)):
+  - `identity` - **(optional)** Controls how the local user's `userId` is loaded
+    and saved (see [User identity](#user-identity)):
     - `'session'` _(default in browsers)_ - Persists the user identity in
       `sessionStorage` scoped to `appId` so page reloads in the same tab keep
       the same `userId`.
     - `'local'` - Persists the user identity across tabs and future visits on
       the same device using IndexedDB (with a non-extractable WebCrypto
       `CryptoKey`) and `localStorage` fallback.
-    - `'none'` _(default outside browsers)_ - Generates a fresh runtime
-      `userId` that is discarded when the page reloads or process exits.
+    - `'none'` _(default outside browsers)_ - Generates a fresh runtime `userId`
+      that is discarded when the page reloads or process exits.
     - `UserIdentity | string | JsonWebKey | ((context: {appId: string, roomId: string}) => UserIdentity | string | JsonWebKey | Promise<...>)` -
       Supplies a pre-created `UserIdentity` (from `createUserIdentity()` or
-      `importUserIdentity()`), an exported `trystero_uk_...` key string, a
-      P-256 private `JsonWebKey`, or a custom sync/async loader function.
+      `importUserIdentity()`), an exported `trystero_uk_...` key string, a P-256
+      private `JsonWebKey`, or a custom sync/async loader function.
 
   - `admin` - **(optional)** Configures room admins and roles (see
     [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)):
@@ -1729,19 +1741,24 @@ Returns an object with the following methods:
     an in-progress send, pass an `AbortController`'s `signal` in the options
     (e.g. `send(data, {signal: controller.signal})`) and call
     `controller.abort()`.
-  - `onMessage` - Nullable callback property `(data, {userId, peerId, metadata, roles}) => void` for received messages.
-  - `onReceiveProgress` - Nullable callback property `(percent, {userId, peerId, metadata}) => void` for inbound progress.
+  - `onMessage` - Nullable callback property
+    `(data, {userId, peerId, metadata, roles}) => void` for received messages.
+  - `onReceiveProgress` - Nullable callback property
+    `(percent, {userId, peerId, metadata}) => void` for inbound progress.
 
   Request actions expose:
   - `request(data, options)` - Sends to one user or tab (`options.target` can be
     a `userId` or `peerId`; when given a `userId`, it deterministically routes
     to one active tab of that user, preferring a direct 1-hop connection and
     breaking ties by lowest `peerId`) and resolves with its response.
-  - `requestMany(data, options)` - Sends to many users or tabs (`options.targets`
-    accepts `userId`s and/or `peerId`s) and resolves with labeled settled
-    results (`{userId, peerId, status, value | error}`).
-  - `onRequest` - Nullable callback property `(data, {userId, peerId, metadata, signal, roles}) => response` that returns the response.
-  - `onReceiveProgress` - Nullable callback property `(percent, {userId, peerId, metadata}) => void` for inbound progress.
+  - `requestMany(data, options)` - Sends to many users or tabs
+    (`options.targets` accepts `userId`s and/or `peerId`s) and resolves with
+    labeled settled results (`{userId, peerId, status, value | error}`).
+  - `onRequest` - Nullable callback property
+    `(data, {userId, peerId, metadata, signal, roles}) => response` that returns
+    the response.
+  - `onReceiveProgress` - Nullable callback property
+    `(percent, {userId, peerId, metadata}) => void` for inbound progress.
 
   Both kinds expose `onReceive`, a nullable callback accepting
   `{byteLength, userId, peerId, metadata, kind, signal, roles}` and returning a
@@ -1818,13 +1835,14 @@ non-extractable (e.g. when backed by IndexedDB WebCrypto storage).
 
 ### `derivePeerId(publicKey)`
 
-Deterministically derives the 20-character Base62 `peerId` (`sha256(canonicalPubJwk) mod 62²⁰`)
-from a public key string or `JsonWebKey`.
+Deterministically derives the 20-character Base62 `peerId`
+(`sha256(canonicalPubJwk) mod 62²⁰`) from a public key string or `JsonWebKey`.
 
 ### `deriveUserId(publicKey)`
 
-Deterministically derives the 43-character Base64url `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)
-JWK thumbprint) from a public key string or `JsonWebKey`.
+Deterministically derives the 43-character Base64url `userId`
+([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) JWK thumbprint) from a
+public key string or `JsonWebKey`.
 
 ### `verifyPeerIdKey(peerId, publicKey)`
 

@@ -110,7 +110,7 @@ type ActionManagerDeps = {
   getPeerRoles?: (peerId: string) => string[]
   getPeerUserId?: (peerId: string) => string
   resolveSendTarget?: (target?: TargetPeers) => TargetPeers
-  resolveRequestTarget?: (target: string) => string
+  resolveRequestTarget?: (target: string) => string | undefined
   onUnauthorizedAction?: (namespace: string, peerId: string) => void
 }
 
@@ -650,7 +650,7 @@ export const createActionManager = ({
       throwIfAborted(signal)
 
       const resolvedTarget = resolveRequestTarget
-        ? resolveRequestTarget(target)
+        ? (resolveRequestTarget(target) ?? target)
         : target
 
       if (!getPeer(resolvedTarget, false)) {

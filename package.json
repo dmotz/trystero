@@ -1,6 +1,6 @@
 {
   "name": "trystero-monorepo",
-  "version": "0.26.0",
+  "version": "0.27.0-beta1",
   "private": true,
   "keywords": [
     "bittorrent",
@@ -49,8 +49,8 @@
     "format:write": "oxfmt .",
     "find-proxy": "jiti scripts/find-proxy.ts",
     "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "publish": "pnpm login && pnpm build && pnpm copy-readmes-for-publish && pnpm -r publish --no-git-checks --access public"
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p tsconfig.json --noEmit",
+    "publish": "pnpm login && pnpm build && pnpm copy-readmes-for-publish && pnpm -r publish --no-git-checks --access public --tag \"$(node -p 'JSON.parse(require(\"fs\").readFileSync(\"packages/trystero/package.json\", \"utf8\")).version.includes(\"-\") ? \"beta\" : \"latest\"')\""
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",

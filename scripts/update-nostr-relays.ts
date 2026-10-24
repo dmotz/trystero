@@ -347,7 +347,7 @@ const probeTrystero = async (
                   kind: 'request',
                   onRequest: data => data
                 })
-                room.onPeerJoin = peerId => {
+                room.onPeerJoin = ({peerId}) => {
                   phase = 'waiting for action response'
                   console.log(
                     'relay-probe: peer connected; sending action request'

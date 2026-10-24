@@ -24,7 +24,9 @@ import {
   packOverlayControl,
   unpackOverlayBinary
 } from '../../packages/core/src/overlay.ts'
-import createRoom from '../../packages/core/src/room.ts'
+import createRoom, {
+  getRoomSignalingBridge
+} from '../../packages/core/src/room.ts'
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
@@ -71,6 +73,7 @@ const createOverlayCluster = async ({
   const leftByPeer = new Map<string, Set<string>>()
   let totalWireFrames = 0
   let totalAddStreamCalls = 0
+  const addedTracks: string[] = []
 
   class InstrumentedPeer extends (media ? LinkedMediaPeer : LinkedPeer) {
     replaceTrackCalls = 0
@@ -87,7 +90,13 @@ const createOverlayCluster = async ({
 
     override addStream(stream: any) {
       totalAddStreamCalls++
+      addedTracks.push(...stream.getTracks().map(track => track.id))
       super.addStream(stream)
+    }
+
+    override addTrack(track: any, stream: any) {
+      addedTracks.push(track.id)
+      return super.addTrack(track, stream)
     }
 
     override removeStream(stream: any) {
@@ -254,6 +263,7 @@ const createOverlayCluster = async ({
       pair.peerB.destroy()
     }
     directLinks.clear()
+    await Promise.all([...rooms.values()].map(room => room.leave()))
   }
 
   return {
@@ -261,6 +271,7 @@ const createOverlayCluster = async ({
     activeSet,
     rooms,
     directLinks,
+    addedTracks,
     joinedByPeer,
     leftByPeer,
     connectPair,
@@ -3036,4 +3047,140 @@ void test('PeerInfo in room.getPeers(), PBKDF2 passphrase scoping, cascading del
   p1Remote.destroy()
   p2Local.destroy()
   p2Remote.destroy()
+})
+
+void test('Targeted media stays private for direct and multi-hop recipients', async () => {
+  const cluster = await createOverlayCluster({
+    peerCount: 8,
+    topology: {mode: 'tree', maxPeers: 6, fanout: 2},
+    media: true
+  })
+  try {
+    const source = cluster.rooms.get('peer-0000')!
+    const direct = 'peer-0001'
+    const remote = 'peer-0003'
+    assert.equal(source.getPeers()[direct].direct, true)
+    assert.equal(source.getPeers()[remote].direct, false)
+    const streams: string[] = []
+    const tracks: string[] = []
+    for (const [id, room] of cluster.rooms) {
+      getRoomSignalingBridge(room)!.overlay.setOnTargetsChanged(targets => {
+        for (const targetId of targets) {
+          cluster.connectPair(id, targetId)
+        }
+      })
+      room.onPeerStream = () => streams.push(id)
+      room.onPeerTrack = () => tracks.push(id)
+    }
+    for (const target of [direct, remote]) {
+      streams.length = 0
+      tracks.length = 0
+      const camera = {id: `camera-${target}`}
+      const stream = {id: `private-${target}`, getTracks: () => [camera]}
+      await Promise.all(source.addStream(stream, {target}))
+      await wait(100)
+      assert.deepEqual(
+        streams,
+        [target],
+        'only the requested peer receives a stream'
+      )
+      const audio = {id: `audio-${target}`}
+      await Promise.all(
+        source.addTrack(
+          audio,
+          {id: `audio-stream-${target}`, getTracks: () => [audio]},
+          {target}
+        )
+      )
+      await wait(100)
+      assert.deepEqual(
+        tracks,
+        [target],
+        'only the requested peer receives a track'
+      )
+      assert.equal(source.getPeers()[target].direct, true)
+    }
+  } finally {
+    await cluster.cleanup()
+  }
+})
+
+void test('Removing a broadcast track prevents replay after topology healing', async () => {
+  const cluster = await createOverlayCluster({
+    peerCount: 8,
+    topology: {mode: 'tree', maxPeers: 6, fanout: 2},
+    media: true
+  })
+  try {
+    const source = cluster.rooms.get('peer-0000')!
+    const track = {id: 'removed-camera'}
+    const stream = {id: 'removed-stream', getTracks: () => [track]}
+    await Promise.all(source.addTrack(track, stream))
+    await wait(100)
+    assert.ok(cluster.addedTracks.length >= 7)
+    source.removeTrack(track)
+    await wait(100)
+    cluster.addedTracks.length = 0
+    cluster.dropPeer('peer-0001')
+    await cluster.healCluster()
+    await wait(100)
+    assert.deepEqual(
+      cluster.addedTracks,
+      [],
+      'removed tracks must never be sent again'
+    )
+  } finally {
+    await cluster.cleanup()
+  }
+})
+
+void test('Removing and replacing tracks updates broadcast streams before topology healing', async () => {
+  for (const replace of [false, true]) {
+    const cluster = await createOverlayCluster({
+      peerCount: 8,
+      topology: {mode: 'tree', maxPeers: 6, fanout: 2},
+      media: true
+    })
+    try {
+      const source = cluster.rooms.get('peer-0000')!
+      const camera = {id: 'camera'}
+      const audio = {id: 'audio'}
+      const stream = {id: 'two-track-stream', getTracks: () => [camera, audio]}
+      await Promise.all(source.addStream(stream))
+      await wait(100)
+      let removedTrack = camera
+      if (replace) {
+        removedTrack = {id: 'replacement-camera'}
+        await Promise.all(source.replaceTrack(camera, removedTrack))
+        await wait(100)
+      }
+      source.removeTrack(removedTrack)
+      await wait(100)
+      cluster.addedTracks.length = 0
+      cluster.dropPeer('peer-0001')
+      await cluster.healCluster()
+      await wait(100)
+      assert.ok(
+        cluster.addedTracks.length > 0,
+        'remaining audio must still be relayed'
+      )
+      assert.ok(
+        cluster.addedTracks.every(id => id === 'audio'),
+        `removed camera must not be replayed (replace=${replace}): ${cluster.addedTracks.join(',')}`
+      )
+      source.removeStream(stream)
+      await wait(100)
+      cluster.addedTracks.length = 0
+      cluster.dropPeer('peer-0002')
+      await cluster.healCluster()
+      await wait(100)
+      assert.deepEqual(
+        cluster.addedTracks,
+        [],
+        'removed stream must not be replayed'
+      )
+    } finally {
+      await cluster.cleanup()
+    }
+  }
 })

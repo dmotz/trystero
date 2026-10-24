@@ -1,7 +1,6 @@
 import {parseSelfCertifyingRoomId, resolveRoomAuthority} from './authority'
 import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
 import {
-  getOrCreateEndpointIdentitySync,
   registerTestForcedPeerId,
   resolveUserIdentity,
   validateIdentityConfig

@@ -79,19 +79,19 @@ const isValidDelegatedUserEndpoint = (params: {
 }): boolean =>
   Boolean(
     params.cert.subUserId &&
-      params.signerPubKey &&
-      params.userPubKey &&
-      params.userProof &&
-      verifyPeerIdKey(params.peerId, params.signerPubKey) &&
-      verifyUserEndpointProof({
-        appId: params.appId,
-        roomId: params.roomId,
-        peerId: params.peerId,
-        peerPubJwk: params.signerPubKey,
-        userId: params.cert.subUserId,
-        userPubJwk: params.userPubKey,
-        proof: params.userProof
-      })
+    params.signerPubKey &&
+    params.userPubKey &&
+    params.userProof &&
+    verifyPeerIdKey(params.peerId, params.signerPubKey) &&
+    verifyUserEndpointProof({
+      appId: params.appId,
+      roomId: params.roomId,
+      peerId: params.peerId,
+      peerPubJwk: params.signerPubKey,
+      userId: params.cert.subUserId,
+      userPubJwk: params.userPubKey,
+      proof: params.userProof
+    })
   )
 
 export const computePublicKeyFingerprint = async (
@@ -296,11 +296,8 @@ export const createAdminIdentity = async (options?: {
       const dBytes = bigintTo32Bytes(dScalar)
       const pubJwk = uncompressedBytesToPubJwk(p256.getPublicKey(dBytes, false))
       const privJwk: JsonWebKey = {
-        crv: 'P-256',
-        d: toBase64Url(dBytes),
-        kty: 'EC',
-        x: pubJwk.x,
-        y: pubJwk.y
+        ...pubJwk,
+        d: toBase64Url(dBytes)
       }
       return importIdentityFromPrivateJwk(privJwk)
     })()
@@ -669,7 +666,7 @@ export const verifyRoleCertificateChain = async (
 
   // Otherwise must have a valid parent certificate that has canDelegate: true
   const parent = cert.parentCert
-  if (!parent || !parent.canDelegate) {
+  if (cert.isRoot || !parent || !parent.canDelegate) {
     return {valid: false, isRoot: false}
   }
 
@@ -1731,6 +1728,24 @@ export const createRoomAuthority = ({
     return true
   }
 
+  const canRevokeRoles = (
+    issuer: RoleCertificate,
+    target: RoleCertificate | undefined,
+    role?: string
+  ): boolean => {
+    const roles = getEffectiveRolesForCert(issuer)
+    if (roles.includes('admin')) {
+      return true
+    }
+    if (!issuer.canDelegate || roles.length === 0) {
+      return false
+    }
+    const revokedRoles = role && role !== '*' ? [role] : target?.roles
+    return Boolean(
+      revokedRoles?.length && revokedRoles.every(r => roles.includes(r))
+    )
+  }
+
   const verifyAndApplyRevocation = async (
     rev: RoleRevocationRecord
   ): Promise<boolean> => {
@@ -1751,6 +1766,9 @@ export const createRoomAuthority = ({
     const targetCert =
       peerCerts.get(rev.targetPeerId) ??
       (rev.targetUserId ? userCerts.get(rev.targetUserId) : undefined)
+    if (!canRevokeRoles(rev.issuerCert, targetCert, rev.role)) {
+      return false
+    }
     if (targetCert?.isRoot && !rev.issuerCert.isRoot) {
       return false
     }
@@ -1801,7 +1819,7 @@ export const createRoomAuthority = ({
       rootFingerprints,
       rootPubKeys
     )
-    if (!valid) {
+    if (!valid || !getEffectiveRolesForCert(ban.issuerCert).includes('admin')) {
       return false
     }
     const targetCert =
@@ -2455,6 +2473,9 @@ export const createRoomAuthority = ({
       if (targetCert?.isRoot && !localCert?.isRoot) {
         throw mkErr('delegated authority cannot revoke a root admin')
       }
+      if (!localCert || !canRevokeRoles(localCert, targetCert, role)) {
+        throw mkErr('insufficient authority to revoke role')
+      }
       const cryptoId = await getLocalCryptoIdentity()
       const revocation = await signRoleRevocation(
         cryptoId.signPrivateKey,
@@ -2473,7 +2494,9 @@ export const createRoomAuthority = ({
           seq: ++localAuthSeq
         }
       )
-      await verifyAndApplyRevocation(revocation)
+      if (!(await verifyAndApplyRevocation(revocation))) {
+        throw mkErr('insufficient authority to revoke role')
+      }
       return revocation
     },
 
@@ -2512,7 +2535,9 @@ export const createRoomAuthority = ({
         ...(options?.reason ? {reason: options.reason} : {}),
         seq: ++localAuthSeq
       })
-      await verifyAndApplyBan(ban)
+      if (!(await verifyAndApplyBan(ban))) {
+        throw mkErr('only an admin can ban a peer')
+      }
       return ban
     }
   }

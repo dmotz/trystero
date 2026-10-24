@@ -16,6 +16,7 @@ export type InternalMediaMeta = {
   m?: JsonValue
   s?: string
   t?: string
+  r?: string
   o?: string
 }
 
@@ -24,7 +25,19 @@ type PendingMediaMeta = {
   metadata?: JsonValue
   streamId?: string
   trackId?: string
+  replacementId?: string
   originPeerId?: string
+}
+
+type RemoteMediaContext = {
+  fromPeerId: string
+  originPeerId: string
+  key: string
+  metadata: JsonValue | undefined
+  broadcast: boolean
+  trackId?: string
+  replacementId?: string
+  isReplace?: boolean
 }
 
 type MediaManagerDeps = {
@@ -35,23 +48,13 @@ type MediaManagerDeps = {
   ) => Promise<void>[]
   isActive: (id: string) => boolean
   getSharedMediaPeer: (id: string) => SharedMediaPeer | null
+  preparePeer?: (id: string, peer: SharedMediaPeer) => Promise<SharedMediaPeer>
   getPeerUserId?: (peerId: string) => string
-  onRemoteStream?: (
-    fromPeerId: string,
-    originPeerId: string,
-    stream: MediaStream,
-    metadata?: JsonValue,
-    key?: string
-  ) => void
+  onRemoteStream?: (stream: MediaStream, context: RemoteMediaContext) => void
   onRemoteTrack?: (
-    fromPeerId: string,
-    originPeerId: string,
     track: MediaStreamTrack,
     stream: MediaStream,
-    metadata?: JsonValue,
-    key?: string,
-    metaTrackId?: string,
-    isReplace?: boolean
+    context: RemoteMediaContext
   ) => void
 }
 
@@ -69,6 +72,9 @@ const toPendingMediaMeta = (value: unknown): PendingMediaMeta | null => {
         : {}),
       ...(typeof (value as {t?: unknown}).t === 'string'
         ? {trackId: (value as {t: string}).t}
+        : {}),
+      ...(typeof (value as {r?: unknown}).r === 'string'
+        ? {replacementId: (value as {r: string}).r}
         : {}),
       ...(typeof (value as {o?: unknown}).o === 'string'
         ? {originPeerId: (value as {o: string}).o}
@@ -170,6 +176,7 @@ export const createMediaManager = ({
   iterate,
   isActive,
   getSharedMediaPeer,
+  preparePeer,
   getPeerUserId,
   onPeerError,
   onRemoteStream,
@@ -180,7 +187,8 @@ export const createMediaManager = ({
     options: AddMediaOptions,
     sendMeta: InternalActionSender<InternalMediaMeta>,
     originPeerId?: string,
-    explicitKey?: string
+    explicitKey?: string,
+    tracks?: MediaStreamTrack[]
   ) => Promise<void>[]
   removeStream: (stream: MediaStream, target: TargetPeers) => void
   addTrack: (
@@ -198,7 +206,8 @@ export const createMediaManager = ({
     options: AddMediaOptions,
     sendMeta: InternalActionSender<InternalMediaMeta>,
     originPeerId?: string,
-    explicitKey?: string
+    explicitKey?: string,
+    replacementId?: string
   ) => Promise<void>[]
   receiveStreamMeta: (meta: unknown, peerId: string) => void
   receiveTrackMeta: (meta: unknown, peerId: string) => void
@@ -288,7 +297,13 @@ export const createMediaManager = ({
       metadata === undefined
         ? {peerId: sourcePeerId, userId}
         : {peerId: sourcePeerId, userId, metadata}
-    onRemoteStream?.(id, sourcePeerId, stream, metadata, key)
+    onRemoteStream?.(stream, {
+      fromPeerId: id,
+      originPeerId: sourcePeerId,
+      key,
+      metadata,
+      broadcast: originPeerId !== undefined
+    })
     manager.onPeerStream?.(stream, ctx)
   }
 
@@ -300,7 +315,8 @@ export const createMediaManager = ({
     metadata?: JsonValue,
     originPeerId?: string,
     metaTrackId?: string,
-    isReplace?: boolean
+    isReplace?: boolean,
+    replacementId?: string
   ): void => {
     if (!isActive(id)) {
       return
@@ -320,16 +336,16 @@ export const createMediaManager = ({
       metadata === undefined
         ? {peerId: sourcePeerId, userId}
         : {peerId: sourcePeerId, userId, metadata}
-    onRemoteTrack?.(
-      id,
-      sourcePeerId,
-      track,
-      stream,
-      metadata,
+    onRemoteTrack?.(track, stream, {
+      fromPeerId: id,
+      originPeerId: sourcePeerId,
       key,
-      metaTrackId,
-      isReplace
-    )
+      metadata,
+      broadcast: originPeerId !== undefined,
+      ...(metaTrackId === undefined ? {} : {trackId: metaTrackId}),
+      ...(replacementId === undefined ? {} : {replacementId}),
+      ...(isReplace === undefined ? {} : {isReplace})
+    })
     manager.onPeerTrack?.(track, stream, ctx)
   }
 
@@ -348,19 +364,26 @@ export const createMediaManager = ({
     }
 
     return iterate(targets, async (id, peer) => {
+      const mediaPeer = preparePeer ? await preparePeer(id, peer) : peer
       await sendMeta(payload, id)
-      await op(peer)
+      await op(mediaPeer)
     })
   }
 
   const manager: ReturnType<typeof createMediaManager> = {
-    addStream: (stream, options, sendMeta, originPeerId, explicitKey) =>
+    addStream: (stream, options, sendMeta, originPeerId, explicitKey, tracks) =>
       applyMediaOp(
         options.target,
         explicitKey ?? localMedia.getStreamKey(stream),
         options.metadata,
         sendMeta,
-        peer => peer.addStream(stream),
+        peer => {
+          if (tracks) {
+            tracks.forEach(track => peer.addTrack(track, stream))
+          } else {
+            peer.addStream(stream)
+          }
+        },
         {
           s: stream.id,
           ...(originPeerId ? {o: originPeerId} : {})
@@ -395,7 +418,8 @@ export const createMediaManager = ({
       options,
       sendMeta,
       originPeerId,
-      explicitKey
+      explicitKey,
+      replacementId
     ) =>
       applyMediaOp(
         options.target,
@@ -405,6 +429,7 @@ export const createMediaManager = ({
         peer => peer.replaceTrack(oldTrack, newTrack),
         {
           t: oldTrack.id,
+          r: replacementId ?? newTrack.id,
           ...(originPeerId ? {o: originPeerId} : {})
         }
       ),
@@ -460,7 +485,8 @@ export const createMediaManager = ({
           parsed.metadata,
           parsed.originPeerId,
           parsed.trackId,
-          !parsed.streamId && Boolean(parsed.trackId)
+          !parsed.streamId && Boolean(parsed.trackId),
+          parsed.replacementId
         )
         return
       }

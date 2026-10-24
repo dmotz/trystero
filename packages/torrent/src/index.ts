@@ -8,8 +8,6 @@ import {
   keys,
   libName,
   makeSocket,
-  pauseRelayReconnection,
-  resumeRelayReconnection,
   selfId,
   sha1,
   toJson,

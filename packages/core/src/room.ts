@@ -81,7 +81,10 @@ export type RoomSignalingBridge = {
     payload: Record<string, unknown>
   ) => Promise<void> | void
   checkCapacityAfterPassword: (peerId: string) => void
-  onPeerIdentityVerified: (peerId: string, verified: VerifiedPeerIdentity) => void
+  onPeerIdentityVerified: (
+    peerId: string,
+    verified: VerifiedPeerIdentity
+  ) => void
   getPeerHandle: (peerId: string) => PeerHandle | undefined
 }
 
@@ -115,11 +118,14 @@ type PendingPongWaiter = {
   reject: (error: Error) => void
 }
 
-type MediaControlMessage = {
-  op: 'rmStream'
-  o: string
-  id: string
-}
+type MediaControlMessage =
+  | {op: 'connect'}
+  | {
+      op: 'rmStream' | 'rmTrack'
+      o: string
+      id: string
+      keys?: string[]
+    }
 
 type AuthControlMessage =
   | {
@@ -297,6 +303,51 @@ export default (
     string,
     {track: MediaStreamTrack; stream: MediaStream}
   >()
+  const pendingMediaPeers = new Map<
+    string,
+    {
+      promise: Promise<SharedMediaPeer>
+      resolve: (peer: SharedMediaPeer) => void
+      reject: (reason: Error) => void
+    }
+  >()
+
+  const ensureMediaPeer = (
+    id: string,
+    peer: SharedMediaPeer
+  ): Promise<SharedMediaPeer> => {
+    if (overlay.isDirectPeer(id)) {
+      return Promise.resolve(peer)
+    }
+    const pending = pendingMediaPeers.get(id)
+    if (pending) {
+      return pending.promise
+    }
+    let resolve!: (peer: SharedMediaPeer) => void
+    let reject!: (reason: Error) => void
+    const promise = new Promise<SharedMediaPeer>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    const timer = setTimeout(
+      () => reject(mkErr('timed out connecting media peer')),
+      handshakeTimeoutMs
+    )
+    const settled = promise.finally(() => {
+      clearTimeout(timer)
+      pendingMediaPeers.delete(id)
+    })
+    pendingMediaPeers.set(id, {promise: settled, resolve, reject})
+    void mediaControlAction
+      .send({op: 'connect'}, id)
+      .then(() => {
+        if (!leavePromise) {
+          overlay.requireDirectPeer(id)
+        }
+      })
+      .catch(err => reject(toError(err, 'failed connecting media peer')))
+    return settled
+  }
   const listeners = {
     onPeerJoin: null as ((context: PeerJoinContext) => void) | null,
     onPeerLeave: null as ((context: PeerLeaveContext) => void) | null,
@@ -418,7 +469,12 @@ export default (
       }
       const alreadyActive =
         Boolean(activePeerMap[peerId]) || suppressVirtualJoin.has(peerId)
-      peerMap[peerId] = vPeer
+      if (peerMap[peerId] && peerMap[peerId] !== activePeerMap[peerId]) {
+        // Preserve the physical transport while its room handshake completes.
+        promotedFromVirtual.add(peerId)
+      } else {
+        peerMap[peerId] = vPeer
+      }
       activePeerMap[peerId] = vPeer
       if (!alreadyActive) {
         notifyPeerActivated(peerId)
@@ -466,7 +522,8 @@ export default (
       stream,
       metadata,
       targetPeerIds,
-      streamKey
+      streamKey,
+      tracks
     ) => {
       void mediaManager.addStream(
         stream,
@@ -476,7 +533,8 @@ export default (
         },
         streamMetaAction.send,
         broadcasterId,
-        streamKey
+        streamKey,
+        tracks
       )
     },
     onRelayMediaTrack: (
@@ -545,35 +603,48 @@ export default (
   const mediaManager = createMediaManager({
     onPeerError,
     getPeerUserId,
+    preparePeer: ensureMediaPeer,
     iterate: (targets, f) =>
       iterate(targets, (id, peer) => f(id, peer as SharedMediaPeer)),
     isActive: id => Boolean(activePeerMap[id]),
     getSharedMediaPeer: id =>
       (peerMap[id] as SharedMediaPeer | undefined) ?? null,
-    onRemoteStream: (_fromPeerId, originPeerId, stream, metadata, key) => {
+    onRemoteStream: (stream, {originPeerId, metadata, key, broadcast}) => {
       recordStreamTracks(stream)
-      if (overlay.isOverlayActive() && key) {
+      if (overlay.isOverlayActive() && broadcast) {
         overlay.registerBroadcastStream(originPeerId, key, stream, metadata)
       }
     },
     onRemoteTrack: (
-      _fromPeerId,
-      originPeerId,
       track,
       stream,
-      metadata,
-      key,
-      metaTrackId,
-      isReplace
+      {
+        originPeerId,
+        metadata,
+        key,
+        trackId: metaTrackId,
+        replacementId,
+        isReplace,
+        broadcast
+      }
     ) => {
       if (
         overlay.isOverlayActive() &&
-        key &&
+        broadcast &&
         (isReplace || (metaTrackId && metaTrackId !== track.id))
       ) {
         const oldEntry = metaTrackId
           ? knownBroadcastTracks.get(metaTrackId)
           : undefined
+        if (replacementId) {
+          knownBroadcastTracks.set(replacementId, {track, stream})
+        }
+        overlay.replaceBroadcastTrack(
+          originPeerId,
+          oldEntry?.track ?? track,
+          track,
+          metadata
+        )
         if (typeof track.id === 'string') {
           knownBroadcastTracks.set(track.id, {track, stream})
         }
@@ -588,7 +659,8 @@ export default (
             },
             trackMetaAction.send,
             originPeerId,
-            key
+            key,
+            replacementId
           )
         }
         return
@@ -597,7 +669,7 @@ export default (
       if (typeof track.id === 'string') {
         knownBroadcastTracks.set(track.id, {track, stream})
       }
-      if (overlay.isOverlayActive() && key) {
+      if (overlay.isOverlayActive() && broadcast) {
         overlay.registerBroadcastTrack(
           originPeerId,
           key,
@@ -665,6 +737,7 @@ export default (
     recheckCapacity = true
   ): void => {
     const err = toError(reason, 'peer disconnected')
+    pendingMediaPeers.get(id)?.reject(err)
     const rejectTimer = pendingFullRejectTimers.get(id)
     if (rejectTimer) {
       clearTimeout(rejectTimer)
@@ -888,10 +961,10 @@ export default (
         const newCerts: RoleCertificate[] = []
         const newStates: AuthoritativeStateRecord[] = []
 
-        if (Array.isArray(msg.bans)) {
-          for (const b of msg.bans) {
-            if (await authority.verifyAndApplyBan(b)) {
-              newBans.push(b)
+        if (Array.isArray(msg.certs)) {
+          for (const c of msg.certs) {
+            if (await authority.verifyAndApplyCert(c)) {
+              newCerts.push(c)
             }
           }
         }
@@ -902,10 +975,10 @@ export default (
             }
           }
         }
-        if (Array.isArray(msg.certs)) {
-          for (const c of msg.certs) {
-            if (await authority.verifyAndApplyCert(c)) {
-              newCerts.push(c)
+        if (Array.isArray(msg.bans)) {
+          for (const b of msg.bans) {
+            if (await authority.verifyAndApplyBan(b)) {
+              newBans.push(b)
             }
           }
         }
@@ -1279,6 +1352,7 @@ export default (
       const alreadyJoined = promotedFromVirtual.delete(id)
       activePeerMap[id] = peer
       overlay.addDirectPeer(id, peer)
+      pendingMediaPeers.get(id)?.resolve(peer as SharedMediaPeer)
       void sendAuthSyncToPeer(id)
       if (
         effectiveLimit !== undefined &&
@@ -1357,15 +1431,35 @@ export default (
     mediaManager.receiveTrackMeta(meta, id)
   )
 
-  mediaControlAction.onMessage(msg => {
+  mediaControlAction.onMessage((msg, id) => {
     if (!msg || typeof msg !== 'object') {
       return
     }
-    if (msg.op === 'rmStream' && typeof msg.o === 'string') {
+    if (msg.op === 'connect') {
+      overlay.requireDirectPeer(id)
+      return
+    }
+    if (msg.o !== id || typeof msg.id !== 'string') {
+      return
+    }
+    if (msg.op === 'rmStream') {
       const removed = overlay.unregisterBroadcastStreamById(msg.o, msg.id)
       if (removed && removed.targets.length > 0) {
         mediaManager.removeStream(removed.stream, removed.targets)
       }
+    } else if (msg.op === 'rmTrack') {
+      const trackKeys = Array.isArray(msg.keys)
+        ? msg.keys.filter(key => typeof key === 'string')
+        : []
+      const trackId = knownBroadcastTracks.get(msg.id)?.track.id ?? msg.id
+      for (const removed of overlay.unregisterBroadcastTrack(
+        id,
+        trackId,
+        trackKeys
+      )) {
+        mediaManager.removeTrack(removed.track, removed.targets)
+      }
+      knownBroadcastTracks.delete(msg.id)
     }
   })
 
@@ -1689,6 +1783,20 @@ export default (
     },
 
     removeTrack: (track, options = {}) => {
+      if (!options.target) {
+        const removed = overlay.unregisterBroadcastTrack(localSelfId, track.id)
+        knownBroadcastTracks.delete(track.id)
+        if (removed.length > 0) {
+          void mediaControlAction
+            .send({
+              op: 'rmTrack',
+              o: localSelfId,
+              id: track.id,
+              keys: removed.map(entry => entry.key)
+            })
+            .catch(noOp)
+        }
+      }
       mediaManager.removeTrack(track, options.target)
     },
 
@@ -1706,10 +1814,7 @@ export default (
       if (overlay.isOverlayActive() && !options.target) {
         const trackKey = genId(20)
         const targets = overlay.getMediaTargets(localSelfId)
-        if (!targets.length) {
-          return []
-        }
-        return mediaManager.replaceTrack(
+        const replacements = mediaManager.replaceTrack(
           oldTrack,
           newTrack,
           {...options, target: targets},
@@ -1717,6 +1822,16 @@ export default (
           localSelfId,
           trackKey
         )
+        return [
+          Promise.all(replacements).then(() => {
+            overlay.replaceBroadcastTrack(
+              localSelfId,
+              oldTrack,
+              newTrack,
+              options.metadata
+            )
+          })
+        ]
       }
       return mediaManager.replaceTrack(
         oldTrack,
@@ -1821,8 +1936,7 @@ export default (
       }
       authority.registerPeerPublicKey(peerId, verified.peerPubKey)
     },
-    getPeerHandle: peerId =>
-      handshakeManager.getPeer(peerId) ?? peerMap[peerId]
+    getPeerHandle: peerId => handshakeManager.getPeer(peerId) ?? peerMap[peerId]
   })
 
   return roomInstance

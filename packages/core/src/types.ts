@@ -134,7 +134,6 @@ export type UserIdentityLoader = (
 ) => MaybePromise<UserIdentity | JsonWebKey | string>
 
 export type UserIdentityConfig =
-  | UserIdentityPersistence
   | UserIdentity
   | JsonWebKey
   | string

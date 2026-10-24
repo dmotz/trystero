@@ -260,7 +260,7 @@ const createMemorySignalBus = () => {
         if (!handlers) {
           return
         }
-        for (const handler of [...handlers]) {
+        for (const handler of handlers) {
           setTimeout(() => {
             if (topicHandlers.get(topic)?.has(handler)) {
               handler(topic, message)
@@ -287,7 +287,7 @@ void test('Identity primitives: selfId is 20-char Base62 and userId is 43-char B
   assert.equal(selfId.length, 20)
   assert.match(selfId, /^[0-9A-Za-z]{20}$/)
 
-  const user = await createUserIdentity()
+  const user = createUserIdentity()
   assert.equal(typeof user.userId, 'string')
   assert.equal(user.userId.length, 43)
   assert.match(user.userId, /^[0-9A-Za-z_-]{43}$/)
@@ -296,7 +296,7 @@ void test('Identity primitives: selfId is 20-char Base62 and userId is 43-char B
   assert.equal(deriveUserId(user.publicKey), user.userId)
   assert.equal(verifyUserIdKey(user.userId, user.publicKey), true)
 
-  const otherUser = await createUserIdentity()
+  const otherUser = createUserIdentity()
   assert.equal(verifyUserIdKey(user.userId, otherUser.publicKey), false)
 
   const derivedPeerId = derivePeerId(user.publicKey)
@@ -307,17 +307,35 @@ void test('Identity primitives: selfId is 20-char Base62 and userId is 43-char B
 
   const exported = exportUserIdentity(user)
   assert.ok(exported.startsWith('trystero_uk_'))
-  const importedFromStr = await importUserIdentity(exported)
+  const importedFromStr = importUserIdentity(exported)
   assert.equal(importedFromStr.userId, user.userId)
   assert.deepEqual(importedFromStr.publicKey, user.publicKey)
 
   await assert.rejects(
-    () => Promise.resolve().then(() => importUserIdentity('low-entropy-passphrase')),
+    () =>
+      Promise.resolve().then(() =>
+        importUserIdentity('low-entropy-passphrase')
+      ),
     /invalid user identity key material|exported userKey/i
   )
 })
 
-void test('Identity config validation & persistence modes: none, session, local, and custom', async () => {
+void test('Identity config validation & persistence modes: none, session, local, and custom', async t => {
+  for (const name of ['sessionStorage', 'localStorage', 'indexedDB']) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name)
+    t.after(() => {
+      if (descriptor) {
+        Object.defineProperty(globalThis, name, descriptor)
+      } else {
+        delete globalThis[name]
+      }
+    })
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      writable: true,
+      value: undefined
+    })
+  }
   const {makeJoinRoom} = createMemorySignalBus()
   const joinRoom = makeJoinRoom()
 
@@ -418,11 +436,7 @@ void test('Identity config validation & persistence modes: none, session, local,
     assert.notEqual(selfS1.peerId, selfS2.peerId)
     assert.notEqual(selfS1.userId, selfSOther.userId)
 
-    await Promise.all([
-      sRoom1.leave(),
-      sRoom2.leave(),
-      sRoomOtherApp.leave()
-    ])
+    await Promise.all([sRoom1.leave(), sRoom2.leave(), sRoomOtherApp.leave()])
 
     // 'local' coordinates concurrent first-time tabs to converge on the same userId
     const [lRoom1, lRoom2] = [
@@ -454,7 +468,7 @@ void test('Identity config validation & persistence modes: none, session, local,
     await Promise.all([lRoom1.leave(), lRoom2.leave()])
 
     // Custom loader receives {appId, roomId} and returns UserIdentity or exported key
-    const customUser = await createUserIdentity()
+    const customUser = createUserIdentity()
     let loaderContext: any = null
     const cRoom = makeJoinRoom()(
       {
@@ -470,7 +484,10 @@ void test('Identity config validation & persistence modes: none, session, local,
     )
     const selfC = await cRoom.getSelf()
     assert.equal(selfC.userId, customUser.userId)
-    assert.deepEqual(loaderContext, {appId: 'app-custom', roomId: 'room-custom'})
+    assert.deepEqual(loaderContext, {
+      appId: 'app-custom',
+      roomId: 'room-custom'
+    })
     await cRoom.leave()
   } finally {
     ;(globalThis as any).sessionStorage = prevSession
@@ -486,8 +503,8 @@ void test(
     const appId = `multi-tab-presence-${Date.now()}`
     const roomId = 'presence-room'
 
-    const aliceIdentity = await createUserIdentity()
-    const bobIdentity = await createUserIdentity()
+    const aliceIdentity = createUserIdentity()
+    const bobIdentity = createUserIdentity()
 
     const bobPeerJoins: any[] = []
     const bobPeerLeaves: any[] = []
@@ -582,10 +599,7 @@ void test(
       )
 
       // Wait for Alice's two tabs to also connect to each other
-      await waitFor(
-        () => 'peer-alice-2' in roomAlice1.getPeers(),
-        3_000
-      )
+      await waitFor(() => 'peer-alice-2' in roomAlice1.getPeers(), 3_000)
       // getUsers() on Alice's tab excludes the self user (aliceIdentity.userId)
       const usersAtAlice1 = roomAlice1.getUsers()
       assert.equal(
@@ -778,9 +792,9 @@ void test(
     }
 
     // 2. Verify multi-hop overlay descriptor self-certification and userProof
-    const validUser = await createUserIdentity()
-    const victimUser = await createUserIdentity()
-    const validPeerUser = await createUserIdentity()
+    const validUser = createUserIdentity()
+    const victimUser = createUserIdentity()
+    const validPeerUser = createUserIdentity()
     const validPeerId = derivePeerId(validPeerUser.signPubJwk)
     const validProof = await signUserEndpointProof(validUser, {
       appId,
@@ -844,9 +858,9 @@ void test(
     const appId = `limit-userid-${Date.now()}`
     const roomId = 'duel-tabs'
 
-    const hostUser = await createUserIdentity()
-    const aliceUser = await createUserIdentity()
-    const intruderUser = await createUserIdentity()
+    const hostUser = createUserIdentity()
+    const aliceUser = createUserIdentity()
+    const intruderUser = createUserIdentity()
 
     const hostRoom = makeJoinRoom()(
       {
@@ -936,9 +950,9 @@ void test(
     const {makeJoinRoom} = createMemorySignalBus()
     const appId = `sec-multitab-auth-${Date.now()}`
 
-    const adminUser = await createUserIdentity()
-    const aliceUser = await createUserIdentity()
-    const attackerUser = await createUserIdentity()
+    const adminUser = createUserIdentity()
+    const aliceUser = createUserIdentity()
+    const attackerUser = createUserIdentity()
 
     let adminRoom: any
     let aliceTab1: any
@@ -979,10 +993,7 @@ void test(
 
       // Admin grants 'moderator' to Alice's userId while Alice is on Tab 1
       await adminRoom.grantRole(aliceUser.userId, 'moderator')
-      await waitFor(
-        () => aliceTab1.getPeerRoles().includes('moderator'),
-        3_000
-      )
+      await waitFor(() => aliceTab1.getPeerRoles().includes('moderator'), 3_000)
 
       // Alice opens Tab 2 (or reloads with persistent userId -> new peerId 'peer-alice-2')
       aliceTab2 = makeJoinRoom()(
@@ -1066,7 +1077,7 @@ void test(
       assert.equal('peer-attacker-2' in adminRoom.getPeers(), false)
 
       // Newcomer advertising limit: 1 cannot eject established members of an unlimited room
-      const limiterUser = await createUserIdentity()
+      const limiterUser = createUserIdentity()
       const limiterErrors: any[] = []
       limiterRoom = makeJoinRoom()(
         {

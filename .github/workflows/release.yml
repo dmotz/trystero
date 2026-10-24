@@ -50,9 +50,19 @@ jobs:
             fi
           fi
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          if [[ "${VERSION}" == *-* ]]; then
+            echo "npm_tag=beta" >> "${GITHUB_OUTPUT}"
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "npm_tag=latest" >> "${GITHUB_OUTPUT}"
+            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Build packages and browser bundles
         run: pnpm build
+
+      - name: Check types and lint
+        run: pnpm typecheck && pnpm lint
 
       - name: Copy README into each package
         run: pnpm copy-readmes-for-publish
@@ -60,7 +70,8 @@ jobs:
       - name: Publish all packages to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm -r publish --no-git-checks --access public
+          NPM_TAG: ${{ steps.version.outputs.npm_tag }}
+        run: pnpm -r publish --no-git-checks --access public --tag "${NPM_TAG}"
 
       - name: Check if GitHub release already exists
         id: gh_release
@@ -82,6 +93,7 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
           files: |
             dist/trystero-*.min.js
             dist/trystero-*.min.js.map

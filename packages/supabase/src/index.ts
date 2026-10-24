@@ -8,7 +8,6 @@ import {
   entries,
   fromJson,
   keys,
-  selfId,
   values,
   type BaseRelayConfig,
   type BaseRoomConfig,

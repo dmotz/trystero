@@ -6,17 +6,19 @@
 
 - 🕸️ **Scalable room topologies** - rooms now default to `topology: 'auto'`,
   connecting peers directly in small groups (`<= 12` peers) and automatically
-  switching to a bounded-degree `'small-world'` relay overlay (`maxPeers: 8` by
+  switching to a bounded-degree `'small-world'` relay overlay (`maxPeers: 6` by
   default) as rooms grow to dozens or hundreds of peers. You can also opt into
   `'mesh'`, `'small-world'`, or `'tree'` (for one-to-many broadcasts) or pass a
   `TopologyConfig` object to customize connection and routing limits.
 - All room APIs (`makeAction`, `makeState`, `addStream`, `addTrack`,
   `replaceTrack`, `ping`, `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work
-  transparently across both direct and multi-hop peers. Media streams in
-  scalable topologies automatically route through a branching broadcast tree
-  with automatic reparenting if an upstream peer disconnects, and multi-hop
-  messages are ECDSA-signed (with ECDH + AES-GCM end-to-end encryption for
-  targeted sends) so intermediate relays cannot forge or read traffic.
+  transparently across both direct and multi-hop peers. Broadcast media in
+  scalable topologies routes through a branching tree with automatic reparenting
+  if an upstream peer disconnects. Targeted media establishes direct WebRTC
+  connections to its recipients, which can exceed the topology's `maxPeers`
+  target. Multi-hop messages are ECDSA-signed (with ECDH + AES-GCM end-to-end
+  encryption for targeted sends) so intermediate relays cannot forge or read
+  traffic.
 - Added `room.getTopology()` to inspect the active topology mode, direct and
   multi-hop peer lists, routing paths, media broadcast trees, and forwarding
   stats.
@@ -41,7 +43,7 @@
   peers automatically sync the latest signed state snapshot to late joiners even
   after the admin has left the room.
 - 🚪 **Room size limits** - added `limit` to room config to cap the maximum
-  number of peers in a room (including the local user). When a room is at
+  number of unique users in a room (including the local user). When a room is at
   capacity, additional joiners are rejected during handshake before triggering
   `onPeerJoin` on existing members, receive `error: 'room full'` via
   `onJoinError`, and automatically leave the room.
@@ -49,8 +51,9 @@
   peer now has both a self-certifying 20-character Base62 endpoint `peerId`
   (`selfId`, derived from its ECDSA P-256 public key and verified with DTLS
   fingerprint binding during handshake and across multi-hop overlays) and a
-  persistent 43-character Base64url `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html)
-  public-key thumbprint).
+  persistent 43-character Base64url `userId`
+  ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) public-key
+  thumbprint).
 - Added `identity` to room config (`'session'` default in browsers, `'local'`
   stored in IndexedDB with `localStorage` fallback across tabs and future
   visits, `'none'` for ephemeral runtime, or a custom `UserIdentity` /
@@ -73,8 +76,10 @@ of a bare `peerId` string (with `stream` / `track, stream` remaining first on
 media handlers):
 
 ```js
-room.onPeerJoin = ({peerId, userId, roles}) => console.log(`${peerId} (${userId}) joined`)
-room.onPeerLeave = ({peerId, userId}) => console.log(`${peerId} (${userId}) left`)
+room.onPeerJoin = ({peerId, userId, roles}) =>
+  console.log(`${peerId} (${userId}) joined`)
+room.onPeerLeave = ({peerId, userId}) =>
+  console.log(`${peerId} (${userId}) left`)
 room.onPeerStream = (stream, {peerId, userId, metadata}) => {}
 room.onPeerTrack = (track, stream, {peerId, userId, metadata}) => {}
 ```

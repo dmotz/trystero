@@ -4,7 +4,6 @@ import {
   decodeBytes,
   encodeBytes,
   libName,
-  selfId,
   toJson,
   type BaseRoomConfig,
   type JoinRoom

@@ -1,7 +1,6 @@
 import {p256} from '@noble/curves/nist.js'
 import {sha256} from '@noble/hashes/sha2.js'
 import type {
-  MaybePromise,
   UserIdentity,
   UserIdentityConfig,
   UserIdentityPersistence
@@ -95,9 +94,7 @@ export const decodePublicKey = (encoded: string): JsonWebKey | null => {
         ? parsed
         : null
     }
-    const parsed = JSON.parse(
-      decodeBytes(fromBase64Url(encoded))
-    ) as JsonWebKey
+    const parsed = JSON.parse(decodeBytes(fromBase64Url(encoded))) as JsonWebKey
     return parsed && parsed.kty === 'EC' && parsed.x && parsed.y ? parsed : null
   } catch {
     return null
@@ -241,7 +238,10 @@ export const defaultEndpointIdentity: EndpointIdentity =
 export const defaultSelfId: string = defaultEndpointIdentity.peerId
 endpointIdentityByPeerId.set(defaultSelfId, defaultEndpointIdentity)
 
-const deriveDeterministicSecretBytes = (domain: string, id: string): Uint8Array => {
+const deriveDeterministicSecretBytes = (
+  domain: string,
+  id: string
+): Uint8Array => {
   const seed = sha256(encodeBytes(`${domain}:${id}`))
   const dScalar = (bytesToBigInt(seed) % (p256N - 1n)) + 1n
   return bigintTo32Bytes(dScalar)
@@ -299,9 +299,7 @@ export const verifyPeerIdKey = (
   }
   if (registeredTestForcedPeerIds.has(peerId)) {
     const expected = getOrCreateEndpointIdentitySync(peerId)
-    return (
-      canonicalizePubJwk(jwk) === canonicalizePubJwk(expected.signPubJwk)
-    )
+    return canonicalizePubJwk(jwk) === canonicalizePubJwk(expected.signPubJwk)
   }
   return false
 }
@@ -454,15 +452,15 @@ export const exportUserIdentity = (identity: UserIdentity): string => {
 const isUserIdentityObject = (val: unknown): val is UserIdentity =>
   Boolean(
     val &&
-      typeof val === 'object' &&
-      typeof (val as UserIdentity).userId === 'string' &&
-      isValidUserId((val as UserIdentity).userId) &&
-      (val as UserIdentity).signPubJwk &&
-      typeof (val as UserIdentity).sign === 'function' &&
-      verifyUserIdKey(
-        (val as UserIdentity).userId,
-        (val as UserIdentity).signPubJwk
-      )
+    typeof val === 'object' &&
+    typeof (val as UserIdentity).userId === 'string' &&
+    isValidUserId((val as UserIdentity).userId) &&
+    (val as UserIdentity).signPubJwk &&
+    typeof (val as UserIdentity).sign === 'function' &&
+    verifyUserIdKey(
+      (val as UserIdentity).userId,
+      (val as UserIdentity).signPubJwk
+    )
   )
 
 const coerceCustomUserIdentity = (val: unknown): UserIdentity => {
@@ -517,9 +515,7 @@ const hasIndexedDB = (): boolean => {
   }
 }
 
-export const validateIdentityConfig = (config?: {
-  identity?: unknown
-}): void => {
+export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   const raw = config?.identity
   if (raw === undefined || raw === 'none') {
     return
@@ -706,10 +702,7 @@ const withNavigatorLock = async <T>(
     typeof navigator !== 'undefined'
       ? (navigator as {
           locks?: {
-            request?: <R>(
-              name: string,
-              cb: () => Promise<R>
-            ) => Promise<R>
+            request?: <R>(name: string, cb: () => Promise<R>) => Promise<R>
           }
         })
       : undefined

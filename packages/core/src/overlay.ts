@@ -702,7 +702,8 @@ export type OverlayManagerDeps = {
     stream: MediaStream,
     metadata: JsonValue | undefined,
     targetPeerIds: string[],
-    streamKey: string
+    streamKey: string,
+    tracks?: MediaStreamTrack[]
   ) => void
   onRelayMediaTrack?: (
     broadcasterId: string,
@@ -754,6 +755,18 @@ export type OverlayManager = {
     stream: MediaStream,
     metadata?: JsonValue
   ) => void
+  unregisterBroadcastTrack: (
+    broadcasterId: string,
+    trackId: string,
+    trackKeys?: string[]
+  ) => Array<{track: MediaStreamTrack; key: string; targets: string[]}>
+  replaceBroadcastTrack: (
+    broadcasterId: string,
+    oldTrack: MediaStreamTrack,
+    newTrack: MediaStreamTrack,
+    metadata?: JsonValue
+  ) => void
+  requireDirectPeer: (peerId: string) => void
   notePeerDiscovered: (peerId: string) => void
   shouldConnectPeer: (
     peerId: string,
@@ -796,6 +809,7 @@ export const createOverlayManager = ({
   const config = normalizeTopologyConfig(topology)
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
   const directPeers = new Map<string, PeerHandle>()
+  const requiredDirectPeers = new Set<string>()
   const virtualPeers = new Map<string, PeerHandle>()
   const knownRoster = new Set<string>([selfId])
   const privilegedPeers = new Set<string>()
@@ -831,6 +845,7 @@ export const createOverlayManager = ({
       broadcasterId: string
       streamKey: string
       stream: MediaStream
+      tracks?: MediaStreamTrack[]
       metadata?: JsonValue
       forwardedTo: Set<string>
       currentParentId: string | null
@@ -1079,7 +1094,8 @@ export const createOverlayManager = ({
           entry.stream,
           entry.metadata,
           newTargets,
-          entry.streamKey
+          entry.streamKey,
+          entry.tracks
         )
       }
     }
@@ -1203,6 +1219,7 @@ export const createOverlayManager = ({
         config.fanout,
         privilegedPeers
       )
+      requiredDirectPeers.forEach(id => targets.add(id))
       const missing = [...targets].filter(id => !directPeers.has(id))
       if (missing.length > 0) {
         targetsChangedCallback(missing)
@@ -2497,6 +2514,7 @@ export const createOverlayManager = ({
         broadcasterId,
         streamKey,
         stream,
+        ...(existing?.tracks ? {tracks: existing.tracks} : {}),
         ...(metadata === undefined ? {} : {metadata}),
         forwardedTo,
         currentParentId: parentId
@@ -2520,6 +2538,12 @@ export const createOverlayManager = ({
           activeStreams.delete(key)
         }
       }
+      for (const [key, entry] of activeTracks) {
+        if (entry.broadcasterId === broadcasterId && entry.stream === stream) {
+          targets.push(...entry.forwardedTo)
+          activeTracks.delete(key)
+        }
+      }
       return targets
     },
 
@@ -2527,6 +2551,7 @@ export const createOverlayManager = ({
       broadcasterId: string,
       streamId: string
     ): {stream: MediaStream; targets: string[]} | null => {
+      let removed: {stream: MediaStream; targets: string[]} | null = null
       for (const [key, entry] of activeStreams.entries()) {
         if (
           entry.broadcasterId === broadcasterId &&
@@ -2534,10 +2559,21 @@ export const createOverlayManager = ({
         ) {
           const targets = [...entry.forwardedTo]
           activeStreams.delete(key)
-          return {stream: entry.stream, targets}
+          removed ??= {stream: entry.stream, targets: []}
+          removed.targets.push(...targets)
         }
       }
-      return null
+      for (const [key, entry] of activeTracks) {
+        if (
+          entry.broadcasterId === broadcasterId &&
+          entry.stream.id === streamId
+        ) {
+          removed ??= {stream: entry.stream, targets: []}
+          removed.targets.push(...entry.forwardedTo)
+          activeTracks.delete(key)
+        }
+      }
+      return removed
     },
 
     registerBroadcastTrack: (
@@ -2572,6 +2608,74 @@ export const createOverlayManager = ({
       }
     },
 
+    unregisterBroadcastTrack: (broadcasterId, trackId, trackKeys = []) => {
+      const removed = []
+      for (const [key, entry] of activeTracks) {
+        if (
+          entry.broadcasterId === broadcasterId &&
+          (entry.track.id === trackId || trackKeys.includes(entry.trackKey))
+        ) {
+          activeTracks.delete(key)
+          removed.push({
+            track: entry.track,
+            key: entry.trackKey,
+            targets: [...entry.forwardedTo]
+          })
+        }
+      }
+      for (const [key, entry] of activeStreams) {
+        if (entry.broadcasterId !== broadcasterId) {
+          continue
+        }
+        const tracks = entry.tracks ?? entry.stream.getTracks()
+        const track = tracks.find(item => item.id === trackId)
+        if (track) {
+          entry.tracks = tracks.filter(item => item !== track)
+          removed.push({
+            track,
+            key: entry.streamKey,
+            targets: [...entry.forwardedTo]
+          })
+          if (entry.tracks.length === 0) {
+            activeStreams.delete(key)
+          }
+        }
+      }
+      return removed
+    },
+
+    replaceBroadcastTrack: (broadcasterId, oldTrack, newTrack, metadata) => {
+      for (const entry of activeTracks.values()) {
+        if (entry.broadcasterId === broadcasterId && entry.track === oldTrack) {
+          entry.track = newTrack
+          if (metadata !== undefined) {
+            entry.metadata = metadata
+          }
+        }
+      }
+      for (const entry of activeStreams.values()) {
+        const tracks = entry.tracks ?? entry.stream.getTracks()
+        if (
+          entry.broadcasterId === broadcasterId &&
+          tracks.includes(oldTrack)
+        ) {
+          entry.tracks = tracks.map(track =>
+            track === oldTrack ? newTrack : track
+          )
+        }
+      }
+    },
+
+    requireDirectPeer: peerId => {
+      if (isDestroyed || peerId === selfId || bannedPeers.has(peerId)) {
+        return
+      }
+      requiredDirectPeers.add(peerId)
+      if (!directPeers.has(peerId)) {
+        targetsChangedCallback?.([peerId])
+      }
+    },
+
     notePeerDiscovered: (peerId: string): void => {
       if (!peerId || peerId === selfId || bannedPeers.has(peerId)) {
         return
@@ -2591,7 +2695,7 @@ export const createOverlayManager = ({
       if (!peerId || peerId === selfId || bannedPeers.has(peerId)) {
         return false
       }
-      if (directPeers.has(peerId)) {
+      if (directPeers.has(peerId) || requiredDirectPeers.has(peerId)) {
         return true
       }
 
@@ -2630,14 +2734,17 @@ export const createOverlayManager = ({
 
     getTargetNeighbors: (): Set<string> => {
       updateActiveMode()
-      return computeTargetNeighbors(
-        selfId,
-        knownRoster,
-        currentActiveMode,
-        config.maxPeers,
-        config.fanout,
-        privilegedPeers
-      )
+      return new Set([
+        ...requiredDirectPeers,
+        ...computeTargetNeighbors(
+          selfId,
+          knownRoster,
+          currentActiveMode,
+          config.maxPeers,
+          config.fanout,
+          privilegedPeers
+        )
+      ])
     },
 
     setOnTargetsChanged: (cb: (targetPeerIds: string[]) => void): void => {
@@ -2688,6 +2795,7 @@ export const createOverlayManager = ({
 
     markPeerBanned: (peerId: string, keyThumbprint?: string): void => {
       bannedPeers.add(peerId)
+      requiredDirectPeers.delete(peerId)
       privilegedPeers.delete(peerId)
       if (keyThumbprint) {
         bannedKeyThumbprints.add(keyThumbprint)
@@ -2793,6 +2901,7 @@ export const createOverlayManager = ({
 
     destroy: (): void => {
       isDestroyed = true
+      requiredDirectPeers.clear()
       for (const timer of unreachableTimers.values()) {
         resetTimer(timer)
       }

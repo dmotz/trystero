@@ -12,7 +12,7 @@ export const textFormat = 0
 export const jsonFormat = 1
 export const binaryFormat = 2
 
-type WireReceiveContext = Omit<ActionReceiveContext, 'kind'>
+type WireReceiveContext = Omit<ActionReceiveContext, 'kind' | 'userId'>
 export type WireReceiveHandler = (
   context: WireReceiveContext
 ) => boolean | Promise<boolean>

@@ -3,7 +3,6 @@ import {
   createRelayManager,
   createTopicStrategy,
   getRelays,
-  selfId,
   toJson,
   type JoinRoom,
   type JoinRoomConfig

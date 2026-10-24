@@ -178,7 +178,11 @@ const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
         10_000
       )
 
-      window[roomId].onPeerTrack = (track, stream, {peerId, metadata: meta}) => {
+      window[roomId].onPeerTrack = (
+        track,
+        stream,
+        {peerId, metadata: meta}
+      ) => {
         clearTimeout(timeout)
         res({
           peerId,
@@ -403,8 +407,12 @@ const verifyActionIsolation = async ({page, page2, roomConfig, roomNs}) => {
     const sharedB = roomBRef.makeAction('shared')
 
     return Promise.all([
-      new Promise(res => (roomARef.onPeerJoin = res)),
-      new Promise(res => (roomBRef.onPeerJoin = res))
+      new Promise<string>(
+        res => (roomARef.onPeerJoin = ({peerId}) => res(peerId))
+      ),
+      new Promise<string>(
+        res => (roomBRef.onPeerJoin = ({peerId}) => res(peerId))
+      )
     ]).then(([peerA, peerB]) =>
       Promise.all([
         new Promise(res => (sharedA.onMessage = res)),
