@@ -26,16 +26,8 @@ type SdpDescription = {
 const rewriteMdnsCandidatesToLoopback = (sdp: string): string =>
   sdp.replace(/ (\S+\.local) (\d+) typ host/g, ' 127.0.0.1 $2 typ host')
 
-export default (
-  initiator: boolean,
-  {
-    trickleIce,
-    rtcConfig,
-    rtcPolyfill,
-    turnConfig,
-    _test_only_mdnsHostFallbackToLoopback
-  }: BaseRoomConfig
-): PeerHandle => {
+export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
+  const {trickleIce, rtcConfig, rtcPolyfill, turnConfig} = config
   const pc = new (rtcPolyfill ?? RTCPeerConnection)({
     iceServers: defaultIceServers.concat(turnConfig ?? []),
     ...rtcConfig
@@ -110,28 +102,28 @@ export default (
     }
   }
 
-  const normalizeSdp = (sdp: string): string =>
-    _test_only_mdnsHostFallbackToLoopback
-      ? rewriteMdnsCandidatesToLoopback(sdp)
-      : sdp
+  const normalizeSdp = (sdp: string): string => {
+    DEV: if (config._test_only_mdnsHostFallbackToLoopback) {
+      return rewriteMdnsCandidatesToLoopback(sdp)
+    }
+    return sdp
+  }
 
   const normalizeCandidate = (
     candidate: RTCIceCandidateInit
   ): RTCIceCandidateInit => {
-    if (
-      !_test_only_mdnsHostFallbackToLoopback ||
-      typeof candidate.candidate !== 'string'
+    DEV: if (
+      config._test_only_mdnsHostFallbackToLoopback &&
+      typeof candidate.candidate === 'string'
     ) {
-      return candidate
+      const normalizedCandidate = rewriteMdnsCandidatesToLoopback(
+        candidate.candidate
+      )
+      return normalizedCandidate === candidate.candidate
+        ? candidate
+        : {...candidate, candidate: normalizedCandidate}
     }
-
-    const normalizedCandidate = rewriteMdnsCandidatesToLoopback(
-      candidate.candidate
-    )
-
-    return normalizedCandidate === candidate.candidate
-      ? candidate
-      : {...candidate, candidate: normalizedCandidate}
+    return candidate
   }
 
   const localDescriptionSignal = (

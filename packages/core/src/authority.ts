@@ -1,4 +1,4 @@
-import {hashWith} from './crypto'
+import {ecdsaSign, ecdsaVerify, sha256} from './crypto'
 import {
   canonicalizePubJwk,
   computeUserIdFingerprint,
@@ -14,9 +14,18 @@ import {
   signUserEndpointProof,
   toBase64Url,
   verifyPeerIdKey,
-  verifyUserEndpointProof
+  verifyUserEndpointProof,
+  verifyWithP256
 } from './identity'
-import {encodeBytes, genId, mkErr, noOp, toHex, toJson} from './utils'
+import {
+  createBoundedSet,
+  encodeBytes,
+  genId,
+  mkErr,
+  noOp,
+  toHex,
+  toJson
+} from './utils'
 import type {
   AuthorityConfig,
   AuthoritativeState,
@@ -344,13 +353,7 @@ export const signRoleCertificate = async (
   const sigBytes =
     typeof signer === 'function'
       ? await signer(canonicalBytes)
-      : new Uint8Array(
-          await crypto.subtle.sign(
-            {name: 'ECDSA', hash: 'SHA-256'},
-            signer,
-            canonicalBytes as BufferSource
-          )
-        )
+      : await ecdsaSign(signer, canonicalBytes as BufferSource)
   return {
     ...unsigned,
     sig: toBase64Url(sigBytes)
@@ -403,8 +406,7 @@ export const verifyRoleCertificateChain = async (
   // Verify signature of this certificate
   try {
     const canonicalBytes = encodeBytes(roleCertCanonicalPayload(cert))
-    const ok = await crypto.subtle.verify(
-      {name: 'ECDSA', hash: 'SHA-256'},
+    const ok = await ecdsaVerify(
       issuerRec.verifyKey,
       fromBase64Url(cert.sig) as BufferSource,
       canonicalBytes as BufferSource
@@ -510,14 +512,11 @@ export const signRoleRevocation = async (
     issuerCert
   }
   const canonicalBytes = encodeBytes(revocationCanonicalPayload(unsigned))
-  const sigBuf = await crypto.subtle.sign(
-    {name: 'ECDSA', hash: 'SHA-256'},
-    signerPrivateKey,
-    canonicalBytes as BufferSource
-  )
   return {
     ...unsigned,
-    sig: toBase64Url(new Uint8Array(sigBuf))
+    sig: toBase64Url(
+      await ecdsaSign(signerPrivateKey, canonicalBytes as BufferSource)
+    )
   }
 }
 
@@ -562,16 +561,10 @@ export const verifyRoleRevocation = async (
   }
 
   try {
-    const subRec = await getVerifiedPubKeyRecord(rev.issuerCert.subPubKey)
-    if (!subRec) {
-      return false
-    }
-    const canonicalBytes = encodeBytes(revocationCanonicalPayload(rev))
-    return await crypto.subtle.verify(
-      {name: 'ECDSA', hash: 'SHA-256'},
-      subRec.verifyKey,
-      fromBase64Url(rev.sig) as BufferSource,
-      canonicalBytes as BufferSource
+    return await verifyWithP256(
+      fromBase64Url(rev.sig),
+      encodeBytes(revocationCanonicalPayload(rev)),
+      rev.issuerCert.subPubKey
     )
   } catch {
     return false
@@ -624,14 +617,11 @@ export const signPeerBan = async (
     issuerCert
   }
   const canonicalBytes = encodeBytes(banCanonicalPayload(unsigned))
-  const sigBuf = await crypto.subtle.sign(
-    {name: 'ECDSA', hash: 'SHA-256'},
-    signerPrivateKey,
-    canonicalBytes as BufferSource
-  )
   return {
     ...unsigned,
-    sig: toBase64Url(new Uint8Array(sigBuf))
+    sig: toBase64Url(
+      await ecdsaSign(signerPrivateKey, canonicalBytes as BufferSource)
+    )
   }
 }
 
@@ -676,16 +666,10 @@ export const verifyPeerBan = async (
   }
 
   try {
-    const subRec = await getVerifiedPubKeyRecord(ban.issuerCert.subPubKey)
-    if (!subRec) {
-      return false
-    }
-    const canonicalBytes = encodeBytes(banCanonicalPayload(ban))
-    return await crypto.subtle.verify(
-      {name: 'ECDSA', hash: 'SHA-256'},
-      subRec.verifyKey,
-      fromBase64Url(ban.sig) as BufferSource,
-      canonicalBytes as BufferSource
+    return await verifyWithP256(
+      fromBase64Url(ban.sig),
+      encodeBytes(banCanonicalPayload(ban)),
+      ban.issuerCert.subPubKey
     )
   } catch {
     return false
@@ -747,20 +731,12 @@ export const computePayloadDigest = async (
         data instanceof Blob
           ? await data.slice(start, end).arrayBuffer()
           : viewBytes!.subarray(start, end)
-      const chunkHash = await crypto.subtle.digest(
-        'SHA-256',
-        sliceBuf as BufferSource
-      )
-      chunkDigests.set(new Uint8Array(chunkHash), i * 32)
+      chunkDigests.set(await sha256(sliceBuf as BufferSource), i * 32)
     }
     if (metaBytes.byteLength > 0) {
       chunkDigests.set(metaBytes, numChunks * 32)
     }
-    const finalHash = await crypto.subtle.digest(
-      'SHA-256',
-      chunkDigests as BufferSource
-    )
-    return toHex(new Uint8Array(finalHash).subarray(0, 16))
+    return toHex((await sha256(chunkDigests as BufferSource)).subarray(0, 16))
   }
 
   let dataBytes: Uint8Array
@@ -776,20 +752,12 @@ export const computePayloadDigest = async (
     dataBytes = encodeBytes(`j:${toJson(data)}`)
   }
   if (metaBytes.byteLength === 0) {
-    const hashBuf = await crypto.subtle.digest(
-      'SHA-256',
-      dataBytes as BufferSource
-    )
-    return toHex(new Uint8Array(hashBuf).subarray(0, 16))
+    return toHex((await sha256(dataBytes as BufferSource)).subarray(0, 16))
   }
   const combined = new Uint8Array(dataBytes.byteLength + metaBytes.byteLength)
   combined.set(dataBytes, 0)
   combined.set(metaBytes, dataBytes.byteLength)
-  const hashBuf = await crypto.subtle.digest(
-    'SHA-256',
-    combined as BufferSource
-  )
-  return toHex(new Uint8Array(hashBuf).subarray(0, 16))
+  return toHex((await sha256(combined as BufferSource)).subarray(0, 16))
 }
 
 const actionAuthCanonicalPayload = (params: {
@@ -840,11 +808,6 @@ export const signActionAuth = async (
       certSig: cert.sig
     })
   )
-  const sigBuf = await crypto.subtle.sign(
-    {name: 'ECDSA', hash: 'SHA-256'},
-    signerPrivateKey,
-    canonicalBytes as BufferSource
-  )
   return {
     v: 1,
     seq: params.seq,
@@ -853,7 +816,9 @@ export const signActionAuth = async (
     ...(params.signerPubKey ? {signerPubKey: params.signerPubKey} : {}),
     ...(params.userPubKey ? {userPubKey: params.userPubKey} : {}),
     ...(params.userProof ? {userProof: params.userProof} : {}),
-    sig: toBase64Url(new Uint8Array(sigBuf))
+    sig: toBase64Url(
+      await ecdsaSign(signerPrivateKey, canonicalBytes as BufferSource)
+    )
   }
 }
 
@@ -924,10 +889,6 @@ export const verifyActionAuth = async (
   }
 
   try {
-    const signerRec = await getVerifiedPubKeyRecord(verifyPubKeyJwk)
-    if (!signerRec) {
-      return {valid: false, roles: []}
-    }
     const canonicalBytes = encodeBytes(
       actionAuthCanonicalPayload({
         appId: params.appId,
@@ -939,11 +900,10 @@ export const verifyActionAuth = async (
         certSig: env.cert.sig
       })
     )
-    const ok = await crypto.subtle.verify(
-      {name: 'ECDSA', hash: 'SHA-256'},
-      signerRec.verifyKey,
-      fromBase64Url(env.sig) as BufferSource,
-      canonicalBytes as BufferSource
+    const ok = await verifyWithP256(
+      fromBase64Url(env.sig),
+      canonicalBytes,
+      verifyPubKeyJwk
     )
     return ok
       ? {valid: true, roles: [...env.cert.roles]}
@@ -1013,13 +973,10 @@ export const signStateRecord = async <T extends JsonValue = JsonValue>(
     value: params.value
   }
   const canonicalBytes = encodeBytes(stateRecordCanonicalPayload(unsigned))
-  const sigBuf = await crypto.subtle.sign(
-    {name: 'ECDSA', hash: 'SHA-256'},
-    signerPrivateKey,
-    canonicalBytes as BufferSource
+  const sig = toBase64Url(
+    await ecdsaSign(signerPrivateKey, canonicalBytes as BufferSource)
   )
-  const sig = toBase64Url(new Uint8Array(sigBuf))
-  const hash = toHex((await hashWith('SHA-256', sig)).subarray(0, 16))
+  const hash = toHex((await sha256(sig)).subarray(0, 16))
   return {
     ...unsigned,
     sig,
@@ -1086,23 +1043,16 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
   }
 
   try {
-    const signerRec = await getVerifiedPubKeyRecord(rec.signerPubKey)
-    if (!signerRec) {
-      return false
-    }
     const canonicalBytes = encodeBytes(stateRecordCanonicalPayload(rec))
-    const ok = await crypto.subtle.verify(
-      {name: 'ECDSA', hash: 'SHA-256'},
-      signerRec.verifyKey,
-      fromBase64Url(rec.sig) as BufferSource,
-      canonicalBytes as BufferSource
+    const ok = await verifyWithP256(
+      fromBase64Url(rec.sig),
+      canonicalBytes,
+      rec.signerPubKey
     )
     if (!ok) {
       return false
     }
-    const expectedHash = toHex(
-      (await hashWith('SHA-256', rec.sig)).subarray(0, 16)
-    )
+    const expectedHash = toHex((await sha256(rec.sig)).subarray(0, 16))
     return rec.hash === expectedHash
   } catch {
     return false
@@ -1200,9 +1150,7 @@ export const createRoomAuthority = ({
   let authResolved = false
   let localAuthSeq = 0
 
-  const maxActionAuthSeenCache = 4_096
-  const actionAuthSeenOrder: string[] = []
-  const actionAuthSeenKeys = new Set<string>()
+  const actionAuthSeenKeys = createBoundedSet<string>()
   const actionAuthMaxSeq = new Map<string, number>()
   const actionAuthReplayWindow = 512
 
@@ -1223,16 +1171,8 @@ export const createRoomAuthority = ({
       return false
     }
     const exactKey = `${streamKey}:${seq}`
-    if (actionAuthSeenKeys.has(exactKey)) {
+    if (!actionAuthSeenKeys.add(exactKey)) {
       return false
-    }
-    actionAuthSeenKeys.add(exactKey)
-    actionAuthSeenOrder.push(exactKey)
-    if (actionAuthSeenOrder.length > maxActionAuthSeenCache) {
-      const oldest = actionAuthSeenOrder.shift()
-      if (oldest) {
-        actionAuthSeenKeys.delete(oldest)
-      }
     }
     if (seq > maxSeq) {
       actionAuthMaxSeq.set(streamKey, seq)

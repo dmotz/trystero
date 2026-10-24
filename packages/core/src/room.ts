@@ -19,6 +19,7 @@ import {
   type VerifiedPeerIdentity
 } from './handshake'
 import {
+  defaultUserIdentity,
   getDefaultTestUserIdentity,
   getDefaultTestUserIdentityUserIdSync,
   resolveUserIdentity
@@ -200,22 +201,34 @@ export default (
   const activePeerMap: Record<string, PeerHandle> = {}
   const peerUserIds = new Map<string, string>()
   const activeUserPeers = new Map<string, Set<string>>()
-  let localUserId = getDefaultTestUserIdentityUserIdSync(localSelfId)
+  let localUserId = defaultUserIdentity.userId
+  DEV: localUserId = getDefaultTestUserIdentityUserIdSync(localSelfId)
+  let defaultIdentityP: Promise<UserIdentity> | undefined
+  DEV: if (!userIdentityP && identity === undefined) {
+    defaultIdentityP = getDefaultTestUserIdentity(localSelfId)
+  }
   const resolvedUserIdentityP = (
     userIdentityP ??
-    (identity !== undefined
-      ? resolveUserIdentity(appId, initialRoomId, {identity}, localSelfId)
-      : getDefaultTestUserIdentity(localSelfId))
+    defaultIdentityP ??
+    resolveUserIdentity(
+      appId,
+      initialRoomId,
+      identity === undefined ? undefined : {identity},
+      localSelfId
+    )
   ).then(resolvedId => {
     localUserId = resolvedId.userId
     return resolvedId
   })
 
-  const getPeerUserId = (peerId: string): string =>
-    peerId === localSelfId
-      ? localUserId
-      : (peerUserIds.get(peerId) ??
-        getDefaultTestUserIdentityUserIdSync(peerId))
+  const getPeerUserId = (peerId: string): string => {
+    if (peerId === localSelfId) {
+      return localUserId
+    }
+    let userId = peerUserIds.get(peerId)
+    DEV: userId ??= getDefaultTestUserIdentityUserIdSync(peerId)
+    return userId ?? peerId
+  }
 
   const getUserPeerIds = (userId: string): string[] => {
     const set = activeUserPeers.get(userId)
@@ -578,13 +591,16 @@ export default (
     getLocalUserIdentity: () => resolvedUserIdentityP,
     getOverlayPeerPublicKey: peerId => overlay.getPeerSignPublicKey(peerId),
     isOverlayPeerBanned: peerId => overlay.isPeerBanned(peerId),
-    getPeerUserId: peerId =>
-      peerId === localSelfId
-        ? localUserId
-        : (peerUserIds.get(peerId) ??
-          (peerId in peerMap
-            ? getDefaultTestUserIdentityUserIdSync(peerId)
-            : undefined)),
+    getPeerUserId: peerId => {
+      if (peerId === localSelfId) {
+        return localUserId
+      }
+      let userId = peerUserIds.get(peerId)
+      DEV: if (!userId && peerId in peerMap) {
+        userId = getDefaultTestUserIdentityUserIdSync(peerId)
+      }
+      return userId
+    },
     getUserPeerIds: userId => getUserPeerIds(userId),
     onRoomIdResolved: effectiveRoomId => overlay.setRoomId(effectiveRoomId),
     onPeerPublicKey: (peerId, pubKey) =>
@@ -1280,21 +1296,21 @@ export default (
     }, 25)
   }
 
-  const needsAsyncTestUserWarmup =
+  let effectiveOnPeerHandshake = onPeerHandshake
+  DEV: if (
     !verifyPeerIdentity &&
     (localSelfId !== defaultSelfId ||
       identity !== undefined ||
       userIdentityP !== undefined)
-  const effectiveOnPeerHandshake: PeerHandshake | undefined =
-    needsAsyncTestUserWarmup
-      ? async (id, send, receive, isInitiator) => {
-          await Promise.all([
-            resolvedUserIdentityP,
-            id === defaultSelfId ? undefined : getDefaultTestUserIdentity(id)
-          ])
-          await onPeerHandshake?.(id, send, receive, isInitiator)
-        }
-      : onPeerHandshake
+  ) {
+    effectiveOnPeerHandshake = async (id, send, receive, isInitiator) => {
+      await Promise.all([
+        resolvedUserIdentityP,
+        id === defaultSelfId ? undefined : getDefaultTestUserIdentity(id)
+      ])
+      await onPeerHandshake?.(id, send, receive, isInitiator)
+    }
+  }
 
   const handshakeManager = createHandshakeManager({
     selfId: localSelfId,

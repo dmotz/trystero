@@ -1,4 +1,4 @@
-import {hashWith} from './crypto'
+import {sha256} from './crypto'
 import {
   extractDtlsFingerprints,
   fromBase64Url,
@@ -359,12 +359,7 @@ export const createPasswordHandshake = (
   compose: (userHandshake?: PeerHandshake) => PeerHandshake | undefined
 } => {
   const hashChallenge = async (challenge: string): Promise<string> =>
-    toHex(
-      await hashWith(
-        'SHA-256',
-        `${challenge}:${password}:${appId}:${await roomId}`
-      )
-    )
+    toHex(await sha256(`${challenge}:${password}:${appId}:${await roomId}`))
 
   const run = async (
     send: HandshakeSender,

@@ -1,11 +1,38 @@
-import {decodeBytes, defaultSelfId, encodeBytes} from './identity'
+import {
+  createBoundedCache,
+  createBoundedSet,
+  decodeBytes,
+  encodeBytes,
+  fromBase64,
+  fromBase64Url,
+  fromJson,
+  libName,
+  mkErr,
+  toBase64,
+  toBase64Url,
+  toHex,
+  toJson
+} from './crypto'
+import {defaultSelfId} from './identity'
 import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
 
-export {decodeBytes, encodeBytes}
+export {
+  createBoundedCache,
+  createBoundedSet,
+  decodeBytes,
+  encodeBytes,
+  fromBase64,
+  fromBase64Url,
+  fromJson,
+  libName,
+  mkErr,
+  toBase64,
+  toBase64Url,
+  toHex,
+  toJson
+}
 
 const {floor, min, sin} = Math
-
-export const libName = 'Trystero'
 
 export const alloc = <T>(n: number, f: (v: undefined, i: number) => T): T[] =>
   Array(n).fill(undefined).map(f)
@@ -44,8 +71,6 @@ export const resetTimer = (timer: number | null | undefined): null => {
   return null
 }
 
-export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
-
 export const toErrorMessage = (reason: unknown, fallback: string): string => {
   if (reason instanceof Error && reason.message) {
     return reason.message
@@ -60,9 +85,6 @@ export const toErrorMessage = (reason: unknown, fallback: string): string => {
 
 export const toError = (reason: unknown, fallback: string): Error =>
   reason instanceof Error ? reason : mkErr(toErrorMessage(reason, fallback))
-
-export const toHex = (buffer: Uint8Array): string =>
-  buffer.reduce((a, c) => a + c.toString(16).padStart(2, '0'), '')
 
 export const topicPath = (...parts: string[]): string => parts.join('@')
 
@@ -98,16 +120,6 @@ export const getRelays = <
     ? shuffle(defaults, strToNum(config.appId))
     : defaults
   ).slice(0, config.relayConfig?.redundancy ?? defaultN)
-
-export const toJson = JSON.stringify
-
-export const fromJson = <T>(s: string): T => {
-  try {
-    return JSON.parse(s)
-  } catch {
-    throw mkErr(`failed to parse JSON: ${s}`)
-  }
-}
 
 export const strToNum = (
   str: string,

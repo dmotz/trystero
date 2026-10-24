@@ -110,22 +110,16 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     validateIdentityConfig(config)
 
-    const localSelfId =
-      typeof config._test_only_forcedPeerId === 'string' &&
-      config._test_only_forcedPeerId
-        ? config._test_only_forcedPeerId
-        : selfId
-    if (
+    let forcedPeerId: string | undefined
+    DEV: if (
       typeof config._test_only_forcedPeerId === 'string' &&
       config._test_only_forcedPeerId
     ) {
-      void registerTestForcedPeerId(config._test_only_forcedPeerId)
+      forcedPeerId = config._test_only_forcedPeerId
+      void registerTestForcedPeerId(forcedPeerId)
     }
-    const scopeAppId =
-      typeof config._test_only_forcedPeerId === 'string' &&
-      config._test_only_forcedPeerId
-        ? `${appId}:${config._test_only_forcedPeerId}`
-        : appId
+    const localSelfId = forcedPeerId ?? selfId
+    const scopeAppId = forcedPeerId ? `${appId}:${forcedPeerId}` : appId
 
     if (occupiedRooms[scopeAppId]?.[roomId]) {
       return occupiedRooms[scopeAppId][roomId]
@@ -185,8 +179,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const roomNamespacePromise = effectiveRoomIdP
       ? effectiveRoomIdP.then(rid => deriveRoomNamespace(appId, rid))
       : deriveRoomNamespace(appId, roomId)
-    const sharedPeerIdleMs =
-      config._test_only_sharedPeerIdleMs ?? sharedPeerIdleMsDefault
+    let sharedPeerIdleMs = sharedPeerIdleMsDefault
+    DEV: if (config._test_only_sharedPeerIdleMs !== undefined) {
+      sharedPeerIdleMs = config._test_only_sharedPeerIdleMs
+    }
 
     let didLeaveRoom = false
     let isLeavingRoom = false

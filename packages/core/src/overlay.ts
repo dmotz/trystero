@@ -1,5 +1,5 @@
 import {inspectActionWireHeader} from './action-wire'
-import {hashWith, sha1} from './crypto'
+import {ecdsaSign, sha1, sha256} from './crypto'
 import {
   canonicalizePubJwk,
   getCachedPubKeyRecord,
@@ -8,12 +8,16 @@ import {
   isUserEndpointProofCachedValid,
   signUserEndpointProof,
   verifyPeerIdKey,
-  verifyUserEndpointProof
+  verifyUserEndpointProof,
+  verifyWithP256
 } from './identity'
 import {
   all,
+  createBoundedCache,
+  createBoundedSet,
   decodeBytes,
   encodeBytes,
+  fromBase64,
   fromJson,
   genId,
   keys,
@@ -21,6 +25,7 @@ import {
   noOp,
   resetTimer,
   selfId as defaultSelfId,
+  toBase64,
   toHex,
   toJson
 } from './utils'
@@ -546,18 +551,6 @@ const packOverlayControl = (msg: OverlayControlMessage): Uint8Array => {
   return frame
 }
 
-const toBase64 = (bytes: Uint8Array): string =>
-  btoa(String.fromCharCode(...bytes))
-
-const fromBase64 = (b64: string): Uint8Array => {
-  const bin = atob(b64)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) {
-    out[i] = bin.charCodeAt(i)
-  }
-  return out
-}
-
 const descriptorCanonicalPayload = (d: PeerDescriptor): string =>
   toJson([
     d.peerId,
@@ -579,8 +572,7 @@ const computeRoomAuthToken = async (
   seq: number
 ): Promise<string> =>
   toHex(
-    await hashWith(
-      'SHA-256',
+    await sha256(
       `trystero-ov-auth:${password}:${appId}:${roomId}:${peerId}:${seq}`
     )
   )
@@ -595,10 +587,7 @@ type CryptoIdentity = {
 }
 
 const identityCache = new Map<string, Promise<CryptoIdentity>>()
-const verifyKeyCache = new Map<string, Promise<CryptoKey>>()
-const verifiedSigOrder: string[] = []
-const verifiedSigBytes = new Map<string, Uint8Array>()
-const maxVerifiedSigCache = 4_096
+const verifiedSigBytes = createBoundedCache<string, Uint8Array>()
 
 const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
   if (a.byteLength !== b.byteLength) {
@@ -613,15 +602,6 @@ const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
 }
 
 const rememberVerifiedSig = (cacheKey: string, bytes: Uint8Array): void => {
-  if (!verifiedSigBytes.has(cacheKey)) {
-    verifiedSigOrder.push(cacheKey)
-    if (verifiedSigOrder.length > maxVerifiedSigCache) {
-      const oldest = verifiedSigOrder.shift()
-      if (oldest) {
-        verifiedSigBytes.delete(oldest)
-      }
-    }
-  }
   verifiedSigBytes.set(cacheKey, bytes.slice())
 }
 
@@ -636,14 +616,11 @@ const getOrCreateCryptoIdentity = (peerId: string): Promise<CryptoIdentity> => {
           'deriveBits'
         ])
       ])
-      const [exportedSignPubJwk, encPubJwk] = await all([
-        crypto.subtle.exportKey('jwk', endpointId.signPublicKey),
-        crypto.subtle.exportKey('jwk', encPair.publicKey)
-      ])
+      const encPubJwk = await crypto.subtle.exportKey('jwk', encPair.publicKey)
       return {
         signPrivateKey: endpointId.signPrivateKey,
         signPublicKey: endpointId.signPublicKey,
-        signPubJwk: exportedSignPubJwk,
+        signPubJwk: endpointId.signPubJwk,
         encPrivateKey: encPair.privateKey,
         encPublicKey: encPair.publicKey,
         encPubJwk
@@ -800,7 +777,6 @@ export const createOverlayManager = ({
   const descriptors = new Map<string, PeerDescriptor>()
   const adjacency = new Map<string, Set<string>>()
   const pinnedSignKeys = new Map<string, string>()
-  const importedVerifyKeys = new Map<string, Promise<CryptoKey>>()
   const derivedPairwiseKeys = new Map<string, Promise<CryptoKey>>()
   const prunedDirectPeers = new Set<string>()
   const departedPeers = new Set<string>()
@@ -808,10 +784,10 @@ export const createOverlayManager = ({
   const unreachableTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   // Seen-message deduplication cache and recent broadcast cache for Plumtree lazy repair
-  const seenMessageOrder: string[] = []
-  const seenMessages = new Set<string>()
-  const cachedBroadcastFrames = new Map<string, Uint8Array>()
-  const cachedBroadcastOrder: string[] = []
+  const seenMessages = createBoundedSet<string>(maxSeenMessages)
+  const cachedBroadcastFrames = createBoundedCache<string, Uint8Array>(
+    maxCachedBroadcasts
+  )
   const missingBroadcastTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -913,31 +889,10 @@ export const createOverlayManager = ({
     )
   }
 
-  const rememberSeenMessage = (msgId: string): boolean => {
-    if (seenMessages.has(msgId)) {
-      return false
-    }
+  const rememberSeenMessage = (msgId: string): boolean =>
     seenMessages.add(msgId)
-    seenMessageOrder.push(msgId)
-    if (seenMessageOrder.length > maxSeenMessages) {
-      const oldest = seenMessageOrder.shift()
-      if (oldest) {
-        seenMessages.delete(oldest)
-      }
-    }
-    return true
-  }
 
   const cacheBroadcastFrame = (msgId: string, frame: Uint8Array): void => {
-    if (!cachedBroadcastFrames.has(msgId)) {
-      cachedBroadcastOrder.push(msgId)
-      if (cachedBroadcastOrder.length > maxCachedBroadcasts) {
-        const oldest = cachedBroadcastOrder.shift()
-        if (oldest) {
-          cachedBroadcastFrames.delete(oldest)
-        }
-      }
-    }
     cachedBroadcastFrames.set(msgId, frame)
   }
 
@@ -1257,12 +1212,9 @@ export const createOverlayManager = ({
       })
     }
     const canonicalBytes = encodeBytes(descriptorCanonicalPayload(descriptor))
-    const sigBuffer = await crypto.subtle.sign(
-      {name: 'ECDSA', hash: 'SHA-256'},
-      id.signPrivateKey,
-      canonicalBytes as BufferSource
+    const sig = toBase64(
+      await ecdsaSign(id.signPrivateKey, canonicalBytes as BufferSource)
     )
-    const sig = toBase64(new Uint8Array(sigBuffer))
     descriptor.sig = sig
     rememberVerifiedSig(`desc:${toJson(id.signPubJwk)}:${sig}`, canonicalBytes)
 
@@ -1458,26 +1410,10 @@ export const createOverlayManager = ({
     }
 
     try {
-      let keyP = importedVerifyKeys.get(d.peerId)
-      if (!keyP || !pinned) {
-        keyP =
-          verifyKeyCache.get(keyThumbprint) ??
-          crypto.subtle.importKey(
-            'jwk',
-            d.signPubKey,
-            {name: 'ECDSA', namedCurve: 'P-256'},
-            false,
-            ['verify']
-          )
-        verifyKeyCache.set(keyThumbprint, keyP)
-        importedVerifyKeys.set(d.peerId, keyP)
-      }
-      const pubKey = await keyP
-      const isValid = await crypto.subtle.verify(
-        {name: 'ECDSA', hash: 'SHA-256'},
-        pubKey,
-        fromBase64(d.sig) as BufferSource,
-        canonicalBytes as BufferSource
+      const isValid = await verifyWithP256(
+        fromBase64(d.sig),
+        canonicalBytes,
+        d.signPubKey
       )
       if (!isValid) {
         stats.signatureFailures++
@@ -1601,12 +1537,9 @@ export const createOverlayManager = ({
     const combined = new Uint8Array(headerBytes.byteLength + payload.byteLength)
     combined.set(headerBytes, 0)
     combined.set(payload, headerBytes.byteLength)
-    const sigBuf = await crypto.subtle.sign(
-      {name: 'ECDSA', hash: 'SHA-256'},
-      id.signPrivateKey,
-      combined as BufferSource
+    const sig = toBase64(
+      await ecdsaSign(id.signPrivateKey, combined as BufferSource)
     )
-    const sig = toBase64(new Uint8Array(sigBuf))
     rememberVerifiedSig(`pkt:${toJson(id.signPubJwk)}:${sig}`, combined)
     return sig
   }
@@ -1621,13 +1554,13 @@ export const createOverlayManager = ({
       stats.signatureFailures++
       return false
     }
-    const keyP = importedVerifyKeys.get(originPeerId)
-    const desc = descriptors.get(originPeerId)
-    const signPubJwk = desc?.signPubKey
+    const signPubJwk =
+      peerSignPubKeys.get(originPeerId) ??
+      descriptors.get(originPeerId)?.signPubKey
     const pinnedThumbprint =
       pinnedSignKeys.get(originPeerId) ??
       (signPubJwk ? toJson(signPubJwk) : undefined)
-    if (!keyP && !signPubJwk) {
+    if (!signPubJwk) {
       stats.signatureFailures++
       return false
     }
@@ -1646,29 +1579,7 @@ export const createOverlayManager = ({
     }
 
     try {
-      const verifyKeyP =
-        keyP ??
-        (pinnedThumbprint ? verifyKeyCache.get(pinnedThumbprint) : undefined) ??
-        crypto.subtle.importKey(
-          'jwk',
-          signPubJwk!,
-          {name: 'ECDSA', namedCurve: 'P-256'},
-          false,
-          ['verify']
-        )
-      if (!keyP) {
-        if (pinnedThumbprint) {
-          verifyKeyCache.set(pinnedThumbprint, verifyKeyP)
-        }
-        importedVerifyKeys.set(originPeerId, verifyKeyP)
-      }
-      const pubKey = await verifyKeyP
-      const ok = await crypto.subtle.verify(
-        {name: 'ECDSA', hash: 'SHA-256'},
-        pubKey,
-        fromBase64(sig) as BufferSource,
-        combined as BufferSource
-      )
+      const ok = await verifyWithP256(fromBase64(sig), combined, signPubJwk)
       if (!ok) {
         stats.signatureFailures++
         return false

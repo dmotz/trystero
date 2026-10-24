@@ -1,17 +1,25 @@
+import {
+  createBoundedCache,
+  createBoundedSet,
+  decodeBytes,
+  ecdsaKeyAlgo,
+  ecdsaSign,
+  ecdsaVerify,
+  encodeBytes,
+  fromBase64Url,
+  fromJson,
+  mkErr,
+  sha256,
+  toBase64Url,
+  toJson
+} from './crypto'
 import type {
   UserIdentity,
   UserIdentityConfig,
   UserIdentityPersistence
 } from './types'
 
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
-
-export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
-export const decodeBytes = (buf: ArrayBufferLike | ArrayBufferView): string =>
-  decoder.decode(buf)
-
-const mkIdentityErr = (msg: string): Error => new Error(`Trystero: ${msg}`)
+export {decodeBytes, encodeBytes, fromBase64Url, toBase64Url}
 
 const p256N =
   0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
@@ -28,18 +36,6 @@ export const userKeyPrefix = 'trystero_uk_'
 const storagePrefix = 'trystero:user_identity:v1:'
 const idbDbName = 'trystero_identity_v1'
 const idbStoreName = 'identities'
-
-const sha256Bytes = async (data: Uint8Array): Promise<Uint8Array> =>
-  new Uint8Array(await crypto.subtle.digest('SHA-256', data as BufferSource))
-
-export const bigintTo32Bytes = (n: bigint): Uint8Array => {
-  const hex = n.toString(16).padStart(64, '0')
-  const out = new Uint8Array(32)
-  for (let i = 0; i < 32; i++) {
-    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  }
-  return out
-}
 
 export const bytesToBigInt = (bytes: Uint8Array): bigint => {
   let res = 0n
@@ -60,25 +56,8 @@ export const encodeBase62 = (bytes: Uint8Array, length: number): string => {
   return out
 }
 
-export const toBase64Url = (bytes: Uint8Array): string =>
-  btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '')
-
-export const fromBase64Url = (b64url: string): Uint8Array => {
-  const padded = b64url.replace(/-/g, '+').replace(/_/g, '/')
-  const padLen = (4 - (padded.length % 4)) % 4
-  const bin = atob(padded + '='.repeat(padLen))
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) {
-    out[i] = bin.charCodeAt(i)
-  }
-  return out
-}
-
 export const canonicalizePubJwk = (jwk: JsonWebKey): string =>
-  JSON.stringify({
+  toJson({
     crv: jwk.crv ?? 'P-256',
     kty: jwk.kty ?? 'EC',
     x: jwk.x ?? '',
@@ -90,13 +69,11 @@ export const encodePublicKey = (jwk: JsonWebKey): string =>
 
 export const decodePublicKey = (encoded: string): JsonWebKey | null => {
   try {
-    if (encoded.trim().startsWith('{')) {
-      const parsed = JSON.parse(encoded) as JsonWebKey
-      return parsed && parsed.kty === 'EC' && parsed.x && parsed.y
-        ? parsed
-        : null
-    }
-    const parsed = JSON.parse(decodeBytes(fromBase64Url(encoded))) as JsonWebKey
+    const parsed = fromJson<JsonWebKey>(
+      encoded.trim().startsWith('{')
+        ? encoded
+        : decodeBytes(fromBase64Url(encoded))
+    )
     return parsed && parsed.kty === 'EC' && parsed.x && parsed.y ? parsed : null
   } catch {
     return null
@@ -138,15 +115,6 @@ export const pubJwkToUncompressedBytes = (
   }
 }
 
-export const uncompressedBytesToPubJwk = (
-  uncompressed: Uint8Array
-): JsonWebKey => ({
-  crv: 'P-256',
-  kty: 'EC',
-  x: toBase64Url(uncompressed.subarray(1, 33)),
-  y: toBase64Url(uncompressed.subarray(33, 65))
-})
-
 export type VerifiedPubKeyRecord = {
   canonicalJwk: string
   cleanJwk: JsonWebKey
@@ -157,26 +125,11 @@ export type VerifiedPubKeyRecord = {
   fingerprint: string
 }
 
-const resolvedPubKeyCache = new Map<string, VerifiedPubKeyRecord>()
-const resolvedPubKeyOrder: string[] = []
+const resolvedPubKeyCache = createBoundedCache<string, VerifiedPubKeyRecord>()
 const pendingPubKeyCache = new Map<
   string,
   Promise<VerifiedPubKeyRecord | null>
 >()
-const maxPubKeyCache = 4_096
-
-const cacheVerifiedPubKeyRecord = (record: VerifiedPubKeyRecord): void => {
-  if (!resolvedPubKeyCache.has(record.canonicalJwk)) {
-    resolvedPubKeyOrder.push(record.canonicalJwk)
-    if (resolvedPubKeyOrder.length > maxPubKeyCache) {
-      const oldest = resolvedPubKeyOrder.shift()
-      if (oldest) {
-        resolvedPubKeyCache.delete(oldest)
-      }
-    }
-  }
-  resolvedPubKeyCache.set(record.canonicalJwk, record)
-}
 
 export const getCachedPubKeyRecord = (
   pubKeyOrJwk: JsonWebKey | string
@@ -217,11 +170,11 @@ export const getVerifiedPubKeyRecord = (
           : crypto.subtle.importKey(
               'raw',
               uncompressed as BufferSource,
-              {name: 'ECDSA', namedCurve: 'P-256'},
+              ecdsaKeyAlgo,
               false,
               ['verify']
             ),
-        sha256Bytes(encodeBytes(canonicalJwk))
+        sha256(canonicalJwk)
       ])
       const cleanJwk: JsonWebKey = {
         crv: 'P-256',
@@ -238,7 +191,7 @@ export const getVerifiedPubKeyRecord = (
         userId: toBase64Url(digest),
         fingerprint: encodeBase62(digest.subarray(0, 16), fingerprintLength)
       }
-      cacheVerifiedPubKeyRecord(record)
+      resolvedPubKeyCache.set(canonicalJwk, record)
       return record
     } catch {
       return null
@@ -256,7 +209,7 @@ export const derivePeerId = async (
 ): Promise<string> => {
   const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
   if (!rec) {
-    throw mkIdentityErr('invalid ECDSA P-256 public key for peerId derivation')
+    throw mkErr('invalid ECDSA P-256 public key for peerId derivation')
   }
   return rec.peerId
 }
@@ -266,7 +219,7 @@ export const deriveUserId = async (
 ): Promise<string> => {
   const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
   if (!rec) {
-    throw mkIdentityErr('invalid ECDSA P-256 public key for userId derivation')
+    throw mkErr('invalid ECDSA P-256 public key for userId derivation')
   }
   return rec.userId
 }
@@ -279,11 +232,11 @@ export const isValidUserId = (id: string): boolean =>
 
 export const computeUserIdFingerprint = (userId: string): string => {
   if (!isValidUserId(userId)) {
-    throw mkIdentityErr('invalid userId for fingerprint derivation')
+    throw mkErr('invalid userId for fingerprint derivation')
   }
   const digest = fromBase64Url(userId)
   if (digest.byteLength !== 32) {
-    throw mkIdentityErr('invalid userId digest length')
+    throw mkErr('invalid userId digest length')
   }
   return encodeBase62(digest.subarray(0, 16), fingerprintLength)
 }
@@ -301,8 +254,7 @@ export const verifyWithP256 = async (
     return false
   }
   try {
-    return await crypto.subtle.verify(
-      {name: 'ECDSA', hash: 'SHA-256'},
+    return await ecdsaVerify(
       rec.verifyKey,
       sigBytes as BufferSource,
       payload as BufferSource
@@ -324,11 +276,10 @@ export type EndpointIdentity = {
 const generateEndpointIdentity = async (
   forcedPeerId?: string
 ): Promise<EndpointIdentity> => {
-  const keyPair = await crypto.subtle.generateKey(
-    {name: 'ECDSA', namedCurve: 'P-256'},
-    true,
-    ['sign', 'verify']
-  )
+  const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, true, [
+    'sign',
+    'verify'
+  ])
   const privJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey)
   const signPubJwk: JsonWebKey = {
     crv: 'P-256',
@@ -348,40 +299,28 @@ const generateEndpointIdentity = async (
     signPublicKey: keyPair.publicKey,
     signPubJwk,
     signPrivateJwk,
-    sign: async (payload: Uint8Array) =>
-      new Uint8Array(
-        await crypto.subtle.sign(
-          {name: 'ECDSA', hash: 'SHA-256'},
-          keyPair.privateKey,
-          payload as BufferSource
-        )
-      )
+    sign: (payload: Uint8Array) =>
+      ecdsaSign(keyPair.privateKey, payload as BufferSource)
   }
 }
+
+export const defaultEndpointIdentity: EndpointIdentity =
+  await generateEndpointIdentity()
+export const defaultSelfId: string = defaultEndpointIdentity.peerId
 
 const endpointIdentityByPeerId = new Map<string, Promise<EndpointIdentity>>()
 const registeredTestForcedPeerIds = new Set<string>()
 const resolvedTestEndpointCanonicalJwk = new Map<string, string>()
 
-export const defaultEndpointIdentity: EndpointIdentity =
-  await generateEndpointIdentity()
-export const defaultSelfId: string = defaultEndpointIdentity.peerId
-endpointIdentityByPeerId.set(
-  defaultSelfId,
-  Promise.resolve(defaultEndpointIdentity)
-)
-
 export const registerTestForcedPeerId = (
   peerId: string
 ): Promise<EndpointIdentity> => {
-  if (!peerId) {
+  if (!peerId || peerId === defaultSelfId) {
     return Promise.resolve(defaultEndpointIdentity)
   }
   const existing = endpointIdentityByPeerId.get(peerId)
   if (existing) {
-    if (peerId !== defaultSelfId) {
-      registeredTestForcedPeerIds.add(peerId)
-    }
+    registeredTestForcedPeerIds.add(peerId)
     return existing
   }
   registeredTestForcedPeerIds.add(peerId)
@@ -399,11 +338,10 @@ export const registerTestForcedPeerId = (
 export const getOrCreateEndpointIdentity = (
   peerId = defaultSelfId
 ): Promise<EndpointIdentity> => {
-  const existing = endpointIdentityByPeerId.get(peerId)
-  if (existing) {
-    return existing
+  DEV: if (peerId && peerId !== defaultSelfId) {
+    return registerTestForcedPeerId(peerId)
   }
-  return registerTestForcedPeerId(peerId)
+  return Promise.resolve(defaultEndpointIdentity)
 }
 
 export const isPeerIdKeyCachedValid = (
@@ -420,8 +358,13 @@ export const isPeerIdKeyCachedValid = (
   if (rec.peerId === peerId) {
     return true
   }
-  const forcedCanonical = resolvedTestEndpointCanonicalJwk.get(peerId)
-  return Boolean(forcedCanonical && rec.canonicalJwk === forcedCanonical)
+  DEV: {
+    const forcedCanonical = resolvedTestEndpointCanonicalJwk.get(peerId)
+    if (forcedCanonical && rec.canonicalJwk === forcedCanonical) {
+      return true
+    }
+  }
+  return false
 }
 
 export const verifyPeerIdKey = async (
@@ -441,8 +384,8 @@ export const verifyPeerIdKey = async (
   if (rec.peerId === peerId) {
     return true
   }
-  if (registeredTestForcedPeerIds.has(peerId)) {
-    const expected = await getOrCreateEndpointIdentity(peerId)
+  DEV: if (registeredTestForcedPeerIds.has(peerId)) {
+    const expected = await registerTestForcedPeerId(peerId)
     return rec.canonicalJwk === canonicalizePubJwk(expected.signPubJwk)
   }
   return false
@@ -486,7 +429,7 @@ const buildUserIdentityFromKeys = async (
   }
   const rec = await getVerifiedPubKeyRecord(signPubJwk, publicKey)
   if (!rec) {
-    throw mkIdentityErr('invalid P-256 public key for user identity')
+    throw mkErr('invalid P-256 public key for user identity')
   }
   const userId = rec.userId
   const encodedPub = encodePublicKey(signPubJwk)
@@ -494,7 +437,7 @@ const buildUserIdentityFromKeys = async (
     userKeyPrefix +
     toBase64Url(
       encodeBytes(
-        JSON.stringify({
+        toJson({
           d: privJwk.d,
           x: signPubJwk.x,
           y: signPubJwk.y
@@ -507,23 +450,16 @@ const buildUserIdentityFromKeys = async (
     publicKey: encodedPub,
     userKey,
     signPubJwk,
-    sign: async (payload: Uint8Array) =>
-      new Uint8Array(
-        await crypto.subtle.sign(
-          {name: 'ECDSA', hash: 'SHA-256'},
-          privateKey,
-          payload as BufferSource
-        )
-      )
+    sign: (payload: Uint8Array) =>
+      ecdsaSign(privateKey, payload as BufferSource)
   }
 }
 
 export const createUserIdentity = async (): Promise<UserIdentity> => {
-  const keyPair = await crypto.subtle.generateKey(
-    {name: 'ECDSA', namedCurve: 'P-256'},
-    true,
-    ['sign', 'verify']
-  )
+  const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, true, [
+    'sign',
+    'verify'
+  ])
   const privJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey)
   return buildUserIdentityFromKeys(keyPair.privateKey, keyPair.publicKey, {
     d: privJwk.d ?? '',
@@ -551,9 +487,9 @@ const tryParsePrivateJwk = (
       }
       if (trimmed.startsWith(userKeyPrefix)) {
         const raw = trimmed.slice(userKeyPrefix.length)
-        jwkObj = JSON.parse(decodeBytes(fromBase64Url(raw)))
+        jwkObj = fromJson(decodeBytes(fromBase64Url(raw)))
       } else if (trimmed.startsWith('{')) {
-        jwkObj = JSON.parse(trimmed)
+        jwkObj = fromJson(trimmed)
       } else {
         return null
       }
@@ -617,7 +553,7 @@ export const importUserIdentity = async (
 ): Promise<UserIdentity> => {
   const parsed = tryParsePrivateJwk(keyOrJwk)
   if (!parsed) {
-    throw mkIdentityErr(
+    throw mkErr(
       'invalid user identity key material; expected an exported userKey or valid P-256 private JWK'
     )
   }
@@ -641,7 +577,7 @@ export const importUserIdentity = async (
             x: parsed.x,
             y: parsed.y
           },
-          {name: 'ECDSA', namedCurve: 'P-256'},
+          ecdsaKeyAlgo,
           true,
           ['sign']
         ),
@@ -655,15 +591,10 @@ export const importUserIdentity = async (
       if (!rec) {
         throw new Error('invalid public point')
       }
-      const testSig = await crypto.subtle.sign(
-        {name: 'ECDSA', hash: 'SHA-256'},
-        privateKey,
-        keyPairTestPayload
-      )
-      const validPair = await crypto.subtle.verify(
-        {name: 'ECDSA', hash: 'SHA-256'},
+      const testSig = await ecdsaSign(privateKey, keyPairTestPayload)
+      const validPair = await ecdsaVerify(
         rec.verifyKey,
-        testSig,
+        testSig as BufferSource,
         keyPairTestPayload
       )
       if (!validPair) {
@@ -672,7 +603,7 @@ export const importUserIdentity = async (
       return buildUserIdentityFromKeys(privateKey, rec.verifyKey, parsed)
     } catch {
       importedUserIdentityCache.delete(cacheKey)
-      throw mkIdentityErr(
+      throw mkErr(
         'invalid user identity key material; expected an exported userKey or valid P-256 private JWK'
       )
     }
@@ -684,7 +615,7 @@ export const importUserIdentity = async (
 
 export const exportUserIdentity = (identity: UserIdentity): string => {
   if (!identity || typeof identity.userKey !== 'string' || !identity.userKey) {
-    throw mkIdentityErr('user identity private key is non-extractable')
+    throw mkErr('user identity private key is non-extractable')
   }
   return identity.userKey
 }
@@ -707,14 +638,14 @@ const coerceCustomUserIdentity = async (
     if (await verifyUserIdKey(val.userId, val.signPubJwk)) {
       return val
     }
-    throw mkIdentityErr(
+    throw mkErr(
       'invalid custom user identity; userId does not match signPubJwk'
     )
   }
   if (typeof val === 'string' || (val && typeof val === 'object')) {
     return importUserIdentity(val as string | JsonWebKey)
   }
-  throw mkIdentityErr(
+  throw mkErr(
     'invalid custom user identity; expected a UserIdentity, P-256 private JWK, or exported userKey'
   )
 }
@@ -766,7 +697,7 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   }
   if (raw === 'session') {
     if (!getSessionStorage()) {
-      throw mkIdentityErr(
+      throw mkErr(
         'sessionStorage is not available for "session" identity persistence'
       )
     }
@@ -774,7 +705,7 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   }
   if (raw === 'local') {
     if (!hasIndexedDB() && !getLocalStorage()) {
-      throw mkIdentityErr(
+      throw mkErr(
         'persistent local storage (IndexedDB / localStorage) is not available in this environment; provide a custom identity loader instead'
       )
     }
@@ -786,7 +717,7 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   if (isUserIdentityObjectStructural(raw)) {
     const cached = getCachedPubKeyRecord(raw.signPubJwk)
     if (cached && cached.userId !== raw.userId) {
-      throw mkIdentityErr(
+      throw mkErr(
         'invalid custom user identity; userId does not match signPubJwk'
       )
     }
@@ -796,11 +727,11 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
     if (tryParsePrivateJwk(raw as string | JsonWebKey)) {
       return
     }
-    throw mkIdentityErr(
+    throw mkErr(
       'invalid user identity key material; expected an exported userKey or valid P-256 private JWK'
     )
   }
-  throw mkIdentityErr(
+  throw mkErr(
     'invalid custom user identity; expected a UserIdentity, P-256 private JWK, or exported userKey'
   )
 }
@@ -812,12 +743,8 @@ const runtimeUserIdentityByScope = new Map<string, Promise<UserIdentity>>([
 ])
 const sessionMutexByApp = new Map<string, Promise<UserIdentity>>()
 const localMutexByApp = new Map<string, Promise<UserIdentity>>()
-const testUserIdentityByPeerId = new Map<string, Promise<UserIdentity>>([
-  [defaultSelfId, Promise.resolve(defaultUserIdentity)]
-])
-const resolvedTestUserIdentityByPeerId = new Map<string, UserIdentity>([
-  [defaultSelfId, defaultUserIdentity]
-])
+const testUserIdentityByPeerId = new Map<string, Promise<UserIdentity>>()
+const resolvedTestUserIdentityByPeerId = new Map<string, UserIdentity>()
 
 const getOrCreateRuntimeUserIdentity = (
   appId?: string
@@ -901,7 +828,7 @@ const loadOrCreateFromWebStorage = (
       }
       return created
     } catch (err) {
-      throw mkIdentityErr(
+      throw mkErr(
         `failed to persist ${label} user identity for app "${appId}": ${
           err instanceof Error ? err.message : String(err)
         }`
@@ -929,14 +856,8 @@ const buildUserIdentityFromIdbRecord = (
   publicKey: rec.publicKey,
   userKey: '',
   signPubJwk: rec.signPubJwk,
-  sign: async (payload: Uint8Array) => {
-    const sigBuf = await crypto.subtle.sign(
-      {name: 'ECDSA', hash: 'SHA-256'},
-      rec.privateKey,
-      payload as BufferSource
-    )
-    return new Uint8Array(sigBuf)
-  }
+  sign: (payload: Uint8Array) =>
+    ecdsaSign(rec.privateKey, payload as BufferSource)
 })
 
 const openIdentityDb = (): Promise<IDBDatabase> =>
@@ -1056,11 +977,10 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
             return buildUserIdentityFromIdbRecord(existing)
           }
 
-          const keyPair = await crypto.subtle.generateKey(
-            {name: 'ECDSA', namedCurve: 'P-256'},
-            false,
-            ['sign', 'verify']
-          )
+          const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, false, [
+            'sign',
+            'verify'
+          ])
           const rawPubJwk = await crypto.subtle.exportKey(
             'jwk',
             keyPair.publicKey
@@ -1090,7 +1010,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
         }
       } catch (err) {
         if (!localStore) {
-          throw mkIdentityErr(
+          throw mkErr(
             `failed to persist local user identity in IndexedDB for app "${appId}": ${
               err instanceof Error ? err.message : String(err)
             }`
@@ -1103,7 +1023,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
       return loadOrCreateFromWebStorage(localStore, appId, 'local')
     }
 
-    throw mkIdentityErr(
+    throw mkErr(
       'persistent local storage (IndexedDB / localStorage) is not available in this environment; provide a custom identity loader instead'
     )
   }).finally(() => {
@@ -1139,7 +1059,8 @@ export const resolveUserIdentity = async (
     return coerceCustomUserIdentity(raw)
   }
 
-  const forcedPeerId =
+  let forcedPeerId: string | undefined
+  DEV: forcedPeerId =
     config?._test_only_forcedPeerId ??
     (localSelfId !== defaultSelfId ? localSelfId : undefined)
 
@@ -1147,7 +1068,7 @@ export const resolveUserIdentity = async (
     raw ?? (getSessionStorage() && !forcedPeerId ? 'session' : 'none')
 
   if (mode === 'none') {
-    if (forcedPeerId) {
+    DEV: if (forcedPeerId) {
       return getDefaultTestUserIdentity(forcedPeerId)
     }
     return getOrCreateRuntimeUserIdentity(appId)
@@ -1157,7 +1078,7 @@ export const resolveUserIdentity = async (
     const sessionStore = getSessionStorage()
     if (!sessionStore) {
       if (raw === 'session') {
-        throw mkIdentityErr(
+        throw mkErr(
           'sessionStorage is not available for "session" identity persistence'
         )
       }
@@ -1184,7 +1105,7 @@ export const userEndpointProofPayload = (params: {
   seq?: number
 }): Uint8Array =>
   encodeBytes(
-    JSON.stringify([
+    toJson([
       'trystero-user-proof-v1',
       params.appId,
       params.roomId,
@@ -1194,23 +1115,7 @@ export const userEndpointProofPayload = (params: {
     ])
   )
 
-const verifiedUserProofCache = new Set<string>()
-const verifiedUserProofOrder: string[] = []
-const maxVerifiedUserProofCache = 4_096
-
-const rememberVerifiedUserProof = (cacheKey: string): void => {
-  if (verifiedUserProofCache.has(cacheKey)) {
-    return
-  }
-  verifiedUserProofCache.add(cacheKey)
-  verifiedUserProofOrder.push(cacheKey)
-  if (verifiedUserProofOrder.length > maxVerifiedUserProofCache) {
-    const oldest = verifiedUserProofOrder.shift()
-    if (oldest) {
-      verifiedUserProofCache.delete(oldest)
-    }
-  }
-}
+const verifiedUserProofCache = createBoundedSet<string>()
 
 export const signUserEndpointProof = async (
   userIdentity: UserIdentity,
@@ -1226,7 +1131,7 @@ export const signUserEndpointProof = async (
   const sigBytes = await userIdentity.sign(payload)
   const proof = toBase64Url(sigBytes)
   const cacheKey = `${params.appId}:${params.roomId}:${params.peerId}:${canonicalizePubJwk(params.peerPubJwk)}:${userIdentity.userId}:${params.seq ?? 0}:${proof}`
-  rememberVerifiedUserProof(cacheKey)
+  verifiedUserProofCache.add(cacheKey)
   return proof
 }
 
@@ -1285,7 +1190,7 @@ export const verifyUserEndpointProof = async (params: {
     const payload = userEndpointProofPayload(params)
     const ok = await verifyWithP256(sigBytes, payload, userPub)
     if (ok) {
-      rememberVerifiedUserProof(cacheKey)
+      verifiedUserProofCache.add(cacheKey)
     }
     return ok
   } catch {
