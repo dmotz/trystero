@@ -119,7 +119,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       typeof config._test_only_forcedPeerId === 'string' &&
       config._test_only_forcedPeerId
     ) {
-      registerTestForcedPeerId(config._test_only_forcedPeerId)
+      void registerTestForcedPeerId(config._test_only_forcedPeerId)
     }
     const scopeAppId =
       typeof config._test_only_forcedPeerId === 'string' &&
@@ -133,14 +133,30 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     leavingRoomCleanups[scopeAppId]?.[roomId]?.(true)
 
+    let effectiveRoomId = roomId
+    const userIdentityP = resolveUserIdentity(
+      appId,
+      roomId,
+      config,
+      localSelfId
+    ).catch(err => {
+      onJoinError?.({
+        error: toErrorMessage(err, 'identity resolution failed'),
+        appId,
+        peerId: localSelfId,
+        roomId: effectiveRoomId
+      })
+      throw err
+    })
+    void userIdentityP.catch(noOp)
+
     const isAdminBacked =
       Boolean(config.admin) ||
       Boolean(parseSelfCertifyingRoomId(roomId).fingerprint)
     const resolvedAuthorityP = isAdminBacked
-      ? resolveRoomAuthority(roomId, config.admin, appId)
+      ? resolveRoomAuthority(roomId, config.admin, userIdentityP)
       : undefined
 
-    let effectiveRoomId = roomId
     let membershipRef: {rekey: (newRoomId: string) => void} | null = null
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const effectiveRoomIdP = resolvedAuthorityP?.then(auth => {
@@ -521,22 +537,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     })
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
-    const userIdentityP = (
-      effectiveRoomIdP
-        ? effectiveRoomIdP.then(rid =>
-            resolveUserIdentity(appId, rid, config, localSelfId)
-          )
-        : resolveUserIdentity(appId, roomId, config, localSelfId)
-    ).catch(err => {
-      onJoinError?.({
-        error: toErrorMessage(err, 'identity resolution failed'),
-        appId,
-        peerId: localSelfId,
-        roomId: effectiveRoomId
-      })
-      throw err
-    })
-    void userIdentityP.catch(noOp)
 
     const sharedPassword = config.password ?? ''
     const {compose: composePassword} = createPasswordHandshake(

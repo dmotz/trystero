@@ -441,7 +441,6 @@ export const getRelaySockets = relayManager.getSockets
 
 export {
   computePublicKeyFingerprint,
-  createAdminIdentity,
   createAdminRoom,
   createUserIdentity,
   derivePeerId,

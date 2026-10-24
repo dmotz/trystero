@@ -23,16 +23,17 @@
   multi-hop peer lists, routing paths, media broadcast trees, and forwarding
   stats.
 - 👑 **Room admins, custom roles, and peer banning** - added `admin` to room
-  config (`true`, a passphrase/`adminKey` string, or an `AuthorityConfig`
-  object) for zero-trust public-key room administration. Passing `admin: true`
-  appends a 16-character Base62 public-key fingerprint suffix to the room ID
-  (`<roomId>.<fingerprint>`) so guests automatically verify the room creator
-  from the invite room ID alone.
+  config (`true`, a trusted `userId` or array of `userId`s, or an
+  `AuthorityConfig` object) for zero-trust public-key room administration
+  unified with user identity (`userId`). Passing `admin: true` appends a
+  16-character Base62 fingerprint suffix derived from the host's `userId` to the
+  room ID (`<roomId>.<fingerprint>`) so guests automatically verify the room
+  creator from the invite room ID alone, and the host automatically regains
+  admin authority when rejoining with the same `userId`.
 - Added `room.grantRole()`, `room.revokeRole()`, `room.getPeerRoles()`,
   `room.banPeer()`, `room.isBanned()`, and `room.getAuthority()`, plus top-level
-  helpers `createAdminIdentity()`, `createAdminRoom()`,
-  `parseSelfCertifyingRoomId()`, `formatSelfCertifyingRoomId()`, and
-  `computePublicKeyFingerprint()`.
+  helpers `createAdminRoom()`, `parseSelfCertifyingRoomId()`,
+  `formatSelfCertifyingRoomId()`, and `computePublicKeyFingerprint()`.
 - Actions now accept an `authority` option (`makeAction(name, {authority})`) to
   restrict sending or requesting to `'admin'` or specific custom roles, with the
   sender's verified `roles` included in `onMessage` and `onRequest` contexts.

@@ -379,11 +379,12 @@ const room = joinRoom(
 
 #### B. Server-Side Admin
 
-Create an admin identity with `createAdminIdentity()` and store its `adminKey`
-securely on your backend. Restore it by passing that key as `config.admin` when
-the backend joins the room with an RTC polyfill. Guests can trust its public key
-using `admin: {rootPubKeys: [publicKey]}`, or use a self-certifying room ID from
-`createAdminRoom()`.
+Create a user identity with `await createUserIdentity()` and store its exported
+`userKey` (`exportUserIdentity(identity)`) securely on your backend. Restore it
+by passing that key as `config.identity` when the backend joins the room with an
+RTC polyfill. Guests can trust its `userId` on a fixed room name using
+`admin: serverUserId` (or `admin: [serverUserId]`), or use a self-certifying
+room ID from `await createAdminRoom(baseRoomId, {identity: serverIdentity})`.
 
 The backend can issue roles with `room.grantRole()` while it is connected. There
 is no public standalone role-certificate import API in this beta.

@@ -25,7 +25,6 @@ export {
 
 export {
   computePublicKeyFingerprint,
-  createAdminIdentity,
   createAdminRoom,
   formatSelfCertifyingRoomId,
   parseSelfCertifyingRoomId
@@ -47,7 +46,6 @@ export type {
   ActionReceiveContext,
   ActionReceiveHandler,
   AddMediaOptions,
-  AdminIdentity,
   AuthoritativeState,
   AuthoritativeStateRecord,
   AuthorityConfig,

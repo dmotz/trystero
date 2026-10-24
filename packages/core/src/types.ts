@@ -105,15 +105,6 @@ export type TopologySnapshot = {
   stats: TopologyStats
 }
 
-export type AdminIdentity = {
-  publicKey: string
-  fingerprint: string
-  adminKey: string
-  signPrivateKey: CryptoKey
-  signPublicKey: CryptoKey
-  signPubJwk: JsonWebKey
-}
-
 export type UserIdentityPersistence = 'none' | 'session' | 'local'
 
 export type UserIdentity = {
@@ -140,8 +131,7 @@ export type UserIdentityConfig =
   | UserIdentityLoader
 
 export type AuthorityConfig = {
-  rootPubKeys?: string[]
-  credentials?: string | AdminIdentity
+  users?: string[]
   create?: boolean
   signalingProofs?: boolean
 }
@@ -220,8 +210,7 @@ export type RoomAuthorityInfo = {
   fingerprint: string | null
   isAdmin: boolean
   roles: string[]
-  publicKey: string | null
-  adminKey: string | null
+  userId: string
 }
 
 export type StateChangeContext = {
@@ -251,7 +240,7 @@ export type BaseRoomConfig = {
   identity?: UserIdentityConfig
   limit?: number
   topology?: TopologyMode | TopologyConfig
-  admin?: boolean | string | AuthorityConfig
+  admin?: boolean | string | string[] | AuthorityConfig
   maxReceiveBytes?: number
   password?: string
   passive?: boolean

@@ -2,7 +2,10 @@ import {inspectActionWireHeader} from './action-wire'
 import {hashWith, sha1} from './crypto'
 import {
   canonicalizePubJwk,
-  getOrCreateEndpointIdentitySync,
+  getCachedPubKeyRecord,
+  getOrCreateEndpointIdentity,
+  isPeerIdKeyCachedValid,
+  isUserEndpointProofCachedValid,
   signUserEndpointProof,
   verifyPeerIdKey,
   verifyUserEndpointProof
@@ -625,45 +628,21 @@ const rememberVerifiedSig = (cacheKey: string, bytes: Uint8Array): void => {
 const getOrCreateCryptoIdentity = (peerId: string): Promise<CryptoIdentity> => {
   let cached = identityCache.get(peerId)
   if (!cached) {
-    const endpointId = getOrCreateEndpointIdentitySync(peerId)
     cached = (async () => {
-      const signPrivJwk: JsonWebKey = {
-        ...endpointId.signPrivateJwk,
-        ext: true,
-        key_ops: ['sign']
-      }
-      const signPubJwk: JsonWebKey = {
-        ...endpointId.signPubJwk,
-        ext: true,
-        key_ops: ['verify']
-      }
-      const [signPrivateKey, signPublicKey, encPair] = await all([
-        crypto.subtle.importKey(
-          'jwk',
-          signPrivJwk,
-          {name: 'ECDSA', namedCurve: 'P-256'},
-          true,
-          ['sign']
-        ),
-        crypto.subtle.importKey(
-          'jwk',
-          signPubJwk,
-          {name: 'ECDSA', namedCurve: 'P-256'},
-          true,
-          ['verify']
-        ),
+      const [endpointId, encPair] = await all([
+        getOrCreateEndpointIdentity(peerId),
         crypto.subtle.generateKey({name: 'ECDH', namedCurve: 'P-256'}, true, [
           'deriveKey',
           'deriveBits'
         ])
       ])
       const [exportedSignPubJwk, encPubJwk] = await all([
-        crypto.subtle.exportKey('jwk', signPublicKey),
+        crypto.subtle.exportKey('jwk', endpointId.signPublicKey),
         crypto.subtle.exportKey('jwk', encPair.publicKey)
       ])
       return {
-        signPrivateKey,
-        signPublicKey,
+        signPrivateKey: endpointId.signPrivateKey,
+        signPublicKey: endpointId.signPublicKey,
         signPubJwk: exportedSignPubJwk,
         encPrivateKey: encPair.privateKey,
         encPublicKey: encPair.publicKey,
@@ -804,7 +783,7 @@ export const createOverlayManager = ({
   onRelayMediaStream,
   onRelayMediaTrack
 }: OverlayManagerDeps): OverlayManager => {
-  getOrCreateEndpointIdentitySync(selfId)
+  void getOrCreateEndpointIdentity(selfId)
   let roomId = initialRoomId
   const config = normalizeTopologyConfig(topology)
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
@@ -1290,6 +1269,86 @@ export const createOverlayManager = ({
     return descriptor
   }
 
+  const tryVerifyDescriptorCached = (d: PeerDescriptor): boolean => {
+    if (
+      password ||
+      !d ||
+      typeof d.peerId !== 'string' ||
+      !d.peerId ||
+      typeof d.seq !== 'number' ||
+      !Array.isArray(d.neighbors) ||
+      bannedPeers.has(d.peerId) ||
+      !d.signPubKey ||
+      typeof d.sig !== 'string' ||
+      !d.sig ||
+      !isPeerIdKeyCachedValid(d.peerId, d.signPubKey)
+    ) {
+      return false
+    }
+
+    if (
+      Boolean(getLocalUserIdentity) ||
+      d.userId !== undefined ||
+      d.userPubKey !== undefined ||
+      d.userProof !== undefined
+    ) {
+      if (
+        !d.userId ||
+        !d.userPubKey ||
+        !d.userProof ||
+        !isUserEndpointProofCachedValid({
+          appId,
+          roomId,
+          peerId: d.peerId,
+          peerPubJwk: d.signPubKey,
+          userId: d.userId,
+          userPubJwk: d.userPubKey,
+          proof: d.userProof,
+          seq: d.seq
+        })
+      ) {
+        return false
+      }
+    }
+
+    const keyThumbprint = toJson(d.signPubKey)
+    const canonicalThumbprint =
+      typeof d.signPubKey.x === 'string' && typeof d.signPubKey.y === 'string'
+        ? canonicalizePubJwk(d.signPubKey)
+        : keyThumbprint
+    if (
+      bannedKeyThumbprints.has(keyThumbprint) ||
+      bannedKeyThumbprints.has(canonicalThumbprint)
+    ) {
+      return false
+    }
+    const pinned = pinnedSignKeys.get(d.peerId)
+    if (pinned && pinned !== keyThumbprint) {
+      return false
+    }
+
+    const canonicalBytes = encodeBytes(descriptorCanonicalPayload(d))
+    const sigCacheKey = `desc:${keyThumbprint}:${d.sig}`
+    const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
+    if (
+      !cachedVerifiedBytes ||
+      !bytesMatch(cachedVerifiedBytes, canonicalBytes)
+    ) {
+      return false
+    }
+
+    pinnedSignKeys.set(d.peerId, keyThumbprint)
+    peerSignPubKeys.set(d.peerId, d.signPubKey)
+    onPeerDescriptorCert?.(
+      d.peerId,
+      d.signPubKey,
+      d.cert,
+      d.userId,
+      d.userPubKey
+    )
+    return true
+  }
+
   const verifyDescriptor = async (d: PeerDescriptor): Promise<boolean> => {
     if (
       !d ||
@@ -1329,7 +1388,7 @@ export const createOverlayManager = ({
       return false
     }
 
-    if (!verifyPeerIdKey(d.peerId, d.signPubKey)) {
+    if (!(await verifyPeerIdKey(d.peerId, d.signPubKey))) {
       stats.signatureFailures++
       return false
     }
@@ -1344,7 +1403,7 @@ export const createOverlayManager = ({
         !d.userId ||
         !d.userPubKey ||
         !d.userProof ||
-        !verifyUserEndpointProof({
+        !(await verifyUserEndpointProof({
           appId,
           roomId,
           peerId: d.peerId,
@@ -1353,7 +1412,7 @@ export const createOverlayManager = ({
           userPubJwk: d.userPubKey,
           proof: d.userProof,
           seq: d.seq
-        })
+        }))
       ) {
         stats.signatureFailures++
         return false
@@ -2004,7 +2063,8 @@ export const createOverlayManager = ({
           continue
         }
 
-        const isValid = await verifyDescriptor(d)
+        const isValid =
+          tryVerifyDescriptorCached(d) || (await verifyDescriptor(d))
         if (!isValid || isDestroyed) {
           continue
         }
@@ -2761,10 +2821,19 @@ export const createOverlayManager = ({
       peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey,
 
     setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey): void => {
-      if (!peerId || !pubKey || !verifyPeerIdKey(peerId, pubKey)) {
+      if (!peerId || !pubKey) {
         return
       }
-      peerSignPubKeys.set(peerId, pubKey)
+      const cached = getCachedPubKeyRecord(pubKey)
+      if (cached && cached.peerId === peerId) {
+        peerSignPubKeys.set(peerId, pubKey)
+        return
+      }
+      void verifyPeerIdKey(peerId, pubKey).then(ok => {
+        if (ok) {
+          peerSignPubKeys.set(peerId, pubKey)
+        }
+      })
     },
 
     setLocalRoleCertificate: (cert: RoleCertificate | null): void => {

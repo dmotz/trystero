@@ -18,7 +18,11 @@ import {
   type HandshakeReadyPayload,
   type VerifiedPeerIdentity
 } from './handshake'
-import {getDefaultTestUserIdentitySync} from './identity'
+import {
+  getDefaultTestUserIdentity,
+  getDefaultTestUserIdentityUserIdSync,
+  resolveUserIdentity
+} from './identity'
 import {createMediaManager, type InternalMediaMeta} from './media'
 import {createOverlayManager, type OverlayManager} from './overlay'
 import type {
@@ -44,6 +48,7 @@ import type {
   TopologyConfig,
   TopologyMode,
   UserIdentity,
+  UserIdentityConfig,
   UserInfo,
   UserJoinContext,
   UserLeaveContext
@@ -101,7 +106,8 @@ type RoomOptions = {
   password?: string
   limit?: number
   topology?: TopologyMode | TopologyConfig
-  admin?: boolean | string | AuthorityConfig
+  admin?: boolean | string | string[] | AuthorityConfig
+  identity?: UserIdentityConfig
   resolvedAuthorityP?: Promise<ResolvedRoomAuthority>
   userIdentityP?: Promise<UserIdentity>
   verifyPeerIdentity?: boolean
@@ -178,6 +184,7 @@ export default (
     limit,
     topology,
     admin,
+    identity,
     resolvedAuthorityP,
     userIdentityP,
     verifyPeerIdentity = false,
@@ -193,20 +200,22 @@ export default (
   const activePeerMap: Record<string, PeerHandle> = {}
   const peerUserIds = new Map<string, string>()
   const activeUserPeers = new Map<string, Set<string>>()
-  let localUserId = getDefaultTestUserIdentitySync(localSelfId).userId
+  let localUserId = getDefaultTestUserIdentityUserIdSync(localSelfId)
   const resolvedUserIdentityP = (
     userIdentityP ??
-    Promise.resolve(getDefaultTestUserIdentitySync(localSelfId))
-  ).then(identity => {
-    localUserId = identity.userId
-    return identity
+    (identity !== undefined
+      ? resolveUserIdentity(appId, initialRoomId, {identity}, localSelfId)
+      : getDefaultTestUserIdentity(localSelfId))
+  ).then(resolvedId => {
+    localUserId = resolvedId.userId
+    return resolvedId
   })
 
   const getPeerUserId = (peerId: string): string =>
     peerId === localSelfId
       ? localUserId
       : (peerUserIds.get(peerId) ??
-        getDefaultTestUserIdentitySync(peerId).userId)
+        getDefaultTestUserIdentityUserIdSync(peerId))
 
   const getUserPeerIds = (userId: string): string[] => {
     const set = activeUserPeers.get(userId)
@@ -574,7 +583,7 @@ export default (
         ? localUserId
         : (peerUserIds.get(peerId) ??
           (peerId in peerMap
-            ? getDefaultTestUserIdentitySync(peerId).userId
+            ? getDefaultTestUserIdentityUserIdSync(peerId)
             : undefined)),
     getUserPeerIds: userId => getUserPeerIds(userId),
     onRoomIdResolved: effectiveRoomId => overlay.setRoomId(effectiveRoomId),
@@ -1271,9 +1280,27 @@ export default (
     }, 25)
   }
 
+  const needsAsyncTestUserWarmup =
+    !verifyPeerIdentity &&
+    (localSelfId !== defaultSelfId ||
+      identity !== undefined ||
+      userIdentityP !== undefined)
+  const effectiveOnPeerHandshake: PeerHandshake | undefined =
+    needsAsyncTestUserWarmup
+      ? async (id, send, receive, isInitiator) => {
+          await Promise.all([
+            resolvedUserIdentityP,
+            id === defaultSelfId ? undefined : getDefaultTestUserIdentity(id)
+          ])
+          await onPeerHandshake?.(id, send, receive, isInitiator)
+        }
+      : onPeerHandshake
+
   const handshakeManager = createHandshakeManager({
     selfId: localSelfId,
-    ...(onPeerHandshake === undefined ? {} : {onPeerHandshake}),
+    ...(effectiveOnPeerHandshake === undefined
+      ? {}
+      : {onPeerHandshake: effectiveOnPeerHandshake}),
     ...(onHandshakeError === undefined ? {} : {onHandshakeError}),
     handshakeTimeoutMs,
     sendHandshakeData: handshakeDataAction.send,

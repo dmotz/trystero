@@ -231,7 +231,6 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = (
 
 export {
   computePublicKeyFingerprint,
-  createAdminIdentity,
   createAdminRoom,
   createUserIdentity,
   derivePeerId,

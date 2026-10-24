@@ -1,5 +1,7 @@
-import {defaultSelfId} from './identity'
+import {decodeBytes, defaultSelfId, encodeBytes} from './identity'
 import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
+
+export {decodeBytes, encodeBytes}
 
 const {floor, min, sin} = Math
 
@@ -58,15 +60,6 @@ export const toErrorMessage = (reason: unknown, fallback: string): string => {
 
 export const toError = (reason: unknown, fallback: string): Error =>
   reason instanceof Error ? reason : mkErr(toErrorMessage(reason, fallback))
-
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
-
-export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
-
-export const decodeBytes = (
-  buffer: ArrayBufferLike | ArrayBufferView
-): string => decoder.decode(buffer)
 
 export const toHex = (buffer: Uint8Array): string =>
   buffer.reduce((a, c) => a + c.toString(16).padStart(2, '0'), '')

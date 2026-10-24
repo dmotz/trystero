@@ -93,7 +93,6 @@ export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>
 
 export {
   computePublicKeyFingerprint,
-  createAdminIdentity,
   createAdminRoom,
   createUserIdentity,
   derivePeerId,

@@ -287,35 +287,32 @@ void test('Identity primitives: selfId is 20-char Base62 and userId is 43-char B
   assert.equal(selfId.length, 20)
   assert.match(selfId, /^[0-9A-Za-z]{20}$/)
 
-  const user = createUserIdentity()
+  const user = await createUserIdentity()
   assert.equal(typeof user.userId, 'string')
   assert.equal(user.userId.length, 43)
   assert.match(user.userId, /^[0-9A-Za-z_-]{43}$/)
   assert.notEqual(user.userId.length, selfId.length)
 
-  assert.equal(deriveUserId(user.publicKey), user.userId)
-  assert.equal(verifyUserIdKey(user.userId, user.publicKey), true)
+  assert.equal(await deriveUserId(user.publicKey), user.userId)
+  assert.equal(await verifyUserIdKey(user.userId, user.publicKey), true)
 
-  const otherUser = createUserIdentity()
-  assert.equal(verifyUserIdKey(user.userId, otherUser.publicKey), false)
+  const otherUser = await createUserIdentity()
+  assert.equal(await verifyUserIdKey(user.userId, otherUser.publicKey), false)
 
-  const derivedPeerId = derivePeerId(user.publicKey)
+  const derivedPeerId = await derivePeerId(user.publicKey)
   assert.equal(derivedPeerId.length, 20)
   assert.match(derivedPeerId, /^[0-9A-Za-z]{20}$/)
-  assert.equal(verifyPeerIdKey(derivedPeerId, user.publicKey), true)
-  assert.equal(verifyPeerIdKey(derivedPeerId, otherUser.publicKey), false)
+  assert.equal(await verifyPeerIdKey(derivedPeerId, user.publicKey), true)
+  assert.equal(await verifyPeerIdKey(derivedPeerId, otherUser.publicKey), false)
 
   const exported = exportUserIdentity(user)
   assert.ok(exported.startsWith('trystero_uk_'))
-  const importedFromStr = importUserIdentity(exported)
+  const importedFromStr = await importUserIdentity(exported)
   assert.equal(importedFromStr.userId, user.userId)
   assert.deepEqual(importedFromStr.publicKey, user.publicKey)
 
   await assert.rejects(
-    () =>
-      Promise.resolve().then(() =>
-        importUserIdentity('low-entropy-passphrase')
-      ),
+    () => importUserIdentity('low-entropy-passphrase'),
     /invalid user identity key material|exported userKey/i
   )
 })
@@ -468,7 +465,7 @@ void test('Identity config validation & persistence modes: none, session, local,
     await Promise.all([lRoom1.leave(), lRoom2.leave()])
 
     // Custom loader receives {appId, roomId} and returns UserIdentity or exported key
-    const customUser = createUserIdentity()
+    const customUser = await createUserIdentity()
     let loaderContext: any = null
     const cRoom = makeJoinRoom()(
       {
@@ -503,8 +500,8 @@ void test(
     const appId = `multi-tab-presence-${Date.now()}`
     const roomId = 'presence-room'
 
-    const aliceIdentity = createUserIdentity()
-    const bobIdentity = createUserIdentity()
+    const aliceIdentity = await createUserIdentity()
+    const bobIdentity = await createUserIdentity()
 
     const bobPeerJoins: any[] = []
     const bobPeerLeaves: any[] = []
@@ -792,10 +789,10 @@ void test(
     }
 
     // 2. Verify multi-hop overlay descriptor self-certification and userProof
-    const validUser = createUserIdentity()
-    const victimUser = createUserIdentity()
-    const validPeerUser = createUserIdentity()
-    const validPeerId = derivePeerId(validPeerUser.signPubJwk)
+    const validUser = await createUserIdentity()
+    const victimUser = await createUserIdentity()
+    const validPeerUser = await createUserIdentity()
+    const validPeerId = await derivePeerId(validPeerUser.signPubJwk)
     const validProof = await signUserEndpointProof(validUser, {
       appId,
       roomId,
@@ -805,7 +802,7 @@ void test(
     })
 
     assert.equal(
-      verifyUserEndpointProof({
+      await verifyUserEndpointProof({
         appId,
         roomId,
         peerId: validPeerId,
@@ -820,7 +817,7 @@ void test(
 
     // Forged peerId with someone else's public key
     assert.equal(
-      verifyUserEndpointProof({
+      await verifyUserEndpointProof({
         appId,
         roomId,
         peerId: validPeerId,
@@ -835,7 +832,7 @@ void test(
 
     // Forged userId claim without valid userProof signature
     assert.equal(
-      verifyUserEndpointProof({
+      await verifyUserEndpointProof({
         appId,
         roomId,
         peerId: validPeerId,
@@ -858,9 +855,9 @@ void test(
     const appId = `limit-userid-${Date.now()}`
     const roomId = 'duel-tabs'
 
-    const hostUser = createUserIdentity()
-    const aliceUser = createUserIdentity()
-    const intruderUser = createUserIdentity()
+    const hostUser = await createUserIdentity()
+    const aliceUser = await createUserIdentity()
+    const intruderUser = await createUserIdentity()
 
     const hostRoom = makeJoinRoom()(
       {
@@ -950,9 +947,9 @@ void test(
     const {makeJoinRoom} = createMemorySignalBus()
     const appId = `sec-multitab-auth-${Date.now()}`
 
-    const adminUser = createUserIdentity()
-    const aliceUser = createUserIdentity()
-    const attackerUser = createUserIdentity()
+    const adminUser = await createUserIdentity()
+    const aliceUser = await createUserIdentity()
+    const attackerUser = await createUserIdentity()
 
     let adminRoom: any
     let aliceTab1: any
@@ -967,7 +964,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-admin',
           identity: adminUser,
-          admin: {create: true, credentials: 'root-secret-passphrase'},
+          admin: true,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'activist-hq'
@@ -1077,7 +1074,7 @@ void test(
       assert.equal('peer-attacker-2' in adminRoom.getPeers(), false)
 
       // Newcomer advertising limit: 1 cannot eject established members of an unlimited room
-      const limiterUser = createUserIdentity()
+      const limiterUser = await createUserIdentity()
       const limiterErrors: any[] = []
       limiterRoom = makeJoinRoom()(
         {

@@ -228,7 +228,6 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
 
 export {
   computePublicKeyFingerprint,
-  createAdminIdentity,
   createAdminRoom,
   createUserIdentity,
   derivePeerId,

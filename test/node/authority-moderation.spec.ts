@@ -1,33 +1,33 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {
-  createAdminIdentity,
   createRoomAuthority,
   signPeerBan,
   signRoleCertificate,
   signRoleRevocation
   // @ts-expect-error Internal source import crosses a referenced package boundary.
 } from '../../packages/core/src/authority.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
-import {derivePeerId} from '../../packages/core/src/identity.ts'
+import {
+  createUserIdentity,
+  getOrCreateEndpointIdentity
+  // @ts-expect-error Internal source import crosses a referenced package boundary.
+} from '../../packages/core/src/identity.ts'
 
 const setup = async () => {
-  const [root, ownerKey, delegateKey, targetKey] = await Promise.all(
-    Array.from({length: 4}, () => createAdminIdentity())
-  )
-  const owner = {...ownerKey!, peerId: derivePeerId(ownerKey!.signPubJwk)}
-  const delegate = {
-    ...delegateKey!,
-    peerId: derivePeerId(delegateKey!.signPubJwk)
-  }
-  const target = {...targetKey!, peerId: derivePeerId(targetKey!.signPubJwk)}
+  const [root, owner, delegate, target] = await Promise.all([
+    createUserIdentity(),
+    getOrCreateEndpointIdentity('peer-owner'),
+    getOrCreateEndpointIdentity('peer-delegate'),
+    getOrCreateEndpointIdentity('peer-target')
+  ])
   const scope = {appId: 'moderation-test', roomId: 'room'}
   const authority = createRoomAuthority({
     selfId: owner.peerId,
     appId: scope.appId,
     initialRoomId: scope.roomId,
-    admin: {credentials: root!},
+    admin: [root.userId],
     getLocalCryptoIdentity: async () => owner,
+    getLocalUserIdentity: async () => root,
     getOverlayPeerPublicKey: () => undefined,
     isOverlayPeerBanned: () => false,
     onRoomIdResolved: () => {},
@@ -39,17 +39,13 @@ const setup = async () => {
   })
   await authority.getAuthorityInfo()
   const grant = async (identity: typeof delegate, roles: string[]) => {
-    const cert = await signRoleCertificate(
-      root!.signPrivateKey,
-      root!.signPubJwk,
-      {
-        ...scope,
-        subPeerId: identity.peerId,
-        subPubKey: identity.signPubJwk,
-        roles,
-        canDelegate: true
-      }
-    )
+    const cert = await signRoleCertificate(root.sign, root.signPubJwk, {
+      ...scope,
+      subPeerId: identity.peerId,
+      subPubKey: identity.signPubJwk,
+      roles,
+      canDelegate: true
+    })
     await authority.verifyAndApplyCert(cert)
     return cert
   }

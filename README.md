@@ -65,7 +65,6 @@ You can see what people are building with Trystero
   - [`deriveUserId(publicKey)`](#deriveuseridpublickey)
   - [`verifyPeerIdKey(peerId, publicKey)`](#verifypeeridkeypeerid-publickey)
   - [`verifyUserIdKey(userId, publicKey)`](#verifyuseridkeyuserid-publickey)
-  - [`createAdminIdentity([options])`](#createadminidentityoptions)
   - [`createAdminRoom(baseRoomId, [options])`](#createadminroombaseroomid-options)
   - [`parseSelfCertifyingRoomId(roomId)`](#parseselfcertifyingroomidroomid)
   - [`formatSelfCertifyingRoomId(baseRoomId, fingerprint)`](#formatselfcertifyingroomidbaseroomid-fingerprint)
@@ -689,70 +688,57 @@ calling `joinRoom()`. For example, when a player clicks **"Create Game"** in
 your app:
 
 ```js
-// The host creates a room with admin powers
+// The host creates a room with admin powers tied to their userId
 const hostRoom = joinRoom({appId: 'trivia-night', admin: true}, 'friday-quiz')
-const {roomId, adminKey} = await hostRoom.getAuthority()
+const {roomId} = await hostRoom.getAuthority()
 
 // Share `roomId` (e.g. "friday-quiz.9fX2kLm8pQr7vBn3") in an invite link for friends!
 ```
 
 When you pass `admin: true`, Trystero attaches a short 16-character suffix to
-your room name (like `'friday-quiz.9fX2kLm8pQr7vBn3'`). Think of that suffix as
-a built-in digital ID badge for the host.
+your room name (like `'friday-quiz.9fX2kLm8pQr7vBn3'`) derived from the host's
+`userId`. Think of that suffix as a built-in digital ID badge for the host.
 
 When friends join using that `roomId`, they don't need any special config—their
-browsers automatically check the suffix and recognize the host as the true
-admin:
+browsers automatically check the suffix and recognize the host's `userId` as the
+true admin:
 
 ```js
 // Guests join using the shared roomId—no extra config needed
 const guestRoom = joinRoom({appId: 'trivia-night'}, roomId)
 ```
 
-> **Tip:** Want the host to keep their admin status if they accidentally refresh
-> the page? Save `adminKey` in `sessionStorage` and pass it back in when
-> rejoining:
-> `joinRoom({appId: 'trivia-night', admin: {credentials: adminKey}}, roomId)`.
-> You can also generate the `roomId` and `adminKey` ahead of time before calling
+> **Tip:** Because admin ownership is tied directly to the host's `userId`, if
+> the host refreshes the page (`identity: 'session'`, the browser default) or
+> returns later on the same device (`identity: 'local'`), Trystero automatically
+> recognizes them as the room admin when they rejoin `roomId`—no separate admin
+> token to save! You can also generate the `roomId` ahead of time before calling
 > `joinRoom()` using `await createAdminRoom('friday-quiz')`.
 
 #### 2. Using a fixed room name without a suffix
 
 What if you want a permanent, memorable room name like `'main-stage'` without a
-random suffix at the end—for example, a recurring town hall or live stream where
-you log in as the admin using a secret passphrase?
+fingerprint suffix at the end—for example, a recurring town hall, podcast
+studio, or community hub owned by specific users?
 
-You can generate a reusable admin identity from a secret passphrase with
-`createAdminIdentity()`, and give regular viewers the admin's `publicKey` so
-they know who to trust:
+Pass the trusted admin `userId` (or an array of `userId`s for co-admins) in
+`admin`. When an admin joins with their matching `identity`, they are
+automatically recognized as `'admin'`, and regular viewers automatically trust
+updates and role grants signed by those `userId`s:
 
 ```js
-import {createAdminIdentity, joinRoom} from 'trystero'
+import {joinRoom} from 'trystero'
 
-// 1. Generate a deterministic admin identity from your secret passphrase
-const adminId = await createAdminIdentity({
-  passphrase: process.env.ADMIN_SECRET,
-  appId: 'town-hall',
-  roomId: 'main-stage'
-})
+const HOST_USER_ID = 'tY8mK3pQvN2xR7wL9jB4cF6hZ1sD5gA0eU8iO2uP4yM'
 
-// 2. The host joins with their secret credentials
-const adminRoom = joinRoom(
+// Everyone (both the host and viewers) can use the exact same config!
+// If the local user's userId matches HOST_USER_ID, they are the admin;
+// otherwise they join as a regular participant who trusts HOST_USER_ID.
+const room = joinRoom(
   {
     appId: 'town-hall',
-    admin: {
-      credentials: adminId.adminKey,
-      rootPubKeys: [adminId.publicKey]
-    }
-  },
-  'main-stage'
-)
-
-// 3. Regular viewers join the clean room name and trust the admin's publicKey
-const viewerRoom = joinRoom(
-  {
-    appId: 'town-hall',
-    admin: {rootPubKeys: [adminId.publicKey]}
+    identity: 'local',
+    admin: HOST_USER_ID // or [HOST_USER_ID, CO_HOST_USER_ID]
   },
   'main-stage'
 )
@@ -845,17 +831,19 @@ admin certificates.
 <details>
   <summary>How it works behind the scenes</summary>
 
-- **Zero-trust public-key signatures**: Admin identities use WebCrypto ECDSA
-  P-256 keypairs. Private keys never leave the admin's device. Every privileged
-  action, state update, role grant, or ban is signed with the sender's private
-  key and verified by every peer before being accepted.
-- **Self-certifying room IDs**: When you create a room with `admin: true`,
-  Trystero hashes the admin's raw P-256 public key with SHA-256 and encodes 96
-  bits of the digest as a 16-character Base62 string
-  (`<baseRoomId>.<16-char-base62>`). When peers connect, they check that the
-  admin's public key hashes to the exact fingerprint in the room ID. This makes
-  it impossible for another user or a malicious signaling relay to impersonate
-  the room creator.
+- **Zero-trust public-key signatures**: Room authority is unified directly with
+  each user's WebCrypto ECDSA P-256 `UserIdentity` (`userId`). Private keys
+  never leave the user's device. Every privileged action, state update, role
+  grant, or ban is signed with the sender's private key and verified by every
+  peer before being accepted.
+- **Self-certifying room IDs**: Both a user's 43-character Base64url `userId`
+  and a self-certifying room's 16-character Base62 suffix
+  (`<baseRoomId>.<16-char-base62>`) are derived from the exact same SHA-256
+  thumbprint of the user's P-256 public key. When you create a room with
+  `admin: true`, Trystero encodes the first 96 bits of your `userId` digest into
+  the room ID suffix. When peers connect—or when the host rejoins after a reload
+  or on a persistent device—everyone can mathematically verify from the `userId`
+  alone who owns the room.
 - **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
   `RoleCertificate` binding the recipient's `peerId`, `userId`, and public key
   to the granted role(s), optional expiration timestamp, and `canDelegate` flag.
@@ -1342,18 +1330,17 @@ the same namespace will return the same room instance.
 
   - `admin` - **(optional)** Configures room admins and roles (see
     [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)):
-    - `true` - Generates a new admin identity on the fly and appends its
+    - `true` - Makes the local user (`userId`) the room admin and appends their
       16-character Base62 fingerprint to the room ID (`<roomId>.<fingerprint>`).
-    - `string` - Derives a reusable admin identity from the given secret
-      passphrase (or imports a `trystero_ak_...` admin key token).
+    - `string` (`userId`) or `string[]` (`userId[]`) - Trusts the specified
+      `userId`(s) as root room admin(s) on a fixed room name without a
+      fingerprint suffix. If the local user's `userId` is in the list, they
+      automatically become an `'admin'`.
     - `AuthorityConfig` object:
-      - `create` - Boolean to generate a new admin identity on the fly and
-        append its fingerprint to `roomId`.
-      - `credentials` - Admin secret passphrase, `trystero_ak_...` token,
-        private `JsonWebKey`, or `AdminIdentity`.
-      - `rootPubKeys` - Array of trusted admin public keys (or 16-character
-        Base62 fingerprints) when using a clean room name without a fingerprint
-        suffix.
+      - `create` - Boolean to make the local user the room admin and append
+        their 16-character Base62 fingerprint to `roomId`.
+      - `users` - Array of trusted admin `userId`s (or 16-character Base62
+        fingerprints) when using a clean room name without a fingerprint suffix.
       - `signalingProofs` - Boolean (default: `true` for admin-backed rooms)
         controlling whether signed role certificates and ban records are
         included in initial discovery announcements.
@@ -1510,10 +1497,7 @@ Returns an object with the following methods:
   - `isAdmin` - Boolean indicating whether the local user is a verified
     `'admin'`.
   - `roles` - Array of verified roles currently held by the local user.
-  - `publicKey` - Public key string of the local admin identity (if the local
-    user is an admin), or `null`.
-  - `adminKey` - Exportable `trystero_ak_...` secret token for rejoining the
-    room as admin (if the local user is an admin), or `null`.
+  - `userId` - The local user's 43-character Base64url `userId`.
 
 - ### `makeState(namespace, initialValue, [config])`
 
@@ -1818,14 +1802,14 @@ local runtime's ECDSA P-256 public key.
 
 ### `createUserIdentity()`
 
-Generates a fresh self-certifying ECDSA P-256 `UserIdentity`
-(`{userId, publicKey, userKey, signPubJwk, sign}`).
+Returns a promise resolving to a fresh self-certifying ECDSA P-256
+`UserIdentity` (`{userId, publicKey, userKey, signPubJwk, sign}`).
 
 ### `importUserIdentity(input)`
 
-Imports a `UserIdentity` from an exported `trystero_uk_...` string or a P-256
-private `JsonWebKey`. Throws if the input is not high-entropy P-256 key
-material.
+Returns a promise resolving to a `UserIdentity` imported from an exported
+`trystero_uk_...` string or a P-256 private `JsonWebKey`. Rejects if the input
+is not valid P-256 key material.
 
 ### `exportUserIdentity(identity)`
 
@@ -1835,38 +1819,31 @@ non-extractable (e.g. when backed by IndexedDB WebCrypto storage).
 
 ### `derivePeerId(publicKey)`
 
-Deterministically derives the 20-character Base62 `peerId`
-(`sha256(canonicalPubJwk) mod 62²⁰`) from a public key string or `JsonWebKey`.
+Returns a promise resolving to the deterministic 20-character Base62 `peerId`
+(`sha256(canonicalPubJwk) mod 62²⁰`) for a P-256 public key string or
+`JsonWebKey`.
 
 ### `deriveUserId(publicKey)`
 
-Deterministically derives the 43-character Base64url `userId`
-([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) JWK thumbprint) from a
-public key string or `JsonWebKey`.
+Returns a promise resolving to the deterministic 43-character Base64url `userId`
+([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) JWK thumbprint) for a
+P-256 public key string or `JsonWebKey`.
 
 ### `verifyPeerIdKey(peerId, publicKey)`
 
-Returns `true` if `publicKey` cryptographically derives `peerId`.
+Returns a promise resolving to `true` if `publicKey` is a valid P-256 public key
+that cryptographically derives `peerId`.
 
 ### `verifyUserIdKey(userId, publicKey)`
 
-Returns `true` if `publicKey` cryptographically derives `userId`.
-
-### `createAdminIdentity([options])`
-
-Creates or imports an ECDSA P-256 `AdminIdentity`
-(`{publicKey, fingerprint, adminKey, signPrivateKey, signPublicKey, signPubJwk}`).
-
-- `options.secret` / `options.passphrase` - **(optional)** Deterministically
-  derives the P-256 keypair from a secret passphrase (optionally scoped by
-  `options.appId` and `options.roomId`).
-- `options.adminKey` - **(optional)** Imports an existing `trystero_ak_...`
-  credential token.
+Returns a promise resolving to `true` if `publicKey` is a valid P-256 public key
+that cryptographically derives `userId`.
 
 ### `createAdminRoom(baseRoomId, [options])`
 
-Generates (or derives) an `AdminIdentity` and formats a self-certifying room ID,
-resolving to `{roomId, baseRoomId, fingerprint, identity}`.
+Resolves a `UserIdentity` (from `options.identity` or `'session'` / `'none'` by
+default) and formats a self-certifying room ID, returning a promise that
+resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
 
 ### `parseSelfCertifyingRoomId(roomId)`
 

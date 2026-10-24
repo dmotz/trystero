@@ -2,11 +2,11 @@ import {hashWith} from './crypto'
 import {
   extractDtlsFingerprints,
   fromBase64Url,
-  getOrCreateEndpointIdentitySync,
+  getOrCreateEndpointIdentity,
   toBase64Url,
   verifyPeerIdKey,
   verifyUserIdKey,
-  verifyWithP256Sync
+  verifyWithP256
 } from './identity'
 import {
   encodeBytes,
@@ -62,12 +62,12 @@ type IdentityHandshakeStepMessage = {
   us?: unknown
 }
 
-const parseAndVerifyPeerIdentityClaims = (
+const parseAndVerifyPeerIdentityClaims = async (
   raw: unknown,
   expectedStep: 1 | 2,
   remotePeerId: string,
   expectedRemoteDtls: string[]
-): {
+): Promise<{
   nonce: string
   dtls: string[]
   userId: string
@@ -75,7 +75,7 @@ const parseAndVerifyPeerIdentityClaims = (
   userPubJwk: JsonWebKey
   ps?: string
   us?: string
-} => {
+}> => {
   if (!raw || typeof raw !== 'object') {
     throw peerIdentityErr
   }
@@ -106,10 +106,11 @@ const parseAndVerifyPeerIdentityClaims = (
 
   const peerPubJwk = msg.pk as JsonWebKey
   const userPubJwk = msg.uk as JsonWebKey
-  if (
-    !verifyPeerIdKey(remotePeerId, peerPubJwk) ||
-    !verifyUserIdKey(msg.uid, userPubJwk)
-  ) {
+  const [peerOk, userOk] = await Promise.all([
+    verifyPeerIdKey(remotePeerId, peerPubJwk),
+    verifyUserIdKey(msg.uid, userPubJwk)
+  ])
+  if (!peerOk || !userOk) {
     throw peerIdentityErr
   }
 
@@ -124,21 +125,18 @@ const parseAndVerifyPeerIdentityClaims = (
   }
 }
 
-const verifyTranscriptDualSignatures = (
+const verifyTranscriptDualSignatures = async (
   transcriptBytes: Uint8Array,
   peerSigB64: string,
   userSigB64: string,
   peerPubJwk: JsonWebKey,
   userPubJwk: JsonWebKey
-): void => {
-  if (
-    !verifyWithP256Sync(
-      fromBase64Url(peerSigB64),
-      transcriptBytes,
-      peerPubJwk
-    ) ||
-    !verifyWithP256Sync(fromBase64Url(userSigB64), transcriptBytes, userPubJwk)
-  ) {
+): Promise<void> => {
+  const [peerOk, userOk] = await Promise.all([
+    verifyWithP256(fromBase64Url(peerSigB64), transcriptBytes, peerPubJwk),
+    verifyWithP256(fromBase64Url(userSigB64), transcriptBytes, userPubJwk)
+  ])
+  if (!peerOk || !userOk) {
     throw peerIdentityErr
   }
 }
@@ -159,15 +157,22 @@ export const createIdentityHandshake = (params: {
   ) => Promise<VerifiedPeerIdentity>
   compose: (nextHandshake?: PeerHandshake) => PeerHandshake
 } => {
-  const localEndpoint = getOrCreateEndpointIdentitySync(params.selfId)
+  const localEndpointP = getOrCreateEndpointIdentity(params.selfId)
 
   const signTranscript = async (
     transcriptBytes: Uint8Array,
     localUser: UserIdentity
-  ): Promise<{ps: string; us: string}> => ({
-    ps: toBase64Url(localEndpoint.sign(transcriptBytes)),
-    us: toBase64Url(await localUser.sign(transcriptBytes))
-  })
+  ): Promise<{ps: string; us: string}> => {
+    const localEndpoint = await localEndpointP
+    const [psBytes, usBytes] = await Promise.all([
+      localEndpoint.sign(transcriptBytes),
+      localUser.sign(transcriptBytes)
+    ])
+    return {
+      ps: toBase64Url(psBytes),
+      us: toBase64Url(usBytes)
+    }
+  }
 
   const run = async (
     remotePeerId: string,
@@ -175,9 +180,10 @@ export const createIdentityHandshake = (params: {
     receive: HandshakeReceiver,
     isInitiator: boolean
   ): Promise<VerifiedPeerIdentity> => {
-    const [resolvedRoomId, localUser] = await Promise.all([
+    const [resolvedRoomId, localUser, localEndpoint] = await Promise.all([
       params.roomId,
-      params.getUserIdentity()
+      params.getUserIdentity(),
+      localEndpointP
     ])
     const peer = params.getPeerHandle?.(remotePeerId)
     const localDtls = extractDtlsFingerprints(
@@ -199,7 +205,7 @@ export const createIdentityHandshake = (params: {
       })
 
       const {data: step2} = await receive()
-      const resp = parseAndVerifyPeerIdentityClaims(
+      const resp = await parseAndVerifyPeerIdentityClaims(
         step2,
         2,
         remotePeerId,
@@ -222,7 +228,7 @@ export const createIdentityHandshake = (params: {
         ])
       )
 
-      verifyTranscriptDualSignatures(
+      await verifyTranscriptDualSignatures(
         transcriptBytes,
         resp.ps!,
         resp.us!,
@@ -261,7 +267,7 @@ export const createIdentityHandshake = (params: {
     }
 
     const {data: step1} = await receive()
-    const init = parseAndVerifyPeerIdentityClaims(
+    const init = await parseAndVerifyPeerIdentityClaims(
       step1,
       1,
       remotePeerId,
@@ -313,7 +319,7 @@ export const createIdentityHandshake = (params: {
     ) {
       throw peerIdentityErr
     }
-    verifyTranscriptDualSignatures(
+    await verifyTranscriptDualSignatures(
       transcriptBytes,
       msg3.ps,
       msg3.us,
@@ -330,7 +336,8 @@ export const createIdentityHandshake = (params: {
     return verified
   }
 
-  const compose = (nextHandshake?: PeerHandshake): PeerHandshake =>
+  const compose =
+    (nextHandshake?: PeerHandshake): PeerHandshake =>
     async (peerId, send, receive, isInitiator): Promise<void> => {
       await nextHandshake?.(peerId, send, receive, isInitiator)
       await run(peerId, send, receive, isInitiator)

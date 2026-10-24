@@ -1,44 +1,37 @@
-import {p256} from '@noble/curves/nist.js'
 import {hashWith} from './crypto'
 import {
-  bigintTo32Bytes,
-  bytesToBigInt,
   canonicalizePubJwk,
+  computeUserIdFingerprint,
+  createUserIdentity,
   decodePublicKey,
-  encodeBase62,
+  defaultUserIdentity,
   encodePublicKey,
   fromBase64Url,
+  getCachedPubKeyRecord,
+  getVerifiedPubKeyRecord,
+  isValidUserId,
+  resolveUserIdentity,
   signUserEndpointProof,
   toBase64Url,
-  uncompressedBytesToPubJwk,
   verifyPeerIdKey,
   verifyUserEndpointProof
 } from './identity'
-import {
-  all,
-  decodeBytes,
-  encodeBytes,
-  fromJson,
-  genId,
-  mkErr,
-  noOp,
-  toHex,
-  toJson
-} from './utils'
+import {encodeBytes, genId, mkErr, noOp, toHex, toJson} from './utils'
 import type {
-  AdminIdentity,
   AuthorityConfig,
   AuthoritativeState,
   AuthoritativeStateRecord,
   DataPayload,
   JsonValue,
+  MaybePromise,
   PeerBanRecord,
   RoleCertificate,
   RoleRevocationRecord,
   RoomAuthorityInfo,
   StateChangeContext,
   StateConfig,
-  UserIdentity
+  UserIdentity,
+  UserIdentityConfig
 } from './types'
 
 export {
@@ -49,16 +42,8 @@ export {
   toBase64Url
 }
 
-const p256N =
-  0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
-
-const adminKeyPrefix = 'trystero_ak_'
-const fingerprintLen = 16
 const fingerprintRegex = /^[0-9A-Za-z]{16}$/
 const selfCertifyingRoomRegex = /^(.*)\.([0-9A-Za-z]{16})$/
-
-const toBase62Fingerprint = (digestBytes: Uint8Array): string =>
-  encodeBase62(digestBytes.subarray(0, 16), fingerprintLen)
 
 const hasRequiredRole = (
   roles: readonly string[],
@@ -68,7 +53,7 @@ const hasRequiredRole = (
   requiredRoles.includes('*') ||
   requiredRoles.some(r => roles.includes(r))
 
-const isValidDelegatedUserEndpoint = (params: {
+const isValidDelegatedUserEndpoint = async (params: {
   appId: string
   roomId: string
   peerId: string
@@ -76,14 +61,14 @@ const isValidDelegatedUserEndpoint = (params: {
   signerPubKey?: JsonWebKey
   userPubKey?: JsonWebKey
   userProof?: string
-}): boolean =>
+}): Promise<boolean> =>
   Boolean(
     params.cert.subUserId &&
     params.signerPubKey &&
     params.userPubKey &&
     params.userProof &&
-    verifyPeerIdKey(params.peerId, params.signerPubKey) &&
-    verifyUserEndpointProof({
+    (await verifyPeerIdKey(params.peerId, params.signerPubKey)) &&
+    (await verifyUserEndpointProof({
       appId: params.appId,
       roomId: params.roomId,
       peerId: params.peerId,
@@ -91,19 +76,20 @@ const isValidDelegatedUserEndpoint = (params: {
       userId: params.cert.subUserId,
       userPubJwk: params.userPubKey,
       proof: params.userProof
-    })
+    }))
   )
 
 export const computePublicKeyFingerprint = async (
   pubKeyOrJwk: JsonWebKey | string
 ): Promise<string> => {
-  const jwk =
-    typeof pubKeyOrJwk === 'string' ? decodePublicKey(pubKeyOrJwk) : pubKeyOrJwk
-  if (!jwk) {
+  if (typeof pubKeyOrJwk === 'string' && isValidUserId(pubKeyOrJwk)) {
+    return computeUserIdFingerprint(pubKeyOrJwk)
+  }
+  const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
+  if (!rec) {
     throw mkErr('invalid ECDSA P-256 public key')
   }
-  const digest = await hashWith('SHA-256', canonicalizePubJwk(jwk))
-  return toBase62Fingerprint(digest)
+  return rec.fingerprint
 }
 
 export const parseSelfCertifyingRoomId = (
@@ -130,224 +116,36 @@ export const formatSelfCertifyingRoomId = (
   return `${baseRoomId}.${fingerprint}`
 }
 
-const importIdentityFromPrivateJwk = async (
-  privJwk: JsonWebKey
-): Promise<AdminIdentity> => {
-  if (!privJwk.x || !privJwk.y || !privJwk.d) {
-    throw mkErr('invalid private JWK for admin identity')
-  }
-  const pubJwk: JsonWebKey = {
-    crv: 'P-256',
-    ext: true,
-    key_ops: ['verify'],
-    kty: 'EC',
-    x: privJwk.x,
-    y: privJwk.y
-  }
-  const cleanPrivJwk: JsonWebKey = {
-    crv: 'P-256',
-    d: privJwk.d,
-    ext: true,
-    key_ops: ['sign'],
-    kty: 'EC',
-    x: privJwk.x,
-    y: privJwk.y
-  }
-  const [signPrivateKey, signPublicKey, fingerprint] = await all([
-    crypto.subtle.importKey(
-      'jwk',
-      cleanPrivJwk,
-      {name: 'ECDSA', namedCurve: 'P-256'},
-      true,
-      ['sign']
-    ),
-    crypto.subtle.importKey(
-      'jwk',
-      pubJwk,
-      {name: 'ECDSA', namedCurve: 'P-256'},
-      true,
-      ['verify']
-    ),
-    computePublicKeyFingerprint(pubJwk)
-  ])
-  const publicKey = encodePublicKey(pubJwk)
-  const adminKey =
-    adminKeyPrefix +
-    toBase64Url(encodeBytes(toJson({d: privJwk.d, x: privJwk.x, y: privJwk.y})))
-
-  return {
-    publicKey,
-    fingerprint,
-    adminKey,
-    signPrivateKey,
-    signPublicKey,
-    signPubJwk: {crv: 'P-256', kty: 'EC', x: privJwk.x, y: privJwk.y}
-  }
-}
-
-const tryDecodeAdminKeyJwk = (token: string): JsonWebKey | null => {
-  try {
-    const raw = token.startsWith(adminKeyPrefix)
-      ? token.slice(adminKeyPrefix.length)
-      : token
-    const parsed = fromJson<{d?: string; x?: string; y?: string}>(
-      decodeBytes(fromBase64Url(raw))
-    )
-    if (
-      parsed &&
-      typeof parsed.d === 'string' &&
-      typeof parsed.x === 'string' &&
-      typeof parsed.y === 'string'
-    ) {
-      return {
-        crv: 'P-256',
-        d: parsed.d,
-        kty: 'EC',
-        x: parsed.x,
-        y: parsed.y
-      }
-    }
-    return null
-  } catch {
-    return null
-  }
-}
-
-const identityFromSecretCache = new Map<string, Promise<AdminIdentity>>()
-const generatedRoomIdentityCache = new Map<string, Promise<AdminIdentity>>()
-
-const pbkdf2Iterations = 100_000
-
-const deriveSeedFromPassphrase = async (
-  passphrase: string,
-  appId = '',
-  roomId = ''
-): Promise<Uint8Array> => {
-  const baseKey = await crypto.subtle.importKey(
-    'raw',
-    encodeBytes(passphrase) as BufferSource,
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  )
-  const salt = encodeBytes(`trystero-p256-admin-kdf:v1:${appId}:${roomId}`)
-  const derivedBits = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      hash: 'SHA-256',
-      salt: salt as BufferSource,
-      iterations: pbkdf2Iterations
-    },
-    baseKey,
-    256
-  )
-  return new Uint8Array(derivedBits)
-}
-
-export const createAdminIdentity = async (options?: {
-  secret?: string
-  passphrase?: string
-  credentials?: string
-  adminKey?: string
-  appId?: string
-  roomId?: string
-}): Promise<AdminIdentity> => {
-  const rawSecret =
-    options?.secret ?? options?.passphrase ?? options?.credentials
-  const appId = options?.appId ?? ''
-  const roomId = options?.roomId
-    ? parseSelfCertifyingRoomId(options.roomId).baseRoomId
-    : ''
-  const cacheKey = options?.adminKey
-    ? `ak:${options.adminKey}`
-    : typeof rawSecret === 'string' && rawSecret.length > 0
-      ? rawSecret.startsWith(adminKeyPrefix)
-        ? `ak:${rawSecret}`
-        : `kdf:${appId}:${roomId}:${rawSecret}`
-      : ''
-  if (cacheKey) {
-    const existing = identityFromSecretCache.get(cacheKey)
-    if (existing) {
-      return existing
-    }
-    const promise = (async () => {
-      if (options?.adminKey) {
-        const decoded = tryDecodeAdminKeyJwk(options.adminKey)
-        if (!decoded) {
-          throw mkErr('invalid adminKey token')
-        }
-        return importIdentityFromPrivateJwk(decoded)
-      }
-      const maybeJwk =
-        rawSecret && rawSecret.startsWith(adminKeyPrefix)
-          ? tryDecodeAdminKeyJwk(rawSecret)
-          : null
-      if (maybeJwk) {
-        return importIdentityFromPrivateJwk(maybeJwk)
-      }
-
-      // Deterministic PBKDF2-HMAC-SHA-256 derivation from passphrase secret
-      const seedBytes = await deriveSeedFromPassphrase(
-        rawSecret!,
-        appId,
-        roomId
-      )
-      const dScalar = (bytesToBigInt(seedBytes) % (p256N - 1n)) + 1n
-      const dBytes = bigintTo32Bytes(dScalar)
-      const pubJwk = uncompressedBytesToPubJwk(p256.getPublicKey(dBytes, false))
-      const privJwk: JsonWebKey = {
-        ...pubJwk,
-        d: toBase64Url(dBytes)
-      }
-      return importIdentityFromPrivateJwk(privJwk)
-    })()
-    identityFromSecretCache.set(cacheKey, promise)
-    return promise
-  }
-
-  const keyPair = await crypto.subtle.generateKey(
-    {name: 'ECDSA', namedCurve: 'P-256'},
-    true,
-    ['sign', 'verify']
-  )
-  const privJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey)
-  return importIdentityFromPrivateJwk(privJwk)
-}
-
 export const createAdminRoom = async (
   baseRoomId: string,
   options?: {
-    secret?: string
-    passphrase?: string
-    credentials?: string
-    adminKey?: string
     appId?: string
+    identity?: UserIdentityConfig
   }
 ): Promise<{
   roomId: string
   baseRoomId: string
   fingerprint: string
-  publicKey: string
-  adminKey: string
-  identity: AdminIdentity
+  userId: string
+  identity: UserIdentity
 }> => {
   if (!baseRoomId || typeof baseRoomId !== 'string') {
     throw mkErr('baseRoomId is required')
   }
   const parsed = parseSelfCertifyingRoomId(baseRoomId)
   const cleanBase = parsed.baseRoomId
-  const identity = await createAdminIdentity(
-    options ? {...options, roomId: cleanBase} : undefined
-  )
-  const roomId = formatSelfCertifyingRoomId(cleanBase, identity.fingerprint)
-  generatedRoomIdentityCache.set(roomId, Promise.resolve(identity))
+  const identity =
+    options?.identity !== undefined || options?.appId !== undefined
+      ? await resolveUserIdentity(options.appId ?? '', cleanBase, options)
+      : await createUserIdentity()
+  const fingerprint = computeUserIdFingerprint(identity.userId)
+  const roomId = formatSelfCertifyingRoomId(cleanBase, fingerprint)
 
   return {
     roomId,
     baseRoomId: cleanBase,
-    fingerprint: identity.fingerprint,
-    publicKey: identity.publicKey,
-    adminKey: identity.adminKey,
+    fingerprint,
+    userId: identity.userId,
     identity
   }
 }
@@ -356,22 +154,45 @@ export type ResolvedRoomAuthority = {
   effectiveRoomId: string
   baseRoomId: string
   roomFingerprint: string | null
-  rootPubKeys: Set<string>
   rootFingerprints: Set<string>
-  localIdentity: AdminIdentity | null
+  rootUserIds: Set<string>
+  localAdminUser: UserIdentity | null
+  localUser: UserIdentity
   hasAuthorityAnchor: boolean
   signalingProofs: boolean
 }
 
+const addRootEntry = async (
+  entry: string,
+  rootFingerprints: Set<string>,
+  rootUserIds: Set<string>
+): Promise<void> => {
+  const trimmed = entry.trim()
+  if (!trimmed) {
+    return
+  }
+  if (isValidUserId(trimmed)) {
+    rootUserIds.add(trimmed)
+    rootFingerprints.add(computeUserIdFingerprint(trimmed))
+  } else if (fingerprintRegex.test(trimmed)) {
+    rootFingerprints.add(trimmed)
+  } else {
+    const rec = await getVerifiedPubKeyRecord(trimmed)
+    if (rec) {
+      rootUserIds.add(rec.userId)
+      rootFingerprints.add(rec.fingerprint)
+    }
+  }
+}
+
 export const resolveRoomAuthority = async (
   rawRoomId: string,
-  adminOption?: boolean | string | AuthorityConfig,
-  appId = ''
+  adminOption?: boolean | string | string[] | AuthorityConfig,
+  localUserP?: Promise<UserIdentity>
 ): Promise<ResolvedRoomAuthority> => {
   const parsed = parseSelfCertifyingRoomId(rawRoomId)
-  const rootPubKeys = new Set<string>()
   const rootFingerprints = new Set<string>()
-  let localIdentity: AdminIdentity | null = null
+  const rootUserIds = new Set<string>()
   let effectiveRoomId = rawRoomId
   let roomFingerprint = parsed.fingerprint
   let signalingProofs = true
@@ -380,135 +201,75 @@ export const resolveRoomAuthority = async (
     rootFingerprints.add(parsed.fingerprint)
   }
 
+  let resolvedLocalUser: UserIdentity | null = null
+  const getLocalUser = async (): Promise<UserIdentity> => {
+    if (!resolvedLocalUser) {
+      resolvedLocalUser = localUserP ? await localUserP : defaultUserIdentity
+    }
+    return resolvedLocalUser
+  }
+
   if (adminOption === true) {
-    if (parsed.fingerprint) {
-      const cached = generatedRoomIdentityCache.get(rawRoomId)
-      if (cached) {
-        const id = await cached
-        if (id.fingerprint === parsed.fingerprint) {
-          localIdentity = id
-          rootPubKeys.add(canonicalizePubJwk(id.signPubJwk))
-        }
-      }
-    } else {
-      localIdentity = await createAdminIdentity()
-      roomFingerprint = localIdentity.fingerprint
+    if (!parsed.fingerprint) {
+      const user = await getLocalUser()
+      roomFingerprint = computeUserIdFingerprint(user.userId)
       effectiveRoomId = formatSelfCertifyingRoomId(rawRoomId, roomFingerprint)
       rootFingerprints.add(roomFingerprint)
-      rootPubKeys.add(canonicalizePubJwk(localIdentity.signPubJwk))
-      generatedRoomIdentityCache.set(
-        effectiveRoomId,
-        Promise.resolve(localIdentity)
-      )
+      rootUserIds.add(user.userId)
     }
-  } else if (typeof adminOption === 'string' && adminOption.length > 0) {
-    localIdentity = await createAdminIdentity({
-      secret: adminOption,
-      appId,
-      roomId: parsed.baseRoomId
-    })
-    rootPubKeys.add(canonicalizePubJwk(localIdentity.signPubJwk))
-    rootFingerprints.add(localIdentity.fingerprint)
+  } else if (typeof adminOption === 'string') {
+    if (!parsed.fingerprint) {
+      await addRootEntry(adminOption, rootFingerprints, rootUserIds)
+    }
+  } else if (Array.isArray(adminOption)) {
+    if (!parsed.fingerprint) {
+      for (const entry of adminOption) {
+        if (typeof entry === 'string') {
+          await addRootEntry(entry, rootFingerprints, rootUserIds)
+        }
+      }
+    }
   } else if (adminOption && typeof adminOption === 'object') {
     if (adminOption.signalingProofs === false) {
       signalingProofs = false
     }
-    if (adminOption.create) {
-      if (!parsed.fingerprint) {
-        localIdentity = await createAdminIdentity(
-          typeof adminOption.credentials === 'string'
-            ? {
-                secret: adminOption.credentials,
-                appId,
-                roomId: parsed.baseRoomId
-              }
-            : undefined
-        )
-        roomFingerprint = localIdentity.fingerprint
-        effectiveRoomId = formatSelfCertifyingRoomId(rawRoomId, roomFingerprint)
-        rootFingerprints.add(roomFingerprint)
-        rootPubKeys.add(canonicalizePubJwk(localIdentity.signPubJwk))
-        generatedRoomIdentityCache.set(
-          effectiveRoomId,
-          Promise.resolve(localIdentity)
-        )
-      }
+    if (adminOption.create && !parsed.fingerprint) {
+      const user = await getLocalUser()
+      roomFingerprint = computeUserIdFingerprint(user.userId)
+      effectiveRoomId = formatSelfCertifyingRoomId(rawRoomId, roomFingerprint)
+      rootFingerprints.add(roomFingerprint)
+      rootUserIds.add(user.userId)
     }
-    if (adminOption.credentials && !localIdentity) {
-      localIdentity =
-        typeof adminOption.credentials === 'string'
-          ? await createAdminIdentity({
-              secret: adminOption.credentials,
-              appId,
-              roomId: parsed.baseRoomId
-            })
-          : adminOption.credentials
-      if (
-        !adminOption.rootPubKeys?.length &&
-        (!roomFingerprint || localIdentity.fingerprint === roomFingerprint)
-      ) {
-        rootPubKeys.add(canonicalizePubJwk(localIdentity.signPubJwk))
-        rootFingerprints.add(localIdentity.fingerprint)
-      }
-    }
-    if (Array.isArray(adminOption.rootPubKeys)) {
-      for (const rk of adminOption.rootPubKeys) {
-        if (fingerprintRegex.test(rk)) {
-          rootFingerprints.add(rk)
-        } else {
-          const jwk = decodePublicKey(rk)
-          if (jwk) {
-            rootPubKeys.add(canonicalizePubJwk(jwk))
-            rootFingerprints.add(await computePublicKeyFingerprint(jwk))
-          }
+    if (!parsed.fingerprint && Array.isArray(adminOption.users)) {
+      for (const entry of adminOption.users) {
+        if (typeof entry === 'string') {
+          await addRootEntry(entry, rootFingerprints, rootUserIds)
         }
       }
     }
   }
 
-  // If the room has a self-certifying fingerprint, ensure localIdentity matches it
-  // (unless additional rootPubKeys were explicitly configured).
-  if (
-    localIdentity &&
-    roomFingerprint &&
-    !rootFingerprints.has(localIdentity.fingerprint) &&
-    !rootPubKeys.has(canonicalizePubJwk(localIdentity.signPubJwk))
-  ) {
-    localIdentity = null
-  }
-
-  const hasAuthorityAnchor = rootFingerprints.size > 0 || rootPubKeys.size > 0
+  const localUser =
+    rootFingerprints.size > 0 || rootUserIds.size > 0 || localUserP
+      ? await getLocalUser()
+      : defaultUserIdentity
+  const localFp = computeUserIdFingerprint(localUser.userId)
+  const isLocalAdmin =
+    rootUserIds.has(localUser.userId) || rootFingerprints.has(localFp)
+  const localAdminUser = isLocalAdmin ? localUser : null
+  const hasAuthorityAnchor = rootFingerprints.size > 0 || rootUserIds.size > 0
 
   return {
     effectiveRoomId,
     baseRoomId: parsed.baseRoomId,
     roomFingerprint,
-    rootPubKeys,
     rootFingerprints,
-    localIdentity,
+    rootUserIds,
+    localAdminUser,
+    localUser,
     hasAuthorityAnchor,
     signalingProofs
   }
-}
-
-const verifyKeyImportCache = new Map<string, Promise<CryptoKey>>()
-
-const importVerifyKeyFromCanonical = (
-  canonicalJwk: string
-): Promise<CryptoKey> => {
-  let cached = verifyKeyImportCache.get(canonicalJwk)
-  if (!cached) {
-    const jwk = fromJson<JsonWebKey>(canonicalJwk)
-    cached = crypto.subtle.importKey(
-      'jwk',
-      jwk,
-      {name: 'ECDSA', namedCurve: 'P-256'},
-      false,
-      ['verify']
-    )
-    verifyKeyImportCache.set(canonicalJwk, cached)
-  }
-  return cached
 }
 
 const roleCertCanonicalPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
@@ -538,7 +299,7 @@ const nextMonotonicTs = (): number => {
 }
 
 export const signRoleCertificate = async (
-  signerPrivateKey: CryptoKey,
+  signer: CryptoKey | ((payload: Uint8Array) => MaybePromise<Uint8Array>),
   signerPubJwk: JsonWebKey,
   params: {
     subPeerId: string
@@ -580,14 +341,19 @@ export const signRoleCertificate = async (
   }
 
   const canonicalBytes = encodeBytes(roleCertCanonicalPayload(unsigned))
-  const sigBuf = await crypto.subtle.sign(
-    {name: 'ECDSA', hash: 'SHA-256'},
-    signerPrivateKey,
-    canonicalBytes as BufferSource
-  )
+  const sigBytes =
+    typeof signer === 'function'
+      ? await signer(canonicalBytes)
+      : new Uint8Array(
+          await crypto.subtle.sign(
+            {name: 'ECDSA', hash: 'SHA-256'},
+            signer,
+            canonicalBytes as BufferSource
+          )
+        )
   return {
     ...unsigned,
-    sig: toBase64Url(new Uint8Array(sigBuf))
+    sig: toBase64Url(sigBytes)
   }
 }
 
@@ -598,7 +364,7 @@ export const verifyRoleCertificateChain = async (
   appId: string,
   roomId: string,
   rootFingerprints: ReadonlySet<string>,
-  rootPubKeys: ReadonlySet<string>,
+  rootUserIds?: ReadonlySet<string>,
   depth = 0
 ): Promise<{valid: boolean; isRoot: boolean; rootFingerprint?: string}> => {
   if (
@@ -611,7 +377,7 @@ export const verifyRoleCertificateChain = async (
     cert.roles.length === 0 ||
     !cert.subPeerId ||
     !cert.subPubKey ||
-    !verifyPeerIdKey(cert.subPeerId, cert.subPubKey) ||
+    !(await verifyPeerIdKey(cert.subPeerId, cert.subPubKey)) ||
     typeof cert.iat !== 'number' ||
     !Number.isSafeInteger(cert.iat) ||
     cert.iat <= 0 ||
@@ -629,20 +395,17 @@ export const verifyRoleCertificateChain = async (
     return {valid: false, isRoot: false}
   }
 
-  const issuerJwk = decodePublicKey(cert.issuerPubKey)
-  if (!issuerJwk) {
+  const issuerRec = await getVerifiedPubKeyRecord(cert.issuerPubKey)
+  if (!issuerRec) {
     return {valid: false, isRoot: false}
   }
-  const issuerCanonical = canonicalizePubJwk(issuerJwk)
-  const issuerFingerprint = await computePublicKeyFingerprint(issuerJwk)
 
   // Verify signature of this certificate
   try {
-    const verifyKey = await importVerifyKeyFromCanonical(issuerCanonical)
     const canonicalBytes = encodeBytes(roleCertCanonicalPayload(cert))
     const ok = await crypto.subtle.verify(
       {name: 'ECDSA', hash: 'SHA-256'},
-      verifyKey,
+      issuerRec.verifyKey,
       fromBase64Url(cert.sig) as BufferSource,
       canonicalBytes as BufferSource
     )
@@ -654,13 +417,14 @@ export const verifyRoleCertificateChain = async (
   }
 
   const isTrustedRoot =
-    rootFingerprints.has(issuerFingerprint) || rootPubKeys.has(issuerCanonical)
+    rootFingerprints.has(issuerRec.fingerprint) ||
+    Boolean(rootUserIds?.has(issuerRec.userId))
 
   if (isTrustedRoot) {
     return {
       valid: true,
       isRoot: Boolean(cert.isRoot && cert.roles.includes('admin')),
-      rootFingerprint: issuerFingerprint
+      rootFingerprint: issuerRec.fingerprint
     }
   }
 
@@ -670,7 +434,7 @@ export const verifyRoleCertificateChain = async (
     return {valid: false, isRoot: false}
   }
 
-  if (canonicalizePubJwk(parent.subPubKey) !== issuerCanonical) {
+  if (canonicalizePubJwk(parent.subPubKey) !== issuerRec.canonicalJwk) {
     return {valid: false, isRoot: false}
   }
 
@@ -687,7 +451,7 @@ export const verifyRoleCertificateChain = async (
     appId,
     roomId,
     rootFingerprints,
-    rootPubKeys,
+    rootUserIds,
     depth + 1
   )
   return {
@@ -762,7 +526,7 @@ export const verifyRoleRevocation = async (
   appId: string,
   roomId: string,
   rootFingerprints: ReadonlySet<string>,
-  rootPubKeys: ReadonlySet<string>
+  rootUserIds?: ReadonlySet<string>
 ): Promise<boolean> => {
   if (
     !rev ||
@@ -791,20 +555,21 @@ export const verifyRoleRevocation = async (
     appId,
     roomId,
     rootFingerprints,
-    rootPubKeys
+    rootUserIds
   )
   if (!certRes.valid) {
     return false
   }
 
   try {
-    const verifyKey = await importVerifyKeyFromCanonical(
-      canonicalizePubJwk(rev.issuerCert.subPubKey)
-    )
+    const subRec = await getVerifiedPubKeyRecord(rev.issuerCert.subPubKey)
+    if (!subRec) {
+      return false
+    }
     const canonicalBytes = encodeBytes(revocationCanonicalPayload(rev))
     return await crypto.subtle.verify(
       {name: 'ECDSA', hash: 'SHA-256'},
-      verifyKey,
+      subRec.verifyKey,
       fromBase64Url(rev.sig) as BufferSource,
       canonicalBytes as BufferSource
     )
@@ -875,7 +640,7 @@ export const verifyPeerBan = async (
   appId: string,
   roomId: string,
   rootFingerprints: ReadonlySet<string>,
-  rootPubKeys: ReadonlySet<string>
+  rootUserIds?: ReadonlySet<string>
 ): Promise<boolean> => {
   if (
     !ban ||
@@ -904,20 +669,21 @@ export const verifyPeerBan = async (
     appId,
     roomId,
     rootFingerprints,
-    rootPubKeys
+    rootUserIds
   )
   if (!certRes.valid) {
     return false
   }
 
   try {
-    const verifyKey = await importVerifyKeyFromCanonical(
-      canonicalizePubJwk(ban.issuerCert.subPubKey)
-    )
+    const subRec = await getVerifiedPubKeyRecord(ban.issuerCert.subPubKey)
+    if (!subRec) {
+      return false
+    }
     const canonicalBytes = encodeBytes(banCanonicalPayload(ban))
     return await crypto.subtle.verify(
       {name: 'ECDSA', hash: 'SHA-256'},
-      verifyKey,
+      subRec.verifyKey,
       fromBase64Url(ban.sig) as BufferSource,
       canonicalBytes as BufferSource
     )
@@ -1102,7 +868,7 @@ export const verifyActionAuth = async (
     userMetadata?: JsonValue
     requiredRoles: readonly string[]
     rootFingerprints: ReadonlySet<string>
-    rootPubKeys: ReadonlySet<string>
+    rootUserIds?: ReadonlySet<string>
   }
 ): Promise<{valid: boolean; roles: string[]}> => {
   if (
@@ -1119,7 +885,7 @@ export const verifyActionAuth = async (
   let verifyPubKeyJwk: JsonWebKey = env.cert.subPubKey
   if (env.cert.subPeerId !== params.peerId) {
     if (
-      !isValidDelegatedUserEndpoint({
+      !(await isValidDelegatedUserEndpoint({
         appId: params.appId,
         roomId: params.roomId,
         peerId: params.peerId,
@@ -1127,7 +893,7 @@ export const verifyActionAuth = async (
         ...(env.signerPubKey ? {signerPubKey: env.signerPubKey} : {}),
         ...(env.userPubKey ? {userPubKey: env.userPubKey} : {}),
         ...(env.userProof ? {userProof: env.userProof} : {})
-      })
+      }))
     ) {
       return {valid: false, roles: []}
     }
@@ -1143,7 +909,7 @@ export const verifyActionAuth = async (
     params.appId,
     params.roomId,
     params.rootFingerprints,
-    params.rootPubKeys
+    params.rootUserIds
   )
   if (!certRes.valid) {
     return {valid: false, roles: []}
@@ -1158,9 +924,10 @@ export const verifyActionAuth = async (
   }
 
   try {
-    const verifyKey = await importVerifyKeyFromCanonical(
-      canonicalizePubJwk(verifyPubKeyJwk)
-    )
+    const signerRec = await getVerifiedPubKeyRecord(verifyPubKeyJwk)
+    if (!signerRec) {
+      return {valid: false, roles: []}
+    }
     const canonicalBytes = encodeBytes(
       actionAuthCanonicalPayload({
         appId: params.appId,
@@ -1174,7 +941,7 @@ export const verifyActionAuth = async (
     )
     const ok = await crypto.subtle.verify(
       {name: 'ECDSA', hash: 'SHA-256'},
-      verifyKey,
+      signerRec.verifyKey,
       fromBase64Url(env.sig) as BufferSource,
       canonicalBytes as BufferSource
     )
@@ -1266,7 +1033,7 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
   roomId: string,
   requiredRoles: readonly string[],
   rootFingerprints: ReadonlySet<string>,
-  rootPubKeys: ReadonlySet<string>
+  rootUserIds?: ReadonlySet<string>
 ): Promise<boolean> => {
   if (
     !rec ||
@@ -1289,7 +1056,7 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
       return false
     }
   } else if (
-    !isValidDelegatedUserEndpoint({
+    !(await isValidDelegatedUserEndpoint({
       appId,
       roomId,
       peerId: rec.updatedBy,
@@ -1297,7 +1064,7 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
       signerPubKey: rec.signerPubKey,
       ...(rec.userPubKey ? {userPubKey: rec.userPubKey} : {}),
       ...(rec.userProof ? {userProof: rec.userProof} : {})
-    })
+    }))
   ) {
     return false
   }
@@ -1312,18 +1079,21 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
     appId,
     roomId,
     rootFingerprints,
-    rootPubKeys
+    rootUserIds
   )
   if (!certRes.valid) {
     return false
   }
 
   try {
-    const verifyKey = await importVerifyKeyFromCanonical(signerCanonical)
+    const signerRec = await getVerifiedPubKeyRecord(rec.signerPubKey)
+    if (!signerRec) {
+      return false
+    }
     const canonicalBytes = encodeBytes(stateRecordCanonicalPayload(rec))
     const ok = await crypto.subtle.verify(
       {name: 'ECDSA', hash: 'SHA-256'},
-      verifyKey,
+      signerRec.verifyKey,
       fromBase64Url(rec.sig) as BufferSource,
       canonicalBytes as BufferSource
     )
@@ -1367,7 +1137,7 @@ export type RoomAuthorityDeps = {
   selfId: string
   appId: string
   initialRoomId: string
-  admin?: boolean | string | AuthorityConfig
+  admin?: boolean | string | string[] | AuthorityConfig
   resolvedAuthorityP?: Promise<ResolvedRoomAuthority>
   getLocalCryptoIdentity: () => Promise<{
     signPrivateKey: CryptoKey
@@ -1413,7 +1183,7 @@ export const createRoomAuthority = ({
 }: RoomAuthorityDeps) => {
   let effectiveRoomId = initialRoomId
   const rootFingerprints = new Set<string>()
-  const rootPubKeys = new Set<string>()
+  const rootUserIds = new Set<string>()
   const peerSignKeys = new Map<string, JsonWebKey>()
   const pubKeyWaiters = new Map<string, Array<(jwk: JsonWebKey) => void>>()
   const peerCerts = new Map<string, RoleCertificate>()
@@ -1425,7 +1195,7 @@ export const createRoomAuthority = ({
   const bannedUserIds = new Set<string>()
   const latestStateRecords = new Map<string, AuthoritativeStateRecord>()
   const stateInstances = new Map<string, StateInstanceEntry>()
-  let localAdminIdentity: AdminIdentity | null = null
+  let localAdminUser: UserIdentity | null = null
   let localCert: RoleCertificate | null = null
   let authResolved = false
   let localAuthSeq = 0
@@ -1470,6 +1240,19 @@ export const createRoomAuthority = ({
     return true
   }
 
+  const applyVerifiedPeerPublicKey = (
+    peerId: string,
+    cleanJwk: JsonWebKey
+  ): void => {
+    peerSignKeys.set(peerId, cleanJwk)
+    onPeerPublicKey(peerId, cleanJwk)
+    const waiters = pubKeyWaiters.get(peerId)
+    if (waiters) {
+      pubKeyWaiters.delete(peerId)
+      waiters.forEach(w => w(cleanJwk))
+    }
+  }
+
   const registerPeerPublicKey = (peerId: string, jwk: JsonWebKey): void => {
     if (!peerId || !jwk || jwk.kty !== 'EC' || !jwk.x || !jwk.y) {
       return
@@ -1480,16 +1263,16 @@ export const createRoomAuthority = ({
       x: jwk.x,
       y: jwk.y
     }
-    if (!verifyPeerIdKey(peerId, cleanJwk)) {
+    const cached = getCachedPubKeyRecord(cleanJwk)
+    if (cached && cached.peerId === peerId) {
+      applyVerifiedPeerPublicKey(peerId, cleanJwk)
       return
     }
-    peerSignKeys.set(peerId, cleanJwk)
-    onPeerPublicKey(peerId, cleanJwk)
-    const waiters = pubKeyWaiters.get(peerId)
-    if (waiters) {
-      pubKeyWaiters.delete(peerId)
-      waiters.forEach(w => w(cleanJwk))
-    }
+    void verifyPeerIdKey(peerId, cleanJwk).then(ok => {
+      if (ok) {
+        applyVerifiedPeerPublicKey(peerId, cleanJwk)
+      }
+    })
   }
 
   const resolveTargetIds = (
@@ -1618,19 +1401,48 @@ export const createRoomAuthority = ({
     if (
       !authResolved &&
       (targetPeerOrUserId === localSelfId ||
-        (uid && uid === getPeerUserId?.(localSelfId))) &&
-      (admin === true ||
-        (typeof admin === 'string' && admin.length > 0) ||
-        (typeof admin === 'object' &&
-          Boolean(admin?.create || admin?.credentials)))
+        (uid && uid === getPeerUserId?.(localSelfId)))
     ) {
-      return ['admin']
+      if (
+        admin === true ||
+        (typeof admin === 'object' &&
+          !Array.isArray(admin) &&
+          Boolean(admin?.create))
+      ) {
+        return ['admin']
+      }
+      const localUid = getPeerUserId?.(localSelfId)
+      if (localUid && isValidUserId(localUid)) {
+        const localFp = computeUserIdFingerprint(localUid)
+        const parsedInit = parseSelfCertifyingRoomId(initialRoomId)
+        if (parsedInit.fingerprint === localFp) {
+          return ['admin']
+        }
+        const entries =
+          typeof admin === 'string'
+            ? [admin]
+            : Array.isArray(admin)
+              ? admin
+              : admin && typeof admin === 'object' && Array.isArray(admin.users)
+                ? admin.users
+                : []
+        if (
+          entries.some(
+            e =>
+              typeof e === 'string' &&
+              (e.trim() === localUid || e.trim() === localFp)
+          )
+        ) {
+          return ['admin']
+        }
+      }
     }
     return []
   }
 
   const ready = (
-    resolvedAuthorityP ?? resolveRoomAuthority(initialRoomId, admin, appId)
+    resolvedAuthorityP ??
+    resolveRoomAuthority(initialRoomId, admin, getLocalUserIdentity?.())
   ).then(async resolved => {
     if (
       resolved.effectiveRoomId &&
@@ -1642,19 +1454,20 @@ export const createRoomAuthority = ({
     for (const fp of resolved.rootFingerprints) {
       rootFingerprints.add(fp)
     }
-    for (const pk of resolved.rootPubKeys) {
-      rootPubKeys.add(pk)
+    for (const uid of resolved.rootUserIds) {
+      rootUserIds.add(uid)
     }
-    localAdminIdentity = resolved.localIdentity
-    if (resolved.hasAuthorityAnchor || localAdminIdentity) {
+    localAdminUser = resolved.localAdminUser
+    if (resolved.hasAuthorityAnchor || localAdminUser) {
       const cryptoId = await getLocalCryptoIdentity()
       registerPeerPublicKey(localSelfId, cryptoId.signPubJwk)
-      if (localAdminIdentity) {
+      if (localAdminUser) {
         const rootCert = await signRoleCertificate(
-          localAdminIdentity.signPrivateKey,
-          localAdminIdentity.signPubJwk,
+          localAdminUser.sign,
+          localAdminUser.signPubJwk,
           {
             subPeerId: localSelfId,
+            subUserId: localAdminUser.userId,
             subPubKey: cryptoId.signPubJwk,
             appId,
             roomId: effectiveRoomId,
@@ -1665,6 +1478,7 @@ export const createRoomAuthority = ({
         )
         localCert = rootCert
         peerCerts.set(localSelfId, rootCert)
+        userCerts.set(localAdminUser.userId, rootCert)
         onLocalRoleCertificate(rootCert)
         onPrivilegedPeer(localSelfId, true)
       }
@@ -1685,7 +1499,7 @@ export const createRoomAuthority = ({
       appId,
       effectiveRoomId,
       rootFingerprints,
-      rootPubKeys
+      rootUserIds
     )
     if (!res.valid) {
       return false
@@ -1758,7 +1572,7 @@ export const createRoomAuthority = ({
       appId,
       effectiveRoomId,
       rootFingerprints,
-      rootPubKeys
+      rootUserIds
     )
     if (!valid) {
       return false
@@ -1817,7 +1631,7 @@ export const createRoomAuthority = ({
       appId,
       effectiveRoomId,
       rootFingerprints,
-      rootPubKeys
+      rootUserIds
     )
     if (!valid || !getEffectiveRolesForCert(ban.issuerCert).includes('admin')) {
       return false
@@ -1865,7 +1679,7 @@ export const createRoomAuthority = ({
       effectiveRoomId,
       requiredRoles,
       rootFingerprints,
-      rootPubKeys
+      rootUserIds
     )
     if (!isValid) {
       onSignatureFailure()
@@ -2003,7 +1817,7 @@ export const createRoomAuthority = ({
         appId,
         effectiveRoomId,
         rootFingerprints,
-        rootPubKeys
+        rootUserIds
       )
       if (!chainRes.valid) {
         return null
@@ -2106,7 +1920,7 @@ export const createRoomAuthority = ({
       const {env, userMetadata, effectiveRoles} = parsed
       if (
         (env.cert.subPeerId !== peerId &&
-          !isValidDelegatedUserEndpoint({
+          !(await isValidDelegatedUserEndpoint({
             appId,
             roomId: effectiveRoomId,
             peerId,
@@ -2114,7 +1928,7 @@ export const createRoomAuthority = ({
             ...(env.signerPubKey ? {signerPubKey: env.signerPubKey} : {}),
             ...(env.userPubKey ? {userPubKey: env.userPubKey} : {}),
             ...(env.userProof ? {userProof: env.userProof} : {})
-          })) ||
+          }))) ||
         typeof env.seq !== 'number' ||
         env.seq <= 0 ||
         typeof env.sig !== 'string'
@@ -2153,7 +1967,7 @@ export const createRoomAuthority = ({
         ...(userMetadata === undefined ? {} : {userMetadata}),
         requiredRoles,
         rootFingerprints,
-        rootPubKeys
+        rootUserIds
       })
       if (!verified.valid) {
         return {valid: false, roles: []}
@@ -2391,8 +2205,7 @@ export const createRoomAuthority = ({
         fingerprint: resolved.roomFingerprint,
         isAdmin: roles.includes('admin'),
         roles,
-        publicKey: localAdminIdentity?.publicKey ?? null,
-        adminKey: localAdminIdentity?.adminKey ?? null
+        userId: resolved.localUser.userId
       }
     },
 
@@ -2414,7 +2227,7 @@ export const createRoomAuthority = ({
         throw mkErr('at least one role must be specified')
       }
       const canGrant =
-        Boolean(localAdminIdentity) ||
+        Boolean(localAdminUser) ||
         (Boolean(localCert?.canDelegate) &&
           (myRoles.includes('admin') ||
             requestedRoles.every(r => myRoles.includes(r))))
@@ -2429,12 +2242,8 @@ export const createRoomAuthority = ({
       const cryptoId = await getLocalCryptoIdentity()
 
       const cert = await signRoleCertificate(
-        localAdminIdentity
-          ? localAdminIdentity.signPrivateKey
-          : cryptoId.signPrivateKey,
-        localAdminIdentity
-          ? localAdminIdentity.signPubJwk
-          : cryptoId.signPubJwk,
+        localAdminUser ? localAdminUser.sign : cryptoId.signPrivateKey,
+        localAdminUser ? localAdminUser.signPubJwk : cryptoId.signPubJwk,
         {
           subPeerId: peerId,
           ...(subUserId ? {subUserId} : {}),
@@ -2446,7 +2255,7 @@ export const createRoomAuthority = ({
           ...(typeof options?.expiresInMs === 'number'
             ? {expiresInMs: options.expiresInMs}
             : {}),
-          ...(localAdminIdentity ? {} : {parentCert: localCert!})
+          ...(localAdminUser ? {} : {parentCert: localCert!})
         }
       )
 
