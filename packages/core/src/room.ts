@@ -966,11 +966,17 @@ export default (
     pendingFullRejectTimers.set(id, timer)
   }
 
+  let unlimitedByEstablishedPeer = false
+
   const handleSelfRejectedAsFull = (byPeerId: string): void => {
     if (didRejectSelfAsFull || leavePromise) {
       return
     }
-    if (isEstablished || keys(activePeerMap).length > 0) {
+    if (
+      isEstablished ||
+      keys(activePeerMap).length > 0 ||
+      unlimitedByEstablishedPeer
+    ) {
       if (peerMap[byPeerId]) {
         exitPeer(byPeerId, peerMap[byPeerId], mkErr('room full'))
       }
@@ -1144,6 +1150,24 @@ export default (
         isEstablished || keys(activePeerMap).length > 0
       if (data && typeof data === 'object') {
         if (
+          limit === undefined &&
+          data.ok !== false &&
+          Boolean(data.est) &&
+          data.limit === undefined
+        ) {
+          unlimitedByEstablishedPeer = true
+          effectiveLimit = undefined
+          if (capacityEvalTimer) {
+            clearTimeout(capacityEvalTimer)
+            capacityEvalTimer = null
+          }
+          for (const readyId of handshakeManager.getReadyPendingIds()) {
+            if (readyId !== id && !pendingFullRejectTimers.has(readyId)) {
+              handshakeManager.activate(readyId)
+            }
+          }
+        }
+        if (
           typeof data.limit === 'number' &&
           Number.isSafeInteger(data.limit) &&
           data.limit >= 1
@@ -1158,7 +1182,7 @@ export default (
               rejectPeerAsFull(id, peer)
               return true
             }
-          } else {
+          } else if (limit === undefined && !unlimitedByEstablishedPeer) {
             effectiveLimit =
               effectiveLimit === undefined
                 ? data.limit
@@ -1268,12 +1292,37 @@ export default (
     void activePeerMap[id]?.signal(sdp as never)
   })
 
+  const sanitizeIncomingMediaMeta = <T extends {o?: string}>(
+    meta: T,
+    fromPeerId: string
+  ): T => {
+    if (
+      meta &&
+      typeof meta === 'object' &&
+      typeof meta.o === 'string' &&
+      meta.o !== fromPeerId
+    ) {
+      const isValidRelayOrigin = Boolean(
+        scaleProvider?.isOverlayActive() &&
+        meta.o !== localSelfId &&
+        !isPeerBanned(meta.o) &&
+        (activePeerMap[meta.o] ||
+          scaleProvider.isVirtualPeer(meta.o) ||
+          Boolean(scaleProvider.getRoute(meta.o)))
+      )
+      if (!isValidRelayOrigin) {
+        return {...meta, o: fromPeerId}
+      }
+    }
+    return meta
+  }
+
   streamMetaAction.onMessage((meta, id) =>
-    mediaManager.receiveStreamMeta(meta, id)
+    mediaManager.receiveStreamMeta(sanitizeIncomingMediaMeta(meta, id), id)
   )
 
   trackMetaAction.onMessage((meta, id) =>
-    mediaManager.receiveTrackMeta(meta, id)
+    mediaManager.receiveTrackMeta(sanitizeIncomingMediaMeta(meta, id), id)
   )
 
   mediaControlAction.onMessage((msg, id) => {

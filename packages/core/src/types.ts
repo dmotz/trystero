@@ -1,6 +1,8 @@
 import type {ActionOptions, InternalAction} from './action-wire'
 import type {OfferManager} from './offer-manager'
 
+export type {ActionOptions, InternalAction}
+
 export type JsonPrimitive = null | string | number | boolean
 
 export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue}
@@ -174,6 +176,9 @@ export type RoleRevocationRecord = {
   seq: number
   ts: number
   issuerCert: RoleCertificate
+  signerPubKey?: JsonWebKey
+  userPubKey?: JsonWebKey
+  userProof?: string
   sig: string
 }
 
@@ -189,6 +194,9 @@ export type PeerBanRecord = {
   seq: number
   ts: number
   issuerCert: RoleCertificate
+  signerPubKey?: JsonWebKey
+  userPubKey?: JsonWebKey
+  userProof?: string
   sig: string
 }
 

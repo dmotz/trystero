@@ -17,14 +17,25 @@ import {
   createUserIdentity,
   exportUserIdentity
 } from '../../packages/core/src/identity.ts'
+import {ecdsaSign} from '../../packages/core/src/crypto.ts'
 import {inspectActionWireHeader} from '../../packages/core/src/action-wire.ts'
 import {
+  maxActionFrameBytes,
+  maxRoomFrameBytes
+} from '../../packages/core/src/data-limits.ts'
+import {
+  buildOverlaySignedBytes,
+  canonicalBroadcastHeader,
+  canonicalLeaveHeader,
   computeShortestPathRoutes,
   computeTargetNeighbors,
   createOverlayManager,
   normalizeTopologyConfig,
   overlayBroadcastKind,
+  overlayControlKind,
+  overlayFrameVersion,
   overlayUnicastKind,
+  packGossipControlFrames,
   packOverlayBinary,
   packOverlayControl,
   scale,
@@ -92,6 +103,12 @@ const createOverlayCluster = async ({
 
     override sendData(data: Uint8Array) {
       if (this.isDead) {
+        return
+      }
+      if (data.byteLength > maxRoomFrameBytes) {
+        const partner = this.partner
+        this.destroy()
+        partner?.destroy()
         return
       }
       totalWireFrames++
@@ -3301,4 +3318,1040 @@ void test('Third-party plugin injection via definePlugin (spread and plugins arr
     'mod2:setup:custom-peer-2:plugin-room-2'
   ])
   await room2.leave()
+})
+
+void test('C1 regression: gossip descriptor dumps and flushes chunk below maxActionFrameBytes / maxRoomFrameBytes at scale with role certs', async () => {
+  // 1. Direct unit test of packGossipControlFrames with 30 cert-bearing descriptors
+  const adminUser = await createUserIdentity()
+  const descriptors = []
+  for (let i = 0; i < 30; i++) {
+    const peerUser = await createUserIdentity()
+    const peerId = `cert-peer-${String(i).padStart(3, '0')}`
+    const cert = await signRoleCertificate(
+      adminUser.sign,
+      adminUser.signPubJwk,
+      {
+        appId: 'c1-app',
+        roomId: 'c1-room',
+        subPeerId: peerId,
+        subUserId: peerUser.userId,
+        subPubKey: peerUser.signPubJwk,
+        roles: ['moderator', 'speaker'],
+        canDelegate: true
+      }
+    )
+    descriptors.push({
+      peerId,
+      seq: i + 1,
+      neighbors: [
+        `cert-peer-${String((i + 1) % 30).padStart(3, '0')}`,
+        `cert-peer-${String((i + 2) % 30).padStart(3, '0')}`,
+        `cert-peer-${String((i + 3) % 30).padStart(3, '0')}`
+      ],
+      streams: [],
+      signPubKey: peerUser.signPubJwk,
+      encPubKey: peerUser.signPubJwk,
+      userId: peerUser.userId,
+      userPubKey: peerUser.signPubJwk,
+      userProof: 'A'.repeat(88),
+      cert,
+      sig: 'B'.repeat(88)
+    })
+  }
+  const downList = Array.from({length: 25}, (_, i) => `departed-peer-${i}`)
+
+  const unchunked = packOverlayControl({
+    t: 'gossip',
+    descriptors,
+    down: downList
+  })
+  assert.ok(
+    unchunked.byteLength > maxRoomFrameBytes,
+    `expected unchunked 30-descriptor dump (${unchunked.byteLength} B) to exceed maxRoomFrameBytes (${maxRoomFrameBytes} B)`
+  )
+
+  const frames = packGossipControlFrames(descriptors, downList)
+  assert.ok(frames.length >= 2, 'expected gossip dump to split into chunks')
+  const recoveredPeerIds: string[] = []
+  const recoveredDown: string[] = []
+  for (const frame of frames) {
+    assert.ok(
+      frame.byteLength <= maxActionFrameBytes,
+      `gossip chunk (${frame.byteLength} B) must not exceed maxActionFrameBytes (${maxActionFrameBytes} B)`
+    )
+    assert.equal(frame[0], overlayFrameVersion)
+    assert.equal(frame[1], overlayControlKind)
+    const parsed = JSON.parse(decodeBytes(frame.subarray(2)))
+    assert.equal(parsed.t, 'gossip')
+    for (const d of parsed.descriptors) {
+      recoveredPeerIds.push(d.peerId)
+    }
+    if (parsed.down) {
+      recoveredDown.push(...parsed.down)
+    }
+  }
+  assert.deepEqual(
+    recoveredPeerIds,
+    descriptors.map(d => d.peerId)
+  )
+  assert.deepEqual(recoveredDown, downList)
+
+  // 2. Live 25-peer cluster with role certificates enforcing strict WebRTC frame limits
+  let maxObservedControlFrameBytes = 0
+  let oversizedDrops = 0
+  const peerCount = 25
+  const provisioned = await createAdminRoom('c1-cluster-room')
+  const roomId = provisioned.roomId
+  const appId = 'c1-cluster-app'
+  const peerIds = Array.from(
+    {length: peerCount},
+    (_, i) => `c1-peer-${String(i).padStart(2, '0')}`
+  )
+  const registerCallbacks = new Map<
+    string,
+    (peer: LinkedPeer, id: string) => void
+  >()
+  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
+
+  class StrictWebRTCPeer extends LinkedPeer {
+    override sendData(data: Uint8Array) {
+      if (this.isDead) {
+        return
+      }
+      if (
+        data.byteLength >= 2 &&
+        data[0] === overlayFrameVersion &&
+        data[1] === overlayControlKind
+      ) {
+        if (data.byteLength > maxObservedControlFrameBytes) {
+          maxObservedControlFrameBytes = data.byteLength
+        }
+      }
+      if (data.byteLength > maxActionFrameBytes) {
+        oversizedDrops++
+        const partner = this.partner
+        this.destroy()
+        partner?.destroy()
+        return
+      }
+      super.sendData(data)
+    }
+  }
+
+  const connectPair = (idA: string, idB: string) => {
+    if (idA === idB) {
+      return
+    }
+    const key = idA < idB ? `${idA}<->${idB}` : `${idB}<->${idA}`
+    if (directLinks.has(key)) {
+      return
+    }
+    const regA = registerCallbacks.get(idA)
+    const regB = registerCallbacks.get(idB)
+    if (!regA || !regB) {
+      return
+    }
+    const {peerA, peerB} = linkPeers(
+      new StrictWebRTCPeer(),
+      new StrictWebRTCPeer()
+    )
+    directLinks.set(key, {peerA, peerB})
+    if (idA < idB) {
+      regA(peerA, idB)
+      regB(peerB, idA)
+    } else {
+      regB(peerA, idA)
+      regA(peerB, idB)
+    }
+  }
+
+  for (let i = 0; i < peerCount; i++) {
+    const id = peerIds[i]!
+    const peerIdentity =
+      i === 0 ? provisioned.identity : await createUserIdentity()
+    const room = createRoom(
+      peerRegister => {
+        registerCallbacks.set(id, peerRegister)
+      },
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId,
+        roomId,
+        ...scale({
+          mode: 'gossip',
+          maxConnections: 6,
+          fanout: 4
+        }),
+        ...roles(),
+        identity: peerIdentity
+      }
+    )
+    rooms.set(id, room)
+  }
+
+  try {
+    const activeSet = new Set(peerIds)
+    for (const id of activeSet) {
+      const targets = computeTargetNeighbors(id, activeSet, 'gossip', 6, 4)
+      for (const targetId of targets) {
+        connectPair(id, targetId)
+      }
+    }
+
+    await waitFor(() => {
+      for (const room of rooms.values()) {
+        if (room.getTopology().roomPeerIds.length < peerCount - 1) {
+          return false
+        }
+      }
+      return true
+    }, 5_000)
+
+    // Grant moderator role certificates to 18 peers so their descriptors grow to ~1.5-2.1 KB
+    const adminRoom = rooms.get(peerIds[0]!)!
+    for (let i = 1; i <= 18; i++) {
+      await adminRoom.grantRole(peerIds[i]!, 'moderator', {canDelegate: true})
+    }
+    await waitFor(
+      () =>
+        rooms.get(peerIds[24]!)!.getRoles(peerIds[18]!).includes('moderator'),
+      3_000
+    )
+
+    // Now dial fresh direct links so welcome dumps carry 24 descriptors (18 with certs)
+    connectPair(peerIds[0]!, peerIds[12]!)
+    connectPair(peerIds[3]!, peerIds[19]!)
+    await wait(150)
+
+    assert.equal(
+      oversizedDrops,
+      0,
+      'no peer link should ever be dropped due to an oversized gossip frame'
+    )
+    assert.ok(
+      maxObservedControlFrameBytes > 0 &&
+        maxObservedControlFrameBytes <= maxActionFrameBytes,
+      `expected max control frame (${maxObservedControlFrameBytes} B) <= maxActionFrameBytes (${maxActionFrameBytes} B)`
+    )
+    for (const [id, room] of rooms.entries()) {
+      assert.equal(
+        room.getTopology().roomPeerIds.length,
+        peerCount - 1,
+        `peer ${id} must remain connected to all ${peerCount - 1} peers`
+      )
+    }
+  } finally {
+    await Promise.all([...rooms.values()].map(r => r.leave()))
+  }
+})
+
+void test('C2 regression: relay boundary-shifting bytes between msgId and payload fails signature verification and never evicts origin', async () => {
+  // Set up a line topology: alice <-> relay <-> bob <-> carol
+  const peerIds = ['alice', 'relay', 'bob', 'carol']
+  const registerCallbacks = new Map<
+    string,
+    (peer: LinkedPeer, id: string) => void
+  >()
+  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const receivedByBob: Array<{data: string; peerId: string}> = []
+  const receivedByCarol: Array<{data: string; peerId: string}> = []
+  const senders = new Map<string, (data: string) => Promise<void>>()
+  const capturedBroadcastsAtRelay: Uint8Array[] = []
+
+  for (const id of peerIds) {
+    const room = createRoom(
+      peerRegister => {
+        registerCallbacks.set(id, peerRegister)
+      },
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId: 'c2-boundary-app',
+        roomId: 'c2-boundary-room',
+        ...scale({
+          mode: 'gossip',
+          maxConnections: 2,
+          redundancy: 1
+        })
+      }
+    )
+    const chatAction = room.makeAction<string>('chat', {
+      onMessage: (data, {peerId}) => {
+        if (id === 'bob') {
+          receivedByBob.push({data, peerId})
+        }
+        if (id === 'carol') {
+          receivedByCarol.push({data, peerId})
+        }
+      }
+    })
+    senders.set(id, chatAction.send)
+    rooms.set(id, room)
+  }
+
+  try {
+    // Link alice <-> relay
+    const linkAR = linkPeers(new LinkedPeer(), new LinkedPeer())
+    registerCallbacks.get('alice')!(linkAR.peerA, 'relay')
+    registerCallbacks.get('relay')!(linkAR.peerB, 'alice')
+
+    // Link relay <-> bob, intercepting frames from relay to bob
+    const linkRB = linkPeers(new LinkedPeer(), new LinkedPeer())
+    const origRelayToBobSend = linkRB.peerA.sendData.bind(linkRB.peerA)
+    linkRB.peerA.sendData = (data: Uint8Array) => {
+      const parsed = unpackOverlayBinary(data)
+      if (
+        parsed?.kind === overlayBroadcastKind &&
+        parsed.header['o'] === 'alice'
+      ) {
+        capturedBroadcastsAtRelay.push(data.slice())
+      }
+      origRelayToBobSend(data)
+    }
+    registerCallbacks.get('relay')!(linkRB.peerA, 'bob')
+    registerCallbacks.get('bob')!(linkRB.peerB, 'relay')
+
+    // Link bob <-> carol
+    const linkBC = linkPeers(new LinkedPeer(), new LinkedPeer())
+    registerCallbacks.get('bob')!(linkBC.peerA, 'carol')
+    registerCallbacks.get('carol')!(linkBC.peerB, 'bob')
+
+    await waitFor(
+      () =>
+        rooms.get('bob')!.getTopology().roomPeerIds.includes('alice') &&
+        rooms.get('carol')!.getTopology().roomPeerIds.includes('alice'),
+      3_000
+    )
+
+    // Alice broadcasts a normal message
+    await senders.get('alice')!('legitimate-first-message')
+    await waitFor(
+      () =>
+        receivedByBob.length === 1 &&
+        receivedByCarol.length === 1 &&
+        capturedBroadcastsAtRelay.length >= 1,
+      2_000
+    )
+
+    const captured = unpackOverlayBinary(
+      capturedBroadcastsAtRelay[capturedBroadcastsAtRelay.length - 1]!
+    )!
+    assert.ok(captured, 'expected captured broadcast packet from alice')
+    assert.equal(
+      captured.payload[0],
+      2,
+      'expected action-wire v2 version byte (0x02) at start of payload'
+    )
+
+    const origMsgId = captured.header['m'] as string
+    const origSig = captured.header['s'] as string
+
+    // Attack 1 (exact C2 exploit): move the first byte of payload ("\u0002") into header.m
+    const shiftedMsgId1 =
+      origMsgId + decodeBytes(captured.payload.subarray(0, 1))
+    const shiftedPayload1 = captured.payload.subarray(1)
+    const exploitPacket1 = packOverlayBinary(
+      overlayBroadcastKind,
+      captured.ttl,
+      {o: 'alice', m: shiftedMsgId1, s: origSig},
+      shiftedPayload1
+    )
+
+    // Attack 2: move a printable suffix of msgId into the front of payload
+    const shiftedMsgId2 = origMsgId.slice(0, -1)
+    const movedCharBytes = encodeBytes(origMsgId.slice(-1))
+    const shiftedPayload2 = new Uint8Array(
+      movedCharBytes.byteLength + captured.payload.byteLength
+    )
+    shiftedPayload2.set(movedCharBytes, 0)
+    shiftedPayload2.set(captured.payload, movedCharBytes.byteLength)
+    const exploitPacket2 = packOverlayBinary(
+      overlayBroadcastKind,
+      captured.ttl,
+      {o: 'alice', m: shiftedMsgId2, s: origSig},
+      shiftedPayload2
+    )
+
+    const bobStatsBefore = rooms.get('bob')!.getTopology()
+      .stats.signatureFailures
+    const bobForwardedBefore = rooms.get('bob')!.getTopology()
+      .stats.messagesForwarded
+
+    origRelayToBobSend(exploitPacket1)
+    origRelayToBobSend(exploitPacket2)
+    await wait(80)
+
+    const bobStatsAfter = rooms.get('bob')!.getTopology()
+      .stats.signatureFailures
+    const bobForwardedAfter = rooms.get('bob')!.getTopology()
+      .stats.messagesForwarded
+
+    assert.equal(
+      bobStatsAfter,
+      bobStatsBefore + 2,
+      'both boundary-shifted packets must be rejected as signature failures'
+    )
+    assert.equal(
+      bobForwardedAfter,
+      bobForwardedBefore,
+      'boundary-shifted packets must never be re-forwarded by receivers'
+    )
+    assert.ok(
+      rooms.get('bob')!.getTopology().roomPeerIds.includes('alice'),
+      'victim origin (alice) must NOT be evicted/kicked from bob'
+    )
+    assert.ok(
+      rooms.get('carol')!.getTopology().roomPeerIds.includes('alice'),
+      'victim origin (alice) must NOT be evicted/kicked from carol'
+    )
+    assert.ok(
+      rooms.get('alice')!.getTopology().roomPeerIds.includes('bob'),
+      'alice must remain connected to bob (no forged leave triggered)'
+    )
+
+    // Verify Alice can still broadcast normally to Bob and Carol afterwards
+    await senders.get('alice')!('legitimate-second-message')
+    await waitFor(
+      () => receivedByBob.length === 2 && receivedByCarol.length === 2,
+      2_000
+    )
+    assert.equal(receivedByBob[1]!.data, 'legitimate-second-message')
+    assert.equal(receivedByCarol[1]!.data, 'legitimate-second-message')
+  } finally {
+    await Promise.all([...rooms.values()].map(r => r.leave()))
+  }
+})
+
+void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as a PeerBanRecord', async () => {
+  const provisioned = await createAdminRoom('c3-live-room')
+  const roomId = provisioned.roomId
+  const appId = 'c3-live-app'
+  const [modUser, attackerUser] = await Promise.all([
+    createUserIdentity(),
+    createUserIdentity()
+  ])
+  const peerIds = ['admin-peer', 'mod-peer', 'attacker-peer']
+  const usersByPeer: Record<string, any> = {
+    'admin-peer': provisioned.identity,
+    'mod-peer': modUser,
+    'attacker-peer': attackerUser
+  }
+  const registerCallbacks = new Map<
+    string,
+    (peer: LinkedPeer, id: string) => void
+  >()
+  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
+  const capturedAuthFrames: Uint8Array[] = []
+
+  const connectPair = (idA: string, idB: string) => {
+    const key = idA < idB ? `${idA}<->${idB}` : `${idB}<->${idA}`
+    if (directLinks.has(key)) {
+      return
+    }
+    const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+    if (idA === 'admin-peer' && idB === 'attacker-peer') {
+      const origSend = peerA.sendData.bind(peerA)
+      peerA.sendData = (data: Uint8Array) => {
+        if (decodeBytes(data).includes('{"t":"revoke"')) {
+          capturedAuthFrames.push(data.slice())
+        }
+        origSend(data)
+      }
+    }
+    directLinks.set(key, {peerA, peerB})
+    registerCallbacks.get(idA)!(peerA, idB)
+    registerCallbacks.get(idB)!(peerB, idA)
+  }
+
+  for (const id of peerIds) {
+    const room = createRoom(
+      peerRegister => {
+        registerCallbacks.set(id, peerRegister)
+      },
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId,
+        roomId,
+        ...scale({mode: 'mesh'}),
+        ...roles(),
+        identity: usersByPeer[id]!
+      }
+    )
+    rooms.set(id, room)
+  }
+
+  try {
+    connectPair('admin-peer', 'mod-peer')
+    connectPair('admin-peer', 'attacker-peer')
+    connectPair('mod-peer', 'attacker-peer')
+
+    await waitFor(
+      () =>
+        rooms.get('admin-peer')!.getTopology().directPeerIds.length === 2 &&
+        rooms.get('mod-peer')!.getTopology().directPeerIds.length === 2 &&
+        rooms.get('attacker-peer')!.getTopology().directPeerIds.length === 2,
+      2_000
+    )
+
+    const adminRoom = rooms.get('admin-peer')!
+    const modRoom = rooms.get('mod-peer')!
+    const attackerRoom = rooms.get('attacker-peer')!
+
+    await waitFor(
+      () =>
+        modRoom.getRoles('admin-peer').includes('admin') &&
+        attackerRoom.getRoles('admin-peer').includes('admin'),
+      2_000
+    )
+
+    // Admin grants 'moderator' to mod-peer, then revokes 'moderator'
+    await adminRoom.grantRole('mod-peer', 'moderator')
+    await waitFor(
+      () => attackerRoom.getRoles('mod-peer').includes('moderator'),
+      2_000
+    )
+
+    capturedAuthFrames.length = 0
+    await adminRoom.revokeRole('mod-peer', 'moderator')
+    await waitFor(
+      () =>
+        !attackerRoom.getRoles('mod-peer').includes('moderator') &&
+        capturedAuthFrames.length >= 1,
+      2_000
+    )
+
+    // Extract the signed RoleRevocationRecord from the captured '$auth' frame
+    let capturedRevocation: any = null
+    for (const frame of capturedAuthFrames) {
+      const text = decodeBytes(frame)
+      const jsonStart = text.indexOf('{"t":"revoke"')
+      if (jsonStart !== -1) {
+        capturedRevocation = JSON.parse(text.slice(jsonStart)).revocation
+      }
+    }
+    assert.ok(
+      capturedRevocation,
+      'expected attacker to capture signed RoleRevocationRecord from wire'
+    )
+
+    // Attacker re-wraps the captured RoleRevocationRecord into a PeerBanRecord with the same signature
+    const forgedBan = {
+      v: capturedRevocation.v,
+      appId: capturedRevocation.appId,
+      roomId: capturedRevocation.roomId,
+      issuerPeerId: capturedRevocation.issuerPeerId,
+      targetPeerId: capturedRevocation.targetPeerId,
+      ...(capturedRevocation.targetUserId
+        ? {targetUserId: capturedRevocation.targetUserId}
+        : {}),
+      ...(capturedRevocation.targetCertId
+        ? {targetKeyThumbprint: capturedRevocation.targetCertId}
+        : {}),
+      ...(capturedRevocation.role ? {reason: capturedRevocation.role} : {}),
+      seq: capturedRevocation.seq,
+      ts: capturedRevocation.ts,
+      issuerCert: capturedRevocation.issuerCert,
+      sig: capturedRevocation.sig
+    }
+
+    // Attacker attempts to apply/inject the forged ban record via signaling proofs and wire
+    const adminBridge = getRoomSignalingBridge(adminRoom)!
+    const modBridge = getRoomSignalingBridge(modRoom)!
+    await adminBridge.onSignalingPayload?.('attacker-peer', {
+      bans: [forgedBan]
+    })
+    await modBridge.onSignalingPayload?.('attacker-peer', {
+      bans: [forgedBan]
+    })
+
+    // Also craft a raw '$auth' wire frame carrying {t: 'ban', ban: forgedBan} and inject it into admin-peer and mod-peer
+    const revokeFrame = capturedAuthFrames.find(f =>
+      decodeBytes(f).includes('{"t":"revoke"')
+    )!
+    const revokeText = decodeBytes(revokeFrame)
+    const jsonOffset = revokeText.indexOf('{"t":"revoke"')
+    const frameHeaderPrefix = revokeFrame.subarray(
+      0,
+      encodeBytes(revokeText.slice(0, jsonOffset)).byteLength
+    )
+    const forgedBanBodyBytes = encodeBytes(
+      JSON.stringify({t: 'ban', ban: forgedBan})
+    )
+    const forgedBanWireFrame = new Uint8Array(
+      frameHeaderPrefix.byteLength + forgedBanBodyBytes.byteLength
+    )
+    forgedBanWireFrame.set(frameHeaderPrefix, 0)
+    forgedBanWireFrame.set(forgedBanBodyBytes, frameHeaderPrefix.byteLength)
+
+    const adminSigFailBefore = adminRoom.getTopology().stats.signatureFailures
+    directLinks
+      .get('admin-peer<->attacker-peer')!
+      .peerB.sendData(forgedBanWireFrame)
+    directLinks
+      .get('attacker-peer<->mod-peer')!
+      .peerA.sendData(forgedBanWireFrame)
+    await wait(60)
+
+    assert.equal(
+      adminRoom.isBanned('mod-peer'),
+      false,
+      'adminRoom must not ban mod-peer from a re-wrapped revocation'
+    )
+    assert.equal(
+      adminRoom.isBanned(modUser.userId),
+      false,
+      'adminRoom must not ban modUser from a re-wrapped revocation'
+    )
+    assert.equal(
+      modRoom.isBanned('mod-peer'),
+      false,
+      'modRoom must not ban mod-peer from a re-wrapped revocation'
+    )
+    assert.ok(
+      adminRoom.getTopology().stats.signatureFailures > adminSigFailBefore,
+      'forged ban from revocation must increment signatureFailures'
+    )
+    assert.ok(
+      adminRoom.getTopology().directPeerIds.includes('mod-peer'),
+      'mod-peer must remain connected in adminRoom'
+    )
+  } finally {
+    await Promise.all([...rooms.values()].map(r => r.leave()))
+  }
+})
+
+void test('Overlay & room hardening: unauthorized down-with-descriptor eviction, unknown-origin unicast relay, departed-peer broadcast resurrection, stale leave replay, maxOverlayHeaderBytes, third-party prune, fake neighbor roster inflation, and auth metadata unwrapping', async () => {
+  const appId = 'overlay-hardening-test'
+  const roomId = 'hardening-room'
+  const deliveredAtBob: Array<{from: string; bytes: Uint8Array}> = []
+  const virtualJoinsAtBob: string[] = []
+  const virtualLeavesAtBob: string[] = []
+  const sentFromRelayToBob: Uint8Array[] = []
+
+  const alice = createOverlayManager({
+    selfId: 'alice',
+    appId,
+    roomId,
+    topology: {mode: 'gossip', maxConnections: 6, minConnections: 2},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+  const relay = createOverlayManager({
+    selfId: 'relay',
+    appId,
+    roomId,
+    topology: {mode: 'gossip', maxConnections: 6, minConnections: 2},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+  const bob = createOverlayManager({
+    selfId: 'bob',
+    appId,
+    roomId,
+    topology: {
+      mode: 'auto',
+      autoThreshold: 12,
+      maxConnections: 6,
+      minConnections: 2
+    },
+    onVirtualPeerJoin: pid => virtualJoinsAtBob.push(pid),
+    onVirtualPeerLeave: pid => virtualLeavesAtBob.push(pid),
+    onDeliverData: (from, data) =>
+      deliveredAtBob.push({from, bytes: new Uint8Array(data)})
+  })
+  const mallory = createOverlayManager({
+    selfId: 'mallory',
+    appId,
+    roomId,
+    topology: {mode: 'gossip', maxConnections: 6, minConnections: 2},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+
+  try {
+    // Link alice <-> relay <-> bob, and mallory <-> bob
+    alice.addDirectPeer('relay', {
+      connection: {} as RTCPeerConnection,
+      createdAt: Date.now(),
+      isInitiator: true,
+      sendData: d => relay.handleOverlayFrame('alice', d.slice().buffer),
+      signal: async () => {},
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as RTCRtpSender,
+      removeTrack: () => {},
+      replaceTrack: async () => {},
+      setHandlers: () => {},
+      destroy: () => {}
+    })
+    relay.addDirectPeer('alice', {
+      connection: {} as RTCPeerConnection,
+      createdAt: Date.now(),
+      isInitiator: false,
+      sendData: d => alice.handleOverlayFrame('relay', d.slice().buffer),
+      signal: async () => {},
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as RTCRtpSender,
+      removeTrack: () => {},
+      replaceTrack: async () => {},
+      setHandlers: () => {},
+      destroy: () => {}
+    })
+    relay.addDirectPeer('bob', {
+      connection: {} as RTCPeerConnection,
+      createdAt: Date.now(),
+      isInitiator: true,
+      sendData: d => {
+        sentFromRelayToBob.push(d.slice())
+        bob.handleOverlayFrame('relay', d.slice().buffer)
+      },
+      signal: async () => {},
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as RTCRtpSender,
+      removeTrack: () => {},
+      replaceTrack: async () => {},
+      setHandlers: () => {},
+      destroy: () => {}
+    })
+    bob.addDirectPeer('relay', {
+      connection: {} as RTCPeerConnection,
+      createdAt: Date.now(),
+      isInitiator: false,
+      sendData: d => relay.handleOverlayFrame('bob', d.slice().buffer),
+      signal: async () => {},
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as RTCRtpSender,
+      removeTrack: () => {},
+      replaceTrack: async () => {},
+      setHandlers: () => {},
+      destroy: () => {}
+    })
+    mallory.addDirectPeer('bob', {
+      connection: {} as RTCPeerConnection,
+      createdAt: Date.now(),
+      isInitiator: true,
+      sendData: d => bob.handleOverlayFrame('mallory', d.slice().buffer),
+      signal: async () => {},
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as RTCRtpSender,
+      removeTrack: () => {},
+      replaceTrack: async () => {},
+      setHandlers: () => {},
+      destroy: () => {}
+    })
+    bob.addDirectPeer('mallory', {
+      connection: {} as RTCPeerConnection,
+      createdAt: Date.now(),
+      isInitiator: false,
+      sendData: d => mallory.handleOverlayFrame('bob', d.slice().buffer),
+      signal: async () => {},
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as RTCRtpSender,
+      removeTrack: () => {},
+      replaceTrack: async () => {},
+      setHandlers: () => {},
+      destroy: () => {}
+    })
+
+    await waitFor(
+      () =>
+        bob.getSnapshot().roomPeerIds.includes('alice') &&
+        bob.getSnapshot().roomPeerIds.includes('mallory'),
+      2_000
+    )
+
+    // 1. Mallory (NOT a neighbor of Alice) sends her own fresh signed descriptor + down: ['alice']
+    const malloryId = await mallory.getLocalCryptoIdentity()
+    const malloryFakeNeighbors = Array.from(
+      {length: 20},
+      (_, i) => `sybil-neighbor-${i}`
+    )
+    const malloryDesc = {
+      peerId: 'mallory',
+      seq: 50,
+      neighbors: ['bob', ...malloryFakeNeighbors],
+      streams: [],
+      signPubKey: malloryId.signPubJwk,
+      encPubKey: malloryId.encPubJwk,
+      sig: ''
+    }
+    const malloryDescCanonical = encodeBytes(
+      JSON.stringify([
+        malloryDesc.peerId,
+        malloryDesc.seq,
+        malloryDesc.neighbors,
+        [],
+        malloryDesc.signPubKey,
+        malloryDesc.encPubKey,
+        null,
+        null
+      ])
+    )
+    malloryDesc.sig = Buffer.from(
+      await ecdsaSign(
+        malloryId.signPrivateKey,
+        malloryDescCanonical as BufferSource
+      )
+    ).toString('base64')
+
+    const sigFailBeforeDown = bob.getSnapshot().stats.signatureFailures
+    const gossipWithFreshDescAndDown = new Uint8Array([
+      overlayFrameVersion,
+      1,
+      ...encodeBytes(
+        JSON.stringify({
+          t: 'gossip',
+          descriptors: [malloryDesc],
+          down: ['alice', 'unknown-phantom-1', 'unknown-phantom-2']
+        })
+      )
+    ])
+    bob.handleOverlayFrame('mallory', gossipWithFreshDescAndDown.slice().buffer)
+    await wait(40)
+
+    assert.ok(
+      bob.getSnapshot().roomPeerIds.includes('alice'),
+      'Alice must NOT be evicted when non-neighbor Mallory bundles her own fresh descriptor with down: ["alice"]'
+    )
+    assert.ok(
+      bob.getSnapshot().stats.signatureFailures > sigFailBeforeDown,
+      'unauthorized down claim accompanied by attacker descriptor must increment signatureFailures'
+    )
+    // Verify Mallory's 20 fake unverified neighbor IDs did NOT inflate Bob's knownRoster or flip auto mode to gossip
+    assert.equal(
+      bob.getActiveMode(),
+      'mesh',
+      'unverified neighbor claims in a descriptor must not inflate knownRoster to flip auto mode to gossip'
+    )
+
+    // 2. Unicast frame from an unknown origin is rejected at the relay and never forwarded to Bob
+    const relaySentBefore = sentFromRelayToBob.length
+    const relaySigFailBefore = relay.getSnapshot().stats.signatureFailures
+    const fakeUnicastHeader = encodeBytes(
+      JSON.stringify({
+        o: 'unknown-attacker-origin',
+        d: 'bob',
+        m: 'unknown-attacker-origin:msg-1',
+        iv: Buffer.from(new Uint8Array(12)).toString('base64'),
+        s: Buffer.from(new Uint8Array(64)).toString('base64')
+      })
+    )
+    const fakeUnicastFrame = new Uint8Array(
+      5 + fakeUnicastHeader.byteLength + 4
+    )
+    fakeUnicastFrame[0] = overlayFrameVersion
+    fakeUnicastFrame[1] = 3
+    fakeUnicastFrame[2] = 6
+    fakeUnicastFrame[3] = (fakeUnicastHeader.byteLength >>> 8) & 0xff
+    fakeUnicastFrame[4] = fakeUnicastHeader.byteLength & 0xff
+    fakeUnicastFrame.set(fakeUnicastHeader, 5)
+    relay.handleOverlayFrame('alice', fakeUnicastFrame.slice().buffer)
+    await wait(40)
+
+    assert.equal(
+      sentFromRelayToBob.length,
+      relaySentBefore,
+      'relay must drop unicast frame from unknown origin instead of forwarding it'
+    )
+    assert.equal(
+      relay.getSnapshot().stats.signatureFailures,
+      relaySigFailBefore + 1,
+      'relay must record signatureFailure for unicast from unknown origin'
+    )
+
+    // 3. Oversized overlay binary header (> maxOverlayHeaderBytes = 1024 B) is rejected
+    const oversizedHeaderBytes = encodeBytes(
+      JSON.stringify({
+        o: 'alice',
+        m: 'alice:oversized',
+        pad: 'x'.repeat(1200)
+      })
+    )
+    const oversizedFrame = new Uint8Array(
+      5 + oversizedHeaderBytes.byteLength + 2
+    )
+    oversizedFrame[0] = overlayFrameVersion
+    oversizedFrame[1] = 2
+    oversizedFrame[2] = 4
+    oversizedFrame[3] = (oversizedHeaderBytes.byteLength >>> 8) & 0xff
+    oversizedFrame[4] = oversizedHeaderBytes.byteLength & 0xff
+    oversizedFrame.set(oversizedHeaderBytes, 5)
+    const deliveredBeforeOversized = deliveredAtBob.length
+    bob.handleOverlayFrame('relay', oversizedFrame.slice().buffer)
+    await wait(20)
+    assert.equal(deliveredAtBob.length, deliveredBeforeOversized)
+
+    // 4. Third-party prune ({t: 'prune', peerId: 'relay'} sent by 'mallory') is ignored
+    const thirdPartyPrune = new Uint8Array([
+      overlayFrameVersion,
+      1,
+      ...encodeBytes(JSON.stringify({t: 'prune', peerId: 'relay'}))
+    ])
+    bob.handleOverlayFrame('mallory', thirdPartyPrune.slice().buffer)
+    await wait(20)
+
+    // 5. Capture a valid broadcast and stale leave from Alice; after Alice leaves, replaying her broadcast must NOT resurrect her as a virtual peer
+    const aliceId = await alice.getLocalCryptoIdentity()
+    const staleLeaveSeq = 1
+    const staleLeaveSig = Buffer.from(
+      await ecdsaSign(
+        aliceId.signPrivateKey,
+        buildOverlaySignedBytes(
+          canonicalLeaveHeader('alice', staleLeaveSeq),
+          new Uint8Array()
+        ) as BufferSource
+      )
+    ).toString('base64')
+    const staleLeaveFrame = new Uint8Array([
+      overlayFrameVersion,
+      1,
+      ...encodeBytes(
+        JSON.stringify({
+          t: 'leave',
+          peerId: 'alice',
+          seq: staleLeaveSeq,
+          sig: staleLeaveSig
+        })
+      )
+    ])
+
+    // Alice publishes a higher descriptor seq (seq = 100) so seq = 1 is stale
+    const aliceNewDesc = {
+      peerId: 'alice',
+      seq: 100,
+      neighbors: ['relay'],
+      streams: [],
+      signPubKey: aliceId.signPubJwk,
+      encPubKey: aliceId.encPubJwk,
+      sig: ''
+    }
+    const aliceNewDescCanonical = encodeBytes(
+      JSON.stringify([
+        aliceNewDesc.peerId,
+        aliceNewDesc.seq,
+        aliceNewDesc.neighbors,
+        [],
+        aliceNewDesc.signPubKey,
+        aliceNewDesc.encPubKey,
+        null,
+        null
+      ])
+    )
+    aliceNewDesc.sig = Buffer.from(
+      await ecdsaSign(
+        aliceId.signPrivateKey,
+        aliceNewDescCanonical as BufferSource
+      )
+    ).toString('base64')
+    bob.handleOverlayFrame(
+      'relay',
+      new Uint8Array([
+        overlayFrameVersion,
+        1,
+        ...encodeBytes(
+          JSON.stringify({t: 'gossip', descriptors: [aliceNewDesc]})
+        )
+      ]).slice().buffer
+    )
+    await wait(30)
+
+    // Replaying stale leave (seq = 1 < currentDesc.seq = 100) must be ignored
+    bob.handleOverlayFrame('mallory', staleLeaveFrame.slice().buffer)
+    await wait(30)
+    assert.ok(
+      bob.getSnapshot().roomPeerIds.includes('alice'),
+      'stale leave with seq < current descriptor seq must be ignored'
+    )
+
+    // Now Alice leaves with a fresh seq = 101; replaying a valid signed broadcast from Alice with an unseen msgId must NOT resurrect Alice
+    const freshLeaveSig = Buffer.from(
+      await ecdsaSign(
+        aliceId.signPrivateKey,
+        buildOverlaySignedBytes(
+          canonicalLeaveHeader('alice', 101),
+          new Uint8Array()
+        ) as BufferSource
+      )
+    ).toString('base64')
+    bob.handleOverlayFrame(
+      'relay',
+      new Uint8Array([
+        overlayFrameVersion,
+        1,
+        ...encodeBytes(
+          JSON.stringify({
+            t: 'leave',
+            peerId: 'alice',
+            seq: 101,
+            sig: freshLeaveSig
+          })
+        )
+      ]).slice().buffer
+    )
+    await wait(30)
+    assert.ok(
+      !bob.getSnapshot().roomPeerIds.includes('alice'),
+      'Alice should be removed after valid fresh leave'
+    )
+
+    const ghostMsgId = 'alice:ghost-broadcast-after-leave'
+    const ghostPayload = new Uint8Array([1, 2, 3, 4])
+    const ghostSig = Buffer.from(
+      await ecdsaSign(
+        aliceId.signPrivateKey,
+        buildOverlaySignedBytes(
+          canonicalBroadcastHeader('alice', ghostMsgId),
+          ghostPayload
+        ) as BufferSource
+      )
+    ).toString('base64')
+    const ghostHeaderBytes = encodeBytes(
+      JSON.stringify({o: 'alice', m: ghostMsgId, s: ghostSig})
+    )
+    const ghostBroadcastFrame = new Uint8Array(
+      5 + ghostHeaderBytes.byteLength + ghostPayload.byteLength
+    )
+    ghostBroadcastFrame[0] = overlayFrameVersion
+    ghostBroadcastFrame[1] = 2
+    ghostBroadcastFrame[2] = 6
+    ghostBroadcastFrame[3] = (ghostHeaderBytes.byteLength >>> 8) & 0xff
+    ghostBroadcastFrame[4] = ghostHeaderBytes.byteLength & 0xff
+    ghostBroadcastFrame.set(ghostHeaderBytes, 5)
+    ghostBroadcastFrame.set(ghostPayload, 5 + ghostHeaderBytes.byteLength)
+
+    const joinsBeforeGhost = virtualJoinsAtBob.length
+    const deliveredBeforeGhost = deliveredAtBob.length
+    bob.handleOverlayFrame('mallory', ghostBroadcastFrame.slice().buffer)
+    await wait(30)
+    assert.equal(
+      virtualJoinsAtBob.length,
+      joinsBeforeGhost,
+      'replayed broadcast from a departed peer must not resurrect a virtual peer'
+    )
+    assert.equal(
+      deliveredAtBob.length,
+      deliveredBeforeGhost,
+      'replayed broadcast from a departed peer must not deliver payload'
+    )
+  } finally {
+    alice.destroy()
+    relay.destroy()
+    bob.destroy()
+    mallory.destroy()
+  }
 })

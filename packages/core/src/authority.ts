@@ -305,6 +305,7 @@ export const resolveRoomAuthority = async (
 
 const roleCertCanonicalPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
   toJson([
+    'trystero-role-cert-v1',
     cert.v,
     cert.certId,
     cert.issuerPubKey,
@@ -454,7 +455,14 @@ export const verifyRoleCertificateChain = async (
 
   // Otherwise must have a valid parent certificate that has canDelegate: true
   const parent = cert.parentCert
-  if (cert.isRoot || !parent || !parent.canDelegate) {
+  if (
+    cert.isRoot ||
+    !parent ||
+    typeof parent !== 'object' ||
+    !parent.canDelegate ||
+    !parent.subPubKey ||
+    !Array.isArray(parent.roles)
+  ) {
     return {valid: false, isRoot: false}
   }
 
@@ -491,6 +499,7 @@ export const revocationCanonicalPayload = (
   rev: Omit<RoleRevocationRecord, 'sig'>
 ): string =>
   toJson([
+    'trystero-role-revoke-v1',
     rev.v,
     rev.appId,
     rev.roomId,
@@ -517,6 +526,9 @@ export const signRoleRevocation = async (
     minTs?: number
     role?: string
     seq: number
+    signerPubKey?: JsonWebKey
+    userPubKey?: JsonWebKey
+    userProof?: string
   }
 ): Promise<RoleRevocationRecord> => {
   const ts = Math.max(nextMonotonicTs(), params.minTs ?? 0)
@@ -531,7 +543,10 @@ export const signRoleRevocation = async (
     ...(params.role ? {role: params.role} : {}),
     seq: params.seq,
     ts,
-    issuerCert
+    issuerCert,
+    ...(params.signerPubKey ? {signerPubKey: params.signerPubKey} : {}),
+    ...(params.userPubKey ? {userPubKey: params.userPubKey} : {}),
+    ...(params.userProof ? {userProof: params.userProof} : {})
   }
   const canonicalBytes = encodeBytes(revocationCanonicalPayload(unsigned))
   return {
@@ -557,14 +572,38 @@ export const verifyRoleRevocation = async (
     !rev.issuerPeerId ||
     !rev.targetPeerId ||
     typeof rev.seq !== 'number' ||
+    !Number.isSafeInteger(rev.seq) ||
+    rev.seq <= 0 ||
+    typeof rev.ts !== 'number' ||
+    !Number.isSafeInteger(rev.ts) ||
+    rev.ts <= 0 ||
     !rev.issuerCert ||
-    typeof rev.sig !== 'string'
+    typeof rev.issuerCert !== 'object' ||
+    !Array.isArray(rev.issuerCert.roles) ||
+    !rev.issuerCert.subPubKey ||
+    typeof rev.sig !== 'string' ||
+    'targetKeyThumbprint' in rev ||
+    'reason' in rev
   ) {
     return false
   }
 
+  let verifyPubKeyJwk: JsonWebKey = rev.issuerCert.subPubKey
   if (rev.issuerCert.subPeerId !== rev.issuerPeerId) {
-    return false
+    if (
+      !(await isValidDelegatedUserEndpoint({
+        appId,
+        roomId,
+        peerId: rev.issuerPeerId,
+        cert: rev.issuerCert,
+        ...(rev.signerPubKey ? {signerPubKey: rev.signerPubKey} : {}),
+        ...(rev.userPubKey ? {userPubKey: rev.userPubKey} : {}),
+        ...(rev.userProof ? {userProof: rev.userProof} : {})
+      }))
+    ) {
+      return false
+    }
+    verifyPubKeyJwk = rev.signerPubKey!
   }
 
   if (!rev.issuerCert.roles.includes('admin') && !rev.issuerCert.canDelegate) {
@@ -586,7 +625,7 @@ export const verifyRoleRevocation = async (
     return await verifyWithP256(
       fromBase64Url(rev.sig),
       encodeBytes(revocationCanonicalPayload(rev)),
-      rev.issuerCert.subPubKey
+      verifyPubKeyJwk
     )
   } catch {
     return false
@@ -595,6 +634,7 @@ export const verifyRoleRevocation = async (
 
 export const banCanonicalPayload = (ban: Omit<PeerBanRecord, 'sig'>): string =>
   toJson([
+    'trystero-peer-ban-v1',
     ban.v,
     ban.appId,
     ban.roomId,
@@ -620,6 +660,9 @@ export const signPeerBan = async (
     targetKeyThumbprint?: string
     reason?: string
     seq: number
+    signerPubKey?: JsonWebKey
+    userPubKey?: JsonWebKey
+    userProof?: string
   }
 ): Promise<PeerBanRecord> => {
   const ts = nextMonotonicTs()
@@ -636,7 +679,10 @@ export const signPeerBan = async (
     ...(params.reason ? {reason: params.reason} : {}),
     seq: params.seq,
     ts,
-    issuerCert
+    issuerCert,
+    ...(params.signerPubKey ? {signerPubKey: params.signerPubKey} : {}),
+    ...(params.userPubKey ? {userPubKey: params.userPubKey} : {}),
+    ...(params.userProof ? {userProof: params.userProof} : {})
   }
   const canonicalBytes = encodeBytes(banCanonicalPayload(unsigned))
   return {
@@ -662,14 +708,38 @@ export const verifyPeerBan = async (
     !ban.issuerPeerId ||
     !ban.targetPeerId ||
     typeof ban.seq !== 'number' ||
+    !Number.isSafeInteger(ban.seq) ||
+    ban.seq <= 0 ||
+    typeof ban.ts !== 'number' ||
+    !Number.isSafeInteger(ban.ts) ||
+    ban.ts <= 0 ||
     !ban.issuerCert ||
-    typeof ban.sig !== 'string'
+    typeof ban.issuerCert !== 'object' ||
+    !Array.isArray(ban.issuerCert.roles) ||
+    !ban.issuerCert.subPubKey ||
+    typeof ban.sig !== 'string' ||
+    'targetCertId' in ban ||
+    'role' in ban
   ) {
     return false
   }
 
+  let verifyPubKeyJwk: JsonWebKey = ban.issuerCert.subPubKey
   if (ban.issuerCert.subPeerId !== ban.issuerPeerId) {
-    return false
+    if (
+      !(await isValidDelegatedUserEndpoint({
+        appId,
+        roomId,
+        peerId: ban.issuerPeerId,
+        cert: ban.issuerCert,
+        ...(ban.signerPubKey ? {signerPubKey: ban.signerPubKey} : {}),
+        ...(ban.userPubKey ? {userPubKey: ban.userPubKey} : {}),
+        ...(ban.userProof ? {userProof: ban.userProof} : {})
+      }))
+    ) {
+      return false
+    }
+    verifyPubKeyJwk = ban.signerPubKey!
   }
 
   if (!ban.issuerCert.roles.includes('admin')) {
@@ -691,7 +761,7 @@ export const verifyPeerBan = async (
     return await verifyWithP256(
       fromBase64Url(ban.sig),
       encodeBytes(banCanonicalPayload(ban)),
-      ban.issuerCert.subPubKey
+      verifyPubKeyJwk
     )
   } catch {
     return false
@@ -792,6 +862,7 @@ const actionAuthCanonicalPayload = (params: {
   certSig: string
 }): string =>
   toJson([
+    'trystero-action-auth-v1',
     1,
     params.appId,
     params.roomId,
@@ -862,8 +933,13 @@ export const verifyActionAuth = async (
     !env ||
     env.v !== 1 ||
     typeof env.seq !== 'number' ||
+    !Number.isSafeInteger(env.seq) ||
+    env.seq <= 0 ||
     typeof env.digest !== 'string' ||
     !env.cert ||
+    typeof env.cert !== 'object' ||
+    !Array.isArray(env.cert.roles) ||
+    !env.cert.subPubKey ||
     typeof env.sig !== 'string'
   ) {
     return {valid: false, roles: []}
@@ -939,6 +1015,7 @@ export const stateRecordCanonicalPayload = <T extends JsonValue = JsonValue>(
   rec: Omit<AuthoritativeStateRecord<T>, 'sig' | 'hash'>
 ): string =>
   toJson([
+    'trystero-state-record-v1',
     rec.v,
     rec.appId,
     rec.roomId,
@@ -998,7 +1075,9 @@ export const signStateRecord = async <T extends JsonValue = JsonValue>(
   const sig = toBase64Url(
     await ecdsaSign(signerPrivateKey, canonicalBytes as BufferSource)
   )
-  const hash = toHex((await sha256(sig)).subarray(0, 16))
+  const hash = toHex(
+    (await sha256(canonicalBytes as BufferSource)).subarray(0, 16)
+  )
   return {
     ...unsigned,
     sig,
@@ -1020,16 +1099,39 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
     rec.appId !== appId ||
     rec.roomId !== roomId ||
     typeof rec.namespace !== 'string' ||
+    !rec.namespace ||
     typeof rec.seq !== 'number' ||
+    !Number.isSafeInteger(rec.seq) ||
+    rec.seq <= 0 ||
     typeof rec.epoch !== 'number' ||
+    !Number.isSafeInteger(rec.epoch) ||
+    rec.epoch <= 0 ||
+    typeof rec.ts !== 'number' ||
+    !Number.isSafeInteger(rec.ts) ||
+    rec.ts <= 0 ||
+    typeof rec.prevHash !== 'string' ||
+    !rec.prevHash ||
+    (rec.epoch === 1 &&
+      rec.seq === 1 &&
+      rec.prevHash !== '00000000000000000000000000000000') ||
+    typeof rec.updatedBy !== 'string' ||
+    !rec.updatedBy ||
+    typeof rec.hash !== 'string' ||
     !rec.cert ||
+    typeof rec.cert !== 'object' ||
+    !Array.isArray(rec.cert.roles) ||
+    !rec.cert.subPubKey ||
     !rec.signerPubKey ||
+    typeof rec.signerPubKey !== 'object' ||
     typeof rec.sig !== 'string'
   ) {
     return false
   }
 
   const signerCanonical = canonicalizePubJwk(rec.signerPubKey)
+  if (!signerCanonical) {
+    return false
+  }
   if (rec.cert.subPeerId === rec.updatedBy) {
     if (canonicalizePubJwk(rec.cert.subPubKey) !== signerCanonical) {
       return false
@@ -1074,7 +1176,9 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
     if (!ok) {
       return false
     }
-    const expectedHash = toHex((await sha256(rec.sig)).subarray(0, 16))
+    const expectedHash = toHex(
+      (await sha256(canonicalBytes as BufferSource)).subarray(0, 16)
+    )
     return rec.hash === expectedHash
   } catch {
     return false
@@ -1264,20 +1368,76 @@ export const createRoomAuthority = ({
     return {peerId: peerOrUserId}
   }
 
-  const isPeerBanned = (peerOrUserId: string): boolean => {
+  const isTargetRootAuthority = (
+    targetPeerId: string,
+    targetUserId?: string,
+    targetCert?: RoleCertificate
+  ): boolean => {
+    if (targetCert?.isRoot) {
+      return true
+    }
+    const storedCert =
+      peerCerts.get(targetPeerId) ??
+      (targetUserId ? userCerts.get(targetUserId) : undefined)
+    if (storedCert?.isRoot) {
+      return true
+    }
+    const uid =
+      targetUserId ??
+      targetCert?.subUserId ??
+      storedCert?.subUserId ??
+      getPeerUserId?.(targetPeerId)
+    if (uid) {
+      if (rootUserIds.has(uid)) {
+        return true
+      }
+      if (
+        isValidUserId(uid) &&
+        rootFingerprints.has(computeUserIdFingerprint(uid))
+      ) {
+        return true
+      }
+    }
+    if (rootUserIds.has(targetPeerId)) {
+      return true
+    }
     if (
-      bannedPeerRecords.has(peerOrUserId) ||
-      bannedUserIds.has(peerOrUserId) ||
-      isOverlayPeerBanned(peerOrUserId)
+      isValidUserId(targetPeerId) &&
+      rootFingerprints.has(computeUserIdFingerprint(targetPeerId))
     ) {
       return true
     }
+    return false
+  }
+
+  const isPeerBanned = (peerOrUserId: string): boolean => {
     const uid = getPeerUserId?.(peerOrUserId)
-    if (uid && bannedUserIds.has(uid)) {
+    const isRootTarget = isTargetRootAuthority(peerOrUserId, uid)
+    const directBan = bannedPeerRecords.get(peerOrUserId)
+    if (directBan) {
+      if (isRootTarget && !directBan.issuerCert.isRoot) {
+        bannedPeerRecords.delete(peerOrUserId)
+      } else {
+        return true
+      }
+    }
+    if (
+      !isRootTarget &&
+      (bannedUserIds.has(peerOrUserId) || isOverlayPeerBanned(peerOrUserId))
+    ) {
+      return true
+    }
+    if (!isRootTarget && uid && bannedUserIds.has(uid)) {
       return true
     }
     const ownedPeers = getUserPeerIds?.(peerOrUserId)
-    if (ownedPeers && ownedPeers.some(pid => bannedPeerRecords.has(pid))) {
+    if (
+      ownedPeers &&
+      ownedPeers.some(pid => {
+        const b = bannedPeerRecords.get(pid)
+        return Boolean(b && (!isRootTarget || b.issuerCert.isRoot))
+      })
+    ) {
       return true
     }
     return false
@@ -1457,10 +1617,10 @@ export const createRoomAuthority = ({
     }
     registerPeerPublicKey(cert.subPeerId, cert.subPubKey)
     const existing = peerCerts.get(cert.subPeerId)
-    if (existing && existing.iat > cert.iat) {
-      return true
-    }
-    if (existing && existing.certId === cert.certId) {
+    if (
+      existing &&
+      (existing.iat > cert.iat || existing.certId === cert.certId)
+    ) {
       return false
     }
     peerCerts.set(cert.subPeerId, cert)
@@ -1485,6 +1645,7 @@ export const createRoomAuthority = ({
       (subUid &&
         localUid &&
         subUid === localUid &&
+        !(localCert?.subPeerId === localSelfId && localCert.isRoot) &&
         (!localCert || localCert.iat <= cert.iat))
     ) {
       localCert = cert
@@ -1495,7 +1656,7 @@ export const createRoomAuthority = ({
 
   const canRevokeRoles = (
     issuer: RoleCertificate,
-    target: RoleCertificate | undefined,
+    _target: RoleCertificate | undefined,
     role?: string
   ): boolean => {
     const roles = getEffectiveRolesForCert(issuer)
@@ -1505,10 +1666,7 @@ export const createRoomAuthority = ({
     if (!issuer.canDelegate || roles.length === 0) {
       return false
     }
-    const revokedRoles = role && role !== '*' ? [role] : target?.roles
-    return Boolean(
-      revokedRoles?.length && revokedRoles.every(r => roles.includes(r))
-    )
+    return Boolean(role && role !== '*' && roles.includes(role))
   }
 
   const verifyAndApplyRevocation = async (
@@ -1534,7 +1692,10 @@ export const createRoomAuthority = ({
     if (!canRevokeRoles(rev.issuerCert, targetCert, rev.role)) {
       return false
     }
-    if (targetCert?.isRoot && !rev.issuerCert.isRoot) {
+    if (
+      !rev.issuerCert.isRoot &&
+      isTargetRootAuthority(rev.targetPeerId, rev.targetUserId, targetCert)
+    ) {
       return false
     }
     allRevocations.set(rev.sig, rev)
@@ -1590,7 +1751,10 @@ export const createRoomAuthority = ({
     const targetCert =
       peerCerts.get(ban.targetPeerId) ??
       (ban.targetUserId ? userCerts.get(ban.targetUserId) : undefined)
-    if (targetCert?.isRoot && !ban.issuerCert.isRoot) {
+    if (
+      !ban.issuerCert.isRoot &&
+      isTargetRootAuthority(ban.targetPeerId, ban.targetUserId, targetCert)
+    ) {
       return false
     }
     bannedPeerRecords.set(ban.targetPeerId, ban)
@@ -1637,8 +1801,19 @@ export const createRoomAuthority = ({
       return false
     }
     const current = instance?.record ?? latestStateRecords.get(record.namespace)
-    if (current && compareStateRecords(record, current) <= 0) {
-      return false
+    if (current) {
+      if (compareStateRecords(record, current) <= 0) {
+        return false
+      }
+      if (
+        record.epoch === current.epoch &&
+        record.seq === current.seq + 1 &&
+        record.updatedBy === current.updatedBy &&
+        record.prevHash !== current.hash
+      ) {
+        onSignatureFailure()
+        return false
+      }
     }
     const updatedByUserId =
       record.userId ??
@@ -1755,23 +1930,37 @@ export const createRoomAuthority = ({
     const env = (wireMetadata as {__trysteroAuth?: unknown}).__trysteroAuth as
       | ActionAuthEnvelope
       | undefined
-    if (!env || !env.cert) {
+    if (
+      !env ||
+      !env.cert ||
+      typeof env.cert !== 'object' ||
+      !Array.isArray(env.cert.roles) ||
+      !env.cert.subPubKey
+    ) {
       return null
     }
     const userMetadata = Object.hasOwn(wireMetadata, 'm')
       ? (wireMetadata as {m?: JsonValue}).m
       : undefined
     const certApplied = await verifyAndApplyCert(env.cert)
-    if (!certApplied && peerCerts.get(peerId)?.certId !== env.cert.certId) {
-      const chainRes = await verifyRoleCertificateChain(
-        env.cert,
-        appId,
-        effectiveRoomId,
-        rootFingerprints,
-        rootUserIds
-      )
-      if (!chainRes.valid) {
-        return null
+    if (!certApplied) {
+      const existingCert = peerCerts.get(env.cert.subPeerId)
+      if (
+        !existingCert ||
+        existingCert.sig !== env.cert.sig ||
+        roleCertCanonicalPayload(existingCert) !==
+          roleCertCanonicalPayload(env.cert)
+      ) {
+        const chainRes = await verifyRoleCertificateChain(
+          env.cert,
+          appId,
+          effectiveRoomId,
+          rootFingerprints,
+          rootUserIds
+        )
+        if (!chainRes.valid) {
+          return null
+        }
       }
     }
     const effectiveRoles = getEffectiveRolesForCert(env.cert)
@@ -2230,13 +2419,19 @@ export const createRoomAuthority = ({
       const targetCert =
         peerCerts.get(peerId) ??
         (targetUserId ? userCerts.get(targetUserId) : undefined)
-      if (targetCert?.isRoot && !localCert?.isRoot) {
+      if (
+        !localCert?.isRoot &&
+        isTargetRootAuthority(peerId, targetUserId, targetCert)
+      ) {
         throw mkErr('delegated authority cannot revoke a root admin')
       }
       if (!localCert || !canRevokeRoles(localCert, targetCert, role)) {
         throw mkErr('insufficient authority to revoke role')
       }
       const cryptoId = await getLocalCryptoIdentity()
+      const userProofFields = await buildLocalUserDelegationProof(
+        cryptoId.signPubJwk
+      )
       const revocation = await signRoleRevocation(
         cryptoId.signPrivateKey,
         localCert!,
@@ -2251,7 +2446,8 @@ export const createRoomAuthority = ({
             ? {minTs: targetCert.iat}
             : {}),
           ...(role ? {role} : {}),
-          seq: ++localAuthSeq
+          seq: ++localAuthSeq,
+          ...userProofFields
         }
       )
       if (!(await verifyAndApplyRevocation(revocation))) {
@@ -2276,7 +2472,10 @@ export const createRoomAuthority = ({
       const targetCert =
         peerCerts.get(peerId) ??
         (targetUserId ? userCerts.get(targetUserId) : undefined)
-      if (targetCert?.isRoot && !localCert.isRoot) {
+      if (
+        !localCert.isRoot &&
+        isTargetRootAuthority(peerId, targetUserId, targetCert)
+      ) {
         throw mkErr('delegated admin cannot ban a root admin')
       }
       const targetPubKey =
@@ -2285,6 +2484,9 @@ export const createRoomAuthority = ({
         ? toJson(targetPubKey)
         : undefined
       const cryptoId = await getLocalCryptoIdentity()
+      const userProofFields = await buildLocalUserDelegationProof(
+        cryptoId.signPubJwk
+      )
       const ban = await signPeerBan(cryptoId.signPrivateKey, localCert, {
         appId,
         roomId: effectiveRoomId,
@@ -2293,7 +2495,8 @@ export const createRoomAuthority = ({
         ...(targetUserId ? {targetUserId} : {}),
         ...(targetKeyThumbprint ? {targetKeyThumbprint} : {}),
         ...(options?.reason ? {reason: options.reason} : {}),
-        seq: ++localAuthSeq
+        seq: ++localAuthSeq,
+        ...userProofFields
       })
       if (!(await verifyAndApplyBan(ban))) {
         throw mkErr('only an admin can ban a peer')

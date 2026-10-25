@@ -66,7 +66,8 @@ const parseAndVerifyPeerIdentityClaims = async (
   raw: unknown,
   expectedStep: 1 | 2,
   remotePeerId: string,
-  expectedRemoteDtls: string[]
+  expectedRemoteDtls: string[],
+  localDtls: string[] = []
 ): Promise<{
   nonce: string
   dtls: string[]
@@ -98,8 +99,9 @@ const parseAndVerifyPeerIdentityClaims = async (
 
   const dtls = msg.dtls.filter((x): x is string => typeof x === 'string')
   if (
-    expectedRemoteDtls.length > 0 &&
-    expectedRemoteDtls.join(',') !== dtls.join(',')
+    (expectedRemoteDtls.length > 0 &&
+      expectedRemoteDtls.join(',') !== dtls.join(',')) ||
+    (localDtls.length > 0 && dtls.length === 0)
   ) {
     throw mkErr('DTLS fingerprint mismatch during identity handshake')
   }
@@ -209,7 +211,8 @@ export const createIdentityHandshake = (params: {
         step2,
         2,
         remotePeerId,
-        remoteDtls
+        remoteDtls,
+        localDtls
       )
 
       const transcriptBytes = encodeBytes(
@@ -222,7 +225,7 @@ export const createIdentityHandshake = (params: {
           initNonce,
           resp.nonce,
           localDtls,
-          resp.dtls,
+          remoteDtls.length > 0 ? remoteDtls : resp.dtls,
           localUser.userId,
           resp.userId
         ])
@@ -271,7 +274,8 @@ export const createIdentityHandshake = (params: {
       step1,
       1,
       remotePeerId,
-      remoteDtls
+      remoteDtls,
+      localDtls
     )
 
     const respNonce = genId(32)
@@ -284,7 +288,7 @@ export const createIdentityHandshake = (params: {
         params.selfId,
         init.nonce,
         respNonce,
-        init.dtls,
+        remoteDtls.length > 0 ? remoteDtls : init.dtls,
         localDtls,
         init.userId,
         localUser.userId

@@ -1,5 +1,6 @@
 import {inspectActionWireHeader} from './action-wire'
 import {ecdsaSign, sha1, sha256} from './crypto'
+import {maxActionFrameBytes, maxOverlayHeaderBytes} from './data-limits'
 import {
   canonicalizePubJwk,
   getCachedPubKeyRecord,
@@ -529,7 +530,11 @@ const unpackOverlayBinary = (
   const kind = bytes[1]!
   const ttl = bytes[2]!
   const headerLen = (bytes[3]! << 8) | bytes[4]!
-  if (headerLen <= 0 || 5 + headerLen > bytes.byteLength) {
+  if (
+    headerLen <= 0 ||
+    headerLen > maxOverlayHeaderBytes ||
+    5 + headerLen > bytes.byteLength
+  ) {
     return null
   }
   try {
@@ -557,6 +562,162 @@ const packOverlayControl = (msg: OverlayControlMessage): Uint8Array => {
   frame[1] = overlayControlKind
   frame.set(body, 2)
   return frame
+}
+
+export const packGossipControlFrames = (
+  descriptors: PeerDescriptor[],
+  downPeers?: string[],
+  maxFrameBytes = maxActionFrameBytes
+): Uint8Array[] => {
+  const hasDown = Boolean(downPeers && downPeers.length > 0)
+  if (descriptors.length === 0 && !hasDown) {
+    return []
+  }
+  const single = packOverlayControl({
+    t: 'gossip',
+    descriptors,
+    ...(hasDown ? {down: downPeers!} : {})
+  })
+  if (single.byteLength <= maxFrameBytes) {
+    return [single]
+  }
+
+  const frames: Uint8Array[] = []
+  let currentDescs: PeerDescriptor[] = []
+
+  for (const desc of descriptors) {
+    currentDescs.push(desc)
+    const candidate = packOverlayControl({
+      t: 'gossip',
+      descriptors: currentDescs
+    })
+    if (candidate.byteLength > maxFrameBytes) {
+      if (currentDescs.length === 1) {
+        frames.push(candidate)
+        currentDescs = []
+      } else {
+        currentDescs.pop()
+        frames.push(
+          packOverlayControl({
+            t: 'gossip',
+            descriptors: currentDescs
+          })
+        )
+        currentDescs = [desc]
+      }
+    }
+  }
+
+  const remainingDown = hasDown ? [...downPeers!] : []
+  if (currentDescs.length > 0) {
+    if (remainingDown.length > 0) {
+      const withAllDown = packOverlayControl({
+        t: 'gossip',
+        descriptors: currentDescs,
+        down: remainingDown
+      })
+      if (withAllDown.byteLength <= maxFrameBytes) {
+        frames.push(withAllDown)
+        return frames
+      }
+    }
+    frames.push(
+      packOverlayControl({
+        t: 'gossip',
+        descriptors: currentDescs
+      })
+    )
+  }
+
+  if (remainingDown.length > 0) {
+    let currentDown: string[] = []
+    for (const peerId of remainingDown) {
+      currentDown.push(peerId)
+      const candidate = packOverlayControl({
+        t: 'gossip',
+        descriptors: [],
+        down: currentDown
+      })
+      if (candidate.byteLength > maxFrameBytes) {
+        if (currentDown.length === 1) {
+          frames.push(candidate)
+          currentDown = []
+        } else {
+          currentDown.pop()
+          frames.push(
+            packOverlayControl({
+              t: 'gossip',
+              descriptors: [],
+              down: currentDown
+            })
+          )
+          currentDown = [peerId]
+        }
+      }
+    }
+    if (currentDown.length > 0) {
+      frames.push(
+        packOverlayControl({
+          t: 'gossip',
+          descriptors: [],
+          down: currentDown
+        })
+      )
+    }
+  }
+
+  return frames
+}
+
+const maxOverlayMsgIdLength = 128
+
+const isValidOverlayMsgId = (msgId: string): boolean => {
+  if (msgId.length === 0 || msgId.length > maxOverlayMsgIdLength) {
+    return false
+  }
+  for (let i = 0; i < msgId.length; i++) {
+    const code = msgId.charCodeAt(i)
+    if (code <= 0x1f || code === 0x7f) {
+      return false
+    }
+  }
+  return true
+}
+
+export const canonicalBroadcastHeader = (
+  origin: string,
+  msgId: string
+): string => toJson(['trystero-broadcast-v1', origin, msgId])
+
+export const canonicalUnicastHeader = (
+  origin: string,
+  dest: string,
+  msgId: string,
+  ivB64: string
+): string => toJson(['trystero-unicast-v1', origin, dest, msgId, ivB64])
+
+export const canonicalLeaveHeader = (
+  leavingId: string,
+  seq: number,
+  appId?: string,
+  roomId?: string
+): string =>
+  appId !== undefined || roomId !== undefined
+    ? toJson(['trystero-leave-v1', leavingId, seq, appId ?? '', roomId ?? ''])
+    : toJson(['trystero-leave-v1', leavingId, seq])
+
+export const buildOverlaySignedBytes = (
+  canonicalHeader: string,
+  payload: Uint8Array
+): Uint8Array => {
+  const headerBytes = encodeBytes(canonicalHeader)
+  const combined = new Uint8Array(
+    4 + headerBytes.byteLength + payload.byteLength
+  )
+  new DataView(combined.buffer).setUint32(0, headerBytes.byteLength)
+  combined.set(headerBytes, 4)
+  combined.set(payload, 4 + headerBytes.byteLength)
+  return combined
 }
 
 const descriptorCanonicalPayload = (d: PeerDescriptor): string =>
@@ -595,7 +756,7 @@ type CryptoIdentity = {
 }
 
 const identityCache = new Map<string, Promise<CryptoIdentity>>()
-const verifiedSigBytes = createBoundedCache<string, Uint8Array>()
+const verifiedSigBytes = createBoundedCache<string, Uint8Array>(512)
 
 const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
   if (a.byteLength !== b.byteLength) {
@@ -610,7 +771,9 @@ const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
 }
 
 const rememberVerifiedSig = (cacheKey: string, bytes: Uint8Array): void => {
-  verifiedSigBytes.set(cacheKey, bytes.slice())
+  if (bytes.byteLength <= 4_096) {
+    verifiedSigBytes.set(cacheKey, bytes.slice())
+  }
 }
 
 const getOrCreateCryptoIdentity = (peerId: string): Promise<CryptoIdentity> => {
@@ -1229,6 +1392,50 @@ export const createOverlayManager = ({
     return descriptor
   }
 
+  const maxDescriptorNeighbors = Math.max(32, config.maxConnections * 4)
+  const maxDepartedPeers = 1_024
+  const maxMissingBroadcastTimers = 256
+  const maxIhaveItemsPerFrame = 32
+  const maxIwantIdsPerFrame = 16
+  const maxGossipEntriesPerFrame = 64
+
+  const isValidDescriptorNeighbors = (
+    peerId: string,
+    neighbors: unknown
+  ): neighbors is string[] => {
+    if (
+      !Array.isArray(neighbors) ||
+      neighbors.length > maxDescriptorNeighbors
+    ) {
+      return false
+    }
+    for (const n of neighbors) {
+      if (
+        typeof n !== 'string' ||
+        n.length === 0 ||
+        n.length > 128 ||
+        n === peerId
+      ) {
+        return false
+      }
+    }
+    return true
+  }
+
+  const recordDepartedPeer = (peerId: string, seq: number): void => {
+    if (departedPeers.has(peerId)) {
+      departedPeers.delete(peerId)
+    } else if (departedPeers.size >= maxDepartedPeers) {
+      const oldest = departedPeers.values().next().value
+      if (oldest !== undefined) {
+        departedPeers.delete(oldest)
+        downPeersSeq.delete(oldest)
+      }
+    }
+    departedPeers.add(peerId)
+    downPeersSeq.set(peerId, seq)
+  }
+
   const tryVerifyDescriptorCached = (d: PeerDescriptor): boolean => {
     if (
       password ||
@@ -1236,7 +1443,9 @@ export const createOverlayManager = ({
       typeof d.peerId !== 'string' ||
       !d.peerId ||
       typeof d.seq !== 'number' ||
-      !Array.isArray(d.neighbors) ||
+      !Number.isSafeInteger(d.seq) ||
+      d.seq <= 0 ||
+      !isValidDescriptorNeighbors(d.peerId, d.neighbors) ||
       bannedPeers.has(d.peerId) ||
       !d.signPubKey ||
       typeof d.sig !== 'string' ||
@@ -1315,8 +1524,11 @@ export const createOverlayManager = ({
       typeof d.peerId !== 'string' ||
       !d.peerId ||
       typeof d.seq !== 'number' ||
-      !Array.isArray(d.neighbors)
+      !Number.isSafeInteger(d.seq) ||
+      d.seq <= 0 ||
+      !isValidDescriptorNeighbors(d.peerId, d.neighbors)
     ) {
+      stats.signatureFailures++
       return false
     }
 
@@ -1449,17 +1661,15 @@ export const createOverlayManager = ({
     excludePeerId?: string,
     downPeers?: string[]
   ): void => {
-    if (list.length === 0 && (!downPeers || downPeers.length === 0)) {
+    const packets = packGossipControlFrames(list, downPeers)
+    if (packets.length === 0) {
       return
     }
-    const packet = packOverlayControl({
-      t: 'gossip',
-      descriptors: list,
-      ...(downPeers && downPeers.length > 0 ? {down: downPeers} : {})
-    })
     for (const neighborId of directPeers.keys()) {
       if (neighborId !== excludePeerId) {
-        sendToDirectNeighbor(neighborId, packet)
+        for (const packet of packets) {
+          sendToDirectNeighbor(neighborId, packet)
+        }
       }
     }
   }
@@ -1522,9 +1732,27 @@ export const createOverlayManager = ({
           false,
           []
         )
-        return crypto.subtle.deriveKey(
+        const rawBits = await crypto.subtle.deriveBits(
           {name: 'ECDH', public: remotePub},
           id.encPrivateKey,
+          256
+        )
+        const sortedPair =
+          selfId < remotePeerId
+            ? `${selfId}:${remotePeerId}`
+            : `${remotePeerId}:${selfId}`
+        const contextBytes = encodeBytes(
+          `trystero-e2e-v1:${appId}:${roomId}:${sortedPair}`
+        )
+        const combined = new Uint8Array(
+          rawBits.byteLength + contextBytes.byteLength
+        )
+        combined.set(new Uint8Array(rawBits), 0)
+        combined.set(contextBytes, rawBits.byteLength)
+        const derivedBytes = await sha256(combined)
+        return crypto.subtle.importKey(
+          'raw',
+          derivedBytes as BufferSource,
           {name: 'AES-GCM', length: 256},
           false,
           ['encrypt', 'decrypt']
@@ -1541,10 +1769,7 @@ export const createOverlayManager = ({
   ): Promise<string> => {
     const id = identityReady ?? (await getOrCreateCryptoIdentity(selfId))
     identityReady = id
-    const headerBytes = encodeBytes(canonicalHeader)
-    const combined = new Uint8Array(headerBytes.byteLength + payload.byteLength)
-    combined.set(headerBytes, 0)
-    combined.set(payload, headerBytes.byteLength)
+    const combined = buildOverlaySignedBytes(canonicalHeader, payload)
     const sig = toBase64(
       await ecdsaSign(id.signPrivateKey, combined as BufferSource)
     )
@@ -1573,10 +1798,7 @@ export const createOverlayManager = ({
       return false
     }
 
-    const headerBytes = encodeBytes(canonicalHeader)
-    const combined = new Uint8Array(headerBytes.byteLength + payload.byteLength)
-    combined.set(headerBytes, 0)
-    combined.set(payload, headerBytes.byteLength)
+    const combined = buildOverlaySignedBytes(canonicalHeader, payload)
 
     if (pinnedThumbprint) {
       const sigCacheKey = `pkt:${pinnedThumbprint}:${sig}`
@@ -1694,7 +1916,7 @@ export const createOverlayManager = ({
     rememberSeenMessage(msgId)
     stats.messagesSent++
 
-    const canonical = `${selfId}:${msgId}`
+    const canonical = canonicalBroadcastHeader(selfId, msgId)
     const sig = await signUnicastOrBroadcast(canonical, frame)
     const header: BroadcastEnvelopeHeader = {
       o: selfId,
@@ -1743,10 +1965,16 @@ export const createOverlayManager = ({
       }
     }
 
-    // Fallback: forward to all direct neighbors except arrival hop
-    for (const neighborId of directPeers.keys()) {
-      if (neighborId !== excludePeerId) {
-        sendToDirectNeighbor(neighborId, packet)
+    // Only allow fallback forwarding when destination is a known room peer
+    if (
+      knownRoster.has(destPeerId) ||
+      descriptors.has(destPeerId) ||
+      virtualPeers.has(destPeerId)
+    ) {
+      for (const neighborId of directPeers.keys()) {
+        if (neighborId !== excludePeerId) {
+          sendToDirectNeighbor(neighborId, packet)
+        }
       }
     }
   }
@@ -1780,6 +2008,7 @@ export const createOverlayManager = ({
         }
         let payloadToSend: Uint8Array
         let ivB64: string
+        let canonical: string
 
         const pairwiseKeyP = getPairwiseKey(targetPeerId)
         if (!pairwiseKeyP) {
@@ -1788,18 +2017,22 @@ export const createOverlayManager = ({
         try {
           const aesKey = await pairwiseKeyP
           const iv = crypto.getRandomValues(new Uint8Array(12))
+          ivB64 = toBase64(iv)
+          canonical = canonicalUnicastHeader(selfId, targetPeerId, msgId, ivB64)
           const encrypted = await crypto.subtle.encrypt(
-            {name: 'AES-GCM', iv},
+            {
+              name: 'AES-GCM',
+              iv,
+              additionalData: encodeBytes(canonical) as BufferSource
+            },
             aesKey,
             frameCopy as BufferSource
           )
           payloadToSend = new Uint8Array(encrypted)
-          ivB64 = toBase64(iv)
         } catch {
           return
         }
 
-        const canonical = `${selfId}:${targetPeerId}:${msgId}:${ivB64}`
         const sig = await signUnicastOrBroadcast(canonical, payloadToSend)
         if (isDestroyed) {
           return
@@ -1820,6 +2053,11 @@ export const createOverlayManager = ({
         routeUnicastPacket(targetPeerId, packet)
       })
       .catch(noOp)
+      .finally(() => {
+        if (outboundUnicastQueues.get(targetPeerId) === nextQueue) {
+          outboundUnicastQueues.delete(targetPeerId)
+        }
+      })
     outboundUnicastQueues.set(targetPeerId, nextQueue)
   }
 
@@ -1876,8 +2114,8 @@ export const createOverlayManager = ({
     }
 
     if (msg.t === 'prune') {
-      if (typeof msg.peerId === 'string') {
-        prunedDirectPeers.add(msg.peerId)
+      if (typeof msg.peerId === 'string' && msg.peerId === fromPeerId) {
+        prunedDirectPeers.add(fromPeerId)
       }
       return
     }
@@ -1887,13 +2125,27 @@ export const createOverlayManager = ({
       if (!leavingId || leavingId === selfId) {
         return
       }
-      if (typeof msg.sig !== 'string' || !msg.sig) {
+      if (
+        typeof msg.seq !== 'number' ||
+        !Number.isSafeInteger(msg.seq) ||
+        msg.seq <= 0 ||
+        typeof msg.sig !== 'string' ||
+        !msg.sig
+      ) {
         stats.signatureFailures++
+        return
+      }
+      const existingDesc = descriptors.get(leavingId)
+      const prevDownSeq = downPeersSeq.get(leavingId)
+      if (
+        (existingDesc && msg.seq < existingDesc.seq) ||
+        (prevDownSeq !== undefined && msg.seq <= prevDownSeq)
+      ) {
         return
       }
       const valid = await verifyUnicastOrBroadcast(
         leavingId,
-        `leave:${leavingId}:${msg.seq}`,
+        canonicalLeaveHeader(leavingId, msg.seq),
         new Uint8Array(),
         msg.sig
       )
@@ -1902,12 +2154,8 @@ export const createOverlayManager = ({
       }
 
       if (!departedPeers.has(leavingId)) {
-        const lastSeq = Math.max(
-          msg.seq ?? 0,
-          descriptors.get(leavingId)?.seq ?? 0
-        )
-        downPeersSeq.set(leavingId, lastSeq)
-        departedPeers.add(leavingId)
+        const lastSeq = Math.max(msg.seq, descriptors.get(leavingId)?.seq ?? 0)
+        recordDepartedPeer(leavingId, lastSeq)
         purgePeerFromGraph(leavingId)
         recomputeTopologyAndRoutes()
         const fwd = packOverlayControl(msg)
@@ -1922,10 +2170,11 @@ export const createOverlayManager = ({
 
     if (msg.t === 'ihave' && Array.isArray(msg.items)) {
       const missing: string[] = []
-      for (const item of msg.items) {
+      for (const item of msg.items.slice(0, maxIhaveItemsPerFrame)) {
         if (
           item &&
           typeof item.m === 'string' &&
+          isValidOverlayMsgId(item.m) &&
           !seenMessages.has(item.m) &&
           !missingBroadcastTimers.has(item.m)
         ) {
@@ -1936,6 +2185,9 @@ export const createOverlayManager = ({
       if (missing.length > 0) {
         // Schedule a quick lazy repair request if eager push hasn't delivered it
         for (const m of missing) {
+          if (missingBroadcastTimers.size >= maxMissingBroadcastTimers) {
+            break
+          }
           const timer = setTimeout(() => {
             missingBroadcastTimers.delete(m)
             if (!isDestroyed && !seenMessages.has(m)) {
@@ -1953,7 +2205,15 @@ export const createOverlayManager = ({
     }
 
     if (msg.t === 'iwant' && Array.isArray(msg.ids)) {
-      for (const id of msg.ids) {
+      const uniqueIds = [
+        ...new Set(
+          msg.ids.filter(
+            (id): id is string =>
+              typeof id === 'string' && isValidOverlayMsgId(id)
+          )
+        )
+      ].slice(0, maxIwantIdsPerFrame)
+      for (const id of uniqueIds) {
         const cached = cachedBroadcastFrames.get(id)
         if (cached) {
           stats.lazyRepairsResolved++
@@ -1967,7 +2227,7 @@ export const createOverlayManager = ({
       const newlyUpdated: PeerDescriptor[] = []
       const newDown: string[] = []
 
-      for (const d of msg.descriptors) {
+      for (const d of msg.descriptors.slice(0, maxGossipEntriesPerFrame)) {
         if (!d || d.peerId === selfId) {
           continue
         }
@@ -1993,16 +2253,34 @@ export const createOverlayManager = ({
           continue
         }
 
+        if (
+          latest?.encPubKey &&
+          d.encPubKey &&
+          toJson(latest.encPubKey) !== toJson(d.encPubKey)
+        ) {
+          derivedPairwiseKeys.delete(d.peerId)
+        }
         departedPeers.delete(d.peerId)
         downPeersSeq.delete(d.peerId)
         knownRoster.add(d.peerId)
         descriptors.set(d.peerId, d)
         adjacency.set(
           d.peerId,
-          new Set(d.neighbors.filter(n => !departedPeers.has(n)))
+          new Set(
+            d.neighbors.filter(
+              n =>
+                !departedPeers.has(n) &&
+                !bannedPeers.has(n) &&
+                (n !== selfId || directPeers.has(d.peerId))
+            )
+          )
         )
         for (const n of d.neighbors) {
-          if (!departedPeers.has(n)) {
+          if (
+            !departedPeers.has(n) &&
+            !bannedPeers.has(n) &&
+            (descriptors.has(n) || directPeers.has(n))
+          ) {
             knownRoster.add(n)
           }
         }
@@ -2010,18 +2288,21 @@ export const createOverlayManager = ({
       }
 
       if (Array.isArray(msg.down)) {
-        for (const downId of msg.down) {
+        for (const downId of msg.down.slice(0, maxGossipEntriesPerFrame)) {
           if (
             typeof downId === 'string' &&
             downId !== selfId &&
             !directPeers.has(downId) &&
-            !departedPeers.has(downId)
+            !departedPeers.has(downId) &&
+            (descriptors.has(downId) ||
+              knownRoster.has(downId) ||
+              virtualPeers.has(downId))
           ) {
             if (pinnedSignKeys.has(downId)) {
               const targetDesc = descriptors.get(downId)
               const hasAuthorizedReporter =
                 !targetDesc ||
-                newlyUpdated.length > 0 ||
+                targetDesc.neighbors.length === 0 ||
                 targetDesc.neighbors.some(n => {
                   const nDesc = descriptors.get(n)
                   return Boolean(nDesc && !nDesc.neighbors.includes(downId))
@@ -2034,8 +2315,7 @@ export const createOverlayManager = ({
 
             lastChurnAtMs = Date.now()
             const lastSeq = descriptors.get(downId)?.seq ?? 0
-            downPeersSeq.set(downId, lastSeq)
-            departedPeers.add(downId)
+            recordDepartedPeer(downId, lastSeq)
             purgePeerFromGraph(downId)
             newDown.push(downId)
           }
@@ -2079,7 +2359,12 @@ export const createOverlayManager = ({
       const msgId = typeof header['m'] === 'string' ? header['m'] : ''
       const sig = typeof header['s'] === 'string' ? header['s'] : undefined
 
-      if (!origin || !msgId || origin === selfId) {
+      if (!origin || !msgId || origin === selfId || departedPeers.has(origin)) {
+        return
+      }
+
+      if (!isValidOverlayMsgId(msgId)) {
+        stats.signatureFailures++
         return
       }
 
@@ -2095,11 +2380,11 @@ export const createOverlayManager = ({
 
       const valid = await verifyUnicastOrBroadcast(
         origin,
-        `${origin}:${msgId}`,
+        canonicalBroadcastHeader(origin, msgId),
         payload,
         sig
       )
-      if (!valid || isDestroyed) {
+      if (!valid || isDestroyed || departedPeers.has(origin)) {
         return
       }
 
@@ -2167,7 +2452,19 @@ export const createOverlayManager = ({
       const ivB64 = typeof header['iv'] === 'string' ? header['iv'] : undefined
       const sig = typeof header['s'] === 'string' ? header['s'] : undefined
 
-      if (!origin || !dest || !msgId || origin === selfId) {
+      if (
+        !origin ||
+        !dest ||
+        !msgId ||
+        origin === selfId ||
+        departedPeers.has(origin) ||
+        departedPeers.has(dest)
+      ) {
+        return
+      }
+
+      if (!isValidOverlayMsgId(msgId) || !ivB64) {
+        stats.signatureFailures++
         return
       }
 
@@ -2185,22 +2482,25 @@ export const createOverlayManager = ({
         return
       }
 
-      const canonical = `${origin}:${dest}:${msgId}:${ivB64 ?? ''}`
+      const canonical = canonicalUnicastHeader(origin, dest, msgId, ivB64)
 
       if (dest !== selfId) {
         if (ttl <= 1) {
           return
         }
-        if (pinnedSignKeys.has(origin) || descriptors.get(origin)?.signPubKey) {
-          const validRelaySig = await verifyUnicastOrBroadcast(
-            origin,
-            canonical,
-            payload,
-            sig
-          )
-          if (!validRelaySig || isDestroyed) {
-            return
-          }
+        const validRelaySig = await verifyUnicastOrBroadcast(
+          origin,
+          canonical,
+          payload,
+          sig
+        )
+        if (
+          !validRelaySig ||
+          isDestroyed ||
+          departedPeers.has(origin) ||
+          departedPeers.has(dest)
+        ) {
+          return
         }
         if (!rememberSeenMessage(msgId)) {
           stats.duplicatesDropped++
@@ -2224,7 +2524,7 @@ export const createOverlayManager = ({
         payload,
         sig
       )
-      if (!valid || isDestroyed) {
+      if (!valid || isDestroyed || departedPeers.has(origin)) {
         return
       }
 
@@ -2241,14 +2541,28 @@ export const createOverlayManager = ({
       try {
         const aesKey = await pairwiseKeyP
         const decrypted = await crypto.subtle.decrypt(
-          {name: 'AES-GCM', iv: fromBase64(ivB64) as BufferSource},
+          {
+            name: 'AES-GCM',
+            iv: fromBase64(ivB64) as BufferSource,
+            additionalData: encodeBytes(canonical) as BufferSource
+          },
           aesKey,
           payload as BufferSource
         )
         plainPayload = new Uint8Array(decrypted)
       } catch {
-        stats.signatureFailures++
-        return
+        try {
+          const aesKey = await pairwiseKeyP
+          const decrypted = await crypto.subtle.decrypt(
+            {name: 'AES-GCM', iv: fromBase64(ivB64) as BufferSource},
+            aesKey,
+            payload as BufferSource
+          )
+          plainPayload = new Uint8Array(decrypted)
+        } catch {
+          stats.signatureFailures++
+          return
+        }
       }
 
       if (!rememberSeenMessage(msgId)) {
@@ -2303,16 +2617,16 @@ export const createOverlayManager = ({
       }
       if (kind === overlayBroadcastKind || kind === overlayUnicastKind) {
         const copy = bytes.slice()
-        const parsed = unpackOverlayBinary(copy)
-        const originKey =
-          parsed && typeof parsed.header['o'] === 'string' && parsed.header['o']
-            ? parsed.header['o']
-            : fromPeerId
-        const prev = inboundOriginQueues.get(originKey) ?? Promise.resolve()
-        inboundOriginQueues.set(
-          originKey,
-          prev.then(() => handleOverlayBinary(fromPeerId, copy)).catch(noOp)
-        )
+        const prev = inboundOriginQueues.get(fromPeerId) ?? Promise.resolve()
+        const next = prev
+          .then(() => handleOverlayBinary(fromPeerId, copy))
+          .catch(noOp)
+          .finally(() => {
+            if (inboundOriginQueues.get(fromPeerId) === next) {
+              inboundOriginQueues.delete(fromPeerId)
+            }
+          })
+        inboundOriginQueues.set(fromPeerId, next)
       }
     },
 
@@ -2349,15 +2663,8 @@ export const createOverlayManager = ({
             d => d.peerId !== selfId && d.peerId !== peerId
           )
           const downList = [...departedPeers]
-          if (allKnown.length > 0 || downList.length > 0) {
-            sendToDirectNeighbor(
-              peerId,
-              packOverlayControl({
-                t: 'gossip',
-                descriptors: allKnown,
-                ...(downList.length > 0 ? {down: downList} : {})
-              })
-            )
+          for (const packet of packGossipControlFrames(allKnown, downList)) {
+            sendToDirectNeighbor(peerId, packet)
           }
         })
       }
@@ -2649,6 +2956,16 @@ export const createOverlayManager = ({
       if (isDestroyed || peerId === selfId || bannedPeers.has(peerId)) {
         return
       }
+      const maxRequired = Math.max(8, config.maxConnections * 2)
+      if (
+        !requiredDirectPeers.has(peerId) &&
+        requiredDirectPeers.size >= maxRequired
+      ) {
+        const oldest = requiredDirectPeers.values().next().value
+        if (oldest !== undefined) {
+          requiredDirectPeers.delete(oldest)
+        }
+      }
       requiredDirectPeers.add(peerId)
       if (!directPeers.has(peerId)) {
         targetsChangedCallback?.([peerId])
@@ -2746,11 +3063,13 @@ export const createOverlayManager = ({
       const cached = getCachedPubKeyRecord(pubKey)
       if (cached && cached.peerId === peerId) {
         peerSignPubKeys.set(peerId, pubKey)
+        pinnedSignKeys.set(peerId, toJson(pubKey))
         return
       }
       void verifyPeerIdKey(peerId, pubKey).then(ok => {
         if (ok) {
           peerSignPubKeys.set(peerId, pubKey)
+          pinnedSignKeys.set(peerId, toJson(pubKey))
         }
       })
     },
@@ -2857,6 +3176,7 @@ export const createOverlayManager = ({
     setRoomId: (effectiveRoomId: string): void => {
       if (effectiveRoomId && effectiveRoomId !== roomId) {
         roomId = effectiveRoomId
+        derivedPairwiseKeys.clear()
         if (isOverlayActive()) {
           void publishLocalDescriptor()
         }
@@ -2869,7 +3189,7 @@ export const createOverlayManager = ({
       }
       const seq = ++localSeq
       void signUnicastOrBroadcast(
-        `leave:${selfId}:${seq}`,
+        canonicalLeaveHeader(selfId, seq),
         new Uint8Array()
       ).then(sig => {
         if (isDestroyed) {

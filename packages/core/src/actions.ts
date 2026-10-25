@@ -152,10 +152,9 @@ const withMetadata = <T extends {peerId: string}>(
 
 const unwrapAuthUserMetadata = (
   wireMeta: JsonValue | undefined,
-  hasAuthority: boolean
+  _hasAuthority?: boolean
 ): JsonValue | undefined => {
   if (
-    hasAuthority &&
     wireMeta &&
     typeof wireMeta === 'object' &&
     !Array.isArray(wireMeta) &&

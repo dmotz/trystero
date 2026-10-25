@@ -47,6 +47,7 @@ export {
 } from './identity'
 
 export type {
+  ActionOptions,
   ActionProgressContext,
   ActionProgressHandler,
   ActionReceiveContext,
@@ -58,6 +59,7 @@ export type {
   BaseRelayConfig,
   BaseRoomConfig,
   DataPayload,
+  InternalAction,
   JoinError,
   JoinErrorHandler,
   JoinRoom,
