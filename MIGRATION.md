@@ -26,14 +26,20 @@ boilerplate—and eliminates subtle security and topology footguns.
    `onUserJoin` and `onUserLeave` fire once per unique user and automatically
    deduplicate multiple tabs.
 3. **Out-of-the-Box Room Authority, Limits, and State**: Room capacity limits
-   (`config.limit`), cryptographic admin ownership (`config.admin`), role-based
-   access control (`grantRole`, `revokeRole`, `banPeer`), and synchronized
-   authoritative state (`room.makeState`) are now built into the core protocol.
+   (`config.limit`), opt-in cryptographic admin ownership (`roles(...)`),
+   role-based access control (`grantRole`, `revokeRole`, `ban`), and
+   synchronized authoritative state (`room.makeState`) are now built into the
+   core protocol and tree-shaken when `roles()` is not imported.
 4. **Scalable Multi-Hop Topologies**: Rooms are no longer restricted to
-   full-mesh WebRTC (`O(N²)` connections). With `topology: 'auto'`,
-   `'small-world'`, or `'tree'`, rooms can scale to hundreds of participants
-   using multi-hop overlay routing with end-to-end cryptographic sender
-   verification.
+   full-mesh WebRTC (`O(N²)` connections). By opting in with `scale()` (supports
+   `'auto'`, `'gossip'`, or `'broadcast'`), rooms can scale to hundreds of
+   participants using multi-hop overlay routing with end-to-end cryptographic
+   sender verification, while apps that don't import `scale()` pay zero bundle
+   overhead.
+5. **Prebuilt `.min.js` Bundles Deprecated**: Prebuilt `dist/trystero-*.min.js`
+   bundles are deprecated in favor of tree-shaking bundlers (or ESM CDNs like
+   `esm.run`) so optional plugins like `roles()` and `scale()` are only bundled
+   when imported.
 
 ---
 
@@ -49,12 +55,12 @@ security footguns:
 
 1. **False Sense of Security in Multi-Hop Topologies**: `onPeerHandshake`
    operated during the physical WebRTC connection setup. In scalable topologies
-   (`'auto'`, `'small-world'`, `'tree'`), a peer only establishes physical
-   WebRTC connections with a handful of 1-hop neighbors (`degree`), while
-   communicating with everyone else over multi-hop overlay routing. A physical
-   handshake gate would **never run** for 2+ hop peers—giving developers a false
-   sense of security that they had gated the room when unverified peers could
-   still route messages through neighbors.
+   (`scale()` with `'auto'`, `'gossip'`, or `'broadcast'`), a peer only
+   establishes physical WebRTC connections with a handful of 1-hop neighbors
+   (`maxConnections`), while communicating with everyone else over multi-hop
+   overlay routing. A physical handshake gate would **never run** for 2+ hop
+   peers—giving developers a false sense of security that they had gated the
+   room when unverified peers could still route messages through neighbors.
 2. **Unverified Signaling IDs**: Previously, `peerId` was just a random string
    announced over the signaling server. Using `onPeerHandshake` to check an
    allowlist of `peerId`s was vulnerable to spoofing on public relays unless
@@ -66,10 +72,10 @@ security footguns:
    - **Room capacity limits**: Handled natively by `joinRoom({limit: N})`, which
      properly accounts for multi-tab users (`userId`) without locking out a user
      who refreshes their page.
-   - **Roles and moderation**: Handled cryptographically by `config.admin`,
-     `room.grantRole()`, `authority` filters on `makeAction` / `makeState`, and
-     `room.banPeer()`. These authorize actions and enforce bans after joining;
-     they are not a custom pre-connection admission hook.
+   - **Roles and moderation**: Handled cryptographically by `roles(...)`,
+     `room.grantRole()`, `roles` filters on `makeAction` / `makeState`, and
+     `room.ban()`. These authorize actions and enforce bans after joining; they
+     are not a custom pre-connection admission hook.
    - **Custom profile / app-version exchange**: Handled cleanly across both
      direct and multi-hop peers using
      `room.makeAction('hello', {kind: 'request'})` and `room.makeState()`.
@@ -200,7 +206,8 @@ move.onMessage = (data, {userId, metadata, roles}) => {
   objects directly (`Record<string, RTCPeerConnection>`), `getPeers()` now
   returns rich peer descriptors (`Record<string, PeerInfo>`), which works for
   both direct WebRTC neighbors and multi-hop overlay peers.
-- **New `await room.getSelf()`**: Returns your own verified `{peerId, userId}`.
+- **New `await room.getSelf()`**: Returns your own verified
+  `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`.
 
 #### Before (0.26.x)
 
@@ -294,23 +301,25 @@ const room = joinRoom(
 ### Scenario 3: Allowlists, Roles, and Moderation (Replacing `onPeerHandshake` Auth)
 
 Instead of gating physical connections with `onPeerHandshake`, 0.27.0 provides
-cryptographic **self-certifying rooms** (`admin: true`), **signed role
-certificates** (`grantRole`), **action/state authority gating**, and **signed
-bans** (`banPeer`) that work across both full-mesh and multi-hop topologies.
+cryptographic **self-certifying rooms** (`roles(true)`), **signed role
+certificates** (`grantRole`), **action/state role gating**, and **signed bans**
+(`ban`) that work across both full-mesh and multi-hop topologies.
 
 ```js
+import {joinRoom, roles} from 'trystero'
+
 // --- Host (Room Creator) ---
-const room = joinRoom({appId: 'poker-club', admin: true}, 'table-1')
+const room = joinRoom({appId: 'poker-club', ...roles(true)}, 'table-1')
 
 // Wait for the room ID containing the admin public key fingerprint
-const {roomId: inviteRoomId} = await room.getAuthority()
+const {roomId: inviteRoomId} = await room.getSelf()
 shareInviteLink(`https://example.com/join#${inviteRoomId}`)
 
 // Only 'admin' and 'player' roles can submit game moves
-const betAction = room.makeAction('bet', {authority: ['admin', 'player']})
+const betAction = room.makeAction('bet', {roles: ['admin', 'player']})
 
 // Shared table state that only the admin can mutate
-const tableState = room.makeState('table', {pot: 0}, {authority: ['admin']})
+const tableState = room.makeState('table', {pot: 0}, {roles: ['admin']})
 
 room.onUserJoin = async ({userId}) => {
   if (await isUserOnAllowlist(userId)) {
@@ -318,24 +327,24 @@ room.onUserJoin = async ({userId}) => {
     await room.grantRole(userId, 'player')
   } else {
     // Cryptographically ban the user across the entire mesh/overlay
-    await room.banPeer(userId, {reason: 'Not on the table allowlist'})
+    await room.ban(userId, {reason: 'Not on the table allowlist'})
   }
 }
 ```
 
 ```js
 // --- Joining Participant ---
-const room = joinRoom({appId: 'poker-club'}, inviteRoomIdFromUrl)
+const room = joinRoom({appId: 'poker-club', ...roles()}, inviteRoomIdFromUrl)
 
-const betAction = room.makeAction('bet', {authority: ['admin', 'player']})
-const tableState = room.makeState('table', {pot: 0}, {authority: ['admin']})
+const betAction = room.makeAction('bet', {roles: ['admin', 'player']})
+const tableState = room.makeState('table', {pot: 0}, {roles: ['admin']})
 
 tableState.onChange = (value, previousValue, {userId}) => {
   console.log(`Table updated by ${userId}:`, value)
 }
 
 // Inspect current roles when updating your UI
-const myRoles = room.getPeerRoles()
+const myRoles = room.getRoles()
 ```
 
 ---
@@ -383,8 +392,10 @@ Create a user identity with `await createUserIdentity()` and store its exported
 `userKey` (`exportUserIdentity(identity)`) securely on your backend. Restore it
 by passing that key as `config.identity` when the backend joins the room with an
 RTC polyfill. Guests can trust its `userId` on a fixed room name using
-`admin: serverUserId` (or `admin: [serverUserId]`), or use a self-certifying
-room ID from `await createAdminRoom(baseRoomId, {identity: serverIdentity})`.
+`...roles(serverUserId)` (or `...roles([serverUserId])`), or use a
+self-certifying room ID from
+`await createAdminRoom(baseRoomId, {identity: serverIdentity})` along with
+`...roles()`.
 
 The backend can issue roles with `room.grantRole()` while it is connected. There
 is no public standalone role-certificate import API in this beta.
@@ -396,7 +407,7 @@ is no public standalone role-certificate import API in this beta.
 If you previously exchanged application versions or user profiles during
 `onPeerHandshake`, use a request action after a user joins. This exchanges
 application data after admission; it does not reject the connection before
-`onUserJoin`. Protect privileged actions with `authority` and use room passwords
+`onUserJoin`. Protect privileged actions with `roles` and use room passwords
 where appropriate.
 
 `makeState(namespace, initialValue, config)` holds one shared value per

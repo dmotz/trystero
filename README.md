@@ -47,7 +47,8 @@ You can see what people are building with Trystero
   - [Encryption](#encryption)
   - [Room size limits](#room-size-limits)
   - [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)
-  - [Scalable topologies](#scalable-topologies)
+  - [Scaling large rooms](#scaling-large-rooms)
+  - [Custom room modules](#custom-room-modules)
   - [React hooks](#react-hooks)
   - [Troubleshooting connection issues](#troubleshooting-connection-issues)
   - [Running server-side (Node, Bun, Deno)](#running-server-side-node-bun-deno)
@@ -57,6 +58,9 @@ You can see what people are building with Trystero
   - [Firebase setup](#firebase-setup)
 - [API](#api)
   - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
+  - [`roles([config])`](#rolesconfig)
+  - [`scale([config])`](#scaleconfig)
+  - [`defineRoomModule(name, spec)`](#defineroommodulename-spec)
   - [`selfId`](#selfid)
   - [`createUserIdentity()`](#createuseridentity)
   - [`importUserIdentity(input)`](#importuseridentityinput)
@@ -113,13 +117,19 @@ npm i trystero
 import {joinRoom} from 'trystero'
 ```
 
-No package manager? You can also use a CDN:
+No package manager? You can also use an ESM CDN:
 
 ```html
 <script type="module">
   import {joinRoom} from 'https://esm.run/trystero'
 </script>
 ```
+
+> **Note:** Prebuilt `.min.js` bundles (`dist/trystero-*.min.js`) are
+> deprecated. Use a package manager with a modern tree-shaking bundler (Vite,
+> Rollup, esbuild, webpack, etc.) or an ESM CDN like `esm.run` so optional
+> modules such as `roles()` and `scale()` are only included in your bundle when
+> imported.
 
 The default Trystero package runs on the Nostr network, but you can swap in any
 other stategy by changing which package you import:
@@ -658,7 +668,7 @@ When a room is already at capacity:
 - **Asymmetric configs & multi-hop rooms**: Even if only the room creator passes
   `limit` in their config, Trystero automatically propagates the active limit to
   other admitted peers and enforces total room capacity across multi-hop
-  `'small-world'` and `'tree'` overlay topologies.
+  `'gossip'` and `'broadcast'` overlay topologies when `scale()` is enabled.
 
 </details>
 
@@ -677,43 +687,52 @@ For example, you might be building:
 - **A live chatroom or classroom** where moderators can mute or ban spammers so
   they can't disrupt the room.
 
-Trystero lets you create verified room admins, assign custom roles (like
-`'moderator'` or `'dj'`), restrict actions to specific roles, and sync an
-official "source of truth" state that everyone can read—all purely peer-to-peer.
+By importing the tree-shakeable `roles` plugin, Trystero lets you create
+verified room admins, assign custom roles (like `'moderator'` or `'dj'`),
+restrict actions to specific roles, and sync an official "source of truth" state
+that everyone can read—all purely peer-to-peer.
 
 #### 1. Creating a room on the fly as the admin
 
-The easiest way to make the room creator an admin is to pass `admin: true` when
-calling `joinRoom()`. For example, when a player clicks **"Create Game"** in
-your app:
+The easiest way to make the room creator an admin is to pass `...roles(true)`
+when calling `joinRoom()`. For example, when a player clicks **"Create Game"**
+in your app:
 
 ```js
+import {joinRoom, roles} from 'trystero'
+
 // The host creates a room with admin powers tied to their userId
-const hostRoom = joinRoom({appId: 'trivia-night', admin: true}, 'friday-quiz')
-const {roomId} = await hostRoom.getAuthority()
+const hostRoom = joinRoom(
+  {appId: 'trivia-night', ...roles(true)},
+  'friday-quiz'
+)
+const {roomId} = await hostRoom.getSelf()
 
 // Share `roomId` (e.g. "friday-quiz.9fX2kLm8pQr7vBn3") in an invite link for friends!
 ```
 
-When you pass `admin: true`, Trystero attaches a short 16-character suffix to
+When you pass `...roles(true)`, Trystero attaches a short 16-character suffix to
 your room name (like `'friday-quiz.9fX2kLm8pQr7vBn3'`) derived from the host's
 `userId`. Think of that suffix as a built-in digital ID badge for the host.
 
-When friends join using that `roomId`, they don't need any special config—their
-browsers automatically check the suffix and recognize the host's `userId` as the
-true admin:
+When friends join using that self-certifying `roomId`, they simply include
+`...roles()` in `joinRoom()`—their browsers automatically check the suffix and
+recognize the host's `userId` as the true admin (joining a fingerprinted
+`<roomId>.<fingerprint>` without `roles()` throws an error so misconfigured
+clients fail fast):
 
 ```js
-// Guests join using the shared roomId—no extra config needed
-const guestRoom = joinRoom({appId: 'trivia-night'}, roomId)
+// Guests join using the shared roomId with ...roles()
+const guestRoom = joinRoom({appId: 'trivia-night', ...roles()}, roomId)
 ```
 
 > **Tip:** Because admin ownership is tied directly to the host's `userId`, if
 > the host refreshes the page (`identity: 'session'`, the browser default) or
 > returns later on the same device (`identity: 'local'`), Trystero automatically
-> recognizes them as the room admin when they rejoin `roomId`—no separate admin
-> token to save! You can also generate the `roomId` ahead of time before calling
-> `joinRoom()` using `await createAdminRoom('friday-quiz')`.
+> recognizes them as the room admin when they rejoin `roomId` with
+> `...roles()`—no separate admin token to save! You can also generate the
+> `roomId` ahead of time before calling `joinRoom()` using
+> `await createAdminRoom('friday-quiz')`.
 
 #### 2. Using a fixed room name without a suffix
 
@@ -721,13 +740,13 @@ What if you want a permanent, memorable room name like `'main-stage'` without a
 fingerprint suffix at the end—for example, a recurring town hall, podcast
 studio, or community hub owned by specific users?
 
-Pass the trusted admin `userId` (or an array of `userId`s for co-admins) in
-`admin`. When an admin joins with their matching `identity`, they are
+Pass the trusted admin `userId` (or an array of `userId`s for co-admins) to
+`roles()`. When an admin joins with their matching `identity`, they are
 automatically recognized as `'admin'`, and regular viewers automatically trust
 updates and role grants signed by those `userId`s:
 
 ```js
-import {joinRoom} from 'trystero'
+import {joinRoom, roles} from 'trystero'
 
 const HOST_USER_ID = 'tY8mK3pQvN2xR7wL9jB4cF6hZ1sD5gA0eU8iO2uP4yM'
 
@@ -738,7 +757,7 @@ const room = joinRoom(
   {
     appId: 'town-hall',
     identity: 'local',
-    admin: HOST_USER_ID // or [HOST_USER_ID, CO_HOST_USER_ID]
+    ...roles(HOST_USER_ID) // or roles([HOST_USER_ID, CO_HOST_USER_ID])
   },
   'main-stage'
 )
@@ -748,11 +767,11 @@ const room = joinRoom(
 
 For example, in a game where anyone can send chat messages, you might want an
 `'announce'` action that only the `'admin'` or a `'moderator'` is allowed to
-send. Just pass `authority` when creating the action:
+send. Just pass `roles` when creating the action:
 
 ```js
 const announce = room.makeAction('announce', {
-  authority: ['admin', 'moderator'],
+  roles: ['admin', 'moderator'],
   onMessage: (data, {userId, roles}) => {
     console.log(`Verified ${roles.join(', ')} (${userId}) announced:`, data)
   }
@@ -772,18 +791,19 @@ Many apps need official room state that everyone can read, but only the host or
 authorized roles can update—like the current question in a quiz game, the active
 video URL in a watch party, or the current slide in a presentation.
 
-With `room.makeState()`, whenever an authorized user updates the state, every
-user in the room receives the verified update. Better yet, **if a new user joins
-the room late—or even after the host has closed their laptop and left—existing
-users in the room automatically sync the latest official state to the newcomer**
-without being able to tamper with it:
+With `room.makeState()` (enabled when `roles()` is passed to `joinRoom()`),
+whenever an authorized user updates the state, every user in the room receives
+the verified update. Better yet, **if a new user joins the room late—or even
+after the host has closed their laptop and left—existing users in the room
+automatically sync the latest official state to the newcomer** without being
+able to tamper with it:
 
 ```js
 const roundState = room.makeState(
   'round-state',
   {round: 1, phase: 'lobby'},
   {
-    authority: ['admin', 'host'],
+    roles: ['admin', 'host'],
     // Optional rule: prevent the round number from ever going backward
     validate: (next, prev) => next.round >= prev.round
   }
@@ -815,13 +835,13 @@ await room.grantRole(userId, 'moderator', {
 })
 
 // Check which verified roles a user currently has
-console.log(room.getPeerRoles(userId)) // => ['moderator']
+console.log(room.getRoles(userId)) // => ['moderator']
 
 // Remove the 'moderator' role from a user
 await room.revokeRole(userId, 'moderator')
 
 // As an admin, kick and ban a disruptive user from the room
-await room.banPeer(maliciousUserId, {reason: 'spam'})
+await room.ban(maliciousUserId, {reason: 'spam'})
 ```
 
 Delegators may revoke only roles they still hold. Revoked or banned admins
@@ -840,10 +860,10 @@ admin certificates.
   and a self-certifying room's 16-character Base62 suffix
   (`<baseRoomId>.<16-char-base62>`) are derived from the exact same SHA-256
   thumbprint of the user's P-256 public key. When you create a room with
-  `admin: true`, Trystero encodes the first 96 bits of your `userId` digest into
-  the room ID suffix. When peers connect—or when the host rejoins after a reload
-  or on a persistent device—everyone can mathematically verify from the `userId`
-  alone who owns the room.
+  `...roles(true)`, Trystero encodes the first 96 bits of your `userId` digest
+  into the room ID suffix. When peers connect—or when the host rejoins after a
+  reload or on a persistent device—everyone can mathematically verify from the
+  `userId` alone who owns the room.
 - **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
   `RoleCertificate` binding the recipient's `peerId`, `userId`, and public key
   to the granted role(s), optional expiration timestamp, and `canDelegate` flag.
@@ -851,8 +871,8 @@ admin certificates.
   across page reloads and multiple open tabs by presenting a signed `userProof`
   linking their new endpoint `peerId` to their `userId`. Peers verify the full
   signature chain back to a root admin key and check against signed
-  `RoleRevocationRecord`s. Likewise, `room.banPeer()` bans both the target
-  `peerId` and `userId` across all current and future tabs.
+  `RoleRevocationRecord`s. Likewise, `room.ban()` bans both the target `peerId`
+  and `userId` across all current and future tabs.
 - **Tamper-proof state syncing (`makeState`)**: Each state update is signed with
   a monotonically increasing sequence number (`seq`) and chained to the SHA-256
   hash of the previous state record (`prevHash`). This prevents replay or
@@ -869,23 +889,31 @@ admin certificates.
 
 </details>
 
-### Scalable topologies
+### Scaling large rooms
 
 Normally in WebRTC, every browser in a room opens a direct connection to every
-other browser. That works great for small groups, but once a room grows past a
-dozen people—like a busy game lobby, a collaborative canvas with 50 cursors, or
-a live watch party—maintaining that many connections at once can slow down or
-overwhelm a user's browser.
+other browser (`'mesh'`). That works great for small groups (And keeps your
+bundle size minimal when you don't need multi-hop routing), but once a room
+grows past a dozen people—like a busy game lobby, a collaborative canvas with 50
+cursors, or a live watch party—maintaining that many connections at once can
+slow down or overwhelm a user's browser.
 
-**Out of the box, Trystero handles this for you automatically.** By default,
-rooms use `topology: 'auto'`:
+**Opt into automatic scaling with `scale()`:**
+
+```js
+import {joinRoom, scale} from 'trystero'
+
+const room = joinRoom({appId: 'massive-canvas', ...scale()}, 'lobby-1')
+```
+
+When you include `...scale()` (which defaults to `'auto'` mode):
 
 - When a room is small (`12` peers or fewer), everyone connects directly to
   everyone else for the lowest possible latency.
 - If more people join, Trystero automatically switches the room to a scalable
-  relay network where each browser only maintains a handful of direct
-  connections (6 by default) and passes messages and media streams along to the
-  rest of the room.
+  `'gossip'` relay network where each browser only maintains a handful of direct
+  connections (`maxConnections: 6` by default) and passes messages and media
+  streams along to the rest of the room.
 
 All of your code (`makeAction`, `makeState`, `addStream`, `addTrack`, `ping`,
 `onUserJoin`, `onUserLeave`, and `getUsers()`) works the exact same way no
@@ -895,48 +923,48 @@ directly or through other peers.
 Broadcast media travels through the relay tree. Targeted media establishes a
 direct WebRTC connection to each selected endpoint, so other participants do not
 receive or relay its audio/video. These connections can exceed the overlay's
-`maxPeers` target and remain available until the peer or room disconnects. Await
-the promises returned by `addStream`, `addTrack`, and `replaceTrack` to handle
-connection failures.
+`maxConnections` target and remain available until the peer or room disconnects.
+Await the promises returned by `addStream`, `addTrack`, and `replaceTrack` to
+handle connection failures.
 
-If you want to customize how peers connect for your specific app, pass a
-`topology` option to `joinRoom()`:
+You can customize how `scale()` connects peers by passing a mode string or
+config object:
 
-- `'auto'` _(default)_ – Best for most apps. Uses direct connections for small
-  groups and automatically scales up when a room exceeds `autoThreshold`
+- `'auto'` _(default when `scale()` is called with no arguments)_ – Best for
+  most large-room apps. Uses direct connections for small groups and
+  automatically switches to `'gossip'` when a room exceeds `autoThreshold`
   (default: `12` peers).
-- `'mesh'` – Everyone always connects directly to everyone else. Useful when
-  building a small, latency-critical app (like a 4-player fighting game) where
-  you never want messages relayed through other peers.
-- `'small-world'` – Always uses the scalable relay network, even in small rooms.
-  Useful when building a massive multiplayer world or public town square where
-  you want every user's connection count capped from the start.
-- `'tree'` – Organizes peers into a branching broadcast tree. Ideal when one or
-  a few hosts are streaming video, audio, or live updates to a large audience
-  (like a webinar, live DJ set, or stage presentation).
+- `'gossip'` – Always uses the bounded-degree gossip relay network, even in
+  small rooms. Useful when building a massive multiplayer world or public town
+  square where you want every user's connection count capped from the start.
+- `'broadcast'` – Organizes peers into a branching broadcast tree. Ideal when
+  one or a few hosts are streaming video, audio, or live updates to a large
+  audience (like a webinar, live DJ set, or stage presentation).
+- `'mesh'` – Everyone always connects directly to everyone else (the default
+  when `scale()` is omitted).
 
 ```js
 // Example: a live stage app where a presenter streams video to a large audience
 const room = joinRoom(
   {
     appId: 'live-stage',
-    topology: 'tree'
+    ...scale('broadcast')
   },
   'main-hall'
 )
 ```
 
-You can also fine-tune connection limits by passing an object:
+You can also fine-tune connection limits by passing an object to `scale()`:
 
 ```js
 const room = joinRoom(
   {
     appId: 'massive-canvas',
-    topology: {
+    ...scale({
       mode: 'auto',
-      autoThreshold: 12, // switch to 'small-world' above 12 peers
-      maxPeers: 6 // target degree for the routing overlay
-    }
+      autoThreshold: 12, // switch to 'gossip' above 12 peers
+      maxConnections: 6 // target direct WebRTC connections per peer
+    })
   },
   'lobby-1'
 )
@@ -949,17 +977,17 @@ streams are being routed.
 <details>
   <summary>How it works behind the scenes</summary>
 
-- **Small-world overlay (`'small-world'`)**: Peers arrange themselves by ID on a
+- **Gossip overlay (`'gossip'`)**: Peers arrange themselves by ID on a
   bounded-degree circulant ring with deterministic multi-scale logarithmic
   chords, keeping the network diameter to $O(\log N)$ hops even as rooms grow to
   hundreds of peers. Broadcasts use a Plumtree-style epidemic push tree combined
   with lazy `ihave`/`iwant` gossip repair so messages reach every peer reliably
   without flooding redundant copies. Point-to-point messages (`target`) route
   along shortest paths with disjoint backup next-hops for instant failover.
-- **Broadcast trees (`'tree'` and media streaming)**: In `'tree'` mode—and
-  whenever any peer calls `addStream()` in `'small-world'` mode—Trystero builds
-  a deterministic $k$-ary application-layer multicast (ALM) tree rooted at the
-  broadcaster. Each internal peer receives the stream once and clones the
+- **Broadcast trees (`'broadcast'` and media streaming)**: In `'broadcast'`
+  mode—and whenever any peer calls `addStream()` in `'gossip'` mode—Trystero
+  builds a deterministic $k$-ary application-layer multicast (ALM) tree rooted
+  at the broadcaster. Each internal peer receives the stream once and clones the
   `MediaStreamTrack`s to its downstream children (`fanout: 3` by default), so a
   broadcaster can stream audio or video to dozens of viewers while only
   uploading to 3 peers. If an upstream peer disconnects, downstream viewers
@@ -973,6 +1001,40 @@ streams are being routed.
   with AES-GCM so intermediate peers cannot read them.
 
 </details>
+
+### Custom room modules
+
+Both `roles()` and `scale()` are built on Trystero's opt-in room module standard
+(`defineRoomModule`), which you can also use to author tree-shakeable 1st- or
+3rd-party extensions (such as CRDT bindings like Yjs/Automerge, custom
+telemetry, or state sync adapters):
+
+```js
+import {joinRoom, defineRoomModule} from 'trystero'
+
+const myPlugin = (options = {}) =>
+  defineRoomModule('myPlugin', {
+    setup(kernel) {
+      const sync = kernel.makeInternalAction('@_my_sync')
+      kernel.onLeave(() => {
+        // clean up resources when room.leave() is called
+      })
+      // Any methods returned here are merged onto the Room instance
+      return {
+        syncNow: data => sync.send(data)
+      }
+    }
+  })
+
+// Pass modules via object spread or via the `modules: [...]` array:
+const room = joinRoom(
+  {
+    appId: 'collab-doc',
+    ...myPlugin()
+  },
+  'doc-1'
+)
+```
 
 ### React hooks
 
@@ -1328,15 +1390,22 @@ the same namespace will return the same room instance.
       `importUserIdentity()`), an exported `trystero_uk_...` key string, a P-256
       private `JsonWebKey`, or a custom sync/async loader function.
 
-  - `admin` - **(optional)** Configures room admins and roles (see
+  - `roles` / `...roles([config])` - **(optional)** Opt-in, tree-shakeable room
+    plugin that enables room admins, custom role delegation, peer banning, and
+    `room.makeState()` (see
     [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)):
-    - `true` - Makes the local user (`userId`) the room admin and appends their
-      16-character Base62 fingerprint to the room ID (`<roomId>.<fingerprint>`).
-    - `string` (`userId`) or `string[]` (`userId[]`) - Trusts the specified
+    - `roles()` - Enables role and state verification for a guest joining a room
+      (required when joining a self-certifying `<roomId>.<fingerprint>`).
+    - `roles(true)` - Makes the local user (`userId`) the room admin and appends
+      their 16-character Base62 fingerprint to the room ID
+      (`<roomId>.<fingerprint>`).
+    - `roles(userId)` or `roles([userId1, userId2])` - Trusts the specified
       `userId`(s) as root room admin(s) on a fixed room name without a
       fingerprint suffix. If the local user's `userId` is in the list, they
       automatically become an `'admin'`.
-    - `AuthorityConfig` object:
+    - `roles(RolesConfig)` object:
+      - `admin` - `true`, a trusted admin `userId`, or an array of trusted admin
+        `userId`s.
       - `create` - Boolean to make the local user the room admin and append
         their 16-character Base62 fingerprint to `roomId`.
       - `users` - Array of trusted admin `userId`s (or 16-character Base62
@@ -1345,22 +1414,29 @@ the same namespace will return the same room instance.
         controlling whether signed role certificates and ban records are
         included in initial discovery announcements.
 
-  - `topology` - **(optional)** How peers connect and route data as the room
-    grows (see [Scalable topologies](#scalable-topologies)): `'auto'` (default),
-    `'mesh'`, `'small-world'`, `'tree'`, or a `TopologyConfig` object:
-    - `mode` - `'auto' | 'mesh' | 'small-world' | 'tree'` (default: `'auto'`).
-    - `maxPeers` - Maximum target direct WebRTC connections per browser in
-      scalable modes (default: `6`, or `fanout + 3` in `'tree'` mode).
-    - `minPeers` - Minimum direct connections maintained before closing extra
-      links (default: `3`).
+  - `scale` / `...scale([config])` - **(optional)** Opt-in, tree-shakeable room
+    plugin that enables multi-hop overlay scaling as the room grows (see
+    [Scaling large rooms](#scaling-large-rooms)): `'auto'` (default when
+    `scale()` is called with no arguments), `'gossip'`, `'broadcast'`, `'mesh'`,
+    or a `ScaleConfig` object:
+    - `mode` - `'auto' | 'mesh' | 'gossip' | 'broadcast'` (default: `'auto'`).
+    - `maxConnections` - Maximum target direct WebRTC connections per browser in
+      scalable modes (default: `6`, or `fanout + 3` in `'broadcast'` mode).
+    - `minConnections` - Minimum direct connections maintained before closing
+      extra links (default: `3`).
     - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
-      `'small-world'` (default: `12`).
-    - `fanout` - Number of downstream peers each node forwards to in `'tree'`
-      mode and media broadcast trees (default: `3`).
+      `'gossip'` (default: `12`).
+    - `fanout` - Number of downstream peers each node forwards to in
+      `'broadcast'` mode and media broadcast trees (default: `3`).
     - `redundancy` - Number of separate paths used when routing messages across
       hops (default: `1`).
     - `maxHops` - Maximum number of hops a relayed packet can travel (default:
       `8`).
+
+  - `plugins` - **(optional)** Array of `RoomPlugin`s created with
+    `definePlugin` (or `roles()` / `scale()`). Plugins can also be spread
+    directly into the `joinRoom` config object
+    (`{appId, ...scale(), ...roles()}`).
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
     Object containing strategy-specific relay settings:
@@ -1444,9 +1520,18 @@ Returns an object with the following methods:
 
 - ### `getSelf()`
 
-  Returns a promise resolving to `{peerId, userId}` for the local participant in
-  this room, where `peerId` is the 20-character Base62 endpoint ID (`selfId`)
-  and `userId` is the 43-character Base64url user identity thumbprint.
+  Returns a promise resolving to `SelfInfo` for the local participant in this
+  room:
+  - `peerId` - The 20-character Base62 endpoint ID (`selfId`).
+  - `userId` - The local user's 43-character Base64url user identity thumbprint.
+  - `roomId` - The full room ID (including the `.<16-char-base62-fingerprint>`
+    suffix when created with `roles(true)` or `roles({create: true})`).
+  - `baseRoomId` - The base room name without the fingerprint suffix.
+  - `fingerprint` - The 16-character Base62 admin fingerprint from the room ID,
+    or `null`.
+  - `isAdmin` - Boolean indicating whether the local user is a verified
+    `'admin'`.
+  - `roles` - Array of verified roles currently held by the local user.
 
 - ### `getUsers()`
 
@@ -1481,32 +1566,19 @@ Returns an object with the following methods:
 
   Returns a `TopologySnapshot` describing how peers in the room are currently
   connected and routing data: `mode`, `activeMode`
-  (`'mesh' | 'small-world' | 'tree'`), `selfId`, `directPeerIds`, `roomPeerIds`,
+  (`'mesh' | 'gossip' | 'broadcast'`), `selfId`, `directPeerIds`, `roomPeerIds`,
   `routes`, `mediaTrees`, and `stats` (`messagesSent`, `messagesReceived`,
   `messagesForwarded`, `duplicatesDropped`, `signatureFailures`,
   `lazyRepairsSent`, `lazyRepairsResolved`, `treeReparents`).
 
-- ### `getAuthority()`
-
-  Returns a promise resolving to `RoomAuthorityInfo` for the current room:
-  - `roomId` - The full room ID (including the `.<16-char-base62-fingerprint>`
-    suffix when created with `admin: true` or `admin: {create: true}`).
-  - `baseRoomId` - The base room name without the fingerprint suffix.
-  - `fingerprint` - The 16-character Base62 admin fingerprint from the room ID,
-    or `null`.
-  - `isAdmin` - Boolean indicating whether the local user is a verified
-    `'admin'`.
-  - `roles` - Array of verified roles currently held by the local user.
-  - `userId` - The local user's 43-character Base64url `userId`.
-
 - ### `makeState(namespace, initialValue, [config])`
 
-  Creates or retrieves a shared, admin-controlled state container
-  (`AuthoritativeState<T>`) that any peer can read and only authorized roles can
-  update.
+  _(Requires `roles(...)` in `joinRoom` config)_ Creates or retrieves a shared,
+  admin-controlled state container (`AuthoritativeState<T>`) that any peer can
+  read and only authorized roles can update.
   - `namespace` - Unique name for this state within the room.
   - `initialValue` - Initial state value before any update is received.
-  - `config.authority` - **(optional)** Role or array of roles allowed to update
+  - `config.roles` - **(optional)** Role or array of roles allowed to update
     this state (defaults to `'admin'`).
   - `config.validate(next, prev, context)` - **(optional)** Synchronous function
     returning `true` or `false` to validate state changes before they are sent
@@ -1525,9 +1597,10 @@ Returns an object with the following methods:
 
 - ### `grantRole(targetId, role, [options])`
 
-  Grants `role` (a role name string or array of strings) to `targetId` (which
-  can be either a `peerId` or a `userId`). Requires the local user to be an
-  `'admin'` or to hold that role with `canDelegate: true`.
+  _(Requires `roles(...)` in `joinRoom` config)_ Grants `role` (a role name
+  string or array of strings) to `targetId` (which can be either a `peerId` or a
+  `userId`). Requires the local user to be an `'admin'` or to hold that role
+  with `canDelegate: true`.
   - `options.canDelegate` - **(optional)** Boolean allowing the recipient to
     grant those role(s) to other peers as well.
   - `options.expiresInMs` - **(optional)** How long the role remains valid in
@@ -1535,20 +1608,21 @@ Returns an object with the following methods:
 
 - ### `revokeRole(targetId, [role])`
 
-  Revokes `role` (or all roles if omitted) from `targetId` (`peerId` or
-  `userId`). Delegated moderators cannot revoke a root `'admin'`.
+  _(Requires `roles(...)` in `joinRoom` config)_ Revokes `role` (or all roles if
+  omitted) from `targetId` (`peerId` or `userId`). Delegated moderators cannot
+  revoke a root `'admin'`.
 
-- ### `getPeerRoles([targetId])`
+- ### `getRoles([targetId])`
 
   Returns the array of verified roles currently held by `targetId` (`peerId` or
   `userId`, or by the local user if `targetId` is omitted).
 
-- ### `banPeer(targetId, [options])`
+- ### `ban(targetId, [options])`
 
-  Permanently bans `targetId` (`peerId` or `userId`) from the room (requires
-  `'admin'` role). Immediately disconnects all endpoints belonging to that peer
-  or user, removes any roles they held, and blocks future connection offers or
-  messages from them.
+  _(Requires `roles(...)` in `joinRoom` config)_ Permanently bans `targetId`
+  (`peerId` or `userId`) from the room (requires `'admin'` role). Immediately
+  disconnects all endpoints belonging to that peer or user, removes any roles
+  they held, and blocks future connection offers or messages from them.
   - `options.reason` - **(optional)** Optional reason string for the ban.
 
 - ### `isBanned(targetId)`
@@ -1751,11 +1825,11 @@ Returns an object with the following methods:
   requests and responses. Responses have no metadata. See
   [receiving files](#receiving-files).
 
-  Pass `config.authority` (`'admin'`, a custom role string, or an array of role
-  strings) to restrict who can send or make requests on this action. When set,
-  messages from unauthorized senders are rejected and the verified sender's
-  roles are passed as `roles` in the `onMessage` / `onRequest` context
-  (`{userId, peerId, metadata, roles}`).
+  Pass `config.roles` (`'admin'`, a custom role string, or an array of role
+  strings; requires `roles(...)` in `joinRoom` config) to restrict who can send
+  or make requests on this action. When set, messages from unauthorized senders
+  are rejected and the verified sender's roles are passed as `roles` in the
+  `onMessage` / `onRequest` context (`{userId, peerId, metadata, roles}`).
 
   Send options use `target`, `metadata`, `onProgress`, and `signal`. Request
   options use `target`, `metadata`, `timeoutMs`, `onProgress`, and `signal`.
@@ -1794,6 +1868,23 @@ Returns an object with the following methods:
       2000
     )
   ```
+
+### `roles([config])`
+
+Creates the opt-in room authority module (`RoomModule<'roles'>`) for
+`joinRoom()`. Pass via object spread
+(`joinRoom({appId, ...roles(config)}, roomId)`).
+
+### `scale([config])`
+
+Creates the opt-in multi-hop scaling module (`RoomModule<'scale'>`) for
+`joinRoom()`. Pass via object spread
+(`joinRoom({appId, ...scale(config)}, roomId)`).
+
+### `defineRoomModule(name, spec)`
+
+Creates a custom or 3rd-party `RoomModule` that can be passed to `joinRoom()`
+via object spread (`...myModule()`) or via `modules: [myModule()]`.
 
 ### `selfId`
 

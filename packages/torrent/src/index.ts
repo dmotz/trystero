@@ -443,6 +443,7 @@ export {
   computePublicKeyFingerprint,
   createAdminRoom,
   createUserIdentity,
+  definePlugin,
   derivePeerId,
   deriveUserId,
   exportUserIdentity,
@@ -451,6 +452,8 @@ export {
   parseSelfCertifyingRoomId,
   pauseRelayReconnection,
   resumeRelayReconnection,
+  roles,
+  scale,
   selfId,
   verifyPeerIdKey,
   verifyUserIdKey

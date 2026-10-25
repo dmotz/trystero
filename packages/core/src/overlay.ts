@@ -16,6 +16,7 @@ import {
   createBoundedCache,
   createBoundedSet,
   decodeBytes,
+  definePlugin,
   encodeBytes,
   fromBase64,
   fromJson,
@@ -34,6 +35,7 @@ import type {
   PeerHandle,
   PeerHandlers,
   RoleCertificate,
+  RoomPlugin,
   Signal,
   TopologyConfig,
   TopologyMediaTree,
@@ -50,8 +52,8 @@ const overlayControlKind = 1
 const overlayBroadcastKind = 2
 const overlayUnicastKind = 3
 
-const defaultMaxPeers = 6
-const defaultMinPeers = 3
+const defaultMaxConnections = 6
+const defaultMinConnections = 3
 const defaultAutoThreshold = 12
 const defaultFanout = 3
 const defaultRedundancy = 1
@@ -63,8 +65,8 @@ const unreachableGraceMs = 80
 
 export type ResolvedTopologyConfig = {
   mode: TopologyMode
-  maxPeers: number
-  minPeers: number
+  maxConnections: number
+  minConnections: number
   autoThreshold: number
   fanout: number
   redundancy: number
@@ -135,8 +137,8 @@ type UnicastEnvelopeHeader = {
 const validModes = new Set<TopologyMode>([
   'mesh',
   'auto',
-  'small-world',
-  'tree'
+  'gossip',
+  'broadcast'
 ])
 
 export const normalizeTopologyConfig = (
@@ -145,8 +147,8 @@ export const normalizeTopologyConfig = (
   if (!topology) {
     return {
       mode: 'auto',
-      maxPeers: defaultMaxPeers,
-      minPeers: defaultMinPeers,
+      maxConnections: defaultMaxConnections,
+      minConnections: defaultMinConnections,
       autoThreshold: defaultAutoThreshold,
       fanout: defaultFanout,
       redundancy: defaultRedundancy,
@@ -164,39 +166,45 @@ export const normalizeTopologyConfig = (
 
   const fanout = raw.fanout ?? defaultFanout
   if (!Number.isSafeInteger(fanout) || fanout < 2) {
-    throw mkErr('topology.fanout must be an integer >= 2')
+    throw mkErr('scale.fanout must be an integer >= 2')
   }
 
-  const maxPeers =
-    raw.maxPeers ?? (mode === 'tree' ? fanout + 3 : defaultMaxPeers)
-  if (!Number.isSafeInteger(maxPeers) || maxPeers < 2) {
-    throw mkErr('topology.maxPeers must be an integer >= 2')
+  const maxConnections =
+    raw.maxConnections ??
+    (mode === 'broadcast' ? fanout + 3 : defaultMaxConnections)
+  if (!Number.isSafeInteger(maxConnections) || maxConnections < 2) {
+    throw mkErr('scale.maxConnections must be an integer >= 2')
   }
 
-  const minPeers = raw.minPeers ?? Math.min(defaultMinPeers, maxPeers)
-  if (!Number.isSafeInteger(minPeers) || minPeers < 1 || minPeers > maxPeers) {
-    throw mkErr('topology.minPeers must be between 1 and maxPeers')
+  const minConnections =
+    raw.minConnections ?? Math.min(defaultMinConnections, maxConnections)
+  if (
+    !Number.isSafeInteger(minConnections) ||
+    minConnections < 1 ||
+    minConnections > maxConnections
+  ) {
+    throw mkErr('scale.minConnections must be between 1 and maxConnections')
   }
 
   const autoThreshold = raw.autoThreshold ?? defaultAutoThreshold
   if (!Number.isSafeInteger(autoThreshold) || autoThreshold < 2) {
-    throw mkErr('topology.autoThreshold must be an integer >= 2')
+    throw mkErr('scale.autoThreshold must be an integer >= 2')
   }
 
   const redundancy = raw.redundancy ?? defaultRedundancy
   if (!Number.isSafeInteger(redundancy) || redundancy < 1) {
-    throw mkErr('topology.redundancy must be an integer >= 1')
+    throw mkErr('scale.redundancy must be an integer >= 1')
   }
 
   const maxHops = raw.maxHops ?? defaultMaxHops
   if (!Number.isSafeInteger(maxHops) || maxHops < 1 || maxHops > 64) {
-    throw mkErr('topology.maxHops must be between 1 and 64')
+    throw mkErr('scale.maxHops must be between 1 and 64')
   }
 
   return {
     mode,
-    maxPeers,
-    minPeers,
+    maxConnections,
+    minConnections,
     autoThreshold,
     fanout,
     redundancy,
@@ -207,8 +215,8 @@ export const normalizeTopologyConfig = (
 export const computeTargetNeighbors = (
   localPeerId: string,
   rosterIds: Iterable<string>,
-  activeMode: 'mesh' | 'small-world' | 'tree',
-  maxPeers: number,
+  activeMode: 'mesh' | 'gossip' | 'broadcast',
+  maxConnections: number,
   fanout: number,
   privilegedPeers?: ReadonlySet<string>
 ): Set<string> => {
@@ -232,7 +240,7 @@ export const computeTargetNeighbors = (
     return targets
   }
 
-  if (activeMode === 'mesh' || total - 1 <= maxPeers) {
+  if (activeMode === 'mesh' || total - 1 <= maxConnections) {
     for (const id of sorted) {
       if (id !== localPeerId) {
         targets.add(id)
@@ -241,7 +249,7 @@ export const computeTargetNeighbors = (
     return targets
   }
 
-  if (activeMode === 'tree') {
+  if (activeMode === 'broadcast') {
     if (selfIdx > 0) {
       const parentIdx = Math.floor((selfIdx - 1) / fanout)
       const parentId = sorted[parentIdx]
@@ -271,7 +279,7 @@ export const computeTargetNeighbors = (
     return targets
   }
 
-  // 'small-world': Circulant ring + symmetric multi-scale logarithmic/halving chords.
+  // 'gossip': Circulant ring + symmetric multi-scale logarithmic/halving chords.
   const addSymmetricOffset = (offset: number): void => {
     const norm = ((offset % total) + total) % total
     if (norm === 0) {
@@ -286,7 +294,7 @@ export const computeTargetNeighbors = (
     if (backward && backward !== localPeerId && !targets.has(backward)) {
       toAdd.add(backward)
     }
-    if (toAdd.size > 0 && targets.size + toAdd.size <= maxPeers) {
+    if (toAdd.size > 0 && targets.size + toAdd.size <= maxConnections) {
       for (const id of toAdd) {
         targets.add(id)
       }
@@ -297,7 +305,7 @@ export const computeTargetNeighbors = (
   addSymmetricOffset(1)
 
   // 2. Geometric multi-scale chords across [2, floor(total / 3)] yield O(log N) diameter.
-  const numChordPairs = Math.max(0, Math.floor(maxPeers / 2) - 1)
+  const numChordPairs = Math.max(0, Math.floor(maxConnections / 2) - 1)
   const maxChordSpan = Math.max(2, Math.floor(total / 3))
   const candidateOffsets: number[] = []
 
@@ -320,7 +328,7 @@ export const computeTargetNeighbors = (
   )
 
   for (const offset of candidateOffsets) {
-    if (targets.size >= maxPeers) {
+    if (targets.size >= maxConnections) {
       break
     }
     if (offset >= 2) {
@@ -674,7 +682,7 @@ export type OverlayManagerDeps = {
 export type OverlayManager = {
   config: ResolvedTopologyConfig
   isOverlayActive: () => boolean
-  getActiveMode: () => 'mesh' | 'small-world' | 'tree'
+  getActiveMode: () => 'mesh' | 'gossip' | 'broadcast'
   isOverlayFrame: (data: ArrayBuffer) => boolean
   handleOverlayFrame: (fromPeerId: string, data: ArrayBuffer) => void
   addDirectPeer: (peerId: string, peer: PeerHandle) => void
@@ -821,7 +829,7 @@ export const createOverlayManager = ({
   let localSeq = 0
   let lastChurnAtMs = 0
   let isDestroyed = false
-  let currentActiveMode: 'mesh' | 'small-world' | 'tree' =
+  let currentActiveMode: 'mesh' | 'gossip' | 'broadcast' =
     config.mode === 'auto' ? 'mesh' : config.mode
   let routes: Record<string, TopologyRoute> = {}
   let identityReady: CryptoIdentity | null = null
@@ -837,7 +845,7 @@ export const createOverlayManager = ({
     treeReparents: 0
   }
 
-  if (config.mode === 'small-world' || config.mode === 'tree') {
+  if (config.mode === 'gossip' || config.mode === 'broadcast') {
     void getOrCreateCryptoIdentity(selfId).then(id => {
       if (!isDestroyed) {
         identityReady = id
@@ -853,7 +861,7 @@ export const createOverlayManager = ({
       currentActiveMode = 'mesh'
       return
     }
-    if (config.mode === 'small-world' || config.mode === 'tree') {
+    if (config.mode === 'gossip' || config.mode === 'broadcast') {
       currentActiveMode = config.mode
       return
     }
@@ -864,7 +872,7 @@ export const createOverlayManager = ({
       directPeers.size + 1
     )
     if (currentActiveMode === 'mesh' && totalKnown > config.autoThreshold) {
-      currentActiveMode = 'small-world'
+      currentActiveMode = 'gossip'
     } else if (
       currentActiveMode !== 'mesh' &&
       totalKnown <= Math.max(2, Math.floor(config.autoThreshold * 0.75))
@@ -1149,7 +1157,7 @@ export const createOverlayManager = ({
         selfId,
         knownRoster,
         currentActiveMode,
-        config.maxPeers,
+        config.maxConnections,
         config.fanout,
         privilegedPeers
       )
@@ -1613,7 +1621,7 @@ export const createOverlayManager = ({
     // Use the BFS tree rooted at originPeerId for primary eager push
     const {childrenIds} = getCachedTreeChildren(
       originPeerId,
-      Math.max(config.fanout, config.maxPeers)
+      Math.max(config.fanout, config.maxConnections)
     )
     const eagerSet = new Set<string>(
       childrenIds.filter(id => allNeighbors.includes(id))
@@ -2681,7 +2689,7 @@ export const createOverlayManager = ({
         selfId,
         knownRoster,
         currentActiveMode,
-        config.maxPeers,
+        config.maxConnections,
         config.fanout,
         privilegedPeers
       )
@@ -2690,14 +2698,14 @@ export const createOverlayManager = ({
         return true
       }
 
-      if (directPeers.size < config.minPeers) {
+      if (directPeers.size < config.minConnections) {
         return true
       }
 
       if (direction === 'inbound') {
-        // Accept inbound offers up to a soft ceiling (2x maxPeers) so slightly
+        // Accept inbound offers up to a soft ceiling (2x maxConnections) so slightly
         // out-of-sync rosters during join bursts never reject valid neighbor edges.
-        return directPeers.size < config.maxPeers * 2
+        return directPeers.size < config.maxConnections * 2
       }
 
       return false
@@ -2711,7 +2719,7 @@ export const createOverlayManager = ({
           selfId,
           knownRoster,
           currentActiveMode,
-          config.maxPeers,
+          config.maxConnections,
           config.fanout,
           privilegedPeers
         )
@@ -2935,6 +2943,87 @@ export const createOverlayManager = ({
       }
     }
   }
+}
+
+export const scale = (
+  topology?: TopologyMode | TopologyConfig
+): RoomPlugin<'scale', {getTopology: () => TopologySnapshot}> => {
+  // Validate eagerly at call time
+  normalizeTopologyConfig(topology)
+
+  return definePlugin('scale', {
+    setup: kernel => {
+      const overlay = createOverlayManager({
+        selfId: kernel.selfId,
+        appId: kernel.appId,
+        roomId: kernel.getRoomId(),
+        password: kernel.password,
+        ...(topology === undefined ? {} : {topology}),
+        getLocalUserIdentity: () => kernel.getLocalUserIdentity(),
+        onVirtualPeerJoin: (peerId, vPeer) =>
+          kernel.activateVirtualPeer(peerId, vPeer),
+        onVirtualPeerLeave: (peerId, reason) =>
+          kernel.deactivateVirtualPeer(peerId, reason),
+        onDeliverData: (originPeerId, data) =>
+          kernel.deliverRawData(originPeerId, data),
+        canPeerSendAction: (peerId, requiredRoles, inlineCert) => {
+          const rp = kernel.getRolesProvider()
+          return rp
+            ? rp.canPeerSendAction(peerId, requiredRoles, inlineCert)
+            : true
+        },
+        onPeerDescriptorCert: (peerId, signPubKey, cert, userId) => {
+          if (userId) {
+            kernel.setPeerUserId(peerId, userId)
+          }
+          kernel.setPeerPublicKey(peerId, signPubKey)
+          const rp = kernel.getRolesProvider()
+          if (rp) {
+            rp.onPeerDescriptorCert(peerId, signPubKey, cert, userId)
+          }
+        },
+        onRelayMediaStream: (
+          broadcasterId,
+          stream,
+          metadata,
+          targetPeerIds,
+          streamKey,
+          tracks
+        ) =>
+          kernel.relayMediaStream(
+            broadcasterId,
+            stream,
+            metadata,
+            targetPeerIds,
+            streamKey,
+            tracks
+          ),
+        onRelayMediaTrack: (
+          broadcasterId,
+          track,
+          stream,
+          metadata,
+          targetPeerIds,
+          trackKey
+        ) =>
+          kernel.relayMediaTrack(
+            broadcasterId,
+            track,
+            stream,
+            metadata,
+            targetPeerIds,
+            trackKey
+          )
+      })
+
+      kernel.registerScaleProvider(overlay)
+      kernel.onRoomIdChanged(rid => overlay.setRoomId(rid))
+
+      return {
+        getTopology: () => overlay.getSnapshot()
+      }
+    }
+  })
 }
 
 export {

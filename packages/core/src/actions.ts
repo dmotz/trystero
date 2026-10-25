@@ -206,7 +206,12 @@ export const createActionManager = ({
     ...(broadcastInline ? {broadcastInline} : {}),
     ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes})
   })
-  const makeInternalAction = wire.makeInternalAction
+  const makeWireAction = wire.makeInternalAction
+  const makeInternalAction = <T extends DataPayload = DataPayload>(
+    type: string,
+    options?: Partial<ActionOptions>
+  ): InternalAction<T> =>
+    makeWireAction(type.startsWith('@_') ? type : `@_${type}`, options)
   const handleData = wire.handleData
 
   const clearPendingRequestWaiter = (requestId: string): void => {
@@ -253,7 +258,7 @@ export const createActionManager = ({
     )
   }
 
-  const responseAction = makeInternalAction<DataPayload>('@_response', {
+  const responseAction = makeInternalAction<DataPayload>('response', {
     receiveScope: (peerId, metadata) => {
       const parsed = getResponseMetadata(metadata)
       const waiter = parsed && pendingRequestWaiters[parsed.r]
@@ -331,17 +336,16 @@ export const createActionManager = ({
     }
 
     const kind = config?.kind ?? 'message'
-    const requiredRoles = config?.authority
-      ? (Array.isArray(config.authority)
-          ? config.authority
-          : [config.authority]
-        ).filter(Boolean)
+    const requiredRoles = config?.roles
+      ? (Array.isArray(config.roles) ? config.roles : [config.roles]).filter(
+          Boolean
+        )
       : []
     const hasAuthority = requiredRoles.length > 0
     if (hasAuthority) {
       registerActionAuthority?.(type, requiredRoles)
     }
-    const rawAction = makeInternalAction<T>(type)
+    const rawAction = makeWireAction<T>(type)
     const existingState = publicActions[type]
 
     if (existingState) {

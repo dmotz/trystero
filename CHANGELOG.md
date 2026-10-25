@@ -4,45 +4,54 @@
 
 ### Improvements
 
-- 🕸️ **Scalable room topologies** - rooms now default to `topology: 'auto'`,
-  connecting peers directly in small groups (`<= 12` peers) and automatically
-  switching to a bounded-degree `'small-world'` relay overlay (`maxPeers: 6` by
-  default) as rooms grow to dozens or hundreds of peers. You can also opt into
-  `'mesh'`, `'small-world'`, or `'tree'` (for one-to-many broadcasts) or pass a
-  `TopologyConfig` object to customize connection and routing limits.
+- 🕸️ **Opt-in, tree-shakeable room scaling (`scale()`)** - added `scale()`
+  plugin for `joinRoom({appId, ...scale()})`, connecting peers directly in small
+  groups (`<= 12` peers) and automatically switching to a bounded-degree
+  `'gossip'` relay overlay (`maxConnections: 6` by default) as rooms grow to
+  dozens or hundreds of peers. You can also opt into `'mesh'`, `'gossip'`, or
+  `'broadcast'` (for one-to-many broadcasts) or pass a `ScaleConfig` object to
+  customize connection and routing limits. Apps that do not import `scale()`
+  tree-shake the entire overlay plugin out of their bundle.
 - All room APIs (`makeAction`, `makeState`, `addStream`, `addTrack`,
   `replaceTrack`, `ping`, `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work
   transparently across both direct and multi-hop peers. Broadcast media in
   scalable topologies routes through a branching tree with automatic reparenting
   if an upstream peer disconnects. Targeted media establishes direct WebRTC
-  connections to its recipients, which can exceed the topology's `maxPeers`
-  target. Multi-hop messages are ECDSA-signed (with ECDH + AES-GCM end-to-end
-  encryption for targeted sends) so intermediate relays cannot forge or read
-  traffic.
+  connections to its recipients, which can exceed the topology's
+  `maxConnections` target. Multi-hop messages are ECDSA-signed (with ECDH +
+  AES-GCM end-to-end encryption for targeted sends) so intermediate relays
+  cannot forge or read traffic.
 - Added `room.getTopology()` to inspect the active topology mode, direct and
   multi-hop peer lists, routing paths, media broadcast trees, and forwarding
   stats.
-- 👑 **Room admins, custom roles, and peer banning** - added `admin` to room
-  config (`true`, a trusted `userId` or array of `userId`s, or an
-  `AuthorityConfig` object) for zero-trust public-key room administration
-  unified with user identity (`userId`). Passing `admin: true` appends a
-  16-character Base62 fingerprint suffix derived from the host's `userId` to the
-  room ID (`<roomId>.<fingerprint>`) so guests automatically verify the room
-  creator from the invite room ID alone, and the host automatically regains
-  admin authority when rejoining with the same `userId`.
-- Added `room.grantRole()`, `room.revokeRole()`, `room.getPeerRoles()`,
-  `room.banPeer()`, `room.isBanned()`, and `room.getAuthority()`, plus top-level
-  helpers `createAdminRoom()`, `parseSelfCertifyingRoomId()`,
-  `formatSelfCertifyingRoomId()`, and `computePublicKeyFingerprint()`.
-- Actions now accept an `authority` option (`makeAction(name, {authority})`) to
-  restrict sending or requesting to `'admin'` or specific custom roles, with the
-  sender's verified `roles` included in `onMessage` and `onRequest` contexts.
+- 👑 **Opt-in, tree-shakeable room admins, custom roles, and peer banning
+  (`roles()`)** - added `roles()` plugin for `joinRoom({appId, ...roles(...)})`
+  (`roles()`, `roles(true)`, a trusted `userId` or array of `userId`s, or a
+  `RolesConfig` object) for zero-trust public-key room administration unified
+  with user identity (`userId`). Passing `...roles(true)` appends a 16-character
+  Base62 fingerprint suffix derived from the host's `userId` to the room ID
+  (`<roomId>.<fingerprint>`) so guests automatically verify the room creator
+  from the invite room ID alone (when joining with `...roles()`), and the host
+  automatically regains admin authority when rejoining with the same `userId`.
+  Joining a fingerprinted room ID without `roles()` throws an error. Apps that
+  do not import `roles()` tree-shake the entire authority plugin out of their
+  bundle.
+- Added `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`,
+  `room.ban()`, `room.isBanned()`, and expanded `room.getSelf()` (returning
+  `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`), plus
+  top-level helpers `createAdminRoom()`, `parseSelfCertifyingRoomId()`,
+  `formatSelfCertifyingRoomId()`, `computePublicKeyFingerprint()`, and
+  `definePlugin()` (for authoring custom/3rd-party room plugins).
+- Actions now accept a `roles` option (`makeAction(name, {roles})`) to restrict
+  sending or requesting to `'admin'` or specific custom roles, with the sender's
+  verified `roles` included in `onMessage` and `onRequest` contexts.
 - 🛡️ **Authoritative shared state** - added
-  `room.makeState(namespace, initialValue, [config])` for official room state
-  that any peer can read (`get()`, `onChange`, `getMeta()`) and only authorized
-  roles can update (`set()`), with optional custom `validate` rules. Existing
-  peers automatically sync the latest signed state snapshot to late joiners even
-  after the admin has left the room.
+  `room.makeState(namespace, initialValue, [config])` (enabled via `roles()`)
+  for official room state that any peer can read (`get()`, `onChange`,
+  `getMeta()`) and only authorized roles (`config.roles`) can update (`set()`),
+  with optional custom `validate` rules. Existing peers automatically sync the
+  latest signed state snapshot to late joiners even after the admin has left the
+  room.
 - 🚪 **Room size limits** - added `limit` to room config to cap the maximum
   number of unique users in a room (including the local user). When a room is at
   capacity, additional joiners are rejected during handshake before triggering
@@ -69,6 +78,9 @@
   all of a user's open tabs on `send`/media, and deterministically routing to
   one tab on `request`/`requestMany`/`ping`). `userId` is also included in all
   action, state, and progress callback contexts.
+- 📦 **Tree-shaking & `"sideEffects": false`** - enabled `"sideEffects": false`
+  across all packages and deprecated prebuilt `.min.js` bundles in favor of
+  tree-shaking bundlers and ESM CDNs.
 
 ### ⚠️ Breaking changes
 
@@ -107,15 +119,10 @@ persist or supply a custom identity.
 
 `onPeerHandshake` and `handshakeTimeoutMs` have been removed from `joinRoom()`
 callbacks. Peer and user identity verification, password verification, room
-capacity enforcement (`config.limit`), and role/admin authorization
-(`config.admin`, `authority`, `banPeer`) are now handled automatically across
-both direct and multi-hop topologies; for per-message/request payload filtering,
-use `action.onReceive`.
-
-Rooms now default to `topology: 'auto'`, which switches from `'mesh'` to
-`'small-world'` multi-hop routing when a room exceeds 12 peers. Pass
-`topology: 'mesh'` in `joinRoom()` if your app requires every peer to maintain a
-direct `RTCPeerConnection` regardless of room size.
+capacity enforcement (`config.limit`), and role/admin authorization (`roles()`,
+`roles: []`, `ban()`) are now handled automatically across both direct and
+multi-hop topologies; for per-message/request payload filtering, use
+`action.onReceive`.
 
 ## [0.26.0](https://github.com/dmotz/trystero/releases/tag/0.26.0) - 2026-10-04
 

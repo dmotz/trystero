@@ -8,6 +8,7 @@ import {
   createAdminRoom,
   formatSelfCertifyingRoomId,
   parseSelfCertifyingRoomId,
+  roles,
   signRoleCertificate,
   verifyRoleCertificateChain
 } from '../../packages/core/src/authority.ts'
@@ -26,6 +27,7 @@ import {
   overlayUnicastKind,
   packOverlayBinary,
   packOverlayControl,
+  scale,
   unpackOverlayBinary
 } from '../../packages/core/src/overlay.ts'
 import createRoom, {
@@ -33,7 +35,11 @@ import createRoom, {
 } from '../../packages/core/src/room.ts'
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
-import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  decodeBytes,
+  definePlugin,
+  encodeBytes
+} from '../../packages/core/src/utils.ts'
 import {
   LinkedMediaPeer,
   LinkedPeer,
@@ -171,7 +177,7 @@ const createOverlayCluster = async ({
         appId: 'scale-test-app',
         roomId: 'scale-test-room',
         password,
-        topology: resolvedTopology
+        ...scale(resolvedTopology)
       }
     )
 
@@ -194,7 +200,7 @@ const createOverlayCluster = async ({
     const effectiveMode =
       norm.mode === 'auto'
         ? activeSet.size > norm.autoThreshold
-          ? 'small-world'
+          ? 'gossip'
           : 'mesh'
         : norm.mode
 
@@ -203,7 +209,7 @@ const createOverlayCluster = async ({
         id,
         activeSet,
         effectiveMode,
-        norm.maxPeers,
+        norm.maxConnections,
         norm.fanout
       )
       for (const targetId of targets) {
@@ -294,30 +300,30 @@ const createOverlayCluster = async ({
   }
 }
 
-void test('Topology algorithms: symmetric small-world and tree neighbor selection & shortest-path routing', () => {
+void test('Topology algorithms: symmetric gossip and broadcast neighbor selection & shortest-path routing', () => {
   const peerCount = 200
   const peerIds = Array.from(
     {length: peerCount},
     (_, i) => `peer-${String(i).padStart(4, '0')}`
   )
 
-  for (const mode of ['small-world', 'tree'] as const) {
-    const maxPeers = 8
+  for (const mode of ['gossip', 'broadcast'] as const) {
+    const maxConnections = 8
     const fanout = 3
     const adjacency = new Map<string, Set<string>>()
 
     for (const id of peerIds) {
       adjacency.set(
         id,
-        computeTargetNeighbors(id, peerIds, mode, maxPeers, fanout)
+        computeTargetNeighbors(id, peerIds, mode, maxConnections, fanout)
       )
     }
 
     let totalDirectedEdges = 0
     for (const [u, neighbors] of adjacency.entries()) {
       assert.ok(
-        neighbors.size <= maxPeers,
-        `${mode}: peer ${u} degree ${neighbors.size} exceeds maxPeers ${maxPeers}`
+        neighbors.size <= maxConnections,
+        `${mode}: peer ${u} degree ${neighbors.size} exceeds maxConnections ${maxConnections}`
       )
       assert.ok(
         neighbors.size >= 2,
@@ -371,22 +377,22 @@ void test('Topology algorithms: symmetric small-world and tree neighbor selectio
   }
 })
 
-void test('Data-only scale: 150-peer text chat broadcast & high-frequency cursor updates over small-world overlay', async () => {
+void test('Data-only scale: 150-peer text chat broadcast & high-frequency cursor updates over gossip overlay', async () => {
   const peerCount = 150
-  const maxPeers = 8
+  const maxConnections = 8
   const cluster = await createOverlayCluster({
     peerCount,
-    topology: {mode: 'small-world', maxPeers, minPeers: 4, redundancy: 1}
+    topology: {mode: 'gossip', maxConnections, minConnections: 4, redundancy: 1}
   })
 
   try {
     // 1. Verify bounded direct connections and full room discovery
     for (const id of cluster.peerIds) {
       const snap = cluster.rooms.get(id)!.getTopology()
-      assert.equal(snap.activeMode, 'small-world')
+      assert.equal(snap.activeMode, 'gossip')
       assert.ok(
-        snap.directPeerIds.length <= maxPeers,
-        `peer ${id} has ${snap.directPeerIds.length} direct peers, expected <= ${maxPeers}`
+        snap.directPeerIds.length <= maxConnections,
+        `peer ${id} has ${snap.directPeerIds.length} direct peers, expected <= ${maxConnections}`
       )
       assert.equal(
         snap.roomPeerIds.length,
@@ -507,7 +513,12 @@ void test('Multi-hop unicast: targeted send, ping, RPC request/requestMany, and 
   const peerCount = 40
   const cluster = await createOverlayCluster({
     peerCount,
-    topology: {mode: 'small-world', maxPeers: 4, minPeers: 2, redundancy: 1}
+    topology: {
+      mode: 'gossip',
+      maxConnections: 4,
+      minConnections: 2,
+      redundancy: 1
+    }
   })
 
   try {
@@ -669,7 +680,7 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
   const fanout = 4
   const cluster = await createOverlayCluster({
     peerCount,
-    topology: {mode: 'tree', maxPeers: 8, fanout},
+    topology: {mode: 'broadcast', maxConnections: 8, fanout},
     media: true
   })
 
@@ -820,9 +831,9 @@ void test('Peer dropping & mesh-breaking scenarios: 25% mass churn, targeted rel
   const cluster = await createOverlayCluster({
     peerCount,
     topology: {
-      mode: 'small-world',
-      maxPeers: 8,
-      minPeers: 4,
+      mode: 'gossip',
+      maxConnections: 8,
+      minConnections: 4,
       fanout: 3,
       redundancy: 2
     },
@@ -925,7 +936,7 @@ void test('Plumtree lazy repair (ihave / iwant) recovers broadcasts when an eage
 
   const overlayA = createOverlayManager({
     selfId: 'peer-A',
-    topology: {mode: 'small-world', maxPeers: 4},
+    topology: {mode: 'gossip', maxConnections: 4},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -933,7 +944,7 @@ void test('Plumtree lazy repair (ihave / iwant) recovers broadcasts when an eage
 
   const overlayB = createOverlayManager({
     selfId: 'peer-B',
-    topology: {mode: 'small-world', maxPeers: 4},
+    topology: {mode: 'gossip', maxConnections: 4},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (origin, data) => {
@@ -1030,7 +1041,7 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     appId: 'sec-app',
     roomId: 'sec-room',
     password: 'correct-horse-battery-staple',
-    topology: {mode: 'small-world', maxPeers: 2},
+    topology: {mode: 'gossip', maxConnections: 2},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (_origin, data) => {
@@ -1043,7 +1054,7 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     appId: 'sec-app',
     roomId: 'sec-room',
     password: 'correct-horse-battery-staple',
-    topology: {mode: 'small-world', maxPeers: 2},
+    topology: {mode: 'gossip', maxConnections: 2},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -1054,7 +1065,7 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     appId: 'sec-app',
     roomId: 'sec-room',
     password: 'correct-horse-battery-staple',
-    topology: {mode: 'small-world', maxPeers: 2},
+    topology: {mode: 'gossip', maxConnections: 2},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (origin, data) => {
@@ -1201,22 +1212,22 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
   bob.destroy()
 })
 
-void test('Elegant API & automatic configuration: joinRoom with topology "auto" transitions from mesh to small-world at threshold', async () => {
+void test('Elegant API & automatic configuration: joinRoom with scale "auto" transitions from mesh to gossip at threshold', async () => {
   const peerCount = 24
   const autoThreshold = 8
-  const maxPeers = 6
+  const maxConnections = 6
 
   // Verify normalizeTopologyConfig supports both string shorthand and full config object
   assert.equal(normalizeTopologyConfig().mode, 'auto')
   assert.equal(normalizeTopologyConfig('mesh').mode, 'mesh')
-  assert.equal(normalizeTopologyConfig('small-world').mode, 'small-world')
-  assert.equal(normalizeTopologyConfig('tree').mode, 'tree')
+  assert.equal(normalizeTopologyConfig('gossip').mode, 'gossip')
+  assert.equal(normalizeTopologyConfig('broadcast').mode, 'broadcast')
   assert.equal(normalizeTopologyConfig('auto').mode, 'auto')
 
   // Start with 6 peers (<= autoThreshold of 8): should remain in 'mesh' mode
   const smallCluster = await createOverlayCluster({
     peerCount: 6,
-    topology: {mode: 'auto', autoThreshold, maxPeers}
+    topology: {mode: 'auto', autoThreshold, maxConnections}
   })
 
   try {
@@ -1234,10 +1245,10 @@ void test('Elegant API & automatic configuration: joinRoom with topology "auto" 
     await smallCluster.cleanup()
   }
 
-  // Now scale to 24 peers (> autoThreshold of 8): should automatically switch to 'small-world'
+  // Now scale to 24 peers (> autoThreshold of 8): should automatically switch to 'gossip'
   const largeCluster = await createOverlayCluster({
     peerCount,
-    topology: {mode: 'auto', autoThreshold, maxPeers}
+    topology: {mode: 'auto', autoThreshold, maxConnections}
   })
 
   try {
@@ -1246,10 +1257,10 @@ void test('Elegant API & automatic configuration: joinRoom with topology "auto" 
       assert.equal(snap.mode, 'auto')
       assert.equal(
         snap.activeMode,
-        'small-world',
-        'room above autoThreshold should automatically switch to small-world'
+        'gossip',
+        'room above autoThreshold should automatically switch to gossip'
       )
-      assert.ok(snap.directPeerIds.length <= maxPeers)
+      assert.ok(snap.directPeerIds.length <= maxConnections)
       assert.equal(snap.roomPeerIds.length, peerCount - 1)
     }
   } finally {
@@ -1257,7 +1268,7 @@ void test('Elegant API & automatic configuration: joinRoom with topology "auto" 
   }
 })
 
-void test('End-to-end createTopicStrategy integration with config._test_only_forcedPeerId and config.topology', async () => {
+void test('End-to-end createTopicStrategy integration with config._test_only_forcedPeerId and scale()', async () => {
   const topicSubs = new Map<string, Set<(topic: string, msg: string) => void>>()
 
   const joinRoom = createTopicStrategy({
@@ -1291,7 +1302,7 @@ void test('End-to-end createTopicStrategy integration with config._test_only_for
     {
       appId: 'topic-e2e-overlay',
       _test_only_forcedPeerId: 'peer-alpha',
-      topology: 'small-world',
+      ...scale('gossip'),
       rtcPolyfill: MockRTCPeerConnection as any
     },
     'lobby'
@@ -1300,7 +1311,7 @@ void test('End-to-end createTopicStrategy integration with config._test_only_for
     {
       appId: 'topic-e2e-overlay',
       _test_only_forcedPeerId: 'peer-beta',
-      topology: {mode: 'small-world', maxPeers: 6},
+      ...scale({mode: 'gossip', maxConnections: 6}),
       rtcPolyfill: MockRTCPeerConnection as any
     },
     'lobby'
@@ -1308,9 +1319,9 @@ void test('End-to-end createTopicStrategy integration with config._test_only_for
 
   try {
     assert.equal(roomA.getTopology().selfId, 'peer-alpha')
-    assert.equal(roomA.getTopology().mode, 'small-world')
+    assert.equal(roomA.getTopology().mode, 'gossip')
     assert.equal(roomB.getTopology().selfId, 'peer-beta')
-    assert.equal(roomB.getTopology().activeMode, 'small-world')
+    assert.equal(roomB.getTopology().activeMode, 'gossip')
   } finally {
     await Promise.all([roomA.leave(), roomB.leave()])
   }
@@ -1327,8 +1338,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     roomId: 'adv-room',
     password: 'shared-room-secret',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       maxHops: 4
     },
     onVirtualPeerJoin: () => {},
@@ -1342,8 +1353,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     roomId: 'adv-room',
     password: 'shared-room-secret',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       maxHops: 4
     },
     onVirtualPeerJoin: () => {},
@@ -1357,8 +1368,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     roomId: 'adv-room',
     password: 'shared-room-secret',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       maxHops: 4
     },
     onVirtualPeerJoin: () => {},
@@ -1565,8 +1576,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     roomId: 'adv-room',
     password: 'shared-room-secret',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       maxHops: 4
     },
     onVirtualPeerJoin: () => {},
@@ -1642,8 +1653,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     roomId: 'adv-room',
     password: 'shared-room-secret',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       maxHops: 4
     },
     onVirtualPeerJoin: () => {},
@@ -1743,8 +1754,8 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     appId: 'byz-app',
     roomId: 'byz-room',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       redundancy: 2
     },
     onVirtualPeerJoin: () => {},
@@ -1757,8 +1768,8 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     appId: 'byz-app',
     roomId: 'byz-room',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       redundancy: 2
     },
     onVirtualPeerJoin: () => {},
@@ -1771,8 +1782,8 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     appId: 'byz-app',
     roomId: 'byz-room',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       redundancy: 2
     },
     onVirtualPeerJoin: () => {},
@@ -1785,8 +1796,8 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     appId: 'byz-app',
     roomId: 'byz-room',
     topology: {
-      mode: 'small-world',
-      maxPeers: 2,
+      mode: 'gossip',
+      maxConnections: 2,
       redundancy: 2
     },
     onVirtualPeerJoin: () => {},
@@ -1959,14 +1970,14 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'host-peer',
         identity: hostIdentity,
-        admin: true,
+        ...roles(true),
         rtcPolyfill: MockRTCPeerConnection as any
       },
       'game-lobby'
     )
     createdRooms.push(hostRoom)
 
-    const hostAuth = await hostRoom.getAuthority()
+    const hostAuth = await hostRoom.getSelf()
     assert.equal(hostAuth.baseRoomId, 'game-lobby')
     assert.ok(
       hostAuth.fingerprint && /^[0-9A-Za-z]{16}$/.test(hostAuth.fingerprint)
@@ -1980,17 +1991,32 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     assert.deepEqual(hostAuth.roles, ['admin'])
     assert.equal(hostAuth.userId, hostIdentity.userId)
 
-    // Guest joins using the self-certifying roomId with zero admin config
+    // Joining a self-certifying roomId WITHOUT roles() throws an error
+    assert.throws(
+      () =>
+        joinRoom(
+          {
+            appId: 'auth-bootstrap-app',
+            _test_only_forcedPeerId: 'missing-roles-peer',
+            rtcPolyfill: MockRTCPeerConnection as any
+          },
+          hostAuth.roomId
+        ),
+      /self-certifying room ID requires roles\(\) in joinRoom config/
+    )
+
+    // Guest joins using the self-certifying roomId with roles()
     const guestRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'guest-peer',
+        ...roles(),
         rtcPolyfill: MockRTCPeerConnection as any
       },
       hostAuth.roomId
     )
     createdRooms.push(guestRoom)
-    const guestAuth = await guestRoom.getAuthority()
+    const guestAuth = await guestRoom.getSelf()
     assert.equal(guestAuth.roomId, hostAuth.roomId)
     assert.equal(guestAuth.baseRoomId, 'game-lobby')
     assert.equal(guestAuth.fingerprint, hostAuth.fingerprint)
@@ -2004,31 +2030,32 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'impostor-peer',
         identity: impostorIdentity,
-        admin: [impostorIdentity.userId],
+        ...roles([impostorIdentity.userId]),
         rtcPolyfill: MockRTCPeerConnection as any
       },
       hostAuth.roomId
     )
     createdRooms.push(impostorRoom)
-    const impostorAuth = await impostorRoom.getAuthority()
+    const impostorAuth = await impostorRoom.getSelf()
     assert.equal(
       impostorAuth.isAdmin,
       false,
       'a userId whose fingerprint does not match the self-certifying roomId must not grant admin status'
     )
 
-    // Rejoining with the saved host UserIdentity automatically restores root admin status on the same roomId (even without admin config!)
+    // Rejoining with the saved host UserIdentity automatically restores root admin status on the same roomId (with roles())
     const rejoinedHostRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'host-rejoined',
         identity: exportUserIdentity(hostIdentity),
+        ...roles(),
         rtcPolyfill: MockRTCPeerConnection as any
       },
       hostAuth.roomId
     )
     createdRooms.push(rejoinedHostRoom)
-    const rejoinedAuth = await rejoinedHostRoom.getAuthority()
+    const rejoinedAuth = await rejoinedHostRoom.getSelf()
     assert.equal(rejoinedAuth.isAdmin, true)
     assert.equal(rejoinedAuth.roomId, hostAuth.roomId)
     assert.equal(rejoinedAuth.userId, hostIdentity.userId)
@@ -2039,13 +2066,13 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'fixed-host-peer',
         identity: hostIdentity,
-        admin: hostIdentity.userId,
+        ...roles({admin: hostIdentity.userId}),
         rtcPolyfill: MockRTCPeerConnection as any
       },
       'clean-slug'
     )
     createdRooms.push(fixedHostRoom)
-    const fixedHostAuth = await fixedHostRoom.getAuthority()
+    const fixedHostAuth = await fixedHostRoom.getSelf()
     assert.equal(fixedHostAuth.roomId, 'clean-slug')
     assert.equal(fixedHostAuth.fingerprint, null)
     assert.equal(fixedHostAuth.isAdmin, true)
@@ -2055,13 +2082,13 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       {
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'fixed-guest-peer',
-        admin: hostIdentity.userId,
+        ...roles(hostIdentity.userId),
         rtcPolyfill: MockRTCPeerConnection as any
       },
       'clean-slug'
     )
     createdRooms.push(fixedGuestRoom)
-    const fixedGuestAuth = await fixedGuestRoom.getAuthority()
+    const fixedGuestAuth = await fixedGuestRoom.getSelf()
     assert.equal(fixedGuestAuth.roomId, 'clean-slug')
     assert.equal(fixedGuestAuth.isAdmin, false)
   } finally {
@@ -2091,7 +2118,8 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
         selfId: id,
         appId,
         roomId,
-        topology: {mode: 'small-world', maxPeers: 2},
+        ...scale({mode: 'gossip', maxConnections: 2}),
+        ...roles(),
         identity: peerIdentity
       }
     )
@@ -2129,7 +2157,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       const alertAction = rooms
         .get(id)!
         .makeAction<{msg: string}>('mod-alert', {
-          authority: ['admin', 'moderator'],
+          roles: ['admin', 'moderator'],
           onMessage: (data, {peerId, metadata, roles}) => {
             receivedAlerts.get(id)!.push({
               data,
@@ -2168,7 +2196,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
 
     // Wait for initial authority sync to settle
     await waitFor(
-      () => rooms.get('mallory')!.getPeerRoles('admin').includes('admin'),
+      () => rooms.get('mallory')!.getRoles('admin').includes('admin'),
       2_000
     )
 
@@ -2176,9 +2204,9 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
     await rooms.get('admin')!.grantRole('bob', 'moderator', {canDelegate: true})
     await waitFor(
       () =>
-        rooms.get('bob')!.getPeerRoles('bob').includes('moderator') &&
-        rooms.get('carol')!.getPeerRoles('bob').includes('moderator') &&
-        rooms.get('mallory')!.getPeerRoles('bob').includes('moderator'),
+        rooms.get('bob')!.getRoles('bob').includes('moderator') &&
+        rooms.get('carol')!.getRoles('bob').includes('moderator') &&
+        rooms.get('mallory')!.getRoles('bob').includes('moderator'),
       2_000
     )
 
@@ -2207,8 +2235,8 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
     await rooms.get('bob')!.grantRole('carol', 'moderator')
     await waitFor(
       () =>
-        rooms.get('carol')!.getPeerRoles('carol').includes('moderator') &&
-        rooms.get('admin')!.getPeerRoles('carol').includes('moderator'),
+        rooms.get('carol')!.getRoles('carol').includes('moderator') &&
+        rooms.get('admin')!.getRoles('carol').includes('moderator'),
       2_000
     )
 
@@ -2232,9 +2260,9 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
     await rooms.get('admin')!.revokeRole('carol', 'moderator')
     await waitFor(
       () =>
-        !rooms.get('carol')!.getPeerRoles('carol').includes('moderator') &&
-        !rooms.get('admin')!.getPeerRoles('carol').includes('moderator') &&
-        !rooms.get('bob')!.getPeerRoles('carol').includes('moderator'),
+        !rooms.get('carol')!.getRoles('carol').includes('moderator') &&
+        !rooms.get('admin')!.getRoles('carol').includes('moderator') &&
+        !rooms.get('bob')!.getRoles('carol').includes('moderator'),
       2_000
     )
 
@@ -2269,9 +2297,8 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
         selfId: id,
         appId,
         roomId,
-        topology: 'mesh',
         identity,
-        admin: coAdmins
+        ...roles(coAdmins)
       }
     )
 
@@ -2389,8 +2416,8 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   await Promise.all([viewer1.leave(), viewer2.leave()])
 })
 
-void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast drop, and multi-layer room.banPeer enforcement', async () => {
-  // 1. Verify computeTargetNeighbors pins privilegedPeers to index 0 (tree root)
+void test('Broadcast tree root pinning for verified admins, Hop-1 unauthorized broadcast drop, and multi-layer room.ban enforcement', async () => {
+  // 1. Verify computeTargetNeighbors pins privilegedPeers to index 0 (broadcast tree root)
   // even when the admin has a lexicographically high peerId ('zzzz-admin')
   const roster = [
     'aaaa-peer',
@@ -2403,7 +2430,7 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
   const rootTargets = computeTargetNeighbors(
     'zzzz-admin',
     roster,
-    'tree',
+    'broadcast',
     6,
     2,
     priv
@@ -2414,7 +2441,7 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
   const child1Targets = computeTargetNeighbors(
     'aaaa-peer',
     roster,
-    'tree',
+    'broadcast',
     6,
     2,
     priv
@@ -2430,7 +2457,7 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
     selfId: 'mallory-ov',
     appId: 'hop1-app',
     roomId: 'hop1-room',
-    topology: {mode: 'small-world', maxPeers: 2},
+    topology: {mode: 'gossip', maxConnections: 2},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -2439,7 +2466,7 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
     selfId: 'relay-ov',
     appId: 'hop1-app',
     roomId: 'hop1-room',
-    topology: {mode: 'small-world', maxPeers: 2},
+    topology: {mode: 'gossip', maxConnections: 2},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {},
@@ -2515,7 +2542,7 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
   malloryOverlay.destroy()
   hop1RelayOverlay.destroy()
 
-  // 3. Multi-layer room.banPeer(peerId) enforcement
+  // 3. Multi-layer room.ban(peerId) enforcement
   const provisioned = await createAdminRoom('ban-test-room')
   const roomId = provisioned.roomId
   const appId = 'ban-test-app'
@@ -2535,7 +2562,7 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
         selfId: id,
         appId,
         roomId,
-        topology: 'mesh',
+        ...roles(),
         identity: peerIdentity
       }
     )
@@ -2577,12 +2604,12 @@ void test('Tree root pinning for verified admins, Hop-1 unauthorized broadcast d
 
     // Non-admin cannot ban a peer
     await assert.rejects(
-      () => rooms.get('honest')!.banPeer('mallory'),
+      () => rooms.get('honest')!.ban('mallory'),
       /only an admin can ban a peer/
     )
 
     // Admin bans Mallory
-    await rooms.get('admin')!.banPeer('mallory', {reason: 'abusive behavior'})
+    await rooms.get('admin')!.ban('mallory', {reason: 'abusive behavior'})
     await waitFor(
       () =>
         rooms.get('admin')!.isBanned('mallory') &&
@@ -2709,7 +2736,8 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
         selfId: id,
         appId,
         roomId,
-        topology: {mode: 'small-world', maxPeers: 2},
+        ...scale({mode: 'gossip', maxConnections: 2}),
+        ...roles(),
         identity: peerIdentity
       }
     )
@@ -2742,7 +2770,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
 
     // Verify room.getPeers() returns PeerInfo with connection, direct, hops, and roles
     await waitFor(
-      () => rooms.get('mallory')!.getPeerRoles('admin').includes('admin'),
+      () => rooms.get('mallory')!.getRoles('admin').includes('admin'),
       2_000
     )
     const adminPeers = rooms.get('admin')!.getPeers()
@@ -2776,7 +2804,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     for (const id of peerIds) {
       receivedModPayloads.set(id, [])
       const act = rooms.get(id)!.makeAction<Uint8Array>('mod-file', {
-        authority: ['admin', 'moderator'],
+        roles: ['admin', 'moderator'],
         onMessage: data => {
           receivedModPayloads
             .get(id)!
@@ -2793,14 +2821,14 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     // Grant 'moderator' with canDelegate: true to Bob, then Bob sub-delegates 'moderator' to Carol
     await rooms.get('admin')!.grantRole('bob', 'moderator', {canDelegate: true})
     await waitFor(
-      () => rooms.get('carol')!.getPeerRoles('bob').includes('moderator'),
+      () => rooms.get('carol')!.getRoles('bob').includes('moderator'),
       2_000
     )
     await rooms.get('bob')!.grantRole('carol', 'moderator')
     await waitFor(
       () =>
-        rooms.get('admin')!.getPeerRoles('carol').includes('moderator') &&
-        rooms.get('mallory')!.getPeerRoles('carol').includes('moderator'),
+        rooms.get('admin')!.getRoles('carol').includes('moderator') &&
+        rooms.get('mallory')!.getRoles('carol').includes('moderator'),
       2_000
     )
     assert.deepEqual(rooms.get('admin')!.getPeers()['carol']?.roles, [
@@ -2811,9 +2839,9 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     await rooms.get('admin')!.revokeRole('bob', 'moderator')
     await waitFor(
       () =>
-        !rooms.get('admin')!.getPeerRoles('bob').includes('moderator') &&
-        !rooms.get('admin')!.getPeerRoles('carol').includes('moderator') &&
-        !rooms.get('carol')!.getPeerRoles('carol').includes('moderator'),
+        !rooms.get('admin')!.getRoles('bob').includes('moderator') &&
+        !rooms.get('admin')!.getRoles('carol').includes('moderator') &&
+        !rooms.get('carol')!.getRoles('carol').includes('moderator'),
       2_000
     )
     assert.deepEqual(
@@ -2824,10 +2852,10 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
 
     // Offer-stage bulk transfer rejection on role-protected action:
     // Mallory registers 'mod-bulk' without local authority config (simulating a modified client),
-    // while Carol protects 'mod-bulk' with authority: ['admin', 'moderator'].
+    // while Carol protects 'mod-bulk' with roles: ['admin', 'moderator'].
     // When Mallory sends a 64 KB multi-chunk payload to Carol, Carol rejects the offer at admission time!
     rooms.get('carol')!.makeAction<Uint8Array>('mod-bulk', {
-      authority: ['admin', 'moderator'],
+      roles: ['admin', 'moderator'],
       onMessage: () =>
         assert.fail('unauthorized bulk transfer must be rejected at offer time')
     })
@@ -2926,7 +2954,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     selfId: 'ov-a',
     appId: 'unicast-app',
     roomId: 'unicast-room',
-    topology: {mode: 'small-world', maxPeers: 2},
+    topology: {mode: 'gossip', maxConnections: 2},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () =>
@@ -2936,7 +2964,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     selfId: 'ov-b',
     appId: 'unicast-app',
     roomId: 'unicast-room',
-    topology: {mode: 'small-world', maxPeers: 2},
+    topology: {mode: 'gossip', maxConnections: 2},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () =>
@@ -3083,7 +3111,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
 void test('Targeted media stays private for direct and multi-hop recipients', async () => {
   const cluster = await createOverlayCluster({
     peerCount: 8,
-    topology: {mode: 'tree', maxPeers: 6, fanout: 2},
+    topology: {mode: 'broadcast', maxConnections: 6, fanout: 2},
     media: true
   })
   try {
@@ -3095,11 +3123,13 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
     const streams: string[] = []
     const tracks: string[] = []
     for (const [id, room] of cluster.rooms) {
-      getRoomSignalingBridge(room)!.overlay.setOnTargetsChanged(targets => {
-        for (const targetId of targets) {
-          cluster.connectPair(id, targetId)
-        }
-      })
+      getRoomSignalingBridge(room)!
+        .getScaleProvider()!
+        .setOnTargetsChanged(targets => {
+          for (const targetId of targets) {
+            cluster.connectPair(id, targetId)
+          }
+        })
       room.onPeerStream = () => streams.push(id)
       room.onPeerTrack = () => tracks.push(id)
     }
@@ -3139,7 +3169,7 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
 void test('Removing a broadcast track prevents replay after topology healing', async () => {
   const cluster = await createOverlayCluster({
     peerCount: 8,
-    topology: {mode: 'tree', maxPeers: 6, fanout: 2},
+    topology: {mode: 'broadcast', maxConnections: 6, fanout: 2},
     media: true
   })
   try {
@@ -3169,7 +3199,7 @@ void test('Removing and replacing tracks updates broadcast streams before topolo
   for (const replace of [false, true]) {
     const cluster = await createOverlayCluster({
       peerCount: 8,
-      topology: {mode: 'tree', maxPeers: 6, fanout: 2},
+      topology: {mode: 'broadcast', maxConnections: 6, fanout: 2},
       media: true
     })
     try {
@@ -3214,4 +3244,61 @@ void test('Removing and replacing tracks updates broadcast streams before topolo
       await cluster.cleanup()
     }
   }
+})
+
+void test('Third-party plugin injection via definePlugin (spread and plugins array)', async () => {
+  const events: string[] = []
+  const telemetryPlugin = (prefix: string) =>
+    definePlugin('telemetry', {
+      setup: kernel => {
+        const internal = kernel.makeInternalAction<string>('telem')
+        internal.onMessage(() => {})
+        events.push(`${prefix}:setup:${kernel.selfId}:${kernel.getRoomId()}`)
+        kernel.onLeave(() => {
+          events.push(`${prefix}:destroy:${kernel.selfId}`)
+        })
+        return {
+          getEvents: () => [...events]
+        }
+      }
+    })
+
+  const room = createRoom(
+    () => {},
+    () => {},
+    () => {},
+    {
+      selfId: 'custom-peer',
+      appId: 'plugin-app',
+      roomId: 'plugin-room',
+      ...telemetryPlugin('mod1')
+    }
+  )
+
+  assert.deepEqual((room as any).getEvents(), [
+    'mod1:setup:custom-peer:plugin-room'
+  ])
+  await room.leave()
+  assert.deepEqual(events, [
+    'mod1:setup:custom-peer:plugin-room',
+    'mod1:destroy:custom-peer'
+  ])
+
+  const room2 = createRoom(
+    () => {},
+    () => {},
+    () => {},
+    {
+      selfId: 'custom-peer-2',
+      appId: 'plugin-app',
+      roomId: 'plugin-room-2',
+      plugins: [telemetryPlugin('mod2')]
+    }
+  )
+  assert.deepEqual((room2 as any).getEvents(), [
+    'mod1:setup:custom-peer:plugin-room',
+    'mod1:destroy:custom-peer',
+    'mod2:setup:custom-peer-2:plugin-room-2'
+  ])
+  await room2.leave()
 })

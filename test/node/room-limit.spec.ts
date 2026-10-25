@@ -1,7 +1,7 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {createTopicStrategy} from '../../packages/core/src/index.ts'
+import {createTopicStrategy, scale} from '../../packages/core/src/index.ts'
 import {wait, waitFor} from './peer-harness.ts'
 
 class LinkedDataChannel {
@@ -770,7 +770,7 @@ void test(
     const {makeJoinRoom} = createMemorySignalBus()
     const appId = `limit-overlay-${Date.now()}`
     const roomId = 'tree-room'
-    const topology = {mode: 'tree' as const, maxPeers: 2}
+    const scaleConfig = {mode: 'broadcast' as const, maxConnections: 2}
 
     const peerIds = ['node-1', 'node-2', 'node-3', 'node-4']
     const rooms: any[] = []
@@ -781,7 +781,7 @@ void test(
           appId,
           _test_only_forcedPeerId: peerId,
           limit: 4,
-          topology,
+          ...scale(scaleConfig),
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         roomId
@@ -801,7 +801,7 @@ void test(
         appId,
         _test_only_forcedPeerId: 'node-5',
         limit: 4,
-        topology,
+        ...scale(scaleConfig),
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,

@@ -14,8 +14,7 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
     rtcConfig: {iceServers: []},
     ...(browserName === 'firefox' || browserName === 'webkit'
       ? {_test_only_mdnsHostFallbackToLoopback: true}
-      : {}),
-    topology: {mode: 'tree', maxPeers: 2, minPeers: 1, fanout: 2}
+      : {})
   }
   const contexts = await Promise.all(
     Array.from({length: 8}, () =>
@@ -40,7 +39,15 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
             const scriptUrl = '../dist/trystero-ws-relay.min.js'
             window.trystero = await import(scriptUrl)
             const room = (window[roomId] = window.trystero.joinRoom(
-              config,
+              {
+                ...config,
+                ...window.trystero.scale({
+                  mode: 'broadcast',
+                  maxConnections: 2,
+                  minConnections: 1,
+                  fanout: 2
+                })
+              },
               roomId
             ))
             window.receivedPrivateMedia = []

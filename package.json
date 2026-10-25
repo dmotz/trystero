@@ -29,6 +29,7 @@
     "url": "https://oxism.com"
   },
   "type": "module",
+  "sideEffects": false,
   "scripts": {
     "build": "tsdown",
     "build:test": "TEST_BUILD=1 tsdown",
@@ -48,7 +49,7 @@
     "format": "oxfmt --check .",
     "format:write": "oxfmt .",
     "find-proxy": "jiti scripts/find-proxy.ts",
-    "get-bundle-sizes": "node scripts/get-bundle-sizes.ts",
+    "get-bundle-sizes": "jiti scripts/get-bundle-sizes.ts",
     "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p tsconfig.json --noEmit",
     "publish": "pnpm login && pnpm build && pnpm copy-readmes-for-publish && pnpm -r publish --no-git-checks --access public --tag \"$(node -p 'JSON.parse(require(\"fs\").readFileSync(\"packages/trystero/package.json\", \"utf8\")).version.includes(\"-\") ? \"beta\" : \"latest\"')\""
   },

@@ -14,7 +14,12 @@ import {
   toJson
 } from './crypto'
 import {defaultSelfId} from './identity'
-import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
+import type {
+  BaseRoomConfig,
+  RelayConfig,
+  RoomPlugin,
+  SocketClient
+} from './types'
 
 export {
   createBoundedCache,
@@ -322,3 +327,66 @@ export const watchOnline = (): (() => void) => {
 }
 
 export const log = (...args: unknown[]): void => console.log(...args)
+
+export const selfCertifyingRoomRegex = /^(.*)\.([0-9A-Za-z]{16})$/
+
+export const definePlugin = <
+  TName extends string = string,
+  TApi extends Record<string, unknown> = Record<string, unknown>
+>(
+  name: TName,
+  spec: {
+    resolveRoomId?:
+      | ((context: {
+          appId: string
+          roomId: string
+          userIdentityP: Promise<import('./types').UserIdentity>
+        }) => Promise<{effectiveRoomId: string; state?: unknown}> | undefined)
+      | undefined
+    setup: (
+      kernel: import('./types').RoomKernel,
+      preResolvedState?: unknown
+    ) => TApi | void
+  }
+): RoomPlugin<TName, TApi> => {
+  const plugin = {} as RoomPlugin<TName, TApi>
+  Object.defineProperties(plugin, {
+    __trysteroPlugin: {value: true, enumerable: false},
+    name: {value: name, enumerable: false},
+    ...(spec.resolveRoomId
+      ? {resolveRoomId: {value: spec.resolveRoomId, enumerable: false}}
+      : {}),
+    setup: {value: spec.setup, enumerable: false},
+    [name]: {value: plugin, enumerable: true}
+  })
+  return plugin
+}
+
+export const isPlugin = (val: unknown): val is RoomPlugin =>
+  Boolean(
+    val &&
+    typeof val === 'object' &&
+    (val as {__trysteroPlugin?: unknown}).__trysteroPlugin === true
+  )
+
+export const extractPlugins = (config: unknown): RoomPlugin[] => {
+  if (!config || typeof config !== 'object') {
+    return []
+  }
+  const seen = new Set<RoomPlugin>()
+  const list: RoomPlugin[] = []
+  const add = (item: unknown): void => {
+    if (isPlugin(item) && !seen.has(item)) {
+      seen.add(item)
+      list.push(item)
+    }
+  }
+  for (const val of values(config as Record<string, unknown>)) {
+    if (Array.isArray(val)) {
+      val.forEach(add)
+    } else {
+      add(val)
+    }
+  }
+  return list
+}

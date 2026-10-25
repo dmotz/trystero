@@ -1,4 +1,3 @@
-import {parseSelfCertifyingRoomId, resolveRoomAuthority} from './authority'
 import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
 import {
   registerTestForcedPeerId,
@@ -22,12 +21,14 @@ import {
 import {
   all,
   entries,
+  extractPlugins,
   keys,
   libName,
   log,
   mkErr,
   noOp,
   resetTimer,
+  selfCertifyingRoomRegex,
   selfId,
   toErrorMessage,
   topicPath,
@@ -40,6 +41,7 @@ import type {
   JoinRoomCallbacks,
   JoinRoomConfig,
   PeerHandle,
+  RoomPlugin,
   Signal,
   SignalContext,
   StrategyContext,
@@ -110,6 +112,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     validateIdentityConfig(config)
 
+    const plugins = extractPlugins(config)
+    const hasRolesPlugin = plugins.some(p => p.name === 'roles')
+    if (!hasRolesPlugin && selfCertifyingRoomRegex.test(roomId)) {
+      throw mkErr('self-certifying room ID requires roles() in joinRoom config')
+    }
+
     let forcedPeerId: string | undefined
     DEV: if (
       typeof config._test_only_forcedPeerId === 'string' &&
@@ -144,25 +152,34 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     })
     void userIdentityP.catch(noOp)
 
-    const isAdminBacked =
-      Boolean(config.admin) ||
-      Boolean(parseSelfCertifyingRoomId(roomId).fingerprint)
-    const resolvedAuthorityP = isAdminBacked
-      ? resolveRoomAuthority(roomId, config.admin, userIdentityP)
-      : undefined
+    const preResolvedPlugins = new Map<RoomPlugin, unknown>()
+    let resolvedRoomIdP:
+      | Promise<{effectiveRoomId: string; state?: unknown}>
+      | undefined
+    for (const plugin of plugins) {
+      if (plugin.resolveRoomId) {
+        const resP = plugin.resolveRoomId({appId, roomId, userIdentityP})
+        if (resP) {
+          resolvedRoomIdP = resP.then(res => {
+            preResolvedPlugins.set(plugin, res.state)
+            return res
+          })
+        }
+      }
+    }
 
     let membershipRef: {rekey: (newRoomId: string) => void} | null = null
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
-    const effectiveRoomIdP = resolvedAuthorityP?.then(auth => {
-      effectiveRoomId = auth.effectiveRoomId
-      ctx.roomId = auth.effectiveRoomId
-      ctx.rootTopicPlaintext = topicPath(libName, appId, auth.effectiveRoomId)
-      strategyContext.roomId = auth.effectiveRoomId
-      if (auth.effectiveRoomId !== roomId && !didLeaveRoom) {
-        ;(occupiedRooms[scopeAppId] ??= {})[auth.effectiveRoomId] = joinedRoom
-        membershipRef?.rekey(auth.effectiveRoomId)
+    const effectiveRoomIdP = resolvedRoomIdP?.then(res => {
+      effectiveRoomId = res.effectiveRoomId
+      ctx.roomId = res.effectiveRoomId
+      ctx.rootTopicPlaintext = topicPath(libName, appId, res.effectiveRoomId)
+      strategyContext.roomId = res.effectiveRoomId
+      if (res.effectiveRoomId !== roomId && !didLeaveRoom) {
+        ;(occupiedRooms[scopeAppId] ??= {})[res.effectiveRoomId] = joinedRoom
+        membershipRef?.rekey(res.effectiveRoomId)
       }
-      return auth.effectiveRoomId
+      return res.effectiveRoomId
     })
 
     const rootTopicP = effectiveRoomIdP
@@ -189,16 +206,16 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const bridgeRef: {current?: RoomSignalingBridge | undefined} = {}
 
     const syncOverlayNeighbors = (): void => {
-      const overlay = bridgeRef.current?.overlay
+      const scaleProvider = bridgeRef.current?.getScaleProvider()
       if (
         didLeaveRoom ||
         isPassive ||
-        !overlay ||
-        overlay.getSnapshot().activeMode === 'mesh'
+        !scaleProvider ||
+        scaleProvider.getSnapshot().activeMode === 'mesh'
       ) {
         return
       }
-      for (const targetId of overlay.getTargetNeighbors()) {
+      for (const targetId of scaleProvider.getTargetNeighbors()) {
         ctx.dialPeer?.(targetId)
       }
     }
@@ -333,18 +350,18 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             : undefined
         if (sigWait) {
           return sigWait.then(() => {
-            bridgeRef.current?.overlay.notePeerDiscovered(peerId)
+            bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)
             syncOverlayNeighbors()
           })
         }
-        bridgeRef.current?.overlay.notePeerDiscovered(peerId)
+        bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)
         syncOverlayNeighbors()
         return undefined
       },
       shouldConnectPeer: (peerId, direction) =>
         bridgeRef.current
-          ? bridgeRef.current.overlay.shouldConnectPeer(peerId, direction)
-          : true
+          ?.getScaleProvider()
+          ?.shouldConnectPeer(peerId, direction) ?? true
     }
     const strategyContext: StrategyContext<TConfig> = {
       config,
@@ -400,7 +417,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
 
         const authExtra =
-          isAdminBacked && bridgeRef.current
+          hasRolesPlugin && bridgeRef.current
             ? await bridgeRef.current.getAnnounceExtra()
             : undefined
         const extra =
@@ -641,9 +658,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       roomId,
       ...(config.password === undefined ? {} : {password: config.password}),
       ...(config.limit === undefined ? {} : {limit: config.limit}),
-      ...(config.topology === undefined ? {} : {topology: config.topology}),
-      ...(config.admin === undefined ? {} : {admin: config.admin}),
-      ...(resolvedAuthorityP ? {resolvedAuthorityP} : {}),
+      ...(plugins.length > 0 ? {plugins, preResolvedPlugins} : {}),
       userIdentityP,
       verifyPeerIdentity: true,
       ...(config.maxReceiveBytes === undefined
@@ -694,7 +709,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const signalingBridge = getRoomSignalingBridge(joinedRoom)
     bridgeRef.current = signalingBridge
-    signalingBridge?.overlay.setOnTargetsChanged(missingTargets => {
+    signalingBridge?.getScaleProvider()?.setOnTargetsChanged(missingTargets => {
       if (!didLeaveRoom) {
         missingTargets.forEach(targetId => {
           if (!ctx.reusePeer(targetId)) {
@@ -712,8 +727,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         active: !isPassive || ctx.isActive,
         shouldAttach: peerId =>
           signalingBridge
-            ? signalingBridge.overlay.shouldConnectPeer(peerId, 'inbound')
-            : true,
+            ?.getScaleProvider()
+            ?.shouldConnectPeer(peerId, 'inbound') ?? true,
         onPeer: (proxy, peerId, physical) => {
           const state = getState(ctx.peerStates, peerId)
           markPeerConnected(state, physical)

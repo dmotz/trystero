@@ -1,32 +1,139 @@
-import {readFile} from 'node:fs/promises'
+import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises'
+import {tmpdir} from 'node:os'
+import {join, resolve} from 'node:path'
 import {brotliCompress} from 'node:zlib'
+import {build} from 'tsdown'
 
-const strategies = ['firebase', 'ipfs', 'mqtt', 'nostr', 'supabase', 'torrent']
-const longestName = Math.max(...strategies.map(name => name.length))
+const strategies = [
+  'firebase',
+  'ipfs',
+  'mqtt',
+  'nostr',
+  'supabase',
+  'torrent',
+  'ws-relay'
+] as const
+
+const variants = [
+  {
+    name: 'core',
+    exports:
+      'joinRoom, selfId, createUserIdentity, importUserIdentity, exportUserIdentity'
+  },
+  {
+    name: 'core+roles',
+    exports:
+      'joinRoom, selfId, createUserIdentity, importUserIdentity, exportUserIdentity, roles'
+  },
+  {
+    name: 'core+scale',
+    exports:
+      'joinRoom, selfId, createUserIdentity, importUserIdentity, exportUserIdentity, scale'
+  },
+  {
+    name: 'core+both',
+    exports: '*'
+  }
+] as const
 
 const getBrotliSize = async (filePath: string): Promise<number> => {
   const content = await readFile(filePath)
 
-  return new Promise<number>((resolve, reject) => {
+  return new Promise<number>((resolvePromise, reject) => {
     brotliCompress(content, (error, compressed) => {
       if (error) {
         reject(error)
         return
       }
 
-      resolve(compressed.byteLength)
+      resolvePromise(compressed.byteLength)
     })
   })
 }
 
-const sizes = await Promise.all(
-  strategies.map(async strategy => [
-    strategy,
-    await getBrotliSize(`./dist/trystero-${strategy}.min.js`)
-  ])
-)
+const formatKb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`
 
-sizes.forEach(([strategy, size]) => {
-  const label = `${strategy}:`.padEnd(longestName + 1, ' ')
-  console.log(`${label} ${Math.round((size as number) / 1024)} KB`)
-})
+const tempDir = await mkdtemp(join(tmpdir(), 'trystero-bundle-sizes-'))
+const coreSourcePath = resolve('packages/core/src/index.ts')
+const empty = resolve('scripts/empty.ts')
+
+try {
+  const entryMap: Record<string, string> = {}
+
+  for (const strategy of strategies) {
+    const strategyEntry = resolve(`packages/${strategy}/src/index.ts`)
+    for (const variant of variants) {
+      const key = `${strategy}__${variant.name.replace(/\+/g, '_')}`
+      const entryFile = join(tempDir, `${key}.ts`)
+      const code =
+        variant.exports === '*'
+          ? `export * from ${JSON.stringify(strategyEntry)}\n`
+          : `export {${variant.exports}} from ${JSON.stringify(strategyEntry)}\n`
+      await writeFile(entryFile, code)
+      entryMap[key] = entryFile
+    }
+  }
+
+  await Promise.all(
+    Object.entries(entryMap).map(([key, entryFile]) =>
+      build({
+        config: false,
+        clean: false,
+        entry: {[key]: entryFile},
+        outDir: tempDir,
+        dts: false,
+        format: 'es',
+        platform: 'browser',
+        sourcemap: false,
+        minify: true,
+        logLevel: 'silent',
+        deps: {
+          alwaysBundle: [/^@trystero-p2p\//],
+          onlyBundle: false
+        },
+        alias: {
+          '@trystero-p2p/core': coreSourcePath,
+          crypto: empty,
+          'node:crypto': empty
+        },
+        inputOptions: {
+          transform: {
+            dropLabels: ['DEV']
+          }
+        }
+      })
+    )
+  )
+
+  const headers = ['strategy', ...variants.map(v => v.name)]
+  const rows: string[][] = []
+
+  for (const strategy of strategies) {
+    const row: string[] = [strategy]
+    for (const variant of variants) {
+      const key = `${strategy}__${variant.name.replace(/\+/g, '_')}`
+      const bytes = await getBrotliSize(join(tempDir, `${key}.js`))
+      row.push(formatKb(bytes))
+    }
+    rows.push(row)
+  }
+
+  const colWidths = headers.map((h, i) =>
+    Math.max(h.length, ...rows.map(r => r[i]!.length))
+  )
+
+  const formatRow = (cols: string[]) =>
+    cols
+      .map((c, i) =>
+        i === 0 ? c.padEnd(colWidths[i]!) : c.padStart(colWidths[i]!)
+      )
+      .join('   ')
+
+  console.log(formatRow(headers))
+  console.log(colWidths.map(w => '-'.repeat(w)).join('   '))
+  for (const row of rows) {
+    console.log(formatRow(row))
+  }
+} finally {
+  await rm(tempDir, {recursive: true, force: true})
+}

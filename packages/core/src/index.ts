@@ -5,11 +5,14 @@ export {
   all,
   createRelayManager,
   decodeBytes,
+  definePlugin,
   encodeBytes,
   entries,
+  extractPlugins,
   fromJson,
   genId,
   getRelays,
+  isPlugin,
   keys,
   libName,
   makeSocket,
@@ -27,8 +30,11 @@ export {
   computePublicKeyFingerprint,
   createAdminRoom,
   formatSelfCertifyingRoomId,
-  parseSelfCertifyingRoomId
+  parseSelfCertifyingRoomId,
+  roles
 } from './authority'
+
+export {scale} from './overlay'
 
 export {
   createUserIdentity,
@@ -83,9 +89,16 @@ export type {
   RequestOptions,
   RoleCertificate,
   RoleRevocationRecord,
+  RolesConfig,
+  RolesInput,
   Room,
   RoomAuthorityInfo,
+  RoomKernel,
+  RoomPlugin,
+  ScaleConfig,
   SelfInfo,
+  KernelRolesProvider,
+  KernelScaleProvider,
   Signal,
   SignalPeer,
   SocketClient,

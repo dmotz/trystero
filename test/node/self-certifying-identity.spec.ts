@@ -8,6 +8,7 @@ import {
   deriveUserId,
   exportUserIdentity,
   importUserIdentity,
+  roles,
   selfId,
   verifyPeerIdKey,
   verifyUserIdKey
@@ -964,18 +965,19 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-admin',
           identity: adminUser,
-          admin: true,
+          ...roles(true),
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'activist-hq'
       )
-      const authInfo = await adminRoom.getAuthority()
+      const authInfo = await adminRoom.getSelf()
 
       aliceTab1 = makeJoinRoom()(
         {
           appId,
           _test_only_forcedPeerId: 'peer-alice-1',
           identity: aliceUser,
+          ...roles(),
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId
@@ -990,7 +992,7 @@ void test(
 
       // Admin grants 'moderator' to Alice's userId while Alice is on Tab 1
       await adminRoom.grantRole(aliceUser.userId, 'moderator')
-      await waitFor(() => aliceTab1.getPeerRoles().includes('moderator'), 3_000)
+      await waitFor(() => aliceTab1.getRoles().includes('moderator'), 3_000)
 
       // Alice opens Tab 2 (or reloads with persistent userId -> new peerId 'peer-alice-2')
       aliceTab2 = makeJoinRoom()(
@@ -998,6 +1000,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-alice-2',
           identity: aliceUser,
+          ...roles(),
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId
@@ -1006,25 +1009,25 @@ void test(
       await waitFor(
         () =>
           'peer-alice-2' in adminRoom.getPeers() &&
-          aliceTab2.getPeerRoles().includes('moderator'),
+          aliceTab2.getRoles().includes('moderator'),
         3_000
       )
 
       // Alice Tab 2 can send on a moderator-gated action AND update a moderator-gated state!
       const modAlertsAtAdmin: any[] = []
       adminRoom.makeAction<string>('mod-alert', {
-        authority: 'moderator',
+        roles: 'moderator',
         onMessage: (msg, ctx) => modAlertsAtAdmin.push({msg, ...ctx})
       })
       const modAlertTab2 = aliceTab2.makeAction<string>('mod-alert', {
-        authority: 'moderator'
+        roles: 'moderator'
       })
 
       const adminTopicState = adminRoom.makeState<string>('topic', 'initial', {
-        authority: 'moderator'
+        roles: 'moderator'
       })
       const tab2TopicState = aliceTab2.makeState<string>('topic', 'initial', {
-        authority: 'moderator'
+        roles: 'moderator'
       })
 
       await modAlertTab2.send('verified-from-tab-2')
@@ -1045,12 +1048,13 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-attacker-1',
           identity: attackerUser,
+          ...roles(),
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId
       )
       await waitFor(() => 'peer-attacker-1' in adminRoom.getPeers(), 3_000)
-      await adminRoom.banPeer(attackerUser.userId, {reason: 'disruptor'})
+      await adminRoom.ban(attackerUser.userId, {reason: 'disruptor'})
       await waitFor(() => !('peer-attacker-1' in adminRoom.getPeers()), 3_000)
       await attackerTab1.leave()
 
@@ -1060,6 +1064,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-attacker-2',
           identity: attackerUser,
+          ...roles(),
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId,
@@ -1081,6 +1086,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-limiter',
           identity: limiterUser,
+          ...roles(),
           limit: 1,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
