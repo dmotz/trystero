@@ -113,6 +113,13 @@ void test(
         250,
         'nostr batch filters should stay capped at 250 topics'
       )
+      const nowSec = Math.floor(Date.now() / 1000)
+      for (const req of latestReqs) {
+        assert.ok(
+          req[2].since <= nowSec - 55 && req[2].since >= nowSec - 65,
+          `expected REQ since (${req[2].since}) to include ~60s clock-skew leeway from now (${nowSec})`
+        )
+      }
     } finally {
       await Promise.all(rooms.map(room => room.leave().catch(() => {})))
       globalThis.WebSocket = originalWebSocket

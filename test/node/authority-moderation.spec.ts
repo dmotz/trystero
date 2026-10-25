@@ -601,3 +601,186 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     false
   )
 })
+
+void test('clock skew hardening: reject future-dated records, floor re-granted cert iat above skewed revocations, and evaluate cert.exp at record ts', async () => {
+  const {authority, root, delegate, target, scope, grant} = await setup()
+  const adminCert = await grant(delegate, ['admin'])
+  await grant(target, ['player'])
+  authority.registerPeerPublicKey(target.peerId, target.signPubJwk)
+
+  // 1. Poison-pill future timestamps (> Date.now() + 60_000) on revocations, bans, and state records are rejected
+  const poisonRevocation = await signRoleRevocation(
+    delegate.signPrivateKey,
+    adminCert,
+    {
+      ...scope,
+      issuerPeerId: delegate.peerId,
+      targetPeerId: target.peerId,
+      role: 'player',
+      seq: 1,
+      ts: Number.MAX_SAFE_INTEGER
+    }
+  )
+  assert.equal(
+    await verifyRoleRevocation(
+      poisonRevocation,
+      scope.appId,
+      scope.roomId,
+      new Set(),
+      new Set([root.userId])
+    ),
+    false,
+    'future-dated revocation must be rejected by verifyRoleRevocation'
+  )
+  assert.equal(
+    await authority.verifyAndApplyRevocation(poisonRevocation),
+    false
+  )
+  assert.deepEqual(authority.getPeerRoles(target.peerId), ['player'])
+
+  const futureBan = await signPeerBan(delegate.signPrivateKey, adminCert, {
+    ...scope,
+    issuerPeerId: delegate.peerId,
+    targetPeerId: target.peerId,
+    seq: 2,
+    ts: Date.now() + 120_000
+  })
+  assert.equal(await authority.verifyAndApplyBan(futureBan), false)
+  assert.equal(authority.isPeerBanned(target.peerId), false)
+
+  const futureState = await signStateRecord(
+    delegate.signPrivateKey,
+    delegate.signPubJwk,
+    adminCert,
+    {
+      ...scope,
+      namespace: 'clock-test',
+      epoch: 1,
+      seq: 1,
+      prevHash: '00000000000000000000000000000000',
+      ts: Date.now() + 120_000,
+      updatedBy: delegate.peerId,
+      value: 'future'
+    }
+  )
+  assert.equal(await authority.verifyAndApplyStateRecord(futureState), false)
+
+  // 2. Re-granting a role via issueRoleCertificate floors iat above a revocation from a slightly fast clock
+  const skewedRevocation = await signRoleRevocation(
+    delegate.signPrivateKey,
+    adminCert,
+    {
+      ...scope,
+      issuerPeerId: delegate.peerId,
+      targetPeerId: target.peerId,
+      role: 'player',
+      seq: 3,
+      ts: Date.now() + 30_000
+    }
+  )
+  assert.equal(await authority.verifyAndApplyRevocation(skewedRevocation), true)
+  assert.deepEqual(authority.getPeerRoles(target.peerId), [])
+
+  const regrantedCert = await authority.issueRoleCertificate(
+    target.peerId,
+    'player',
+    undefined,
+    () => {}
+  )
+  assert.ok(
+    regrantedCert.iat > skewedRevocation.ts,
+    're-granted cert iat must supersede skewed revocation ts'
+  )
+  assert.deepEqual(authority.getPeerRoles(target.peerId), ['player'])
+
+  // 3. Late joiners evaluate cert.exp against the record's timestamp (rec.ts / ban.ts / rev.ts)
+  const pastNow = Date.now() - 20_000
+  const tempAdminCert = await signRoleCertificate(root.sign, root.signPubJwk, {
+    ...scope,
+    subPeerId: delegate.peerId,
+    subPubKey: delegate.signPubJwk,
+    roles: ['admin'],
+    canDelegate: true,
+    now: pastNow,
+    expiresInMs: 10_000
+  })
+  const validHistoricalTs = pastNow + 5_000
+  const expiredHistoricalTs = pastNow + 15_000
+
+  const historicalState = await signStateRecord(
+    delegate.signPrivateKey,
+    delegate.signPubJwk,
+    tempAdminCert,
+    {
+      ...scope,
+      namespace: 'hist-state',
+      epoch: 1,
+      seq: 1,
+      prevHash: '00000000000000000000000000000000',
+      ts: validHistoricalTs,
+      updatedBy: delegate.peerId,
+      value: {ok: true}
+    }
+  )
+  const postExpiryState = await signStateRecord(
+    delegate.signPrivateKey,
+    delegate.signPubJwk,
+    tempAdminCert,
+    {
+      ...scope,
+      namespace: 'hist-state-expired',
+      epoch: 1,
+      seq: 1,
+      prevHash: '00000000000000000000000000000000',
+      ts: expiredHistoricalTs,
+      updatedBy: delegate.peerId,
+      value: {ok: false}
+    }
+  )
+  const historicalBan = await signPeerBan(
+    delegate.signPrivateKey,
+    tempAdminCert,
+    {
+      ...scope,
+      issuerPeerId: delegate.peerId,
+      targetPeerId: target.peerId,
+      seq: 10,
+      ts: validHistoricalTs
+    }
+  )
+
+  const latePeer = await getOrCreateEndpointIdentity('peer-late-joiner')
+  const lateAuthority = createRoomAuthority({
+    selfId: latePeer.peerId,
+    appId: scope.appId,
+    initialRoomId: scope.roomId,
+    admin: {admins: [root.userId]},
+    getLocalCryptoIdentity: async () => latePeer,
+    getOverlayPeerPublicKey: () => undefined,
+    isOverlayPeerBanned: () => false,
+    onRoomIdResolved: () => {},
+    onPeerPublicKey: () => {},
+    onLocalRoleCertificate: () => {},
+    onPrivilegedPeer: () => {},
+    onPeerBanned: () => {},
+    onSignatureFailure: () => {}
+  })
+  await lateAuthority.getAuthorityInfo()
+
+  assert.equal(
+    await lateAuthority.verifyAndApplyStateRecord(historicalState),
+    true,
+    'state record signed before cert.exp must still verify for late joiners'
+  )
+  assert.equal(
+    await lateAuthority.verifyAndApplyStateRecord(postExpiryState),
+    false,
+    'state record signed after cert.exp must be rejected'
+  )
+  assert.equal(
+    await lateAuthority.verifyAndApplyBan(historicalBan),
+    true,
+    'ban signed before cert.exp must still verify for late joiners'
+  )
+  assert.equal(lateAuthority.isPeerBanned(target.peerId), true)
+})

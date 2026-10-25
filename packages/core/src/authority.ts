@@ -322,10 +322,14 @@ const roleCertCanonicalPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
     ...(cert.subUserId ? [cert.subUserId] : [])
   ])
 
+const maxCertClockSkewMs = 60_000
 let lastAuthTimestamp = 0
 
 const nextMonotonicTs = (): number => {
   const now = Date.now()
+  if (lastAuthTimestamp > now + maxCertClockSkewMs) {
+    lastAuthTimestamp = now
+  }
   lastAuthTimestamp = now > lastAuthTimestamp ? now : lastAuthTimestamp + 1
   return lastAuthTimestamp
 }
@@ -347,7 +351,10 @@ export const signRoleCertificate = async (
     now?: number
   }
 ): Promise<RoleCertificate> => {
-  const now = typeof params.now === 'number' ? params.now : nextMonotonicTs()
+  const now =
+    typeof params.now === 'number'
+      ? params.now
+      : Math.max(nextMonotonicTs(), params.parentCert?.iat ?? 0)
   const unsigned: Omit<RoleCertificate, 'sig'> = {
     v: 1,
     certId: genId(16),
@@ -382,8 +389,6 @@ export const signRoleCertificate = async (
     sig: toBase64Url(sigBytes)
   }
 }
-
-const maxCertClockSkewMs = 60_000
 
 const isValidPubJwkShape = (jwk: unknown): jwk is JsonWebKey =>
   Boolean(
@@ -451,7 +456,8 @@ export const verifyRoleCertificateChain = async (
   roomId: string,
   rootFingerprints: ReadonlySet<string>,
   rootUserIds?: ReadonlySet<string>,
-  depth = 0
+  depth = 0,
+  atTime?: number
 ): Promise<{valid: boolean; isRoot: boolean; rootFingerprint?: string}> => {
   if (
     !validateRoleCertificateShape(cert, depth) ||
@@ -467,7 +473,12 @@ export const verifyRoleCertificateChain = async (
     return {valid: false, isRoot: false}
   }
 
-  if (typeof cert.exp === 'number' && now > cert.exp) {
+  if (typeof atTime === 'number' && atTime < cert.iat) {
+    return {valid: false, isRoot: false}
+  }
+
+  const expCheckTime = typeof atTime === 'number' ? atTime : now
+  if (typeof cert.exp === 'number' && expCheckTime > cert.exp) {
     return {valid: false, isRoot: false}
   }
 
@@ -532,7 +543,8 @@ export const verifyRoleCertificateChain = async (
     roomId,
     rootFingerprints,
     rootUserIds,
-    depth + 1
+    depth + 1,
+    atTime
   )
   return {
     valid: parentResult.valid,
@@ -614,6 +626,7 @@ export const signRoleRevocation = async (
     targetUserId?: string
     targetCertId?: string
     minTs?: number
+    ts?: number
     role?: string
     seq: number
     signerPubKey?: JsonWebKey
@@ -621,7 +634,10 @@ export const signRoleRevocation = async (
     userProof?: string
   }
 ): Promise<RoleRevocationRecord> => {
-  const ts = Math.max(nextMonotonicTs(), params.minTs ?? 0)
+  const ts =
+    typeof params.ts === 'number'
+      ? params.ts
+      : Math.max(nextMonotonicTs(), issuerCert.iat, params.minTs ?? 0)
   const unsigned: Omit<RoleRevocationRecord, 'sig'> = {
     v: 1,
     appId: params.appId,
@@ -657,7 +673,8 @@ export const verifyRoleRevocation = async (
   if (
     !validateRoleRevocationShape(rev) ||
     rev.appId !== appId ||
-    rev.roomId !== roomId
+    rev.roomId !== roomId ||
+    rev.ts > Date.now() + maxCertClockSkewMs
   ) {
     return false
   }
@@ -689,7 +706,9 @@ export const verifyRoleRevocation = async (
     appId,
     roomId,
     rootFingerprints,
-    rootUserIds
+    rootUserIds,
+    0,
+    rev.ts
   )
   if (!certRes.valid) {
     return false
@@ -774,12 +793,16 @@ export const signPeerBan = async (
     targetKeyThumbprint?: string
     reason?: string
     seq: number
+    ts?: number
     signerPubKey?: JsonWebKey
     userPubKey?: JsonWebKey
     userProof?: string
   }
 ): Promise<PeerBanRecord> => {
-  const ts = nextMonotonicTs()
+  const ts =
+    typeof params.ts === 'number'
+      ? params.ts
+      : Math.max(nextMonotonicTs(), issuerCert.iat)
   const unsigned: Omit<PeerBanRecord, 'sig'> = {
     v: 1,
     appId: params.appId,
@@ -817,7 +840,8 @@ export const verifyPeerBan = async (
   if (
     !validatePeerBanShape(ban) ||
     ban.appId !== appId ||
-    ban.roomId !== roomId
+    ban.roomId !== roomId ||
+    ban.ts > Date.now() + maxCertClockSkewMs
   ) {
     return false
   }
@@ -849,7 +873,9 @@ export const verifyPeerBan = async (
     appId,
     roomId,
     rootFingerprints,
-    rootUserIds
+    rootUserIds,
+    0,
+    ban.ts
   )
   if (!certRes.valid) {
     return false
@@ -1198,6 +1224,7 @@ export const signStateRecord = async <T extends JsonValue = JsonValue>(
     epoch: number
     seq: number
     prevHash: string
+    ts?: number
     updatedBy: string
     userId?: string
     userPubKey?: JsonWebKey
@@ -1205,7 +1232,10 @@ export const signStateRecord = async <T extends JsonValue = JsonValue>(
     value: T
   }
 ): Promise<AuthoritativeStateRecord<T>> => {
-  const ts = nextMonotonicTs()
+  const ts =
+    typeof params.ts === 'number'
+      ? params.ts
+      : Math.max(nextMonotonicTs(), cert.iat)
   const unsigned: Omit<AuthoritativeStateRecord<T>, 'sig' | 'hash'> = {
     v: 1,
     appId: params.appId,
@@ -1253,7 +1283,8 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
   if (
     !validateStateRecordShape(rec) ||
     rec.appId !== appId ||
-    rec.roomId !== roomId
+    rec.roomId !== roomId ||
+    rec.ts > Date.now() + maxCertClockSkewMs
   ) {
     return false
   }
@@ -1290,7 +1321,9 @@ export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
     appId,
     roomId,
     rootFingerprints,
-    rootUserIds
+    rootUserIds,
+    0,
+    rec.ts
   )
   if (!certRes.valid) {
     return false
@@ -1575,19 +1608,26 @@ export const createRoomAuthority = ({
     return false
   }
 
-  const getEffectiveRolesForCert = (cert: RoleCertificate): string[] => {
+  const getEffectiveRolesForCert = (
+    cert: RoleCertificate,
+    atTime?: number
+  ): string[] => {
     if (
       isPeerBanned(cert.subPeerId) ||
       (cert.subUserId && isPeerBanned(cert.subUserId))
     ) {
       return []
     }
-    if (typeof cert.exp === 'number' && Date.now() > cert.exp) {
+    const expCheckTime = typeof atTime === 'number' ? atTime : Date.now()
+    if (
+      (typeof atTime === 'number' && atTime < cert.iat) ||
+      (typeof cert.exp === 'number' && expCheckTime > cert.exp)
+    ) {
       return []
     }
     let allowedByParent: Set<string> | null = null
     if (cert.parentCert && !cert.isRoot) {
-      const parentEffective = getEffectiveRolesForCert(cert.parentCert)
+      const parentEffective = getEffectiveRolesForCert(cert.parentCert, atTime)
       if (parentEffective.length === 0) {
         return []
       }
@@ -1801,9 +1841,10 @@ export const createRoomAuthority = ({
   const canRevokeRoles = (
     issuer: RoleCertificate,
     _target: RoleCertificate | undefined,
-    role?: string
+    role?: string,
+    atTime?: number
   ): boolean => {
-    const roles = getEffectiveRolesForCert(issuer)
+    const roles = getEffectiveRolesForCert(issuer, atTime)
     if (roles.includes('admin')) {
       return true
     }
@@ -1834,7 +1875,7 @@ export const createRoomAuthority = ({
       const targetCert =
         peerCerts.get(rev.targetPeerId) ??
         (rev.targetUserId ? userCerts.get(rev.targetUserId) : undefined)
-      if (!canRevokeRoles(rev.issuerCert, targetCert, rev.role)) {
+      if (!canRevokeRoles(rev.issuerCert, targetCert, rev.role, rev.ts)) {
         return false
       }
       if (
@@ -1895,7 +1936,7 @@ export const createRoomAuthority = ({
       )
       if (
         !valid ||
-        !getEffectiveRolesForCert(ban.issuerCert).includes('admin')
+        !getEffectiveRolesForCert(ban.issuerCert, ban.ts).includes('admin')
       ) {
         return false
       }
@@ -1936,7 +1977,7 @@ export const createRoomAuthority = ({
         return false
       }
       await verifyAndApplyCert(record.cert)
-      const effectiveRoles = getEffectiveRolesForCert(record.cert)
+      const effectiveRoles = getEffectiveRolesForCert(record.cert, record.ts)
       const instance = stateInstances.get(record.namespace)
       const requiredRoles = instance?.requiredRoles ?? ['admin']
       if (!hasRequiredRole(effectiveRoles, requiredRoles)) {
@@ -2490,6 +2531,26 @@ export const createRoomAuthority = ({
       const currentRoles = getPeerRoles(peerId)
       const mergedRoles = [...new Set([...currentRoles, ...requestedRoles])]
       const cryptoId = await getLocalCryptoIdentity()
+      const existingPeerCert = peerCerts.get(peerId)
+      const existingUserCert = subUserId ? userCerts.get(subUserId) : undefined
+      const existingRevs = [
+        ...(peerRevocations.get(peerId) ?? []),
+        ...(subUserId ? (userRevocations.get(subUserId) ?? []) : [])
+      ]
+      let minIat = localAdminUser ? 0 : (localCert?.iat ?? 0)
+      if (existingPeerCert) {
+        minIat = Math.max(minIat, existingPeerCert.iat + 1)
+      }
+      if (existingUserCert) {
+        minIat = Math.max(minIat, existingUserCert.iat + 1)
+      }
+      for (const r of existingRevs) {
+        minIat = Math.max(minIat, r.ts + 1)
+      }
+      const certNow = Math.max(
+        nextMonotonicTs(),
+        Math.min(minIat, Date.now() + maxCertClockSkewMs)
+      )
 
       const cert = await signRoleCertificate(
         localAdminUser ? localAdminUser.sign : cryptoId.signPrivateKey,
@@ -2501,6 +2562,7 @@ export const createRoomAuthority = ({
           appId,
           roomId: effectiveRoomId,
           roles: mergedRoles,
+          now: certNow,
           ...(options?.canDelegate ? {canDelegate: true} : {}),
           ...(typeof options?.expiresInMs === 'number'
             ? {expiresInMs: options.expiresInMs}

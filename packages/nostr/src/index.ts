@@ -87,7 +87,12 @@ const retireRelay = (client: SocketClient): boolean => {
 
 export type NostrRoomConfig = JoinRoomConfig
 
+const subscribeClockSkewSeconds = 60
+
 const now = (): number => Math.floor(Date.now() / 1000)
+
+const subscribeSince = (): number =>
+  Math.max(0, now() - subscribeClockSkewSeconds)
 
 const topicToKind = (topic: string): number =>
   (kindCache[topic] ??= strToNum(topic, 10_000) + 20_000)
@@ -132,7 +137,7 @@ export const subscribe = (subId: string, topic: string): string =>
     subId,
     {
       kinds: [topicToKind(topic)],
-      since: now(),
+      since: subscribeSince(),
       ['#' + tag]: [topic]
     }
   ])
@@ -243,7 +248,7 @@ const flushBatch = (client: SocketClient): void => {
 
   const topics = [...batcher.topics.keys()]
   const chunks: string[][] = []
-  const since = now()
+  const since = subscribeSince()
 
   for (let i = 0; i < topics.length; i += maxTopicsPerSubscription) {
     chunks.push(topics.slice(i, i + maxTopicsPerSubscription))
