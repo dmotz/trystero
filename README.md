@@ -48,7 +48,7 @@ You can see what people are building with Trystero
   - [Room size limits](#room-size-limits)
   - [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)
   - [Scaling large rooms](#scaling-large-rooms)
-  - [Custom room modules](#custom-room-modules)
+  - [Custom room plugins](#custom-room-plugins)
   - [React hooks](#react-hooks)
   - [Troubleshooting connection issues](#troubleshooting-connection-issues)
   - [Running server-side (Node, Bun, Deno)](#running-server-side-node-bun-deno)
@@ -60,19 +60,11 @@ You can see what people are building with Trystero
   - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
   - [`roles([config])`](#rolesconfig)
   - [`scale([config])`](#scaleconfig)
-  - [`defineRoomModule(name, spec)`](#defineroommodulename-spec)
-  - [`selfId`](#selfid)
+  - [`definePlugin(name, spec)`](#definepluginname-spec)
   - [`createUserIdentity()`](#createuseridentity)
   - [`importUserIdentity(input)`](#importuseridentityinput)
   - [`exportUserIdentity(identity)`](#exportuseridentityidentity)
-  - [`derivePeerId(publicKey)`](#derivepeeridpublickey)
-  - [`deriveUserId(publicKey)`](#deriveuseridpublickey)
-  - [`verifyPeerIdKey(peerId, publicKey)`](#verifypeeridkeypeerid-publickey)
-  - [`verifyUserIdKey(userId, publicKey)`](#verifyuseridkeyuserid-publickey)
   - [`createAdminRoom(baseRoomId, [options])`](#createadminroombaseroomid-options)
-  - [`parseSelfCertifyingRoomId(roomId)`](#parseselfcertifyingroomidroomid)
-  - [`formatSelfCertifyingRoomId(baseRoomId, fingerprint)`](#formatselfcertifyingroomidbaseroomid-fingerprint)
-  - [`computePublicKeyFingerprint(publicKey)`](#computepublickeyfingerprintpublickey)
   - [`getRelaySockets()`](#getrelaysockets)
   - [`pauseRelayReconnection()`](#pauserelayreconnection)
   - [`resumeRelayReconnection()`](#resumerelayreconnection)
@@ -128,7 +120,7 @@ No package manager? You can also use an ESM CDN:
 > **Note:** Prebuilt `.min.js` bundles (`dist/trystero-*.min.js`) are
 > deprecated. Use a package manager with a modern tree-shaking bundler (Vite,
 > Rollup, esbuild, webpack, etc.) or an ESM CDN like `esm.run` so optional
-> modules such as `roles()` and `scale()` are only included in your bundle when
+> plugins such as `roles()` and `scale()` are only included in your bundle when
 > imported.
 
 The default Trystero package runs on the Nostr network, but you can swap in any
@@ -407,21 +399,23 @@ Or pass a custom identity or loader function if you want to save and load user
 identity keys from your own backend, file system, or account system:
 
 ```js
+import {joinRoom, importUserIdentity} from 'trystero'
+
 const room = joinRoom(
   {
     appId: 'co-op-RPG',
-    identity: () => fetchUserKeyFromBackend()
+    identity: async () => importUserIdentity(await fetchUserKeyFromBackend())
   },
   'tavern-1'
 )
 ```
 
-| `identity` value                              | `userId` lifetime                                                                                                                 |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `'session'` _(browser default)_               | Reused across page reloads in the same tab (`sessionStorage`), reset when the tab closes.                                         |
-| `'local'`                                     | Reused across all open tabs and future visits on the same device (`IndexedDB` / `localStorage`) until browser storage is cleared. |
-| `'none'` _(non-browser default)_              | Ephemeral for the current runtime; a reload or process restart generates a new `userId`.                                          |
-| Custom (`UserIdentity`, `userKey`, or loader) | Controlled by your app (e.g. synced from your backend or loaded from disk in Node/Bun/Deno).                                      |
+| `identity` value                        | `userId` lifetime                                                                                                                 |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `'session'` _(browser default)_         | Reused across page reloads in the same tab (`sessionStorage`), reset when the tab closes.                                         |
+| `'local'`                               | Reused across all open tabs and future visits on the same device (`IndexedDB` / `localStorage`) until browser storage is cleared. |
+| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload or process restart generates a new `userId`.                                          |
+| Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno).                          |
 
 ### Multiple connections for a single user (`userId` vs `peerId`)
 
@@ -637,7 +631,7 @@ const room = joinRoom(
 When a room is already at capacity:
 
 - Any extra user who tries to join receives `error: 'room full'` in
-  `onJoinError` and is automatically disconnected from the room.
+  `onJoinError` and that peer connection is closed before activation.
 - Because `limit` counts unique `userId`s rather than raw tabs, an admitted
   player who refreshes the page shares their existing seat. Use `'local'`
   identity or an explicitly shared identity to share that seat across tabs.
@@ -653,22 +647,21 @@ When a room is already at capacity:
   admission handshake (after `userId` verification) before a peer is ever added
   to `getPeers()` or triggers `onPeerJoin`. If the room is already full for a
   new `userId`, existing members immediately send a `'room full'` rejection and
-  close the pending connection.
+  close that pending peer connection.
 - **Password privacy**: In password-protected rooms (`config.password`),
   Trystero verifies the password proof _before_ checking room capacity. Users
   with the wrong password receive a password error rather than `'room full'`, so
   outsiders cannot probe whether a private room is full.
 - **Simultaneous burst joins**: What if 5 players click "Join" at the exact same
   millisecond on an empty `limit: 2` room? Peers include their join metadata
-  (`limit`, join timestamp `t`, and established member status) in their
-  handshake readiness packet and coalesce concurrent arrivals over a short 25ms
-  window. Every peer deterministically selects the same winning `userId`s
-  (established member > earliest join timestamp > peer ID tie-breaker) and turns
-  away the excess joiners with `'room full'`.
-- **Asymmetric configs & multi-hop rooms**: Even if only the room creator passes
-  `limit` in their config, Trystero automatically propagates the active limit to
-  other admitted peers and enforces total room capacity across multi-hop
-  `'gossip'` and `'broadcast'` overlay topologies when `scale()` is enabled.
+  (join timestamp `t` and established member status) in their handshake
+  readiness packet and coalesce concurrent arrivals over a short 25ms window.
+  Every peer deterministically selects the same winning `userId`s (established
+  member > earliest join timestamp > peer ID tie-breaker) and turns away the
+  excess joiners with `'room full'`.
+- **Multi-hop rooms**: When `scale()` is enabled, capacity checks also account
+  for verified multi-hop overlay peers across `'gossip'` and `'broadcast'`
+  topologies.
 
 </details>
 
@@ -687,63 +680,69 @@ For example, you might be building:
 - **A live chatroom or classroom** where moderators can mute or ban spammers so
   they can't disrupt the room.
 
-By importing the tree-shakeable `roles` plugin, Trystero lets you create
-verified room admins, assign custom roles (like `'moderator'` or `'dj'`),
-restrict actions to specific roles, and sync an official "source of truth" state
-that everyone can read—all purely peer-to-peer.
+By importing the tree-shakeable `roles` plugin and passing it in `use: [...]`,
+Trystero lets you create verified room admins, assign custom roles (like
+`'moderator'` or `'dj'`), restrict actions to specific roles, and sync an
+official "source of truth" state that everyone can read—all purely peer-to-peer.
 
 #### 1. Creating a room on the fly as the admin
 
-The easiest way to make the room creator an admin is to pass `...roles(true)`
-when calling `joinRoom()`. For example, when a player clicks **"Create Game"**
-in your app:
+The easiest way to make the room creator an admin is to pass
+`use: [roles({selfAsAdmin: true})]` when calling `joinRoom()`. For example, when
+a player clicks **"Create Game"** in your app:
 
 ```js
 import {joinRoom, roles} from 'trystero'
 
 // The host creates a room with admin powers tied to their userId
 const hostRoom = joinRoom(
-  {appId: 'trivia-night', ...roles(true)},
+  {
+    appId: 'trivia-night',
+    identity: 'local',
+    use: [roles({selfAsAdmin: true})]
+  },
   'friday-quiz'
 )
 const {roomId} = await hostRoom.getSelf()
 
-// Share `roomId` (e.g. "friday-quiz.9fX2kLm8pQr7vBn3") in an invite link for friends!
+// Share `roomId` (e.g. "friday-quiz.~9fX2kLm8pQr7vBn3") in an invite link for friends!
 ```
 
-When you pass `...roles(true)`, Trystero attaches a short 16-character suffix to
-your room name (like `'friday-quiz.9fX2kLm8pQr7vBn3'`) derived from the host's
-`userId`. Think of that suffix as a built-in digital ID badge for the host.
+When you pass `roles({selfAsAdmin: true})`, Trystero attaches a `.~` separator
+and a 16-character Base62 suffix to your room name (like
+`'friday-quiz.~9fX2kLm8pQr7vBn3'`) derived from the host's `userId`. Think of
+that suffix as a built-in digital ID badge for the host.
 
 When friends join using that self-certifying `roomId`, they simply include
-`...roles()` in `joinRoom()`—their browsers automatically check the suffix and
-recognize the host's `userId` as the true admin (joining a fingerprinted
-`<roomId>.<fingerprint>` without `roles()` throws an error so misconfigured
+`use: [roles()]` in `joinRoom()`—their browsers automatically check the suffix
+and recognize the host's `userId` as the true admin (joining a fingerprinted
+`<roomId>.~<fingerprint>` without `roles()` throws an error so misconfigured
 clients fail fast):
 
 ```js
-// Guests join using the shared roomId with ...roles()
-const guestRoom = joinRoom({appId: 'trivia-night', ...roles()}, roomId)
+// Guests join using the shared roomId with use: [roles()]
+const guestRoom = joinRoom({appId: 'trivia-night', use: [roles()]}, roomId)
 ```
 
-> **Tip:** Because admin ownership is tied directly to the host's `userId`, if
-> the host refreshes the page (`identity: 'session'`, the browser default) or
-> returns later on the same device (`identity: 'local'`), Trystero automatically
-> recognizes them as the room admin when they rejoin `roomId` with
-> `...roles()`—no separate admin token to save! You can also generate the
-> `roomId` ahead of time before calling `joinRoom()` using
-> `await createAdminRoom('friday-quiz')`.
+> **Important:** Because a fingerprinted room's root admin authority is tied
+> permanently to the host's `userId` key, always pair `selfAsAdmin: true` with
+> `identity: 'local'` or a saved `UserIdentity` (from `createUserIdentity()` /
+> `importUserIdentity()`). With the default browser `identity: 'session'`,
+> refreshing the tab keeps your admin key, but closing the tab discards it—which
+> would leave the fingerprinted room without a root admin if you ever needed to
+> rejoin later. Trystero logs a warning if `selfAsAdmin: true` is used with an
+> ephemeral identity. You can also generate the `roomId` ahead of time before
+> calling `joinRoom()` using `await createAdminRoom('friday-quiz')`.
 
-#### 2. Using a fixed room name without a suffix
+#### 2. Specifying admin `userId`s (fixed room names or co-admins)
 
 What if you want a permanent, memorable room name like `'main-stage'` without a
-fingerprint suffix at the end—for example, a recurring town hall, podcast
-studio, or community hub owned by specific users?
+`.~<fingerprint>` suffix at the end—or want to designate additional co-admins?
 
-Pass the trusted admin `userId` (or an array of `userId`s for co-admins) to
-`roles()`. When an admin joins with their matching `identity`, they are
-automatically recognized as `'admin'`, and regular viewers automatically trust
-updates and role grants signed by those `userId`s:
+Pass `admins: [...]` with the trusted admin `userId`s to `roles()`. When an
+admin joins with their matching `identity`, they are automatically recognized as
+`'admin'`, and regular participants automatically trust updates and role grants
+signed by those `userId`s:
 
 ```js
 import {joinRoom, roles} from 'trystero'
@@ -757,11 +756,14 @@ const room = joinRoom(
   {
     appId: 'town-hall',
     identity: 'local',
-    ...roles(HOST_USER_ID) // or roles([HOST_USER_ID, CO_HOST_USER_ID])
+    use: [roles({admins: [HOST_USER_ID]})]
   },
   'main-stage'
 )
 ```
+
+You can also combine `{selfAsAdmin: true, admins: [CO_HOST_USER_ID]}` to create
+a fingerprinted room while trusting additional co-admins from the start.
 
 #### Restricting actions to admins or custom roles
 
@@ -858,12 +860,12 @@ admin certificates.
   peer before being accepted.
 - **Self-certifying room IDs**: Both a user's 43-character Base64url `userId`
   and a self-certifying room's 16-character Base62 suffix
-  (`<baseRoomId>.<16-char-base62>`) are derived from the exact same SHA-256
+  (`<baseRoomId>.~<16-char-base62>`) are derived from the exact same SHA-256
   thumbprint of the user's P-256 public key. When you create a room with
-  `...roles(true)`, Trystero encodes the first 96 bits of your `userId` digest
-  into the room ID suffix. When peers connect—or when the host rejoins after a
-  reload or on a persistent device—everyone can mathematically verify from the
-  `userId` alone who owns the room.
+  `roles({selfAsAdmin: true})`, Trystero encodes the first 96 bits of your
+  `userId` digest into the room ID suffix after `.~`. When peers connect—or when
+  the host rejoins with the same persistent identity—everyone can mathematically
+  verify from the `userId` alone who owns the room.
 - **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
   `RoleCertificate` binding the recipient's `peerId`, `userId`, and public key
   to the granted role(s), optional expiration timestamp, and `canDelegate` flag.
@@ -875,24 +877,25 @@ admin certificates.
   and `userId` across all current and future tabs.
 - **Tamper-proof state syncing (`makeState`)**: Each state update is signed with
   a monotonically increasing sequence number (`seq`) and chained to the SHA-256
-  hash of the previous state record (`prevHash`). This prevents replay or
-  rollback attacks and lets any regular peer cache and serve the latest state
-  snapshot to late joiners—the newcomer simply verifies the admin's signature on
-  the snapshot. If two co-admins update state at the exact same moment, peers
-  converge deterministically using `(epoch, seq, timestamp, hash)`.
-- **Edge filtering & signaling proofs**: In multi-hop topologies, immediate
+  hash of the previous state record (`prevHash`, verified for successive updates
+  from the same writer). This prevents replay attacks and lets any regular peer
+  cache and serve the latest state snapshot to late joiners—the newcomer simply
+  verifies the writer's signature on the snapshot. Concurrent updates across
+  co-admins converge deterministically using last-writer-wins ordering
+  `(epoch, seq, timestamp, hash)`.
+- **Edge filtering & private signaling**: In multi-hop topologies, immediate
   neighbors (Hop-1 relays) verify role certificates, signatures, and
   `PeerBanRecord`s before forwarding packets, stopping unauthorized traffic or
-  banned peers at the edge. Signed role certificates and ban records are also
-  included in signaling announcements so peers can ignore connection offers from
-  banned users before opening a WebRTC connection.
+  banned peers at the edge. Role certificates and ban records are exchanged only
+  over encrypted WebRTC data channels after connecting so user IDs and ban
+  metadata are never exposed to signaling relays.
 
 </details>
 
 ### Scaling large rooms
 
 Normally in WebRTC, every browser in a room opens a direct connection to every
-other browser (`'mesh'`). That works great for small groups (And keeps your
+other browser (`'mesh'`). That works great for small groups (and keeps your
 bundle size minimal when you don't need multi-hop routing), but once a room
 grows past a dozen people—like a busy game lobby, a collaborative canvas with 50
 cursors, or a live watch party—maintaining that many connections at once can
@@ -903,10 +906,10 @@ slow down or overwhelm a user's browser.
 ```js
 import {joinRoom, scale} from 'trystero'
 
-const room = joinRoom({appId: 'massive-canvas', ...scale()}, 'lobby-1')
+const room = joinRoom({appId: 'massive-canvas', use: [scale()]}, 'lobby-1')
 ```
 
-When you include `...scale()` (which defaults to `'auto'` mode):
+When you include `use: [scale()]` (which defaults to `'auto'` mode):
 
 - When a room is small (`12` peers or fewer), everyone connects directly to
   everyone else for the lowest possible latency.
@@ -948,7 +951,7 @@ config object:
 const room = joinRoom(
   {
     appId: 'live-stage',
-    ...scale('broadcast')
+    use: [scale('broadcast')]
   },
   'main-hall'
 )
@@ -960,11 +963,14 @@ You can also fine-tune connection limits by passing an object to `scale()`:
 const room = joinRoom(
   {
     appId: 'massive-canvas',
-    ...scale({
-      mode: 'auto',
-      autoThreshold: 12, // switch to 'gossip' above 12 peers
-      maxConnections: 6 // target direct WebRTC connections per peer
-    })
+    use: [
+      scale({
+        mode: 'auto',
+        autoThreshold: 12, // switch to 'gossip' above 12 peers
+        maxConnections: 6, // target direct WebRTC connections per peer
+        fanout: 3 // downstream children per node in broadcast trees
+      })
+    ]
   },
   'lobby-1'
 )
@@ -980,57 +986,59 @@ streams are being routed.
 - **Gossip overlay (`'gossip'`)**: Peers arrange themselves by ID on a
   bounded-degree circulant ring with deterministic multi-scale logarithmic
   chords, keeping the network diameter to $O(\log N)$ hops even as rooms grow to
-  hundreds of peers. Broadcasts use a Plumtree-style epidemic push tree combined
-  with lazy `ihave`/`iwant` gossip repair so messages reach every peer reliably
-  without flooding redundant copies. Point-to-point messages (`target`) route
-  along shortest paths with disjoint backup next-hops for instant failover.
+  hundreds of peers. Routing tables require mutual neighbor confirmation in
+  signed link-state descriptors before using an edge. Broadcasts use a
+  Plumtree-style epidemic push tree combined with lazy `ihave`/`iwant` gossip
+  repair so messages reach every peer reliably without flooding redundant
+  copies. Point-to-point messages (`target`) route along shortest paths with
+  disjoint backup next-hops for instant failover.
 - **Broadcast trees (`'broadcast'` and media streaming)**: In `'broadcast'`
-  mode—and whenever any peer calls `addStream()` in `'gossip'` mode—Trystero
-  builds a deterministic $k$-ary application-layer multicast (ALM) tree rooted
-  at the broadcaster. Each internal peer receives the stream once and clones the
-  `MediaStreamTrack`s to its downstream children (`fanout: 3` by default), so a
-  broadcaster can stream audio or video to dozens of viewers while only
-  uploading to 3 peers. If an upstream peer disconnects, downstream viewers
-  automatically reparent to a healthy branch.
-- **End-to-end security across hops**: When messages travel through intermediate
-  peers, you don't have to trust the relays. Every peer automatically generates
-  an ephemeral WebCrypto signing keypair (ECDSA P-256) and encryption keypair
-  (ECDH P-256). Link-state routing announcements and broadcasts are digitally
-  signed and TOFU-pinned (Trust On First Use) so intermediate peers cannot forge
-  or alter messages, and targeted messages (`target`) are end-to-end encrypted
-  with AES-GCM so intermediate peers cannot read them.
+  mode—and whenever any peer calls `addStream()` without `target` in `'gossip'`
+  mode—Trystero builds a deterministic $k$-ary application-layer multicast (ALM)
+  tree rooted at the broadcaster. Each internal peer decodes the incoming stream
+  and forwards the `MediaStreamTrack`s to its downstream children (`fanout: 3`
+  by default), so a broadcaster can stream audio or video to dozens of viewers
+  while only uploading to 3 peers. Targeted media (`addStream` with `target`)
+  establishes a direct 1-hop WebRTC connection to each selected peer instead of
+  traversing relays.
+- **End-to-end data security across hops**: For data channels, every peer
+  automatically generates an ephemeral WebCrypto signing keypair (ECDSA P-256)
+  and encryption keypair (ECDH P-256). Link-state descriptors and data
+  broadcasts are digitally signed and verified against self-certifying `peerId`
+  keys so intermediate relays cannot forge or alter messages, and targeted data
+  messages (`target`) are end-to-end encrypted with AES-GCM so intermediate
+  relays cannot read them.
 
 </details>
 
-### Custom room modules
+### Custom room plugins
 
-Both `roles()` and `scale()` are built on Trystero's opt-in room module standard
-(`defineRoomModule`), which you can also use to author tree-shakeable 1st- or
+Both `roles()` and `scale()` are built on Trystero's opt-in room plugin standard
+(`definePlugin`), which you can also use to author tree-shakeable 1st- or
 3rd-party extensions (such as CRDT bindings like Yjs/Automerge, custom
-telemetry, or state sync adapters):
+telemetry, or state sync adapters) with full TypeScript return-type inference:
 
 ```js
-import {joinRoom, defineRoomModule} from 'trystero'
+import {joinRoom, definePlugin} from 'trystero'
 
 const myPlugin = (options = {}) =>
-  defineRoomModule('myPlugin', {
+  definePlugin('myPlugin', {
     setup(kernel) {
       const sync = kernel.makeInternalAction('@_my_sync')
       kernel.onLeave(() => {
         // clean up resources when room.leave() is called
       })
-      // Any methods returned here are merged onto the Room instance
+      // Any methods returned here are merged onto the Room instance (and inferred in TypeScript)
       return {
         syncNow: data => sync.send(data)
       }
     }
   })
 
-// Pass modules via object spread or via the `modules: [...]` array:
 const room = joinRoom(
   {
     appId: 'collab-doc',
-    ...myPlugin()
+    use: [myPlugin()]
   },
   'doc-1'
 )
@@ -1358,9 +1366,9 @@ the same namespace will return the same room instance.
   - `limit` - **(optional)** Positive integer capping the maximum total number
     of unique users (`userId`s) allowed in the room at once (including the local
     user). When the room is full, additional joiners with a new `userId` are
-    rejected before activation, receive `error: 'room full'` via `onJoinError`,
-    and automatically leave the room. See [room size limits](#room-size-limits)
-    for more details.
+    rejected on that peer link before activation and receive
+    `error: 'room full'` via `onJoinError`. See
+    [room size limits](#room-size-limits) for more details.
 
   - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
     concurrent large incoming transfers per room, in bytes. Defaults to
@@ -1385,58 +1393,16 @@ the same namespace will return the same room instance.
       `CryptoKey`) and `localStorage` fallback.
     - `'none'` _(default outside browsers)_ - Generates a fresh runtime `userId`
       that is discarded when the page reloads or process exits.
-    - `UserIdentity | string | JsonWebKey | ((context: {appId: string, roomId: string}) => UserIdentity | string | JsonWebKey | Promise<...>)` -
-      Supplies a pre-created `UserIdentity` (from `createUserIdentity()` or
-      `importUserIdentity()`), an exported `trystero_uk_...` key string, a P-256
-      private `JsonWebKey`, or a custom sync/async loader function.
+    - `UserIdentity | ((context: {appId: string, roomId: string}) => UserIdentity | Promise<UserIdentity>)` -
+      Supplies a `UserIdentity` (from `createUserIdentity()` or
+      `importUserIdentity()`) or a custom sync/async loader function.
 
-  - `roles` / `...roles([config])` - **(optional)** Opt-in, tree-shakeable room
-    plugin that enables room admins, custom role delegation, peer banning, and
-    `room.makeState()` (see
-    [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)):
-    - `roles()` - Enables role and state verification for a guest joining a room
-      (required when joining a self-certifying `<roomId>.<fingerprint>`).
-    - `roles(true)` - Makes the local user (`userId`) the room admin and appends
-      their 16-character Base62 fingerprint to the room ID
-      (`<roomId>.<fingerprint>`).
-    - `roles(userId)` or `roles([userId1, userId2])` - Trusts the specified
-      `userId`(s) as root room admin(s) on a fixed room name without a
-      fingerprint suffix. If the local user's `userId` is in the list, they
-      automatically become an `'admin'`.
-    - `roles(RolesConfig)` object:
-      - `admin` - `true`, a trusted admin `userId`, or an array of trusted admin
-        `userId`s.
-      - `create` - Boolean to make the local user the room admin and append
-        their 16-character Base62 fingerprint to `roomId`.
-      - `users` - Array of trusted admin `userId`s (or 16-character Base62
-        fingerprints) when using a clean room name without a fingerprint suffix.
-      - `signalingProofs` - Boolean (default: `true` for admin-backed rooms)
-        controlling whether signed role certificates and ban records are
-        included in initial discovery announcements.
-
-  - `scale` / `...scale([config])` - **(optional)** Opt-in, tree-shakeable room
-    plugin that enables multi-hop overlay scaling as the room grows (see
-    [Scaling large rooms](#scaling-large-rooms)): `'auto'` (default when
-    `scale()` is called with no arguments), `'gossip'`, `'broadcast'`, `'mesh'`,
-    or a `ScaleConfig` object:
-    - `mode` - `'auto' | 'mesh' | 'gossip' | 'broadcast'` (default: `'auto'`).
-    - `maxConnections` - Maximum target direct WebRTC connections per browser in
-      scalable modes (default: `6`, or `fanout + 3` in `'broadcast'` mode).
-    - `minConnections` - Minimum direct connections maintained before closing
-      extra links (default: `3`).
-    - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
-      `'gossip'` (default: `12`).
-    - `fanout` - Number of downstream peers each node forwards to in
-      `'broadcast'` mode and media broadcast trees (default: `3`).
-    - `redundancy` - Number of separate paths used when routing messages across
-      hops (default: `1`).
-    - `maxHops` - Maximum number of hops a relayed packet can travel (default:
-      `8`).
-
-  - `plugins` - **(optional)** Array of `RoomPlugin`s created with
-    `definePlugin` (or `roles()` / `scale()`). Plugins can also be spread
-    directly into the `joinRoom` config object
-    (`{appId, ...scale(), ...roles()}`).
+  - `use` - **(optional)** Array of `RoomPlugin`s created with `roles()`,
+    `scale()`, or `definePlugin()`. TypeScript automatically infers the extra
+    methods added to the returned `Room` instance from the plugins passed in
+    `use` (e.g. `makeState`, `grantRole`, `revokeRole`, `getRoles`, `ban`, and
+    `isBanned` from `roles()`, or `getTopology` from `scale()`). See the
+    [Plugin Authoring Guide](docs/plugins.md) for creating custom plugins.
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
     Object containing strategy-specific relay settings:
@@ -1522,10 +1488,10 @@ Returns an object with the following methods:
 
   Returns a promise resolving to `SelfInfo` for the local participant in this
   room:
-  - `peerId` - The 20-character Base62 endpoint ID (`selfId`).
+  - `peerId` - The 20-character Base62 endpoint ID.
   - `userId` - The local user's 43-character Base64url user identity thumbprint.
-  - `roomId` - The full room ID (including the `.<16-char-base62-fingerprint>`
-    suffix when created with `roles(true)` or `roles({create: true})`).
+  - `roomId` - The full room ID (including the `.~<16-char-base62-fingerprint>`
+    suffix when created with `roles({selfAsAdmin: true})`).
   - `baseRoomId` - The base room name without the fingerprint suffix.
   - `fingerprint` - The 16-character Base62 admin fingerprint from the room ID,
     or `null`.
@@ -1564,18 +1530,19 @@ Returns an object with the following methods:
 
 - ### `getTopology()`
 
-  Returns a `TopologySnapshot` describing how peers in the room are currently
-  connected and routing data: `mode`, `activeMode`
-  (`'mesh' | 'gossip' | 'broadcast'`), `selfId`, `directPeerIds`, `roomPeerIds`,
-  `routes`, `mediaTrees`, and `stats` (`messagesSent`, `messagesReceived`,
-  `messagesForwarded`, `duplicatesDropped`, `signatureFailures`,
-  `lazyRepairsSent`, `lazyRepairsResolved`, `treeReparents`).
+  _(Added to `Room` when `scale(...)` is included in `use: [...]`)_ Returns a
+  `TopologySnapshot` describing how peers in the room are currently connected
+  and routing data: `mode`, `activeMode` (`'mesh' | 'gossip' | 'broadcast'`),
+  `selfId`, `directPeerIds`, `roomPeerIds`, `routes`, `mediaTrees`, and `stats`
+  (`messagesSent`, `messagesReceived`, `messagesForwarded`, `duplicatesDropped`,
+  `signatureFailures`, `lazyRepairsSent`, `lazyRepairsResolved`,
+  `treeReparents`).
 
 - ### `makeState(namespace, initialValue, [config])`
 
-  _(Requires `roles(...)` in `joinRoom` config)_ Creates or retrieves a shared,
-  admin-controlled state container (`AuthoritativeState<T>`) that any peer can
-  read and only authorized roles can update.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Creates or
+  retrieves a shared, admin-controlled state container (`AuthoritativeState<T>`)
+  that any peer can read and only authorized roles can update.
   - `namespace` - Unique name for this state within the room.
   - `initialValue` - Initial state value before any update is received.
   - `config.roles` - **(optional)** Role or array of roles allowed to update
@@ -1597,10 +1564,10 @@ Returns an object with the following methods:
 
 - ### `grantRole(targetId, role, [options])`
 
-  _(Requires `roles(...)` in `joinRoom` config)_ Grants `role` (a role name
-  string or array of strings) to `targetId` (which can be either a `peerId` or a
-  `userId`). Requires the local user to be an `'admin'` or to hold that role
-  with `canDelegate: true`.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Grants
+  `role` (a role name string or array of strings) to `targetId` (which can be
+  either a `peerId` or a `userId`). Requires the local user to be an `'admin'`
+  or to hold that role with `canDelegate: true`.
   - `options.canDelegate` - **(optional)** Boolean allowing the recipient to
     grant those role(s) to other peers as well.
   - `options.expiresInMs` - **(optional)** How long the role remains valid in
@@ -1608,27 +1575,29 @@ Returns an object with the following methods:
 
 - ### `revokeRole(targetId, [role])`
 
-  _(Requires `roles(...)` in `joinRoom` config)_ Revokes `role` (or all roles if
-  omitted) from `targetId` (`peerId` or `userId`). Delegated moderators cannot
-  revoke a root `'admin'`.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Revokes
+  `role` (or all roles if omitted) from `targetId` (`peerId` or `userId`).
+  Delegated moderators cannot revoke a root `'admin'`.
 
 - ### `getRoles([targetId])`
 
-  Returns the array of verified roles currently held by `targetId` (`peerId` or
-  `userId`, or by the local user if `targetId` is omitted).
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Returns the
+  array of verified roles currently held by `targetId` (`peerId` or `userId`, or
+  by the local user if `targetId` is omitted).
 
 - ### `ban(targetId, [options])`
 
-  _(Requires `roles(...)` in `joinRoom` config)_ Permanently bans `targetId`
-  (`peerId` or `userId`) from the room (requires `'admin'` role). Immediately
-  disconnects all endpoints belonging to that peer or user, removes any roles
-  they held, and blocks future connection offers or messages from them.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Permanently
+  bans `targetId` (`peerId` or `userId`) from the room (requires `'admin'`
+  role). Immediately disconnects all endpoints belonging to that peer or user,
+  removes any roles they held, and blocks future connection offers or messages
+  from them.
   - `options.reason` - **(optional)** Optional reason string for the ban.
 
 - ### `isBanned(targetId)`
 
-  Returns `true` if `targetId` (`peerId` or `userId`) has been banned from the
-  room.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Returns
+  `true` if `targetId` (`peerId` or `userId`) has been banned from the room.
 
 - ### `addStream(stream, [options])`
 
@@ -1871,30 +1840,46 @@ Returns an object with the following methods:
 
 ### `roles([config])`
 
-Creates the opt-in room authority module (`RoomModule<'roles'>`) for
-`joinRoom()`. Pass via object spread
-(`joinRoom({appId, ...roles(config)}, roomId)`).
+Creates the opt-in room authority plugin (`RoomPlugin<'roles', RolesRoomApi>`)
+for `joinRoom()`. Pass in `use: [roles(config)]`:
+
+- `roles()` - Enables role and state verification for a participant joining a
+  room (required when joining a self-certifying `<roomId>.~<fingerprint>`).
+- `roles({selfAsAdmin: true})` - Makes the local user (`userId`) a root room
+  admin and appends `.~<16-char-base62-fingerprint>` to `roomId`. Pair with
+  `identity: 'local'` or a persistent `UserIdentity`.
+- `roles({admins: [userId1, userId2]})` - Trusts the specified `userId`s (or
+  16-character Base62 fingerprints) as root room admins on either a fixed room
+  name or alongside `selfAsAdmin: true`.
 
 ### `scale([config])`
 
-Creates the opt-in multi-hop scaling module (`RoomModule<'scale'>`) for
-`joinRoom()`. Pass via object spread
-(`joinRoom({appId, ...scale(config)}, roomId)`).
+Creates the opt-in multi-hop scaling plugin
+(`RoomPlugin<'scale', ScaleRoomApi>`) for `joinRoom()`. Pass in
+`use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`,
+`'broadcast'`, `'mesh'`, or a `ScaleConfig` object:
 
-### `defineRoomModule(name, spec)`
+- `mode` - `'auto' | 'mesh' | 'gossip' | 'broadcast'` (default: `'auto'`).
+- `maxConnections` - Maximum target direct WebRTC connections per browser in
+  scalable modes (default: `6`, or `fanout + 3` in `'broadcast'` mode).
+- `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
+  `'gossip'` (default: `12`).
+- `fanout` - Number of downstream peers each node forwards to in `'broadcast'`
+  mode and media broadcast trees (default: `3`).
 
-Creates a custom or 3rd-party `RoomModule` that can be passed to `joinRoom()`
-via object spread (`...myModule()`) or via `modules: [myModule()]`.
+### `definePlugin(name, spec)`
 
-### `selfId`
-
-A synchronous, self-certifying 20-character Base62 ID string derived from the
-local runtime's ECDSA P-256 public key.
+Creates a custom or 3rd-party `RoomPlugin<TName, TApi>` that can be passed to
+`joinRoom()` via `use: [myPlugin()]`. Any methods returned from `spec.setup()`
+are merged onto the returned `Room` instance and inferred by TypeScript. See the
+[Plugin Authoring Guide](docs/plugins.md).
 
 ### `createUserIdentity()`
 
 Returns a promise resolving to a fresh self-certifying ECDSA P-256
-`UserIdentity` (`{userId, publicKey, userKey, signPubJwk, sign}`).
+`UserIdentity` (`{userId, publicKey, signPubJwk, sign}`). Use
+`exportUserIdentity(identity)` to serialize its private key material if you want
+to persist it in custom storage.
 
 ### `importUserIdentity(input)`
 
@@ -1904,52 +1889,17 @@ is not valid P-256 key material.
 
 ### `exportUserIdentity(identity)`
 
-Exports a `UserIdentity` as a compact `trystero_uk_...` string suitable for
-persisting in custom storage. Throws if the identity's private key is
-non-extractable (e.g. when backed by IndexedDB WebCrypto storage).
-
-### `derivePeerId(publicKey)`
-
-Returns a promise resolving to the deterministic 20-character Base62 `peerId`
-(`sha256(canonicalPubJwk) mod 62²⁰`) for a P-256 public key string or
-`JsonWebKey`.
-
-### `deriveUserId(publicKey)`
-
-Returns a promise resolving to the deterministic 43-character Base64url `userId`
-([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) JWK thumbprint) for a
-P-256 public key string or `JsonWebKey`.
-
-### `verifyPeerIdKey(peerId, publicKey)`
-
-Returns a promise resolving to `true` if `publicKey` is a valid P-256 public key
-that cryptographically derives `peerId`.
-
-### `verifyUserIdKey(userId, publicKey)`
-
-Returns a promise resolving to `true` if `publicKey` is a valid P-256 public key
-that cryptographically derives `userId`.
+Exports a `UserIdentity` (created via `createUserIdentity()` or
+`importUserIdentity()`) as a compact `trystero_uk_...` string suitable for
+persisting in custom storage. Throws if the identity is backed by non-exportable
+browser storage (`'session'` or `'local'`).
 
 ### `createAdminRoom(baseRoomId, [options])`
 
-Resolves a `UserIdentity` (from `options.identity` or `'session'` / `'none'` by
-default) and formats a self-certifying room ID, returning a promise that
-resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
-
-### `parseSelfCertifyingRoomId(roomId)`
-
-Parses a room ID into `{baseRoomId, fingerprint}`, where `fingerprint` is the
-16-character Base62 suffix if present, or `null`.
-
-### `formatSelfCertifyingRoomId(baseRoomId, fingerprint)`
-
-Returns `<baseRoomId>.<fingerprint>` (idempotent if `baseRoomId` already ends
-with `.<fingerprint>`).
-
-### `computePublicKeyFingerprint(publicKey)`
-
-Computes the 16-character Base62 (96-bit) SHA-256 fingerprint of a base64url
-public key string or `JsonWebKey`.
+Resolves a `UserIdentity` (from `options.identity`, defaulting to `'local'` when
+persistent browser storage is available) and formats a self-certifying room ID
+(`<baseRoomId>.~<fingerprint>`), returning a promise that resolves to
+`{roomId, baseRoomId, fingerprint, userId, identity}`.
 
 ### `getRelaySockets()`
 
