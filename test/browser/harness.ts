@@ -110,10 +110,20 @@ export const withStrategyBrowserPair = (
           ...(isRelayStrategy || config.relayConfig ? {relayConfig} : {})
         }
 
-        const getSelfId = () => window.trystero.selfId
+        const getSelfId = async cfg => {
+          const probe = window.trystero.joinRoom(
+            {...cfg, passive: true},
+            '__self_id_probe__'
+          )
+          try {
+            return (await probe.getSelf()).peerId
+          } finally {
+            await probe.leave().catch(() => {})
+          }
+        }
 
-        const selfId1 = await page.evaluate(getSelfId)
-        const selfId2 = await page2.evaluate(getSelfId)
+        const selfId1 = await page.evaluate(getSelfId, roomConfig)
+        const selfId2 = await page2.evaluate(getSelfId, roomConfig)
 
         expect(selfId1).toHaveLength(20)
         expect(selfId1).not.toEqual(selfId2)

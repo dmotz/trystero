@@ -41,12 +41,13 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
             const room = (window[roomId] = window.trystero.joinRoom(
               {
                 ...config,
-                ...window.trystero.scale({
-                  mode: 'broadcast',
-                  maxConnections: 2,
-                  minConnections: 1,
-                  fanout: 2
-                })
+                use: [
+                  window.trystero.scale({
+                    mode: 'broadcast',
+                    maxConnections: 2,
+                    fanout: 2
+                  })
+                ]
               },
               roomId
             ))

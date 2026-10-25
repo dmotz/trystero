@@ -4,8 +4,6 @@ import test from './test.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 // @ts-expect-error
 import createStrategy from '../../packages/core/src/strategy.ts'
-// @ts-expect-error
-import {selfId} from '../../packages/core/src/utils.ts'
 import {MockRTCPeerConnection, waitFor} from './peer-harness.ts'
 
 type Subscriber = {
@@ -58,7 +56,7 @@ const createTestStrategy = (subscribers: Subscriber[]) =>
     announce: () => {}
   })
 
-const nextHigherPeerId = (): string =>
+const nextHigherPeerId = (selfId: string): string =>
   String.fromCharCode(selfId.charCodeAt(0) + 1) + selfId.slice(1)
 
 void test(
@@ -69,7 +67,6 @@ void test(
     const subscribers: Subscriber[] = []
     const appId = `turn-offer-failure-${Date.now()}`
     const roomId = 'turn-offer-room'
-    const remotePeerId = nextHigherPeerId()
     const joinRoom = createTestStrategy(subscribers)
     const errors: string[] = []
     const room = joinRoom(
@@ -79,6 +76,8 @@ void test(
     )
 
     try {
+      const {peerId: selfId} = await room.getSelf()
+      const remotePeerId = nextHigherPeerId(selfId)
       await waitFor(() => subscribers.length >= 1)
       const sub = subscribers[0]
       let offerPayload: Record<string, string> | null = null

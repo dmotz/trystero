@@ -67,11 +67,8 @@ export type TopologyMode = 'mesh' | 'auto' | 'gossip' | 'broadcast'
 export type TopologyConfig = {
   mode?: TopologyMode
   maxConnections?: number
-  minConnections?: number
   autoThreshold?: number
   fanout?: number
-  redundancy?: number
-  maxHops?: number
 }
 
 export type ScaleConfig = TopologyConfig
@@ -115,7 +112,6 @@ export type UserIdentityPersistence = 'none' | 'session' | 'local'
 export type UserIdentity = {
   userId: string
   publicKey: string
-  userKey: string
   signPubJwk: JsonWebKey
   sign: (payload: Uint8Array) => MaybePromise<Uint8Array>
 }
@@ -127,24 +123,21 @@ export type UserIdentityLoaderContext = {
 
 export type UserIdentityLoader = (
   context: UserIdentityLoaderContext
-) => MaybePromise<UserIdentity | JsonWebKey | string>
+) => MaybePromise<UserIdentity>
 
 export type UserIdentityConfig =
+  | UserIdentityPersistence
   | UserIdentity
-  | JsonWebKey
-  | string
   | UserIdentityLoader
 
 export type RolesConfig = {
-  admin?: boolean | string | string[]
-  users?: string[]
-  create?: boolean
-  signalingProofs?: boolean
+  selfAsAdmin?: boolean
+  admins?: string[]
 }
 
 export type AuthorityConfig = RolesConfig
 
-export type RolesInput = boolean | string | string[] | RolesConfig
+export type RolesInput = RolesConfig
 
 export type RoleCertificate = {
   v: 1
@@ -287,11 +280,6 @@ export type KernelRolesProvider = {
     wireMetadata?: JsonValue
   ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
   getAuthorityInfo: () => Promise<RoomAuthorityInfo>
-  getAnnounceExtra: () => Promise<Record<string, unknown> | undefined>
-  onSignalingPayload: (
-    peerId: string,
-    payload: Record<string, unknown>
-  ) => Promise<void> | void
 }
 
 export type KernelScaleProvider = {
@@ -430,9 +418,8 @@ export type RoomKernel = {
 
 export type RoomPlugin<
   TName extends string = string,
-  TApi extends Record<string, unknown> = Record<string, unknown>
+  TApi extends Record<string, unknown> = Record<string, never>
 > = {
-  readonly __trysteroPlugin: true
   readonly name: TName
   readonly resolveRoomId?:
     | ((context: {
@@ -445,17 +432,13 @@ export type RoomPlugin<
     kernel: RoomKernel,
     preResolvedState?: unknown
   ) => TApi | void
-} & {
-  readonly [K in TName]: RoomPlugin<TName, TApi>
 }
 
 export type BaseRoomConfig = {
   appId: string
   identity?: UserIdentityConfig
   limit?: number
-  scale?: RoomPlugin<'scale'>
-  roles?: RoomPlugin<'roles'>
-  plugins?: RoomPlugin[]
+  use?: readonly RoomPlugin<string, any>[]
   maxReceiveBytes?: number
   password?: string
   passive?: boolean
@@ -467,7 +450,6 @@ export type BaseRoomConfig = {
   _test_only_forcedPeerId?: string
   _test_only_mdnsHostFallbackToLoopback?: boolean
   _test_only_sharedPeerIdleMs?: number
-  [key: string]: unknown
 }
 
 export type JoinRoomConfig = BaseRoomConfig & {
@@ -650,17 +632,7 @@ export type SelfInfo = {
   roles: string[]
 }
 
-export type Room = {
-  makeAction: {
-    <T extends DataPayload = DataPayload>(
-      namespace: string,
-      config?: MessageActionConfig<T>
-    ): MessageAction<T>
-    <T extends DataPayload = DataPayload, R extends DataPayload = DataPayload>(
-      namespace: string,
-      config: RequestActionConfig<T, R>
-    ): RequestAction<T, R>
-  }
+export type RolesPluginApi = {
   makeState: <T extends JsonValue = JsonValue>(
     namespace: string,
     initialValue: T,
@@ -675,13 +647,29 @@ export type Room = {
   getRoles: (targetId?: string) => string[]
   ban: (targetId: string, options?: {reason?: string}) => Promise<void>
   isBanned: (targetId: string) => boolean
+}
+
+export type ScalePluginApi = {
+  getTopology: () => TopologySnapshot
+}
+
+export type Room = {
+  makeAction: {
+    <T extends DataPayload = DataPayload>(
+      namespace: string,
+      config?: MessageActionConfig<T>
+    ): MessageAction<T>
+    <T extends DataPayload = DataPayload, R extends DataPayload = DataPayload>(
+      namespace: string,
+      config: RequestActionConfig<T, R>
+    ): RequestAction<T, R>
+  }
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
   isPassive: () => boolean
   getSelf: () => Promise<SelfInfo>
   getPeers: () => Record<string, PeerInfo>
   getUsers: () => Record<string, UserInfo>
-  getTopology: () => TopologySnapshot
   addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
   addTrack: (
@@ -779,6 +767,7 @@ export type TopicSubscriptionContext = {
   roomId: string
   rootTopic: string
   selfTopic: string
+  peerId: string
 }
 
 export type TopicPublishContext = {
@@ -787,6 +776,7 @@ export type TopicPublishContext = {
   roomId: string
   rootTopic: string
   selfTopic: string
+  peerId: string
 }
 
 export type OfferRecord = {
@@ -857,11 +847,34 @@ export type TopicStrategyAdapter<
   ) => MaybePromise<void>
 }
 
-export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (
-  config: TConfig,
+type UnionToIntersection<U> = (
+  U extends unknown ? (k: U) => void : never
+) extends (k: infer I) => void
+  ? I
+  : never
+
+export type InferPluginApi<TPlugin> =
+  TPlugin extends RoomPlugin<string, infer TApi> ? TApi : Record<string, never>
+
+export type RoomWithPlugins<
+  TPlugins extends readonly RoomPlugin<string, any>[] | undefined = undefined
+> = Room &
+  (TPlugins extends readonly (infer P)[]
+    ? [P] extends [never]
+      ? unknown
+      : UnionToIntersection<InferPluginApi<P>>
+    : unknown)
+
+export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (<
+  const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
+    undefined
+>(
+  config: TConfig & {use?: TPlugins},
   roomId: string,
   callbacks?: JoinRoomCallbacks
-) => Room
+) => RoomWithPlugins<TPlugins>) & {
+  readonly __config?: TConfig
+}
 
 export type SocketClient = {
   socket: WebSocket
@@ -989,9 +1002,8 @@ export type SignalContext = {
   onPeerDiscovered?: (
     peerId: string,
     relayId: number,
-    signalPeer: SignalPeer,
-    payload?: Record<string, unknown>
-  ) => Promise<void> | void
+    signalPeer: SignalPeer
+  ) => void
   shouldConnectPeer?: (
     peerId: string,
     direction: 'outbound' | 'inbound'

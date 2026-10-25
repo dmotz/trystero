@@ -5,6 +5,7 @@ import {
   canonicalizePubJwk,
   getCachedPubKeyRecord,
   getOrCreateEndpointIdentity,
+  getResolvedDefaultSelfId,
   isPeerIdKeyCachedValid,
   isUserEndpointProofCachedValid,
   signUserEndpointProof,
@@ -26,7 +27,6 @@ import {
   mkErr,
   noOp,
   resetTimer,
-  selfId as defaultSelfId,
   toBase64,
   toHex,
   toJson
@@ -37,6 +37,7 @@ import type {
   PeerHandlers,
   RoleCertificate,
   RoomPlugin,
+  ScalePluginApi,
   Signal,
   TopologyConfig,
   TopologyMediaTree,
@@ -57,7 +58,6 @@ const defaultMaxConnections = 6
 const defaultMinConnections = 3
 const defaultAutoThreshold = 12
 const defaultFanout = 3
-const defaultRedundancy = 1
 const defaultMaxHops = 8
 const maxSeenMessages = 4_096
 const maxCachedBroadcasts = 256
@@ -67,11 +67,8 @@ const unreachableGraceMs = 80
 export type ResolvedTopologyConfig = {
   mode: TopologyMode
   maxConnections: number
-  minConnections: number
   autoThreshold: number
   fanout: number
-  redundancy: number
-  maxHops: number
 }
 
 export type OverlayStreamInfo = {
@@ -149,11 +146,8 @@ export const normalizeTopologyConfig = (
     return {
       mode: 'auto',
       maxConnections: defaultMaxConnections,
-      minConnections: defaultMinConnections,
       autoThreshold: defaultAutoThreshold,
-      fanout: defaultFanout,
-      redundancy: defaultRedundancy,
-      maxHops: defaultMaxHops
+      fanout: defaultFanout
     }
   }
 
@@ -177,39 +171,16 @@ export const normalizeTopologyConfig = (
     throw mkErr('scale.maxConnections must be an integer >= 2')
   }
 
-  const minConnections =
-    raw.minConnections ?? Math.min(defaultMinConnections, maxConnections)
-  if (
-    !Number.isSafeInteger(minConnections) ||
-    minConnections < 1 ||
-    minConnections > maxConnections
-  ) {
-    throw mkErr('scale.minConnections must be between 1 and maxConnections')
-  }
-
   const autoThreshold = raw.autoThreshold ?? defaultAutoThreshold
   if (!Number.isSafeInteger(autoThreshold) || autoThreshold < 2) {
     throw mkErr('scale.autoThreshold must be an integer >= 2')
   }
 
-  const redundancy = raw.redundancy ?? defaultRedundancy
-  if (!Number.isSafeInteger(redundancy) || redundancy < 1) {
-    throw mkErr('scale.redundancy must be an integer >= 1')
-  }
-
-  const maxHops = raw.maxHops ?? defaultMaxHops
-  if (!Number.isSafeInteger(maxHops) || maxHops < 1 || maxHops > 64) {
-    throw mkErr('scale.maxHops must be between 1 and 64')
-  }
-
   return {
     mode,
     maxConnections,
-    minConnections,
     autoThreshold,
-    fanout,
-    redundancy,
-    maxHops
+    fanout
   }
 }
 
@@ -364,8 +335,10 @@ const buildUndirectedGraph = (
 
   for (const [u, neighbors] of adjacency.entries()) {
     for (const v of neighbors) {
-      ensureNode(u).add(v)
-      ensureNode(v).add(u)
+      if (adjacency.get(v)?.has(u)) {
+        ensureNode(u).add(v)
+        ensureNode(v).add(u)
+      }
     }
   }
 
@@ -430,9 +403,10 @@ export const computeMediaTreeChildren = (
   broadcasterId: string,
   localPeerId: string,
   adjacency: Map<string, Set<string>>,
-  fanout: number
+  fanout: number,
+  directPeerIds?: Iterable<string>
 ): {parentId: string | null; childrenIds: string[]} => {
-  const graph = buildUndirectedGraph(adjacency)
+  const graph = buildUndirectedGraph(adjacency, localPeerId, directPeerIds)
 
   const parentMap = new Map<string, string | null>([[broadcasterId, null]])
   const childrenMap = new Map<string, string[]>()
@@ -564,6 +538,8 @@ const packOverlayControl = (msg: OverlayControlMessage): Uint8Array => {
   return frame
 }
 
+const gossipEnvelopeOverheadBytes = 32
+
 export const packGossipControlFrames = (
   descriptors: PeerDescriptor[],
   downPeers?: string[],
@@ -573,38 +549,26 @@ export const packGossipControlFrames = (
   if (descriptors.length === 0 && !hasDown) {
     return []
   }
-  const single = packOverlayControl({
-    t: 'gossip',
-    descriptors,
-    ...(hasDown ? {down: downPeers!} : {})
-  })
-  if (single.byteLength <= maxFrameBytes) {
-    return [single]
-  }
 
   const frames: Uint8Array[] = []
   let currentDescs: PeerDescriptor[] = []
+  let currentBytes = gossipEnvelopeOverheadBytes
 
   for (const desc of descriptors) {
-    currentDescs.push(desc)
-    const candidate = packOverlayControl({
-      t: 'gossip',
-      descriptors: currentDescs
-    })
-    if (candidate.byteLength > maxFrameBytes) {
-      if (currentDescs.length === 1) {
-        frames.push(candidate)
-        currentDescs = []
-      } else {
-        currentDescs.pop()
-        frames.push(
-          packOverlayControl({
-            t: 'gossip',
-            descriptors: currentDescs
-          })
-        )
-        currentDescs = [desc]
-      }
+    const descBytes = encodeBytes(toJson(desc)).byteLength
+    const addedBytes = (currentDescs.length > 0 ? 1 : 0) + descBytes
+    if (currentDescs.length > 0 && currentBytes + addedBytes > maxFrameBytes) {
+      frames.push(
+        packOverlayControl({
+          t: 'gossip',
+          descriptors: currentDescs
+        })
+      )
+      currentDescs = [desc]
+      currentBytes = gossipEnvelopeOverheadBytes + descBytes
+    } else {
+      currentDescs.push(desc)
+      currentBytes += addedBytes
     }
   }
 
@@ -630,29 +594,28 @@ export const packGossipControlFrames = (
   }
 
   if (remainingDown.length > 0) {
+    const downEnvelopeOverheadBytes = gossipEnvelopeOverheadBytes + 9
     let currentDown: string[] = []
+    let currentDownBytes = downEnvelopeOverheadBytes
     for (const peerId of remainingDown) {
-      currentDown.push(peerId)
-      const candidate = packOverlayControl({
-        t: 'gossip',
-        descriptors: [],
-        down: currentDown
-      })
-      if (candidate.byteLength > maxFrameBytes) {
-        if (currentDown.length === 1) {
-          frames.push(candidate)
-          currentDown = []
-        } else {
-          currentDown.pop()
-          frames.push(
-            packOverlayControl({
-              t: 'gossip',
-              descriptors: [],
-              down: currentDown
-            })
-          )
-          currentDown = [peerId]
-        }
+      const peerIdBytes = encodeBytes(toJson(peerId)).byteLength
+      const addedBytes = (currentDown.length > 0 ? 1 : 0) + peerIdBytes
+      if (
+        currentDown.length > 0 &&
+        currentDownBytes + addedBytes > maxFrameBytes
+      ) {
+        frames.push(
+          packOverlayControl({
+            t: 'gossip',
+            descriptors: [],
+            down: currentDown
+          })
+        )
+        currentDown = [peerId]
+        currentDownBytes = downEnvelopeOverheadBytes + peerIdBytes
+      } else {
+        currentDown.push(peerId)
+        currentDownBytes += addedBytes
       }
     }
     if (currentDown.length > 0) {
@@ -747,6 +710,7 @@ const computeRoomAuthToken = async (
   )
 
 type CryptoIdentity = {
+  peerId: string
   signPrivateKey: CryptoKey
   signPublicKey: CryptoKey
   signPubJwk: JsonWebKey
@@ -756,7 +720,7 @@ type CryptoIdentity = {
 }
 
 const identityCache = new Map<string, Promise<CryptoIdentity>>()
-const verifiedSigBytes = createBoundedCache<string, Uint8Array>(512)
+const verifiedSigBytes = createBoundedCache<string, Uint8Array>(4_096)
 
 const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
   if (a.byteLength !== b.byteLength) {
@@ -771,7 +735,7 @@ const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
 }
 
 const rememberVerifiedSig = (cacheKey: string, bytes: Uint8Array): void => {
-  if (bytes.byteLength <= 4_096) {
+  if (bytes.byteLength <= 2_048) {
     verifiedSigBytes.set(cacheKey, bytes.slice())
   }
 }
@@ -788,7 +752,8 @@ const getOrCreateCryptoIdentity = (peerId: string): Promise<CryptoIdentity> => {
         ])
       ])
       const encPubJwk = await crypto.subtle.exportKey('jwk', encPair.publicKey)
-      return {
+      const res: CryptoIdentity = {
+        peerId: endpointId.peerId,
         signPrivateKey: endpointId.signPrivateKey,
         signPublicKey: endpointId.signPublicKey,
         signPubJwk: endpointId.signPubJwk,
@@ -796,6 +761,10 @@ const getOrCreateCryptoIdentity = (peerId: string): Promise<CryptoIdentity> => {
         encPublicKey: encPair.publicKey,
         encPubJwk
       }
+      if (endpointId.peerId !== peerId) {
+        identityCache.set(endpointId.peerId, Promise.resolve(res))
+      }
+      return res
     })()
     identityCache.set(peerId, cached)
   }
@@ -917,7 +886,7 @@ export type OverlayManager = {
 }
 
 export const createOverlayManager = ({
-  selfId = defaultSelfId,
+  selfId: initialSelfId,
   appId = '',
   roomId: initialRoomId = '',
   password = '',
@@ -931,14 +900,21 @@ export const createOverlayManager = ({
   onRelayMediaStream,
   onRelayMediaTrack
 }: OverlayManagerDeps): OverlayManager => {
-  void getOrCreateEndpointIdentity(selfId)
+  let selfId = initialSelfId || getResolvedDefaultSelfId()
+  void getOrCreateEndpointIdentity(initialSelfId).then(ep => {
+    if (!initialSelfId && ep.peerId !== selfId) {
+      knownRoster.delete(selfId)
+      selfId = ep.peerId
+      knownRoster.add(selfId)
+    }
+  })
   let roomId = initialRoomId
   const config = normalizeTopologyConfig(topology)
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
   const directPeers = new Map<string, PeerHandle>()
   const requiredDirectPeers = new Set<string>()
   const virtualPeers = new Map<string, PeerHandle>()
-  const knownRoster = new Set<string>([selfId])
+  const knownRoster = new Set<string>(selfId ? [selfId] : [])
   const privilegedPeers = new Set<string>()
   const bannedPeers = new Set<string>()
   const bannedKeyThumbprints = new Set<string>()
@@ -952,6 +928,7 @@ export const createOverlayManager = ({
   const prunedDirectPeers = new Set<string>()
   const departedPeers = new Set<string>()
   const downPeersSeq = new Map<string, number>()
+  const pendingDownCandidates = new Set<string>()
   const unreachableTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   // Seen-message deduplication cache and recent broadcast cache for Plumtree lazy repair
@@ -1160,7 +1137,8 @@ export const createOverlayManager = ({
         broadcasterId,
         selfId,
         adjacency,
-        fanout
+        fanout,
+        directPeers.keys()
       )
       mediaTreeCache.set(cacheKey, cached)
     }
@@ -1368,6 +1346,12 @@ export const createOverlayManager = ({
 
     const id = identityReady ?? (await getOrCreateCryptoIdentity(selfId))
     identityReady = id
+    if (!initialSelfId && id.peerId !== selfId) {
+      knownRoster.delete(selfId)
+      selfId = id.peerId
+      knownRoster.add(selfId)
+      descriptor.peerId = selfId
+    }
     descriptor.signPubKey = id.signPubJwk
     descriptor.encPubKey = id.encPubJwk
     if (getLocalUserIdentity) {
@@ -1769,6 +1753,11 @@ export const createOverlayManager = ({
   ): Promise<string> => {
     const id = identityReady ?? (await getOrCreateCryptoIdentity(selfId))
     identityReady = id
+    if (!initialSelfId && id.peerId !== selfId) {
+      knownRoster.delete(selfId)
+      selfId = id.peerId
+      knownRoster.add(selfId)
+    }
     const combined = buildOverlaySignedBytes(canonicalHeader, payload)
     const sig = toBase64(
       await ecdsaSign(id.signPrivateKey, combined as BufferSource)
@@ -1836,7 +1825,7 @@ export const createOverlayManager = ({
     }
 
     const inChurnWindow = Date.now() - lastChurnAtMs < churnBoostWindowMs
-    if (inChurnWindow || config.redundancy >= allNeighbors.length) {
+    if (inChurnWindow) {
       return {eager: allNeighbors, lazy: []}
     }
 
@@ -1849,16 +1838,9 @@ export const createOverlayManager = ({
       childrenIds.filter(id => allNeighbors.includes(id))
     )
 
-    // Ensure at least redundancy paths (or all neighbors if tree hasn't converged yet)
+    // Ensure at least one path (or all neighbors if tree hasn't converged yet)
     if (eagerSet.size === 0) {
       allNeighbors.forEach(id => eagerSet.add(id))
-    } else if (config.redundancy > 1) {
-      for (const id of allNeighbors) {
-        if (eagerSet.size >= childrenIds.length + config.redundancy - 1) {
-          break
-        }
-        eagerSet.add(id)
-      }
     }
 
     const eager = [...eagerSet]
@@ -1924,7 +1906,7 @@ export const createOverlayManager = ({
       ...(sig ? {s: sig} : {})
     }
 
-    forwardBroadcastPacket(selfId, msgId, config.maxHops, header, frame)
+    forwardBroadcastPacket(selfId, msgId, defaultMaxHops, header, frame)
 
     if (onProgress) {
       const allRoomPeers = new Set([...directPeers.keys(), ...keys(routes)])
@@ -1948,13 +1930,6 @@ export const createOverlayManager = ({
     const route = routes[destPeerId]
     if (route && route.nextHop !== excludePeerId) {
       if (sendToDirectNeighbor(route.nextHop, packet)) {
-        if (
-          config.redundancy > 1 &&
-          route.backupNextHop &&
-          route.backupNextHop !== excludePeerId
-        ) {
-          sendToDirectNeighbor(route.backupNextHop, packet)
-        }
         return
       }
     }
@@ -2046,7 +2021,7 @@ export const createOverlayManager = ({
         }
         const packet = packOverlayBinary(
           overlayUnicastKind,
-          config.maxHops,
+          defaultMaxHops,
           header,
           payloadToSend
         )
@@ -2262,6 +2237,7 @@ export const createOverlayManager = ({
         }
         departedPeers.delete(d.peerId)
         downPeersSeq.delete(d.peerId)
+        pendingDownCandidates.delete(d.peerId)
         knownRoster.add(d.peerId)
         descriptors.set(d.peerId, d)
         adjacency.set(
@@ -2287,39 +2263,71 @@ export const createOverlayManager = ({
         newlyUpdated.push(d)
       }
 
-      if (Array.isArray(msg.down)) {
-        for (const downId of msg.down.slice(0, maxGossipEntriesPerFrame)) {
-          if (
-            typeof downId === 'string' &&
-            downId !== selfId &&
-            !directPeers.has(downId) &&
-            !departedPeers.has(downId) &&
-            (descriptors.has(downId) ||
-              knownRoster.has(downId) ||
-              virtualPeers.has(downId))
-          ) {
-            if (pinnedSignKeys.has(downId)) {
-              const targetDesc = descriptors.get(downId)
-              const hasAuthorizedReporter =
-                !targetDesc ||
-                targetDesc.neighbors.length === 0 ||
-                targetDesc.neighbors.some(n => {
-                  const nDesc = descriptors.get(n)
-                  return Boolean(nDesc && !nDesc.neighbors.includes(downId))
-                })
-              if (!hasAuthorizedReporter) {
+      const explicitDownClaims = new Set<string>(
+        Array.isArray(msg.down)
+          ? msg.down
+              .slice(0, maxGossipEntriesPerFrame)
+              .filter((id): id is string => typeof id === 'string')
+          : []
+      )
+      const candidatesToEvaluate = new Set<string>([
+        ...explicitDownClaims,
+        ...pendingDownCandidates
+      ])
+
+      for (const downId of candidatesToEvaluate) {
+        if (
+          downId === selfId ||
+          directPeers.has(downId) ||
+          departedPeers.has(downId) ||
+          (!descriptors.has(downId) &&
+            !knownRoster.has(downId) &&
+            !virtualPeers.has(downId))
+        ) {
+          pendingDownCandidates.delete(downId)
+          continue
+        }
+
+        if (pinnedSignKeys.has(downId)) {
+          const targetDesc = descriptors.get(downId)
+          if (targetDesc && targetDesc.neighbors.length > 0) {
+            const knownNeighbors = targetDesc.neighbors.filter(
+              n => n !== selfId && !departedPeers.has(n) && descriptors.has(n)
+            )
+            const droppedCount = knownNeighbors.filter(n => {
+              const nDesc = descriptors.get(n)
+              return Boolean(nDesc && !nDesc.neighbors.includes(downId))
+            }).length
+            const anyDepartedNeighbor = targetDesc.neighbors.some(n =>
+              departedPeers.has(n)
+            )
+
+            if (droppedCount === 0 && !anyDepartedNeighbor) {
+              if (explicitDownClaims.has(downId)) {
                 stats.signatureFailures++
-                continue
               }
+              continue
             }
 
-            lastChurnAtMs = Date.now()
-            const lastSeq = descriptors.get(downId)?.seq ?? 0
-            recordDepartedPeer(downId, lastSeq)
-            purgePeerFromGraph(downId)
-            newDown.push(downId)
+            const requiredConfirmations = Math.min(2, knownNeighbors.length)
+            if (
+              knownNeighbors.length > 0 &&
+              droppedCount < requiredConfirmations
+            ) {
+              if (pendingDownCandidates.size < maxDepartedPeers) {
+                pendingDownCandidates.add(downId)
+              }
+              continue
+            }
           }
         }
+
+        pendingDownCandidates.delete(downId)
+        lastChurnAtMs = Date.now()
+        const lastSeq = descriptors.get(downId)?.seq ?? 0
+        recordDepartedPeer(downId, lastSeq)
+        purgePeerFromGraph(downId)
+        newDown.push(downId)
       }
 
       if (newlyUpdated.length > 0 || newDown.length > 0) {
@@ -2352,7 +2360,7 @@ export const createOverlayManager = ({
     }
 
     const {kind, ttl: rawTtl, header, payload} = parsed
-    const ttl = Math.min(rawTtl, config.maxHops)
+    const ttl = Math.min(rawTtl, defaultMaxHops)
 
     if (kind === overlayBroadcastKind) {
       const origin = typeof header['o'] === 'string' ? header['o'] : ''
@@ -3015,7 +3023,11 @@ export const createOverlayManager = ({
         return true
       }
 
-      if (directPeers.size < config.minConnections) {
+      const minDirectPeers = Math.min(
+        defaultMinConnections,
+        config.maxConnections
+      )
+      if (directPeers.size < minDirectPeers) {
         return true
       }
 
@@ -3267,7 +3279,7 @@ export const createOverlayManager = ({
 
 export const scale = (
   topology?: TopologyMode | TopologyConfig
-): RoomPlugin<'scale', {getTopology: () => TopologySnapshot}> => {
+): RoomPlugin<'scale', ScalePluginApi> => {
   // Validate eagerly at call time
   normalizeTopologyConfig(topology)
 

@@ -13,7 +13,6 @@ import {
   toHex,
   toJson
 } from './crypto'
-import {defaultSelfId} from './identity'
 import type {
   BaseRoomConfig,
   RelayConfig,
@@ -55,8 +54,6 @@ export const genId = (n: number): string => {
   }
   return out
 }
-
-export const selfId = defaultSelfId
 
 export const all = Promise.all.bind(Promise)
 
@@ -328,11 +325,11 @@ export const watchOnline = (): (() => void) => {
 
 export const log = (...args: unknown[]): void => console.log(...args)
 
-export const selfCertifyingRoomRegex = /^(.*)\.([0-9A-Za-z]{16})$/
+export const selfCertifyingRoomRegex = /^(.*)\.~([0-9A-Za-z]{16})$/
 
 export const definePlugin = <
   TName extends string = string,
-  TApi extends Record<string, unknown> = Record<string, unknown>
+  TApi extends Record<string, unknown> = Record<string, never>
 >(
   name: TName,
   spec: {
@@ -349,44 +346,56 @@ export const definePlugin = <
     ) => TApi | void
   }
 ): RoomPlugin<TName, TApi> => {
-  const plugin = {} as RoomPlugin<TName, TApi>
-  Object.defineProperties(plugin, {
-    __trysteroPlugin: {value: true, enumerable: false},
-    name: {value: name, enumerable: false},
-    ...(spec.resolveRoomId
-      ? {resolveRoomId: {value: spec.resolveRoomId, enumerable: false}}
-      : {}),
-    setup: {value: spec.setup, enumerable: false},
-    [name]: {value: plugin, enumerable: true}
-  })
-  return plugin
+  if (!name || typeof name !== 'string') {
+    throw mkErr('plugin name must be a non-empty string')
+  }
+  if (!spec || typeof spec.setup !== 'function') {
+    throw mkErr(`plugin "${name}" must provide a setup(kernel) function`)
+  }
+  return {
+    name,
+    ...(spec.resolveRoomId ? {resolveRoomId: spec.resolveRoomId} : {}),
+    setup: spec.setup
+  }
 }
 
-export const isPlugin = (val: unknown): val is RoomPlugin =>
-  Boolean(
-    val &&
-    typeof val === 'object' &&
-    (val as {__trysteroPlugin?: unknown}).__trysteroPlugin === true
-  )
-
-export const extractPlugins = (config: unknown): RoomPlugin[] => {
-  if (!config || typeof config !== 'object') {
+export const getConfiguredPlugins = (
+  use?: readonly RoomPlugin<string, any>[]
+): RoomPlugin<string, any>[] => {
+  if (use === undefined) {
     return []
   }
-  const seen = new Set<RoomPlugin>()
-  const list: RoomPlugin[] = []
-  const add = (item: unknown): void => {
-    if (isPlugin(item) && !seen.has(item)) {
-      seen.add(item)
-      list.push(item)
-    }
+  if (!Array.isArray(use)) {
+    throw mkErr('use must be an array of room plugins')
   }
-  for (const val of values(config as Record<string, unknown>)) {
-    if (Array.isArray(val)) {
-      val.forEach(add)
-    } else {
-      add(val)
+  const byName = new Map<string, RoomPlugin<string, any>>()
+  for (const item of use) {
+    if (
+      !item ||
+      typeof item !== 'object' ||
+      typeof item.name !== 'string' ||
+      !item.name ||
+      typeof item.setup !== 'function'
+    ) {
+      throw mkErr(
+        'invalid plugin in use[]; expected a plugin created with definePlugin()'
+      )
     }
+    byName.set(item.name, item)
   }
-  return list
+  const ordered: RoomPlugin<string, any>[] = []
+  const rolesPlugin = byName.get('roles')
+  if (rolesPlugin) {
+    ordered.push(rolesPlugin)
+    byName.delete('roles')
+  }
+  const scalePlugin = byName.get('scale')
+  if (scalePlugin) {
+    ordered.push(scalePlugin)
+    byName.delete('scale')
+  }
+  for (const p of byName.values()) {
+    ordered.push(p)
+  }
+  return ordered
 }

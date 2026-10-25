@@ -8,7 +8,6 @@ import {
   keys,
   libName,
   makeSocket,
-  selfId,
   sha1,
   toJson,
   type JoinRoom,
@@ -25,6 +24,7 @@ type TopicState = {
   announceMs: number
   handler: (data: TrackerMessage) => void
   isActive: boolean
+  peerId: string
   startPassiveAnnouncements: () => void
   stopPassiveAnnouncements: () => void
   token: symbol
@@ -83,13 +83,14 @@ const getInfoHash = async (topic: string): Promise<string> => {
 const send = async (
   client: SocketClient,
   topic: string,
+  peerId: string,
   payload: Record<string, unknown>
 ): Promise<void> =>
   client.send(
     toJson({
       action: trackerAction,
       info_hash: await getInfoHash(topic),
-      peer_id: selfId,
+      peer_id: peerId,
       ...payload
     })
   )
@@ -220,7 +221,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
             }
 
             if ((data.offer || data.answer) && topic && data.offer_id) {
-              if (data.peer_id === selfId) {
+              if (state?.peerId && data.peer_id === state.peerId) {
                 return
               }
 
@@ -268,6 +269,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
       clearTimeout(passiveAnnounceTimeout)
       passiveAnnounceTimeout = undefined
     }
+    const peerId = context?.peerId ?? ''
     const topicState: TopicState = {
       announce: async () => {
         if (states[rootTopic]?.token !== subscriptionToken) {
@@ -275,7 +277,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         }
 
         if (!topicState.isActive) {
-          void send(client, rootTopic, {
+          void send(client, rootTopic, peerId, {
             left: 0,
             numwant: requestedPeers,
             offers: []
@@ -310,7 +312,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           offer: {type: 'offer', sdp: offer}
         }))
 
-        void send(client, rootTopic, {
+        void send(client, rootTopic, peerId, {
           numwant: requestedPeers,
           offers
         })
@@ -326,7 +328,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
               peerId: data.peer_id
             },
             (_, signal) =>
-              void send(client, rootTopic, {
+              void send(client, rootTopic, peerId, {
                 answer: {
                   type: 'answer',
                   sdp: fromJson<{answer: string}>(signal).answer
@@ -354,6 +356,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
         }
       },
       isActive: !context?.isPassive,
+      peerId,
       startPassiveAnnouncements: (): void => {
         stopPassiveAnnouncements()
 
@@ -423,7 +426,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   }
 })
 
-export const joinRoom: JoinRoom<TorrentRoomConfig> = (
+export const joinRoom: JoinRoom<TorrentRoomConfig> = ((
   config,
   roomId,
   callbacks
@@ -435,28 +438,20 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = (
     },
     roomId,
     callbacks
-  )
+  )) as JoinRoom<TorrentRoomConfig>
 
 export const getRelaySockets = relayManager.getSockets
 
 export {
-  computePublicKeyFingerprint,
   createAdminRoom,
   createUserIdentity,
   definePlugin,
-  derivePeerId,
-  deriveUserId,
   exportUserIdentity,
-  formatSelfCertifyingRoomId,
   importUserIdentity,
-  parseSelfCertifyingRoomId,
   pauseRelayReconnection,
   resumeRelayReconnection,
   roles,
-  scale,
-  selfId,
-  verifyPeerIdKey,
-  verifyUserIdKey
+  scale
 } from '@trystero-p2p/core'
 
 export const defaultRelayUrls = [

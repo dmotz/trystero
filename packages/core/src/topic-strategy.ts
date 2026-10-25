@@ -1,6 +1,7 @@
+import {getResolvedDefaultSelfId} from './identity'
 import {shouldActivatePassiveRoom} from './signal-handler'
 import createStrategy from './strategy'
-import {mkErr, selfId, toJson} from './utils'
+import {mkErr, toJson} from './utils'
 import type {
   BaseRoomConfig,
   JoinRoom,
@@ -37,12 +38,14 @@ const makeTopicContext = <
   roomId: string
   rootTopic: string
   selfTopic: string
+  peerId: string
 } => ({
   kind,
   appId: context.appId,
   roomId: context.roomId,
   rootTopic,
-  selfTopic
+  selfTopic,
+  peerId: context.peerId ?? getResolvedDefaultSelfId()
 })
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
@@ -126,7 +129,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
           if (
             context.isPassive &&
-            shouldActivatePassiveRoom(msg, context.peerId ?? selfId)
+            shouldActivatePassiveRoom(
+              msg,
+              context.peerId ?? getResolvedDefaultSelfId()
+            )
           ) {
             await ensureSelfSubscription()
           }
@@ -156,7 +162,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       const result = await publishTopic(
         relay,
         rootTopic,
-        toJson({peerId: context.peerId ?? selfId, ...extraPayload}),
+        toJson({
+          peerId: context.peerId ?? getResolvedDefaultSelfId(),
+          ...extraPayload
+        }),
         makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )
 

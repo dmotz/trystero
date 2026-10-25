@@ -318,7 +318,7 @@ const probeTrystero = async (
       pages.map(page =>
         page.evaluate(
           async ({config, deadlineMs}) => {
-            const {joinRoom, selfId} = (
+            const {joinRoom} = (
               window as unknown as {
                 trystero: typeof import('@trystero-p2p/nostr')
               }
@@ -352,12 +352,14 @@ const probeTrystero = async (
                   console.log(
                     'relay-probe: peer connected; sending action request'
                   )
-                  void action
-                    .request(selfId, {target: peerId, timeoutMs: deadlineMs})
-                    .then(response => {
-                      console.log('relay-probe: action response received')
-                      resolve({selfId, peerId, response})
-                    }, reject)
+                  void room.getSelf().then(({peerId: selfId}) =>
+                    action
+                      .request(selfId, {target: peerId, timeoutMs: deadlineMs})
+                      .then(response => {
+                        console.log('relay-probe: action response received')
+                        resolve({selfId, peerId, response})
+                      }, reject)
+                  )
                 }
               })
             } finally {

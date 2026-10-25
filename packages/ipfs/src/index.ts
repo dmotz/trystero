@@ -84,29 +84,25 @@ const joinRoomStrategy: JoinRoom<IpfsRoomConfig> = createTopicStrategy({
   }
 })
 
-export const joinRoom: JoinRoom<IpfsRoomConfig> = (config, roomId, callbacks) =>
+export const joinRoom: JoinRoom<IpfsRoomConfig> = ((
+  config,
+  roomId,
+  callbacks
+) =>
   joinRoomStrategy(
     {...config, trickleIce: config.trickleIce ?? false},
     roomId,
     callbacks
-  )
+  )) as JoinRoom<IpfsRoomConfig>
 
 export {
-  computePublicKeyFingerprint,
   createAdminRoom,
   createUserIdentity,
   definePlugin,
-  derivePeerId,
-  deriveUserId,
   exportUserIdentity,
-  formatSelfCertifyingRoomId,
   importUserIdentity,
-  parseSelfCertifyingRoomId,
   roles,
-  scale,
-  selfId,
-  verifyPeerIdKey,
-  verifyUserIdKey
+  scale
 } from '@trystero-p2p/core'
 
 export type * from '@trystero-p2p/core'

@@ -8,8 +8,6 @@ import createRoom from '../../packages/core/src/room.ts'
 import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import createStrategy from '../../packages/core/src/strategy.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
-import {selfId} from '../../packages/core/src/utils.ts'
 import {
   BufferedPeer,
   linkPeers,
@@ -528,8 +526,6 @@ void test(
   async () => {
     const subscribers: Subscriber[] = []
     const appId = `reply-announce-${Date.now()}`
-    const lowerPeerId =
-      String.fromCharCode(selfId.charCodeAt(0) - 1) + selfId.slice(1)
 
     const joinRoom = createStrategy({
       init: () => ({}),
@@ -546,6 +542,9 @@ void test(
     )
 
     try {
+      const {peerId: selfId} = await room.getSelf()
+      const lowerPeerId =
+        String.fromCharCode(selfId.charCodeAt(0) - 1) + selfId.slice(1)
       await waitFor(() => subscribers.length >= 1)
       const sub = subscribers[0]
 
@@ -579,8 +578,6 @@ void test(
   async () => {
     const subscribers: Subscriber[] = []
     const appId = `no-reply-${Date.now()}`
-    const higherPeerId =
-      String.fromCharCode(selfId.charCodeAt(0) + 1) + selfId.slice(1)
 
     const joinRoom = createStrategy({
       init: () => ({}),
@@ -597,6 +594,9 @@ void test(
     )
 
     try {
+      const {peerId: selfId} = await room.getSelf()
+      const higherPeerId =
+        String.fromCharCode(selfId.charCodeAt(0) + 1) + selfId.slice(1)
       await waitFor(() => subscribers.length >= 1)
       const sub = subscribers[0]
 

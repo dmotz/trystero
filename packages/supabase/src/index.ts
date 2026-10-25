@@ -215,7 +215,7 @@ const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
 
 const joins = new Map<string, JoinRoom<SupabaseRoomConfig>>()
 
-export const joinRoom: JoinRoom<SupabaseRoomConfig> = (
+export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((
   config,
   roomId,
   callbacks
@@ -227,24 +227,16 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = (
     joins.set(key, join)
   }
   return join(config, roomId, callbacks)
-}
+}) as JoinRoom<SupabaseRoomConfig>
 
 export {
-  computePublicKeyFingerprint,
   createAdminRoom,
   createUserIdentity,
   definePlugin,
-  derivePeerId,
-  deriveUserId,
   exportUserIdentity,
-  formatSelfCertifyingRoomId,
   importUserIdentity,
-  parseSelfCertifyingRoomId,
   roles,
-  scale,
-  selfId,
-  verifyPeerIdKey,
-  verifyUserIdKey
+  scale
 } from '@trystero-p2p/core'
 
 export type * from '@trystero-p2p/core'

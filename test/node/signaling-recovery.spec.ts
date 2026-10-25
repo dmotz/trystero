@@ -5,10 +5,11 @@ import {
   createSignalHandler,
   resetOfferState
 } from '../../packages/core/src/signal-handler.ts'
-import {selfId} from '../../packages/core/src/utils.ts'
 import initPeer from '../../packages/core/src/peer.ts'
 import {OfferManager} from '../../packages/core/src/offer-manager.ts'
 import {MockRTCPeerConnection} from './peer-harness.ts'
+
+const selfId = 'K'.repeat(20)
 
 const settle = async () => {
   for (let i = 0; i < 20; i++) {
@@ -61,7 +62,8 @@ const fixture = t => {
     connectPeer() {},
     disconnectPeer() {},
     announceIntervals: [],
-    announceIntervalMs: 5333
+    announceIntervalMs: 5333,
+    selfId
   }
   const receive = createSignalHandler(ctx)(0)
   const send = (_, message) => messages.push(JSON.parse(message))

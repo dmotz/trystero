@@ -1,7 +1,7 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {createTopicStrategy, selfId} from '../../packages/core/src/index.ts'
+import {createTopicStrategy} from '../../packages/core/src/index.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import {MockPeer} from './peer-harness.ts'
 
@@ -220,6 +220,7 @@ void test(
       'room'
     )
     try {
+      const {peerId: selfId} = await room.getSelf()
       await waitFor(() => root !== undefined)
       await root.onMessage(root.topic, {peerId: selfId + 'z'})
       await waitFor(() => offers >= 1)

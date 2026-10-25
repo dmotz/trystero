@@ -3,6 +3,7 @@ import {
   extractDtlsFingerprints,
   fromBase64Url,
   getOrCreateEndpointIdentity,
+  getResolvedDefaultSelfId,
   toBase64Url,
   verifyPeerIdKey,
   verifyUserIdKey,
@@ -14,7 +15,6 @@ import {
   keys,
   mkErr,
   resetTimer,
-  selfId,
   toError,
   toErrorMessage,
   toHex,
@@ -187,6 +187,7 @@ export const createIdentityHandshake = (params: {
       params.getUserIdentity(),
       localEndpointP
     ])
+    const effectiveSelfId = params.selfId || localEndpoint.peerId
     const peer = params.getPeerHandle?.(remotePeerId)
     const localDtls = extractDtlsFingerprints(
       peer?.connection?.localDescription?.sdp
@@ -220,7 +221,7 @@ export const createIdentityHandshake = (params: {
           'trystero-id-hs:v1',
           params.appId,
           resolvedRoomId,
-          params.selfId,
+          effectiveSelfId,
           remotePeerId,
           initNonce,
           resp.nonce,
@@ -285,7 +286,7 @@ export const createIdentityHandshake = (params: {
         params.appId,
         resolvedRoomId,
         remotePeerId,
-        params.selfId,
+        effectiveSelfId,
         init.nonce,
         respNonce,
         remoteDtls.length > 0 ? remoteDtls : init.dtls,
@@ -477,7 +478,7 @@ const toHandshakeErrorMessage = (error: Error): string => {
 }
 
 export const createHandshakeManager = ({
-  selfId: localSelfId = selfId,
+  selfId: localSelfId,
   onPeerHandshake,
   onHandshakeError,
   handshakeTimeoutMs,
@@ -670,11 +671,26 @@ export const createHandshakeManager = ({
           })
         })
 
-      const isInitiator = localSelfId < id
+      const immediateSelfId = localSelfId || getResolvedDefaultSelfId()
+      const runHandshake = immediateSelfId
+        ? Promise.resolve(
+            onPeerHandshake?.(
+              id,
+              sendHandshake,
+              receiveHandshake,
+              immediateSelfId < id
+            )
+          )
+        : getOrCreateEndpointIdentity().then(ep =>
+            onPeerHandshake?.(
+              id,
+              sendHandshake,
+              receiveHandshake,
+              ep.peerId < id
+            )
+          )
 
-      void Promise.resolve(
-        onPeerHandshake?.(id, sendHandshake, receiveHandshake, isInitiator)
-      )
+      void runHandshake
         .then(() => markLocalHandshakePassed(id, peer))
         .catch(err => {
           if (err === roomFullHostRejectErr) {

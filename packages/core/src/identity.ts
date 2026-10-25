@@ -273,6 +273,20 @@ export type EndpointIdentity = {
   sign: (payload: Uint8Array) => Promise<Uint8Array>
 }
 
+let fallbackSelfId = ''
+DEV: {
+  const chars = new Uint8Array(peerIdLength)
+  crypto.getRandomValues(chars)
+  for (const b of chars) {
+    fallbackSelfId += base62Alphabet[b % 62]!
+  }
+}
+
+let resolvedDefaultSelfId = fallbackSelfId
+export const getResolvedDefaultSelfId = (): string => resolvedDefaultSelfId
+
+let defaultEndpointIdentityPromise: Promise<EndpointIdentity> | null = null
+
 const generateEndpointIdentity = async (
   forcedPeerId?: string
 ): Promise<EndpointIdentity> => {
@@ -304,9 +318,17 @@ const generateEndpointIdentity = async (
   }
 }
 
-export const defaultEndpointIdentity: EndpointIdentity =
-  await generateEndpointIdentity()
-export const defaultSelfId: string = defaultEndpointIdentity.peerId
+export const getDefaultEndpointIdentity = (): Promise<EndpointIdentity> =>
+  (defaultEndpointIdentityPromise ??= generateEndpointIdentity().then(id => {
+    resolvedDefaultSelfId = id.peerId
+    DEV: if (fallbackSelfId && fallbackSelfId !== id.peerId) {
+      resolvedTestEndpointCanonicalJwk.set(
+        fallbackSelfId,
+        canonicalizePubJwk(id.signPubJwk)
+      )
+    }
+    return id
+  }))
 
 const endpointIdentityByPeerId = new Map<string, Promise<EndpointIdentity>>()
 const registeredTestForcedPeerIds = new Set<string>()
@@ -315,8 +337,12 @@ const resolvedTestEndpointCanonicalJwk = new Map<string, string>()
 export const registerTestForcedPeerId = (
   peerId: string
 ): Promise<EndpointIdentity> => {
-  if (!peerId || peerId === defaultSelfId) {
-    return Promise.resolve(defaultEndpointIdentity)
+  if (
+    !peerId ||
+    peerId === resolvedDefaultSelfId ||
+    peerId === fallbackSelfId
+  ) {
+    return getDefaultEndpointIdentity()
   }
   const existing = endpointIdentityByPeerId.get(peerId)
   if (existing) {
@@ -336,12 +362,16 @@ export const registerTestForcedPeerId = (
 }
 
 export const getOrCreateEndpointIdentity = (
-  peerId = defaultSelfId
+  peerId?: string
 ): Promise<EndpointIdentity> => {
-  DEV: if (peerId && peerId !== defaultSelfId) {
+  DEV: if (
+    peerId &&
+    peerId !== resolvedDefaultSelfId &&
+    peerId !== fallbackSelfId
+  ) {
     return registerTestForcedPeerId(peerId)
   }
-  return Promise.resolve(defaultEndpointIdentity)
+  return getDefaultEndpointIdentity()
 }
 
 export const isPeerIdKeyCachedValid = (
@@ -416,6 +446,8 @@ export const verifyUserIdKey = async (
   return Boolean(rec && rec.userId === userId)
 }
 
+const extractableUserKeys = new WeakMap<UserIdentity, string>()
+
 const buildUserIdentityFromKeys = async (
   privateKey: CryptoKey,
   publicKey: CryptoKey | undefined,
@@ -445,14 +477,15 @@ const buildUserIdentityFromKeys = async (
       )
     )
 
-  return {
+  const identity: UserIdentity = {
     userId,
     publicKey: encodedPub,
-    userKey,
     signPubJwk,
     sign: (payload: Uint8Array) =>
       ecdsaSign(privateKey, payload as BufferSource)
   }
+  extractableUserKeys.set(identity, userKey)
+  return identity
 }
 
 export const createUserIdentity = async (): Promise<UserIdentity> => {
@@ -614,10 +647,11 @@ export const importUserIdentity = async (
 }
 
 export const exportUserIdentity = (identity: UserIdentity): string => {
-  if (!identity || typeof identity.userKey !== 'string' || !identity.userKey) {
+  const userKey = identity ? extractableUserKeys.get(identity) : undefined
+  if (!userKey) {
     throw mkErr('user identity private key is non-extractable')
   }
-  return identity.userKey
+  return userKey
 }
 
 const isUserIdentityObjectStructural = (val: unknown): val is UserIdentity =>
@@ -642,11 +676,8 @@ const coerceCustomUserIdentity = async (
       'invalid custom user identity; userId does not match signPubJwk'
     )
   }
-  if (typeof val === 'string' || (val && typeof val === 'object')) {
-    return importUserIdentity(val as string | JsonWebKey)
-  }
   throw mkErr(
-    'invalid custom user identity; expected a UserIdentity, P-256 private JWK, or exported userKey'
+    'invalid custom user identity; expected a UserIdentity (use importUserIdentity() for raw keys or JWKs)'
   )
 }
 
@@ -723,24 +754,25 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
     }
     return
   }
-  if (typeof raw === 'string' || (raw && typeof raw === 'object')) {
-    if (tryParsePrivateJwk(raw as string | JsonWebKey)) {
-      return
-    }
-    throw mkErr(
-      'invalid user identity key material; expected an exported userKey or valid P-256 private JWK'
-    )
-  }
   throw mkErr(
-    'invalid custom user identity; expected a UserIdentity, P-256 private JWK, or exported userKey'
+    'invalid custom user identity; expected "none", "session", "local", a UserIdentity (use importUserIdentity() for raw keys or JWKs), or a loader function'
   )
 }
 
-export const defaultUserIdentity: UserIdentity = await createUserIdentity()
+let defaultUserIdentityPromise: Promise<UserIdentity> | null = null
+let resolvedDefaultUserId = ''
+DEV: {
+  const slug = toBase64Url(encodeBytes('trystero-test-uid:__default__'))
+  resolvedDefaultUserId = slug.padEnd(43, '0').slice(0, 43)
+}
 
-const runtimeUserIdentityByScope = new Map<string, Promise<UserIdentity>>([
-  ['__default__', Promise.resolve(defaultUserIdentity)]
-])
+export const getDefaultUserIdentity = (): Promise<UserIdentity> =>
+  (defaultUserIdentityPromise ??= createUserIdentity().then(id => {
+    resolvedDefaultUserId = id.userId
+    return id
+  }))
+
+const runtimeUserIdentityByScope = new Map<string, Promise<UserIdentity>>()
 const sessionMutexByApp = new Map<string, Promise<UserIdentity>>()
 const localMutexByApp = new Map<string, Promise<UserIdentity>>()
 const testUserIdentityByPeerId = new Map<string, Promise<UserIdentity>>()
@@ -750,6 +782,9 @@ const getOrCreateRuntimeUserIdentity = (
   appId?: string
 ): Promise<UserIdentity> => {
   const scopeKey = appId || '__default__'
+  if (scopeKey === '__default__') {
+    return getDefaultUserIdentity()
+  }
   let cached = runtimeUserIdentityByScope.get(scopeKey)
   if (!cached) {
     cached = createUserIdentity()
@@ -761,8 +796,12 @@ const getOrCreateRuntimeUserIdentity = (
 export const getDefaultTestUserIdentity = (
   peerId: string
 ): Promise<UserIdentity> => {
-  if (!peerId || peerId === defaultSelfId) {
-    return Promise.resolve(defaultUserIdentity)
+  if (
+    !peerId ||
+    peerId === resolvedDefaultSelfId ||
+    peerId === fallbackSelfId
+  ) {
+    return getDefaultUserIdentity()
   }
   let cached = testUserIdentityByPeerId.get(peerId)
   if (!cached) {
@@ -778,8 +817,13 @@ export const getDefaultTestUserIdentity = (
 export const getDefaultTestUserIdentityUserIdSync = (
   peerId: string
 ): string => {
-  if (!peerId || peerId === defaultSelfId) {
-    return defaultUserIdentity.userId
+  if (
+    !peerId ||
+    peerId === resolvedDefaultSelfId ||
+    peerId === fallbackSelfId
+  ) {
+    void getDefaultUserIdentity()
+    return resolvedDefaultUserId
   }
   const resolved = resolvedTestUserIdentityByPeerId.get(peerId)
   if (resolved) {
@@ -821,9 +865,10 @@ const loadOrCreateFromWebStorage = (
           /* fall through */
         }
       }
-      storage.setItem(key, created.userKey)
+      const exportedKey = exportUserIdentity(created)
+      storage.setItem(key, exportedKey)
       const verifyRead = storage.getItem(key)
-      if (verifyRead && verifyRead !== created.userKey) {
+      if (verifyRead && verifyRead !== exportedKey) {
         return await importUserIdentity(verifyRead)
       }
       return created
@@ -854,7 +899,6 @@ const buildUserIdentityFromIdbRecord = (
 ): UserIdentity => ({
   userId: rec.userId,
   publicKey: rec.publicKey,
-  userKey: '',
   signPubJwk: rec.signPubJwk,
   sign: (payload: Uint8Array) =>
     ecdsaSign(rec.privateKey, payload as BufferSource)
@@ -1034,14 +1078,18 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
   return promise
 }
 
+export const canPersistLocalIdentity = (): boolean =>
+  hasIndexedDB() || Boolean(getLocalStorage())
+
 export const resolveUserIdentity = async (
   appId: string,
   roomId: string,
   config?: {
     identity?: UserIdentityConfig
+    preferLocal?: boolean
     _test_only_forcedPeerId?: string
   },
-  localSelfId = defaultSelfId
+  localSelfId = resolvedDefaultSelfId
 ): Promise<UserIdentity> => {
   const raw = config?.identity
 
@@ -1062,10 +1110,21 @@ export const resolveUserIdentity = async (
   let forcedPeerId: string | undefined
   DEV: forcedPeerId =
     config?._test_only_forcedPeerId ??
-    (localSelfId !== defaultSelfId ? localSelfId : undefined)
+    (localSelfId &&
+    localSelfId !== resolvedDefaultSelfId &&
+    localSelfId !== fallbackSelfId
+      ? localSelfId
+      : undefined)
 
-  const mode: UserIdentityPersistence =
-    raw ?? (getSessionStorage() && !forcedPeerId ? 'session' : 'none')
+  const defaultMode: UserIdentityPersistence = forcedPeerId
+    ? 'none'
+    : config?.preferLocal && canPersistLocalIdentity()
+      ? 'local'
+      : getSessionStorage()
+        ? 'session'
+        : 'none'
+
+  const mode: UserIdentityPersistence = raw ?? defaultMode
 
   if (mode === 'none') {
     DEV: if (forcedPeerId) {

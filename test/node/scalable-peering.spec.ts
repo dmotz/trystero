@@ -15,7 +15,8 @@ import {
 import {
   computeUserIdFingerprint,
   createUserIdentity,
-  exportUserIdentity
+  exportUserIdentity,
+  importUserIdentity
 } from '../../packages/core/src/identity.ts'
 import {ecdsaSign} from '../../packages/core/src/crypto.ts'
 import {inspectActionWireHeader} from '../../packages/core/src/action-wire.ts'
@@ -194,7 +195,7 @@ const createOverlayCluster = async ({
         appId: 'scale-test-app',
         roomId: 'scale-test-room',
         password,
-        ...scale(resolvedTopology)
+        use: [scale(resolvedTopology)]
       }
     )
 
@@ -1319,7 +1320,7 @@ void test('End-to-end createTopicStrategy integration with config._test_only_for
     {
       appId: 'topic-e2e-overlay',
       _test_only_forcedPeerId: 'peer-alpha',
-      ...scale('gossip'),
+      use: [scale('gossip')],
       rtcPolyfill: MockRTCPeerConnection as any
     },
     'lobby'
@@ -1328,7 +1329,7 @@ void test('End-to-end createTopicStrategy integration with config._test_only_for
     {
       appId: 'topic-e2e-overlay',
       _test_only_forcedPeerId: 'peer-beta',
-      ...scale({mode: 'gossip', maxConnections: 6}),
+      use: [scale({mode: 'gossip', maxConnections: 6})],
       rtcPolyfill: MockRTCPeerConnection as any
     },
     'lobby'
@@ -1717,8 +1718,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   const forwardedParsed = unpackOverlayBinary(clampedForwardedFrames[0]!)!
   assert.equal(
     forwardedParsed.ttl,
-    3,
-    'incoming TTL=255 must be clamped to maxHops(4) - 1 = 3 on forwarding'
+    7,
+    'incoming TTL=255 must be clamped to defaultMaxHops(8) - 1 = 7 on forwarding'
   )
 
   // Attack F: In-Transit Unicast AES-GCM Ciphertext Bit-Flipping
@@ -1893,17 +1894,26 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
   assert.ok(bobRoute.backupNextHop, 'expected disjoint backupNextHop to Bob')
   assert.notEqual(bobRoute.nextHop, bobRoute.backupNextHop)
 
-  // Send 5 broadcasts and 5 E2EE unicasts from Alice -> Bob while blackholeRelay drops 100% of data packets
+  // Send 5 broadcasts from Alice -> Bob while blackholeRelay drops 100% of data packets
+  // (Plumtree eager/lazy recovery delivers via honestRelay), then mark blackholeRelay link dead
+  // on Alice so unicast automatically fails over to backupNextHop (honestRelay)
   for (let i = 0; i < 5; i++) {
     await alice.broadcastInline(encodeBytes(`byz-broadcast-${i}`))
+  }
+
+  await waitFor(() => bobDelivered.length === 5, 2_000)
+  assert.ok(
+    blackholeDroppedCount >= 1,
+    `expected blackholeRelay to drop data packets (dropped ${blackholeDroppedCount})`
+  )
+
+  // Now simulate primary nextHop (relay-blackhole) link failure so unicast uses disjoint backupNextHop
+  alice.removeDirectPeer('relay-blackhole')
+  for (let i = 0; i < 5; i++) {
     alice.sendUnicast('bob', encodeBytes(`byz-unicast-${i}`))
   }
 
   await waitFor(() => bobDelivered.length === 10, 2_000)
-  assert.ok(
-    blackholeDroppedCount >= 5,
-    `expected blackholeRelay to drop data packets (dropped ${blackholeDroppedCount})`
-  )
 
   for (let i = 0; i < 5; i++) {
     assert.ok(
@@ -1987,7 +1997,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'host-peer',
         identity: hostIdentity,
-        ...roles(true),
+        use: [roles({selfAsAdmin: true})],
         rtcPolyfill: MockRTCPeerConnection as any
       },
       'game-lobby'
@@ -2003,12 +2013,23 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       hostAuth.fingerprint,
       computeUserIdFingerprint(hostIdentity.userId)
     )
-    assert.equal(hostAuth.roomId, `game-lobby.${hostAuth.fingerprint}`)
+    assert.equal(hostAuth.roomId, `game-lobby.~${hostAuth.fingerprint}`)
     assert.equal(hostAuth.isAdmin, true)
     assert.deepEqual(hostAuth.roles, ['admin'])
     assert.equal(hostAuth.userId, hostIdentity.userId)
 
-    // Joining a self-certifying roomId WITHOUT roles() throws an error
+    // Room IDs with a single dot + 16 alphanumeric chars (e.g. lobby-${Math.random()}) must NOT throw without roles()
+    const dottedRoom = joinRoom(
+      {
+        appId: 'auth-bootstrap-app',
+        _test_only_forcedPeerId: 'dotted-room-peer',
+        rtcPolyfill: MockRTCPeerConnection as any
+      },
+      `lobby-0.${hostAuth.fingerprint}`
+    )
+    createdRooms.push(dottedRoom)
+
+    // Joining a self-certifying roomId (. ~ separator) WITHOUT roles() throws an error
     assert.throws(
       () =>
         joinRoom(
@@ -2027,7 +2048,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       {
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'guest-peer',
-        ...roles(),
+        use: [roles()],
         rtcPolyfill: MockRTCPeerConnection as any
       },
       hostAuth.roomId
@@ -2040,14 +2061,14 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     assert.equal(guestAuth.isAdmin, false)
     assert.deepEqual(guestAuth.roles, [])
 
-    // Impostor attempts to claim admin status on the existing self-certifying roomId
+    // Impostor whose userId does not match the room fingerprint and is not in admins[] does not get admin status
     const impostorIdentity = await createUserIdentity()
     const impostorRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'impostor-peer',
         identity: impostorIdentity,
-        ...roles([impostorIdentity.userId]),
+        use: [roles()],
         rtcPolyfill: MockRTCPeerConnection as any
       },
       hostAuth.roomId
@@ -2060,13 +2081,33 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       'a userId whose fingerprint does not match the self-certifying roomId must not grant admin status'
     )
 
+    // Configured co-admins in admins: [...] ARE honored even in fingerprinted rooms
+    const coAdminIdentity = await createUserIdentity()
+    const coAdminRoom = joinRoom(
+      {
+        appId: 'auth-bootstrap-app',
+        _test_only_forcedPeerId: 'coadmin-peer',
+        identity: coAdminIdentity,
+        use: [roles({admins: [coAdminIdentity.userId]})],
+        rtcPolyfill: MockRTCPeerConnection as any
+      },
+      hostAuth.roomId
+    )
+    createdRooms.push(coAdminRoom)
+    const coAdminAuth = await coAdminRoom.getSelf()
+    assert.equal(
+      coAdminAuth.isAdmin,
+      true,
+      'configured co-admins in admins: [...] must be honored in fingerprinted rooms'
+    )
+
     // Rejoining with the saved host UserIdentity automatically restores root admin status on the same roomId (with roles())
     const rejoinedHostRoom = joinRoom(
       {
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'host-rejoined',
-        identity: exportUserIdentity(hostIdentity),
-        ...roles(),
+        identity: await importUserIdentity(exportUserIdentity(hostIdentity)),
+        use: [roles()],
         rtcPolyfill: MockRTCPeerConnection as any
       },
       hostAuth.roomId
@@ -2083,7 +2124,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'fixed-host-peer',
         identity: hostIdentity,
-        ...roles({admin: hostIdentity.userId}),
+        use: [roles({admins: [hostIdentity.userId]})],
         rtcPolyfill: MockRTCPeerConnection as any
       },
       'clean-slug'
@@ -2099,7 +2140,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       {
         appId: 'auth-bootstrap-app',
         _test_only_forcedPeerId: 'fixed-guest-peer',
-        ...roles(hostIdentity.userId),
+        use: [roles({admins: [hostIdentity.userId]})],
         rtcPolyfill: MockRTCPeerConnection as any
       },
       'clean-slug'
@@ -2135,8 +2176,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
         selfId: id,
         appId,
         roomId,
-        ...scale({mode: 'gossip', maxConnections: 2}),
-        ...roles(),
+        use: [scale({mode: 'gossip', maxConnections: 2}), roles()],
         identity: peerIdentity
       }
     )
@@ -2315,7 +2355,7 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
         appId,
         roomId,
         identity,
-        ...roles(coAdmins)
+        use: [roles({admins: coAdmins})]
       }
     )
 
@@ -2363,8 +2403,8 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
 
   await waitFor(
     () =>
-      admin1.getTopology().directPeerIds.length === 2 &&
-      viewer1.getTopology().directPeerIds.length === 2,
+      Object.keys(admin1.getPeers()).length === 2 &&
+      Object.keys(viewer1.getPeers()).length === 2,
     2_000
   )
 
@@ -2579,7 +2619,7 @@ void test('Broadcast tree root pinning for verified admins, Hop-1 unauthorized b
         selfId: id,
         appId,
         roomId,
-        ...roles(),
+        use: [roles()],
         identity: peerIdentity
       }
     )
@@ -2602,8 +2642,8 @@ void test('Broadcast tree root pinning for verified admins, Hop-1 unauthorized b
 
     await waitFor(
       () =>
-        rooms.get('admin')!.getTopology().directPeerIds.length === 2 &&
-        rooms.get('honest')!.getTopology().directPeerIds.length === 2,
+        Object.keys(rooms.get('admin')!.getPeers()).length === 2 &&
+        Object.keys(rooms.get('honest')!.getPeers()).length === 2,
       2_000
     )
 
@@ -2637,7 +2677,7 @@ void test('Broadcast tree root pinning for verified admins, Hop-1 unauthorized b
     assert.equal(rooms.get('admin')!.isBanned('mallory'), true)
     assert.equal(rooms.get('honest')!.isBanned('mallory'), true)
     assert.equal(
-      rooms.get('honest')!.getTopology().directPeerIds.includes('mallory'),
+      'mallory' in rooms.get('honest')!.getPeers(),
       false,
       'banned peer must be immediately disconnected from honest peers'
     )
@@ -2646,7 +2686,7 @@ void test('Broadcast tree root pinning for verified admins, Hop-1 unauthorized b
     connectDirect('honest', 'mallory')
     await wait(50)
     assert.equal(
-      rooms.get('honest')!.getTopology().directPeerIds.includes('mallory'),
+      'mallory' in rooms.get('honest')!.getPeers(),
       false,
       'banned peer reconnection attempt must be rejected'
     )
@@ -2676,8 +2716,8 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     roomB1.fingerprint,
     'same UserIdentity must deterministically derive the same self-certifying fingerprint'
   )
-  assert.equal(roomA1.roomId, `lobby.${roomA1.fingerprint}`)
-  assert.equal(roomB1.roomId, `general.${roomB1.fingerprint}`)
+  assert.equal(roomA1.roomId, `lobby.~${roomA1.fingerprint}`)
+  assert.equal(roomB1.roomId, `general.~${roomB1.fingerprint}`)
   assert.notEqual(
     roomA1.fingerprint,
     roomOther.fingerprint,
@@ -2753,8 +2793,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
         selfId: id,
         appId,
         roomId,
-        ...scale({mode: 'gossip', maxConnections: 2}),
-        ...roles(),
+        use: [scale({mode: 'gossip', maxConnections: 2}), roles()],
         identity: peerIdentity
       }
     )
@@ -3288,7 +3327,7 @@ void test('Third-party plugin injection via definePlugin (spread and plugins arr
       selfId: 'custom-peer',
       appId: 'plugin-app',
       roomId: 'plugin-room',
-      ...telemetryPlugin('mod1')
+      use: [telemetryPlugin('mod1')]
     }
   )
 
@@ -3309,7 +3348,7 @@ void test('Third-party plugin injection via definePlugin (spread and plugins arr
       selfId: 'custom-peer-2',
       appId: 'plugin-app',
       roomId: 'plugin-room-2',
-      plugins: [telemetryPlugin('mod2')]
+      use: [telemetryPlugin('mod2')]
     }
   )
   assert.deepEqual((room2 as any).getEvents(), [
@@ -3480,12 +3519,14 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
         selfId: id,
         appId,
         roomId,
-        ...scale({
-          mode: 'gossip',
-          maxConnections: 6,
-          fanout: 4
-        }),
-        ...roles(),
+        use: [
+          scale({
+            mode: 'gossip',
+            maxConnections: 6,
+            fanout: 4
+          }),
+          roles()
+        ],
         identity: peerIdentity
       }
     )
@@ -3572,11 +3613,12 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
         selfId: id,
         appId: 'c2-boundary-app',
         roomId: 'c2-boundary-room',
-        ...scale({
-          mode: 'gossip',
-          maxConnections: 2,
-          redundancy: 1
-        })
+        use: [
+          scale({
+            mode: 'gossip',
+            maxConnections: 2
+          })
+        ]
       }
     )
     const chatAction = room.makeAction<string>('chat', {
@@ -3779,8 +3821,7 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
         selfId: id,
         appId,
         roomId,
-        ...scale({mode: 'mesh'}),
-        ...roles(),
+        use: [scale({mode: 'mesh'}), roles()],
         identity: usersByPeer[id]!
       }
     )
@@ -3861,17 +3902,7 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       sig: capturedRevocation.sig
     }
 
-    // Attacker attempts to apply/inject the forged ban record via signaling proofs and wire
-    const adminBridge = getRoomSignalingBridge(adminRoom)!
-    const modBridge = getRoomSignalingBridge(modRoom)!
-    await adminBridge.onSignalingPayload?.('attacker-peer', {
-      bans: [forgedBan]
-    })
-    await modBridge.onSignalingPayload?.('attacker-peer', {
-      bans: [forgedBan]
-    })
-
-    // Also craft a raw '$auth' wire frame carrying {t: 'ban', ban: forgedBan} and inject it into admin-peer and mod-peer
+    // Craft a raw '$auth' wire frame carrying {t: 'ban', ban: forgedBan} and inject it into admin-peer and mod-peer
     const revokeFrame = capturedAuthFrames.find(f =>
       decodeBytes(f).includes('{"t":"revoke"')
     )!
@@ -4351,6 +4382,213 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
   } finally {
     alice.destroy()
     relay.destroy()
+    bob.destroy()
+    mallory.destroy()
+  }
+})
+
+void test('Mutual edge confirmation, multi-neighbor down eviction, ephemeral identity warning, non-circular plugins, and deleted stubs', async () => {
+  // 1. Non-circular plugin objects & deleted stubs on bare room
+  const serializedConfig = JSON.stringify({
+    appId: 'json-test',
+    use: [roles(), scale()]
+  })
+  assert.ok(serializedConfig.includes('"name":"roles"'))
+  assert.ok(serializedConfig.includes('"name":"scale"'))
+
+  const bareRoom = createRoom(
+    () => {},
+    () => {},
+    () => {},
+    {
+      selfId: 'bare-peer',
+      appId: 'bare-app',
+      roomId: 'bare-room'
+    }
+  )
+  assert.equal((bareRoom as any).makeState, undefined)
+  assert.equal((bareRoom as any).grantRole, undefined)
+  assert.equal((bareRoom as any).revokeRole, undefined)
+  assert.equal((bareRoom as any).getRoles, undefined)
+  assert.equal((bareRoom as any).ban, undefined)
+  assert.equal((bareRoom as any).isBanned, undefined)
+  assert.equal((bareRoom as any).getTopology, undefined)
+  await bareRoom.leave()
+
+  // 2. Ephemeral identity with selfAsAdmin logs a warning, and removed signalingProofs option is rejected
+  const warnings: string[] = []
+  const origWarn = console.warn
+  console.warn = (...args: any[]) => {
+    warnings.push(args.map(String).join(' '))
+  }
+  try {
+    const defaultProofsRoom = createRoom(
+      () => {},
+      () => {},
+      () => {},
+      {
+        selfId: 'host-default-proofs',
+        appId: 'proof-app',
+        roomId: 'proof-room',
+        identity: 'none',
+        use: [roles({selfAsAdmin: true})]
+      }
+    )
+    await defaultProofsRoom.getSelf()
+    assert.ok(
+      warnings.some(w => w.includes('ephemeral identity')),
+      'roles({selfAsAdmin: true}) with ephemeral identity must warn about orphanable room'
+    )
+    await defaultProofsRoom.leave()
+
+    assert.throws(
+      () => roles({selfAsAdmin: true, signalingProofs: true} as any),
+      /Unknown roles config option "signalingProofs"/,
+      'removed signalingProofs option must be rejected'
+    )
+  } finally {
+    console.warn = origWarn
+  }
+
+  // 3. Mutual edge confirmation & multi-neighbor down eviction confirmation
+  // Topology: alice is connected to BOTH relay1 and relay2; bob is connected to relay1, relay2, and mallory.
+  const makeOverlay = (id: string) =>
+    createOverlayManager({
+      selfId: id,
+      appId: 'mutual-app',
+      roomId: 'mutual-room',
+      topology: {mode: 'gossip', maxConnections: 4},
+      onVirtualPeerJoin: () => {},
+      onVirtualPeerLeave: () => {},
+      onDeliverData: () => {}
+    })
+
+  const alice = makeOverlay('alice')
+  const relay1 = makeOverlay('relay1')
+  const relay2 = makeOverlay('relay2')
+  const bob = makeOverlay('bob')
+  const mallory = makeOverlay('mallory')
+
+  const wirePair = (
+    idA: string,
+    ovA: ReturnType<typeof createOverlayManager>,
+    idB: string,
+    ovB: ReturnType<typeof createOverlayManager>
+  ) => {
+    const handleA = {
+      isDead: false,
+      connection: {} as any,
+      channel: {readyState: 'open'} as any,
+      getOffer: async () => undefined,
+      signal: async () => undefined,
+      sendData: (data: Uint8Array) => {
+        if (!handleA.isDead) {
+          queueMicrotask(() => ovB.handleOverlayFrame(idA, data.slice().buffer))
+        }
+      },
+      destroy: () => {
+        handleA.isDead = true
+      },
+      setHandlers: () => {},
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as any,
+      removeTrack: () => {},
+      replaceTrack: async () => {}
+    }
+    const handleB = {
+      ...handleA,
+      sendData: (data: Uint8Array) => {
+        if (!handleB.isDead) {
+          queueMicrotask(() => ovA.handleOverlayFrame(idB, data.slice().buffer))
+        }
+      },
+      destroy: () => {
+        handleB.isDead = true
+      }
+    }
+    ovA.addDirectPeer(idB, handleA)
+    ovB.addDirectPeer(idA, handleB)
+    return {handleA, handleB}
+  }
+
+  try {
+    wirePair('alice', alice, 'relay1', relay1)
+    wirePair('alice', alice, 'relay2', relay2)
+    wirePair('relay1', relay1, 'bob', bob)
+    wirePair('relay2', relay2, 'bob', bob)
+    wirePair('mallory', mallory, 'bob', bob)
+
+    await waitFor(() => bob.getSnapshot().roomPeerIds.includes('alice'), 2_000)
+
+    // 3a. Mallory unilaterally claims 'alice' as a direct neighbor in a signed descriptor (without Alice claiming Mallory).
+    // Bob must NOT route to Alice via Mallory!
+    const malloryId = await mallory.getLocalCryptoIdentity()
+    const forgedMalloryDesc: any = {
+      peerId: 'mallory',
+      seq: 50,
+      neighbors: ['alice', 'bob'],
+      signPubKey: malloryId.signPubJwk,
+      encPubKey: malloryId.encPubJwk
+    }
+    const forgedCanonical = encodeBytes(
+      JSON.stringify([
+        forgedMalloryDesc.peerId,
+        forgedMalloryDesc.seq,
+        forgedMalloryDesc.neighbors,
+        [],
+        forgedMalloryDesc.signPubKey,
+        forgedMalloryDesc.encPubKey,
+        null,
+        null
+      ])
+    )
+    forgedMalloryDesc.sig = Buffer.from(
+      await ecdsaSign(malloryId.signPrivateKey, forgedCanonical as BufferSource)
+    ).toString('base64')
+    bob.handleOverlayFrame(
+      'mallory',
+      new Uint8Array([
+        overlayFrameVersion,
+        1,
+        ...encodeBytes(
+          JSON.stringify({t: 'gossip', descriptors: [forgedMalloryDesc]})
+        )
+      ]).slice().buffer
+    )
+    await wait(30)
+
+    const routeToAlice = bob.getRoute('alice')
+    assert.ok(routeToAlice)
+    assert.notEqual(
+      routeToAlice.nextHop,
+      'mallory',
+      'unilateral neighbor claim by mallory must not attract routes to alice'
+    )
+
+    // 3b. Single neighbor (relay2) drops alice and gossips down: ['alice'].
+    // Because alice has 2 known neighbors (relay1 and relay2) and relay1 still lists alice,
+    // bob must NOT evict alice on a single neighbor's word!
+    relay2.removeDirectPeer('alice')
+    await wait(50)
+    assert.equal(
+      bob.getSnapshot().roomPeerIds.includes('alice'),
+      true,
+      'single neighbor dropping alice must not evict alice while relay1 still confirms her'
+    )
+
+    // 3c. Once relay1 ALSO drops alice, both of alice's known neighbors have confirmed she is down, so bob evicts alice.
+    relay1.removeDirectPeer('alice')
+    await waitFor(() => !bob.getSnapshot().roomPeerIds.includes('alice'), 2_000)
+    assert.equal(
+      bob.getSnapshot().roomPeerIds.includes('alice'),
+      false,
+      'alice must be evicted once 2 neighbors confirm she dropped'
+    )
+  } finally {
+    alice.destroy()
+    relay1.destroy()
+    relay2.destroy()
     bob.destroy()
     mallory.destroy()
   }

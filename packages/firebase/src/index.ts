@@ -15,7 +15,6 @@ import {
   createTopicStrategy,
   fromJson,
   libName,
-  selfId,
   type BaseRelayConfig,
   type BaseRoomConfig,
   type JoinRoom,
@@ -160,7 +159,7 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
     }
   },
 
-  publishTopic: (rootRef, topic, msg, {kind, rootTopic, selfTopic}) => {
+  publishTopic: (rootRef, topic, msg, {kind, rootTopic, selfTopic, peerId}) => {
     const roomRef = child(rootRef, rootTopic)
     const key = roomKey(rootTopic, selfTopic)
 
@@ -206,7 +205,7 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
       return
     }
 
-    const signalRef = push(child(roomRef, getPath(topic, selfId)))
+    const signalRef = push(child(roomRef, getPath(topic, peerId)))
 
     void onDisconnect(signalRef).remove()
     void set(signalRef, msg)
@@ -227,21 +226,13 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
 })
 
 export {
-  computePublicKeyFingerprint,
   createAdminRoom,
   createUserIdentity,
   definePlugin,
-  derivePeerId,
-  deriveUserId,
   exportUserIdentity,
-  formatSelfCertifyingRoomId,
   importUserIdentity,
-  parseSelfCertifyingRoomId,
   roles,
-  scale,
-  selfId,
-  verifyPeerIdKey,
-  verifyUserIdKey
+  scale
 } from '@trystero-p2p/core'
 
 export type * from '@trystero-p2p/core'

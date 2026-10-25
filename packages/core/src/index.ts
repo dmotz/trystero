@@ -8,17 +8,15 @@ export {
   definePlugin,
   encodeBytes,
   entries,
-  extractPlugins,
   fromJson,
   genId,
+  getConfiguredPlugins,
   getRelays,
-  isPlugin,
   keys,
   libName,
   makeSocket,
   pauseRelayReconnection,
   resumeRelayReconnection,
-  selfId,
   socketGetter,
   strToNum,
   toHex,
@@ -26,24 +24,14 @@ export {
   values
 } from './utils'
 
-export {
-  computePublicKeyFingerprint,
-  createAdminRoom,
-  formatSelfCertifyingRoomId,
-  parseSelfCertifyingRoomId,
-  roles
-} from './authority'
+export {createAdminRoom, roles} from './authority'
 
 export {scale} from './overlay'
 
 export {
   createUserIdentity,
-  derivePeerId,
-  deriveUserId,
   exportUserIdentity,
-  importUserIdentity,
-  verifyPeerIdKey,
-  verifyUserIdKey
+  importUserIdentity
 } from './identity'
 
 export type {
@@ -59,6 +47,7 @@ export type {
   BaseRelayConfig,
   BaseRoomConfig,
   DataPayload,
+  InferPluginApi,
   InternalAction,
   JoinError,
   JoinErrorHandler,
@@ -93,11 +82,14 @@ export type {
   RoleRevocationRecord,
   RolesConfig,
   RolesInput,
+  RolesPluginApi,
   Room,
   RoomAuthorityInfo,
   RoomKernel,
   RoomPlugin,
+  RoomWithPlugins,
   ScaleConfig,
+  ScalePluginApi,
   SelfInfo,
   KernelRolesProvider,
   KernelScaleProvider,

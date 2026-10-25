@@ -1,21 +1,22 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
 import test from './test.ts'
+import * as corePublicExports from '../../packages/core/src/index.ts'
 import {
   createTopicStrategy,
   createUserIdentity,
-  derivePeerId,
-  deriveUserId,
   exportUserIdentity,
   importUserIdentity,
-  roles,
-  selfId,
-  verifyPeerIdKey,
-  verifyUserIdKey
+  roles
 } from '../../packages/core/src/index.ts'
 import {
+  derivePeerId,
+  deriveUserId,
+  getDefaultEndpointIdentity,
   signUserEndpointProof,
-  verifyUserEndpointProof
+  verifyPeerIdKey,
+  verifyUserEndpointProof,
+  verifyUserIdKey
 } from '../../packages/core/src/identity.ts'
 import {waitFor} from './peer-harness.ts'
 
@@ -283,7 +284,8 @@ const createMemorySignalBus = () => {
   return {makeJoinRoom}
 }
 
-void test('Identity primitives: selfId is 20-char Base62 and userId is 43-char Base64url JWK thumbprint', async () => {
+void test('Identity primitives: peerId is 20-char Base62, selfId is not exported, and userId is 43-char Base64url JWK thumbprint', async () => {
+  const {peerId: selfId} = await getDefaultEndpointIdentity()
   assert.equal(typeof selfId, 'string')
   assert.equal(selfId.length, 20)
   assert.match(selfId, /^[0-9A-Za-z]{20}$/)
@@ -307,10 +309,31 @@ void test('Identity primitives: selfId is 20-char Base62 and userId is 43-char B
   assert.equal(await verifyPeerIdKey(derivedPeerId, otherUser.publicKey), false)
 
   const exported = exportUserIdentity(user)
+  assert.equal('userKey' in user, false)
   assert.ok(exported.startsWith('trystero_uk_'))
   const importedFromStr = await importUserIdentity(exported)
+  assert.equal('userKey' in importedFromStr, false)
   assert.equal(importedFromStr.userId, user.userId)
   assert.deepEqual(importedFromStr.publicKey, user.publicKey)
+
+  for (const droppedHelper of [
+    'selfId',
+    'computePublicKeyFingerprint',
+    'formatSelfCertifyingRoomId',
+    'parseSelfCertifyingRoomId',
+    'derivePeerId',
+    'deriveUserId',
+    'verifyPeerIdKey',
+    'verifyUserIdKey',
+    'extractPlugins',
+    'isPlugin'
+  ]) {
+    assert.equal(
+      droppedHelper in corePublicExports,
+      false,
+      `${droppedHelper} must not be publicly exported`
+    )
+  }
 
   await assert.rejects(
     () => importUserIdentity('low-entropy-passphrase'),
@@ -337,18 +360,32 @@ void test('Identity config validation & persistence modes: none, session, local,
   const {makeJoinRoom} = createMemorySignalBus()
   const joinRoom = makeJoinRoom()
 
-  // Rejects arbitrary low-entropy strings synchronously
+  // Rejects arbitrary strings or un-imported key strings synchronously
   assert.throws(
     () =>
       joinRoom(
         {
           appId: 'validation-app',
-          identity: 'alice' as any,
+          identity: 'sesion' as any,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'room-1'
       ),
-    /invalid user identity key material|exported userKey/i
+    /invalid custom user identity/i
+  )
+
+  const tempUser = await createUserIdentity()
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'validation-app',
+          identity: exportUserIdentity(tempUser) as any,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        'room-1'
+      ),
+    /importUserIdentity/
   )
 
   // Throws synchronously when 'session' or 'local' is explicitly requested without storage
@@ -474,7 +511,7 @@ void test('Identity config validation & persistence modes: none, session, local,
         _test_only_forcedPeerId: 'peer-c1',
         identity: async ctx => {
           loaderContext = ctx
-          return exportUserIdentity(customUser)
+          return importUserIdentity(exportUserIdentity(customUser))
         },
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -965,7 +1002,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-admin',
           identity: adminUser,
-          ...roles(true),
+          use: [roles({selfAsAdmin: true})],
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'activist-hq'
@@ -977,7 +1014,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-alice-1',
           identity: aliceUser,
-          ...roles(),
+          use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId
@@ -1000,7 +1037,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-alice-2',
           identity: aliceUser,
-          ...roles(),
+          use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId
@@ -1048,7 +1085,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-attacker-1',
           identity: attackerUser,
-          ...roles(),
+          use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId
@@ -1064,7 +1101,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-attacker-2',
           identity: attackerUser,
-          ...roles(),
+          use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         authInfo.roomId,
@@ -1086,7 +1123,7 @@ void test(
           appId,
           _test_only_forcedPeerId: 'peer-limiter',
           identity: limiterUser,
-          ...roles(),
+          use: [roles()],
           limit: 1,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },

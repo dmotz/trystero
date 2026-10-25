@@ -1,5 +1,8 @@
+import {isSelfAsAdminPlugin} from './authority'
 import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
 import {
+  getDefaultEndpointIdentity,
+  getResolvedDefaultSelfId,
   registerTestForcedPeerId,
   resolveUserIdentity,
   validateIdentityConfig
@@ -21,7 +24,7 @@ import {
 import {
   all,
   entries,
-  extractPlugins,
+  getConfiguredPlugins,
   keys,
   libName,
   log,
@@ -29,7 +32,6 @@ import {
   noOp,
   resetTimer,
   selfCertifyingRoomRegex,
-  selfId,
   toErrorMessage,
   topicPath,
   values,
@@ -42,6 +44,7 @@ import type {
   JoinRoomConfig,
   PeerHandle,
   RoomPlugin,
+  RoomWithPlugins,
   Signal,
   SignalContext,
   StrategyContext,
@@ -75,7 +78,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   let initPromises: Promise<TRelay>[] = []
   let cleanupWatchOnline: () => void = noOp
 
-  return (config: TConfig, roomId: string, callbacks?: JoinRoomCallbacks) => {
+  return <
+    const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
+      undefined
+  >(
+    config: TConfig & {use?: TPlugins},
+    roomId: string,
+    callbacks?: JoinRoomCallbacks
+  ): RoomWithPlugins<TPlugins> => {
     if (!config) {
       throw mkErr('requires a config map as the first argument')
     }
@@ -112,10 +122,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     validateIdentityConfig(config)
 
-    const plugins = extractPlugins(config)
+    const plugins = getConfiguredPlugins(config.use)
     const hasRolesPlugin = plugins.some(p => p.name === 'roles')
     if (!hasRolesPlugin && selfCertifyingRoomRegex.test(roomId)) {
       throw mkErr('self-certifying room ID requires roles() in joinRoom config')
+    }
+    if (
+      plugins.some(isSelfAsAdminPlugin) &&
+      (config.identity === undefined ||
+        config.identity === 'session' ||
+        config.identity === 'none')
+    ) {
+      console.warn(
+        `${libName}: roles({selfAsAdmin: true}) with an ephemeral identity will orphan the room when the session closes; pass identity: 'local' or an imported UserIdentity to persist admin authority`
+      )
     }
 
     let forcedPeerId: string | undefined
@@ -124,13 +144,15 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       config._test_only_forcedPeerId
     ) {
       forcedPeerId = config._test_only_forcedPeerId
-      void registerTestForcedPeerId(forcedPeerId)
     }
-    const localSelfId = forcedPeerId ?? selfId
+    const localEndpointP = forcedPeerId
+      ? registerTestForcedPeerId(forcedPeerId)
+      : getDefaultEndpointIdentity()
+    let localSelfId = forcedPeerId ?? getResolvedDefaultSelfId()
     const scopeAppId = forcedPeerId ? `${appId}:${forcedPeerId}` : appId
 
     if (occupiedRooms[scopeAppId]?.[roomId]) {
-      return occupiedRooms[scopeAppId][roomId]
+      return occupiedRooms[scopeAppId][roomId] as RoomWithPlugins<TPlugins>
     }
 
     leavingRoomCleanups[scopeAppId]?.[roomId]?.(true)
@@ -140,12 +162,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       appId,
       roomId,
       config,
-      localSelfId
+      forcedPeerId
     ).catch(err => {
       onJoinError?.({
         error: toErrorMessage(err, 'identity resolution failed'),
         appId,
-        peerId: localSelfId,
+        peerId: localSelfId || getResolvedDefaultSelfId(),
         roomId: effectiveRoomId
       })
       throw err
@@ -185,11 +207,16 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const rootTopicP = effectiveRoomIdP
       ? effectiveRoomIdP.then(rid => sha1(topicPath(libName, appId, rid)))
       : sha1(rootTopicPlaintext)
-    const selfTopicP = effectiveRoomIdP
-      ? effectiveRoomIdP.then(rid =>
-          sha1(topicPath(topicPath(libName, appId, rid), localSelfId))
-        )
-      : sha1(topicPath(rootTopicPlaintext, localSelfId))
+    const selfTopicP = all([
+      effectiveRoomIdP ?? Promise.resolve(roomId),
+      localEndpointP
+    ]).then(([rid, ep]) => {
+      const resolvedPeerId = forcedPeerId ?? ep.peerId
+      localSelfId = resolvedPeerId
+      ctx.selfId = resolvedPeerId
+      strategyContext.peerId = resolvedPeerId
+      return sha1(topicPath(topicPath(libName, appId, rid), resolvedPeerId))
+    })
     const key = effectiveRoomIdP
       ? effectiveRoomIdP.then(rid => genKey(config.password ?? '', appId, rid))
       : genKey(config.password ?? '', appId, roomId)
@@ -343,25 +370,16 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       announceIntervals: [],
       announceIntervalMs,
       selfId: localSelfId,
-      onPeerDiscovered: (peerId, _relayId, _signalPeer, payload) => {
-        const sigWait =
-          payload && bridgeRef.current
-            ? bridgeRef.current.onSignalingPayload(peerId, payload)
-            : undefined
-        if (sigWait) {
-          return sigWait.then(() => {
-            bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)
-            syncOverlayNeighbors()
-          })
-        }
+      onPeerDiscovered: peerId => {
         bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)
         syncOverlayNeighbors()
-        return undefined
       },
       shouldConnectPeer: (peerId, direction) =>
-        bridgeRef.current
+        (bridgeRef.current?.canConnectPeer(peerId) ?? true) &&
+        (bridgeRef.current
           ?.getScaleProvider()
-          ?.shouldConnectPeer(peerId, direction) ?? true
+          ?.shouldConnectPeer(peerId, direction) ??
+          true)
     }
     const strategyContext: StrategyContext<TConfig> = {
       config,
@@ -416,14 +434,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           return
         }
 
-        const authExtra =
-          hasRolesPlugin && bridgeRef.current
-            ? await bridgeRef.current.getAnnounceExtra()
-            : undefined
-        const extra =
-          isPassive || authExtra
-            ? {...authExtra, ...(isPassive ? {passive: true} : {})}
-            : undefined
+        const extra = isPassive ? {passive: true} : undefined
         let announceResult: Awaited<
           ReturnType<StrategyAdapter<TRelay, TConfig>['announce']>
         > = undefined
@@ -558,7 +569,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       effectiveRoomIdP ?? roomId
     )
     const {compose: composeIdentity} = createIdentityHandshake({
-      selfId: localSelfId,
+      selfId: forcedPeerId ?? '',
       appId,
       roomId: effectiveRoomIdP ?? roomId,
       getUserIdentity: () => userIdentityP,
@@ -571,37 +582,39 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const composedPeerHandshake = composePassword(composeIdentity())
 
     const releaseOccupiedRoom = (): void => {
-      if (occupiedRooms[scopeAppId]?.[roomId] === joinedRoom) {
-        delete occupiedRooms[scopeAppId][roomId]
+      const appRooms = occupiedRooms[scopeAppId]
+      if (!appRooms) {
+        return
+      }
+      if (appRooms[roomId] === joinedRoom) {
+        delete appRooms[roomId]
       }
       if (
         effectiveRoomId !== roomId &&
-        occupiedRooms[scopeAppId]?.[effectiveRoomId] === joinedRoom
+        appRooms[effectiveRoomId] === joinedRoom
       ) {
-        delete occupiedRooms[scopeAppId][effectiveRoomId]
+        delete appRooms[effectiveRoomId]
       }
-      if (
-        occupiedRooms[scopeAppId] &&
-        keys(occupiedRooms[scopeAppId]).length === 0
-      ) {
+      if (keys(appRooms).length === 0) {
         delete occupiedRooms[scopeAppId]
       }
     }
 
     const clearLeavingCleanup = (): void => {
-      if (leavingRoomCleanups[scopeAppId]?.[roomId] === cleanupRoom) {
-        delete leavingRoomCleanups[scopeAppId][roomId]
+      const appCleanups = leavingRoomCleanups[scopeAppId]
+      if (!appCleanups) {
+        return
+      }
+      if (appCleanups[roomId] === cleanupRoom) {
+        delete appCleanups[roomId]
       }
       if (
         effectiveRoomId !== roomId &&
-        leavingRoomCleanups[scopeAppId]?.[effectiveRoomId] === cleanupRoom
+        appCleanups[effectiveRoomId] === cleanupRoom
       ) {
-        delete leavingRoomCleanups[scopeAppId][effectiveRoomId]
+        delete appCleanups[effectiveRoomId]
       }
-      if (
-        leavingRoomCleanups[scopeAppId] &&
-        keys(leavingRoomCleanups[scopeAppId]).length === 0
-      ) {
+      if (keys(appCleanups).length === 0) {
         delete leavingRoomCleanups[scopeAppId]
       }
     }
@@ -653,12 +666,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const roomOptions = {
-      selfId: localSelfId,
+      ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
       appId,
       roomId,
       ...(config.password === undefined ? {} : {password: config.password}),
       ...(config.limit === undefined ? {} : {limit: config.limit}),
-      ...(plugins.length > 0 ? {plugins, preResolvedPlugins} : {}),
+      ...(plugins.length > 0 ? {use: plugins, preResolvedPlugins} : {}),
       userIdentityP,
       verifyPeerIdentity: true,
       ...(config.maxReceiveBytes === undefined
@@ -726,9 +739,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       {
         active: !isPassive || ctx.isActive,
         shouldAttach: peerId =>
-          signalingBridge
+          (signalingBridge?.canConnectPeer(peerId) ?? true) &&
+          (signalingBridge
             ?.getScaleProvider()
-            ?.shouldConnectPeer(peerId, 'inbound') ?? true,
+            ?.shouldConnectPeer(peerId, 'inbound') ??
+            true),
         onPeer: (proxy, peerId, physical) => {
           const state = getState(ctx.peerStates, peerId)
           markPeerConnected(state, physical)
@@ -756,6 +771,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     )
     membershipRef = membership
 
-    return (occupiedRooms[scopeAppId][roomId] = joinedRoom)
+    return (occupiedRooms[scopeAppId][roomId] =
+      joinedRoom) as RoomWithPlugins<TPlugins>
   }
 }

@@ -1,4 +1,5 @@
 import {sha1} from './crypto'
+import {getResolvedDefaultSelfId} from './identity'
 import {getConnectedPeerHealth} from './shared-peer'
 import {
   all,
@@ -8,7 +9,6 @@ import {
   log,
   mkErr,
   resetTimer,
-  selfId,
   toJson,
   topicPath
 } from './utils'
@@ -77,7 +77,7 @@ const hasInvalidSignalField = (
 
 export const shouldActivatePassiveRoom = (
   msg: unknown,
-  localSelfId = selfId
+  localSelfId = getResolvedDefaultSelfId()
 ): boolean => {
   const payload = toPayload(msg)
 
@@ -523,7 +523,7 @@ const handleAnnouncement = async (
       : (ctx.announceIntervals[relayId] ?? ctx.announceIntervalMs) * 0.9
   )
 
-  const localSelfId = ctx.selfId ?? selfId
+  const localSelfId = ctx.selfId || getResolvedDefaultSelfId()
   let didSendOffer = false
 
   state.offerSignalRelays[relayId] = signal => {
@@ -585,7 +585,7 @@ const handleOffer = async (
   offerId: string | undefined,
   signalPeer: (peerTopic: string, signal: string) => void
 ): Promise<void> => {
-  const localSelfId = ctx.selfId ?? selfId
+  const localSelfId = ctx.selfId || getResolvedDefaultSelfId()
   if (ctx.shouldConnectPeer && !ctx.shouldConnectPeer(peerId, 'inbound')) {
     return
   }
@@ -817,7 +817,7 @@ const handleAnswer = async (
   offerId: string | undefined,
   peer: PeerHandle | undefined
 ): Promise<void> => {
-  const localSelfId = ctx.selfId ?? selfId
+  const localSelfId = ctx.selfId || getResolvedDefaultSelfId()
   let plainAnswer: Signal
 
   try {
@@ -922,12 +922,12 @@ const prunePendingOffer = (
 }
 
 export const createSignalHandler = (ctx: SignalContext) => {
-  const localSelfId = ctx.selfId ?? selfId
   const relaySignalPeers: Array<
     ((peerTopic: string, signal: string) => void) | undefined
   > = []
 
   ctx.dialPeer = (peerId: string): void => {
+    const localSelfId = ctx.selfId || getResolvedDefaultSelfId()
     if (ctx.isLeaving() || !peerId || peerId === localSelfId) {
       return
     }
@@ -991,12 +991,17 @@ export const createSignalHandler = (ctx: SignalContext) => {
       const offerId = getString(payload, 'offerId')
       const peer = isPeerHandle(payload['peer']) ? payload['peer'] : undefined
       const remoteIsPassive = payload['passive'] === true
+      let localSelfId = ctx.selfId || getResolvedDefaultSelfId()
 
       if (!peerId || peerId === localSelfId) {
         return
       }
 
       const [rootTopic, selfTopic] = await all([ctx.rootTopicP, ctx.selfTopicP])
+      localSelfId = ctx.selfId || getResolvedDefaultSelfId()
+      if (peerId === localSelfId) {
+        return
+      }
 
       if (ctx.isLeaving()) {
         return
@@ -1010,15 +1015,7 @@ export const createSignalHandler = (ctx: SignalContext) => {
         return
       }
 
-      const discoveredP = ctx.onPeerDiscovered?.(
-        peerId,
-        relayId,
-        signalPeer,
-        payload
-      )
-      if (discoveredP) {
-        await discoveredP
-      }
+      ctx.onPeerDiscovered?.(peerId, relayId, signalPeer)
 
       if (ctx.isPassive && !ctx.isActive && !answer && !candidate) {
         ctx.isActive = true

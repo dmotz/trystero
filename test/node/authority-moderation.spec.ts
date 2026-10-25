@@ -13,7 +13,12 @@ import {
   verifyPeerBan,
   verifyRoleCertificateChain,
   verifyRoleRevocation,
-  verifyStateRecord
+  verifyStateRecord,
+  validateActionAuthShape,
+  validatePeerBanShape,
+  validateRoleCertificateShape,
+  validateRoleRevocationShape,
+  validateStateRecordShape
   // @ts-expect-error Internal source import crosses a referenced package boundary.
 } from '../../packages/core/src/authority.ts'
 import {
@@ -35,7 +40,7 @@ const setup = async () => {
     selfId: owner.peerId,
     appId: scope.appId,
     initialRoomId: scope.roomId,
-    admin: [root.userId],
+    admin: {admins: [root.userId]},
     getLocalCryptoIdentity: async () => owner,
     getLocalUserIdentity: async () => root,
     getOverlayPeerPublicKey: () => undefined,
@@ -486,7 +491,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     selfId: freshPeerId.peerId,
     appId: scope.appId,
     initialRoomId: scope.roomId,
-    admin: [root.userId],
+    admin: {admins: [root.userId]},
     getLocalCryptoIdentity: async () => freshPeerId,
     getOverlayPeerPublicKey: () => undefined,
     isOverlayPeerBanned: () => false,
@@ -548,4 +553,51 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     'multi-device admin tab must be able to issue a valid ban using user endpoint proof'
   )
   assert.equal(authority.isPeerBanned(target.peerId), true)
+
+  // 7. Schema validators per record type & try/catch resilience on verifyAndApply*
+  assert.equal(validateRoleCertificateShape(tab1Cert), true)
+  assert.equal(validateRoleCertificateShape({...tab1Cert, roles: [123]}), false)
+  assert.equal(validateRoleCertificateShape({...tab1Cert, iat: -1}), false)
+  assert.equal(validatePeerBanShape(multiTabBan), true)
+  assert.equal(
+    validatePeerBanShape({...multiTabBan, issuerCert: {} as never}),
+    false
+  )
+  assert.equal(
+    validateRoleRevocationShape({
+      ...multiTabBan,
+      revId: 'r1',
+      targetCertId: ''
+    }),
+    false
+  )
+  assert.equal(validateActionAuthShape(null), false)
+  assert.equal(
+    validateStateRecordShape({
+      ...badPrevHashRec,
+      seq: Number.POSITIVE_INFINITY
+    }),
+    false
+  )
+  assert.equal(
+    await authority.verifyAndApplyCert({
+      ...tab1Cert,
+      parentCert: {corrupted: true} as never
+    }),
+    false
+  )
+  assert.equal(
+    await authority.verifyAndApplyBan({
+      ...multiTabBan,
+      userProof: {corrupted: true} as never
+    }),
+    false
+  )
+  assert.equal(
+    await authority.verifyAndApplyStateRecord({
+      ...badPrevHashRec,
+      cert: {corrupted: true} as never
+    }),
+    false
+  )
 })
