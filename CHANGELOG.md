@@ -42,9 +42,9 @@
   `room.ban()`, `room.isBanned()` (on rooms configured with `roles()`), and
   expanded `room.getSelf()` (returning
   `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`), plus
-  top-level helpers `createAdminRoom()` and `definePlugin()` (for authoring
-  custom/3rd-party room plugins with TypeScript return-type inference via
-  `use: [...]`).
+  top-level helpers `createAdminRoom(appId, baseRoomId, [options])` and
+  `definePlugin()` (for authoring custom/3rd-party room plugins with TypeScript
+  return-type inference via `use: [...]`).
 - Actions now accept a `roles` option (`makeAction(name, {roles})`) to restrict
   sending or requesting to `'admin'` or specific custom roles, with the sender's
   verified `roles` included in `onMessage` and `onRequest` contexts.
@@ -67,11 +67,12 @@
   descriptors across multi-hop overlays) and a persistent 43-character Base64url
   `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) public-key
   thumbprint).
-- Added `identity` to room config (`'session'` default in browsers, `'local'`
-  stored in IndexedDB with `localStorage` fallback across tabs and future
-  visits, `'none'` for ephemeral runtime, or a custom `UserIdentity` / loader
-  function), plus top-level helpers `createUserIdentity()`,
-  `importUserIdentity()`, and `exportUserIdentity()`.
+- Added `identity` to room config (`'session'` default in browsers using a
+  per-tab `sessionStorage` token backed by a non-extractable IndexedDB
+  `CryptoKey` with `sessionStorage` fallback, `'local'` stored in IndexedDB with
+  `localStorage` fallback across tabs and future visits, `'none'` for ephemeral
+  runtime, or a custom `UserIdentity` / loader function), plus top-level helpers
+  `createUserIdentity()`, `importUserIdentity()`, and `exportUserIdentity()`.
 - 👥 **Multi-tab user presence & targeting** - added `room.onUserJoin`,
   `room.onUserLeave`, `room.getUsers()`, and `room.getSelf()`. Every `target` /
   `targets` option (`send`, `request`, `requestMany`, `ping`, media methods, and

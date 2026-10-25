@@ -1,4 +1,3 @@
-import {getResolvedDefaultSelfId} from './identity'
 import {shouldActivatePassiveRoom} from './signal-handler'
 import createStrategy from './strategy'
 import {mkErr, toJson} from './utils'
@@ -24,6 +23,16 @@ const requireContext = <TConfig extends BaseRoomConfig>(
   return context
 }
 
+const requirePeerId = <TConfig extends BaseRoomConfig>(
+  context: StrategyContext<TConfig>
+): string => {
+  if (!context.peerId) {
+    throw mkErr('topic strategy missing resolved peerId')
+  }
+
+  return context.peerId
+}
+
 const makeTopicContext = <
   TConfig extends BaseRoomConfig,
   TKind extends TopicSubscriptionContext['kind'] | TopicPublishContext['kind']
@@ -45,7 +54,7 @@ const makeTopicContext = <
   roomId: context.roomId,
   rootTopic,
   selfTopic,
-  peerId: context.peerId ?? getResolvedDefaultSelfId()
+  peerId: requirePeerId(context)
 })
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
@@ -129,10 +138,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
           if (
             context.isPassive &&
-            shouldActivatePassiveRoom(
-              msg,
-              context.peerId ?? getResolvedDefaultSelfId()
-            )
+            shouldActivatePassiveRoom(msg, requirePeerId(context))
           ) {
             await ensureSelfSubscription()
           }
@@ -163,7 +169,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         relay,
         rootTopic,
         toJson({
-          peerId: context.peerId ?? getResolvedDefaultSelfId(),
+          peerId: requirePeerId(context),
           ...extraPayload
         }),
         makeTopicContext(context, 'announce', rootTopic, selfTopic)

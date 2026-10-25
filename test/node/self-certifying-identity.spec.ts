@@ -1,10 +1,15 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
+import {execFileSync} from 'node:child_process'
+import {readFileSync} from 'node:fs'
+import {resolve} from 'node:path'
 import test from './test.ts'
 import * as corePublicExports from '../../packages/core/src/index.ts'
 import {
+  createAdminRoom,
   createTopicStrategy,
   createUserIdentity,
+  definePlugin,
   exportUserIdentity,
   importUserIdentity,
   roles
@@ -1148,3 +1153,368 @@ void test(
     }
   }
 )
+
+void test('Production build (no DEV labels): custom plugin setup(kernel) sees resolved 20-char kernel.selfId on the first room, and built .d.mts omits _test_only_* and __config', () => {
+  const distIndexMjs = resolve(
+    import.meta.dirname,
+    '../../packages/core/dist/index.mjs'
+  )
+  const distIndexDmts = resolve(
+    import.meta.dirname,
+    '../../packages/core/dist/index.d.mts'
+  )
+
+  const script = `
+    import assert from 'node:assert/strict'
+    import {createTopicStrategy, definePlugin} from ${JSON.stringify(distIndexMjs)}
+
+    let setupSelfId = null
+    const customPlugin = definePlugin('custom-selfid-check', {
+      setup(kernel) {
+        setupSelfId = kernel.selfId
+        return {
+          getCapturedSelfId: () => setupSelfId
+        }
+      }
+    })
+
+    const joinRoom = createTopicStrategy({
+      init: () => ({}),
+      subscribeTopic: () => () => {},
+      publishTopic: () => {}
+    })
+
+    const room = joinRoom(
+      {
+        appId: 'prod-first-room-app',
+        use: [customPlugin]
+      },
+      'room-1'
+    )
+
+    const self = await room.getSelf()
+    assert.equal(typeof setupSelfId, 'string')
+    assert.match(setupSelfId, /^[0-9A-Za-z]{20}$/, 'kernel.selfId in setup() must be a resolved 20-char peerId in production build')
+    assert.equal(setupSelfId, self.peerId)
+    assert.equal(room.getCapturedSelfId(), self.peerId)
+    await room.leave()
+  `
+
+  execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: 'pipe'
+  })
+
+  const dtsContent = readFileSync(distIndexDmts, 'utf8')
+  assert.equal(
+    dtsContent.includes('_test_only_forcedPeerId'),
+    false,
+    'built .d.mts must not expose _test_only_forcedPeerId'
+  )
+  assert.equal(
+    dtsContent.includes('_test_only_mdnsHostFallbackToLoopback'),
+    false,
+    'built .d.mts must not expose _test_only_mdnsHostFallbackToLoopback'
+  )
+  assert.equal(
+    dtsContent.includes('_test_only_sharedPeerIdleMs'),
+    false,
+    'built .d.mts must not expose _test_only_sharedPeerIdleMs'
+  )
+  assert.equal(
+    dtsContent.includes('__config?:'),
+    false,
+    'built .d.mts must hide phantom config behind a unique symbol'
+  )
+})
+
+void test('Plugin API safety: rejects reserved room property names, duplicate plugin names, and duplicate plugin API property names', async () => {
+  await getDefaultEndpointIdentity()
+  const {makeJoinRoom} = createMemorySignalBus()
+  const joinRoom = makeJoinRoom()
+
+  assert.throws(
+    () => definePlugin('leave', {setup: () => ({})}),
+    /plugin name "leave" is a reserved room property/
+  )
+  assert.throws(
+    () => definePlugin('onPeerJoin', {setup: () => ({})}),
+    /plugin name "onPeerJoin" is a reserved room property/
+  )
+
+  const shadowLeavePlugin = definePlugin('shadow-leave', {
+    setup: () => ({
+      leave: () => Promise.resolve()
+    })
+  })
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'shadow-test',
+          use: [shadowLeavePlugin],
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        'room-shadow-1'
+      ),
+    /cannot override reserved room property "leave"/
+  )
+
+  const shadowGetPeersPlugin = definePlugin('shadow-peers', {
+    setup: () => ({
+      getPeers: () => ({})
+    })
+  })
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'shadow-test',
+          use: [shadowGetPeersPlugin],
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        'room-shadow-2'
+      ),
+    /cannot override reserved room property "getPeers"/
+  )
+
+  const pluginA = definePlugin('plugin-a', {
+    setup: () => ({sharedFn: () => 1})
+  })
+  const pluginB = definePlugin('plugin-b', {
+    setup: () => ({sharedFn: () => 2})
+  })
+
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'dup-plugin-test',
+          use: [pluginA, pluginA],
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        'room-dup-1'
+      ),
+    /duplicate plugin "plugin-a"/
+  )
+
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'dup-api-test',
+          use: [pluginA, pluginB],
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        'room-dup-2'
+      ),
+    /defines duplicate room property "sharedFn"/
+  )
+})
+
+void test('Session identity with IndexedDB: stores non-extractable CryptoKey keyed by per-tab sessionStorage token, and createAdminRoom(appId, baseRoomId) reuses local identity', async t => {
+  for (const name of ['sessionStorage', 'localStorage', 'indexedDB']) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, name)
+    t.after(() => {
+      if (descriptor) {
+        Object.defineProperty(globalThis, name, descriptor)
+      } else {
+        delete globalThis[name]
+      }
+    })
+  }
+
+  const sessionMap = new Map<string, string>()
+  const localMap = new Map<string, string>()
+  const idbStore = new Map<string, any>()
+
+  const makeMockStorage = (map: Map<string, string>) => ({
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      map.set(k, v)
+    },
+    removeItem: (k: string) => {
+      map.delete(k)
+    }
+  })
+
+  const mockIndexedDB = {
+    open: () => {
+      const req: any = {
+        result: {
+          objectStoreNames: {
+            contains: () => true
+          },
+          createObjectStore: () => ({}),
+          transaction: () => {
+            const tx: any = {
+              objectStore: () => ({
+                get: (key: string) => {
+                  const getReq: any = {
+                    result: idbStore.get(key),
+                    onsuccess: null,
+                    onerror: null
+                  }
+                  queueMicrotask(() => getReq.onsuccess?.())
+                  return getReq
+                },
+                add: (val: any, key: string) => {
+                  const addReq: any = {
+                    onsuccess: null,
+                    onerror: null
+                  }
+                  queueMicrotask(() => {
+                    if (idbStore.has(key)) {
+                      addReq.onerror?.()
+                    } else {
+                      idbStore.set(key, val)
+                      addReq.onsuccess?.()
+                    }
+                  })
+                  return addReq
+                }
+              }),
+              onabort: null,
+              onerror: null
+            }
+            return tx
+          },
+          close: () => {}
+        },
+        onupgradeneeded: null,
+        onsuccess: null,
+        onerror: null
+      }
+      queueMicrotask(() => req.onsuccess?.())
+      return req
+    }
+  }
+
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    writable: true,
+    value: makeMockStorage(sessionMap)
+  })
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    writable: true,
+    value: makeMockStorage(localMap)
+  })
+  Object.defineProperty(globalThis, 'indexedDB', {
+    configurable: true,
+    writable: true,
+    value: mockIndexedDB
+  })
+
+  const {makeJoinRoom} = createMemorySignalBus()
+  const joinRoom = makeJoinRoom()
+
+  // 1. 'session' identity stores only an opaque token in sessionStorage and a non-extractable CryptoKey in IndexedDB
+  const roomTab1A = joinRoom(
+    {
+      appId: 'idb-session-app',
+      identity: 'session',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'room-a'
+  )
+  const selfTab1A = await roomTab1A.getSelf()
+  await roomTab1A.leave()
+
+  const storedSessionToken = sessionMap.get(
+    'trystero:user_identity:v1:session:idb-session-app'
+  )
+  assert.ok(storedSessionToken, 'sessionStorage must contain a per-tab token')
+  assert.match(
+    storedSessionToken,
+    /^[0-9A-Za-z]{24}$/,
+    'sessionStorage token must be an opaque 24-char Base62 tab token, not a serialized private key'
+  )
+  assert.equal(
+    storedSessionToken.includes('trystero_uk_'),
+    false,
+    'sessionStorage must never contain an exported private key when IndexedDB is available'
+  )
+
+  const idbRecord = idbStore.get(
+    `session:idb-session-app:${storedSessionToken}`
+  )
+  assert.ok(idbRecord, 'IndexedDB must store the session CryptoKey record')
+  assert.equal(idbRecord.userId, selfTab1A.userId)
+  assert.equal(
+    idbRecord.privateKey.extractable,
+    false,
+    'Session CryptoKey in IndexedDB must be non-extractable (extractable: false)'
+  )
+
+  // Refreshing the same tab (same sessionMap token) reuses the non-extractable IndexedDB key
+  const roomTab1Refresh = joinRoom(
+    {
+      appId: 'idb-session-app',
+      identity: 'session',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'room-b'
+  )
+  const selfTab1Refresh = await roomTab1Refresh.getSelf()
+  assert.equal(
+    selfTab1Refresh.userId,
+    selfTab1A.userId,
+    'same tab refresh must reuse the non-extractable session identity'
+  )
+  await roomTab1Refresh.leave()
+
+  // Opening a new tab (fresh sessionStorage) generates a distinct session identity
+  sessionMap.clear()
+  const roomTab2 = joinRoom(
+    {
+      appId: 'idb-session-app',
+      identity: 'session',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'room-a'
+  )
+  const selfTab2 = await roomTab2.getSelf()
+  assert.notEqual(
+    selfTab2.userId,
+    selfTab1A.userId,
+    'new tab with empty sessionStorage must get a distinct session userId'
+  )
+  await roomTab2.leave()
+
+  // 2. createAdminRoom(appId, baseRoomId) requires appId first and defaults to persistent 'local' identity for appId
+  await assert.rejects(
+    () => (createAdminRoom as any)('', 'room-x'),
+    /appId is required/
+  )
+  await assert.rejects(
+    () => (createAdminRoom as any)('my-admin-app', ''),
+    /baseRoomId is required/
+  )
+
+  const adminRoom1 = await createAdminRoom('my-admin-app', 'friday-quiz')
+  const adminRoom2 = await createAdminRoom('my-admin-app', 'saturday-quiz')
+  assert.equal(
+    adminRoom1.userId,
+    adminRoom2.userId,
+    'createAdminRoom with same appId must reuse persistent local identity'
+  )
+  assert.equal(adminRoom1.fingerprint, adminRoom2.fingerprint)
+
+  const hostJoined = joinRoom(
+    {
+      appId: 'my-admin-app',
+      identity: 'local',
+      use: [roles()],
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    adminRoom1.roomId
+  )
+  const hostSelf = await hostJoined.getSelf()
+  assert.equal(hostSelf.userId, adminRoom1.userId)
+  assert.equal(
+    hostSelf.isAdmin,
+    true,
+    'joining a room created with createAdminRoom(appId, baseRoomId) using identity: "local" must have admin authority'
+  )
+  await hostJoined.leave()
+})

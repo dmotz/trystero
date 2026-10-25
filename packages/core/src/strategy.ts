@@ -2,7 +2,6 @@ import {isSelfAsAdminPlugin} from './authority'
 import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
 import {
   getDefaultEndpointIdentity,
-  getResolvedDefaultSelfId,
   registerTestForcedPeerId,
   resolveUserIdentity,
   validateIdentityConfig
@@ -48,7 +47,8 @@ import type {
   Signal,
   SignalContext,
   StrategyContext,
-  StrategyAdapter
+  StrategyAdapter,
+  TestOnlyRoomConfig
 } from './types'
 
 const announceIntervalMs = 5_333
@@ -139,16 +139,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     let forcedPeerId: string | undefined
-    DEV: if (
-      typeof config._test_only_forcedPeerId === 'string' &&
-      config._test_only_forcedPeerId
-    ) {
-      forcedPeerId = config._test_only_forcedPeerId
+    DEV: {
+      const testConfig = config as TestOnlyRoomConfig
+      if (
+        typeof testConfig._test_only_forcedPeerId === 'string' &&
+        testConfig._test_only_forcedPeerId
+      ) {
+        forcedPeerId = testConfig._test_only_forcedPeerId
+      }
     }
     const localEndpointP = forcedPeerId
       ? registerTestForcedPeerId(forcedPeerId)
       : getDefaultEndpointIdentity()
-    let localSelfId = forcedPeerId ?? getResolvedDefaultSelfId()
+    const selfIdP = localEndpointP.then(ep => forcedPeerId ?? ep.peerId)
     const scopeAppId = forcedPeerId ? `${appId}:${forcedPeerId}` : appId
 
     if (occupiedRooms[scopeAppId]?.[roomId]) {
@@ -163,11 +166,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       roomId,
       config,
       forcedPeerId
-    ).catch(err => {
+    ).catch(async err => {
       onJoinError?.({
         error: toErrorMessage(err, 'identity resolution failed'),
         appId,
-        peerId: localSelfId || getResolvedDefaultSelfId(),
+        peerId: forcedPeerId ?? (await selfIdP),
         roomId: effectiveRoomId
       })
       throw err
@@ -209,10 +212,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       : sha1(rootTopicPlaintext)
     const selfTopicP = all([
       effectiveRoomIdP ?? Promise.resolve(roomId),
-      localEndpointP
-    ]).then(([rid, ep]) => {
-      const resolvedPeerId = forcedPeerId ?? ep.peerId
-      localSelfId = resolvedPeerId
+      selfIdP
+    ]).then(([rid, resolvedPeerId]) => {
       ctx.selfId = resolvedPeerId
       strategyContext.peerId = resolvedPeerId
       return sha1(topicPath(topicPath(libName, appId, rid), resolvedPeerId))
@@ -224,8 +225,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       ? effectiveRoomIdP.then(rid => deriveRoomNamespace(appId, rid))
       : deriveRoomNamespace(appId, roomId)
     let sharedPeerIdleMs = sharedPeerIdleMsDefault
-    DEV: if (config._test_only_sharedPeerIdleMs !== undefined) {
-      sharedPeerIdleMs = config._test_only_sharedPeerIdleMs
+    DEV: {
+      const testConfig = config as TestOnlyRoomConfig
+      if (testConfig._test_only_sharedPeerIdleMs !== undefined) {
+        sharedPeerIdleMs = testConfig._test_only_sharedPeerIdleMs
+      }
     }
 
     let didLeaveRoom = false
@@ -369,7 +373,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       checkDeactivate,
       announceIntervals: [],
       announceIntervalMs,
-      selfId: localSelfId,
+      ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
+      selfIdP,
       onPeerDiscovered: peerId => {
         bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)
         syncOverlayNeighbors()
@@ -386,7 +391,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       appId,
       roomId,
       isPassive,
-      peerId: localSelfId
+      ...(forcedPeerId ? {peerId: forcedPeerId} : {})
     }
 
     const handleMessage = createSignalHandler(ctx)
@@ -569,7 +574,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       effectiveRoomIdP ?? roomId
     )
     const {compose: composeIdentity} = createIdentityHandshake({
-      selfId: forcedPeerId ?? '',
+      ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
       appId,
       roomId: effectiveRoomIdP ?? roomId,
       getUserIdentity: () => userIdentityP,
@@ -699,30 +704,47 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     occupiedRooms[scopeAppId] ??= {}
 
-    const joinedRoom = room(
-      f => (onPeerConnect = f),
-      id => {
-        if (didLeaveRoom) {
-          return
-        }
+    let joinedRoom: RoomWithPlugins<TPlugins>
+    try {
+      joinedRoom = room(
+        f => (onPeerConnect = f),
+        id => {
+          if (didLeaveRoom) {
+            return
+          }
 
-        const state = ctx.peerStates[id]
+          const state = ctx.peerStates[id]
 
-        if (state?.connectedPeer) {
-          detachConnectedPeer(state, state.connectedPeer)
-        }
+          if (state?.connectedPeer) {
+            detachConnectedPeer(state, state.connectedPeer)
+          }
 
-        checkDeactivate()
-        // Shared-peer close handlers reach the room callback, not disconnectPeer.
-        reannounceAfterDisconnect()
-      },
-      () => cleanupRoom(false),
-      roomOptions
-    )
+          checkDeactivate()
+          // Shared-peer close handlers reach the room callback, not disconnectPeer.
+          reannounceAfterDisconnect()
+        },
+        () => cleanupRoom(false),
+        roomOptions
+      )
+    } catch (err) {
+      didLeaveRoom = true
+      announceTimeouts.forEach(resetTimer)
+      passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+      unsubFns.forEach(async f => {
+        const cleanup = await f
+        cleanup()
+      })
+      offerManager.destroy()
+      if (!hasActiveRooms()) {
+        didInit = false
+        cleanupWatchOnline()
+      }
+      throw err
+    }
 
     const signalingBridge = getRoomSignalingBridge(joinedRoom)
     bridgeRef.current = signalingBridge
-    signalingBridge?.getScaleProvider()?.setOnTargetsChanged(missingTargets => {
+    signalingBridge?.setOnScaleTargetsChanged(missingTargets => {
       if (!didLeaveRoom) {
         missingTargets.forEach(targetId => {
           if (!ctx.reusePeer(targetId)) {

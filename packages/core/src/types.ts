@@ -291,6 +291,10 @@ export type KernelScaleProvider = {
   isDirectPeer: (peerId: string) => boolean
   isVirtualPeer: (peerId: string) => boolean
   getRoute: (peerId: string) => TopologyRoute | undefined
+  isExpectedMediaRelayParent: (
+    broadcasterId: string,
+    fromPeerId: string
+  ) => boolean
   broadcastInline: (
     frame: Uint8Array,
     onProgress?: (peerId: string) => void
@@ -434,7 +438,7 @@ export type RoomPlugin<
   ) => TApi | void
 }
 
-export type BaseRoomConfig = {
+export interface BaseRoomConfig {
   appId: string
   identity?: UserIdentityConfig
   limit?: number
@@ -447,6 +451,9 @@ export type BaseRoomConfig = {
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
   turnConfig?: TurnServerConfig[]
+}
+
+export type TestOnlyRoomConfig = BaseRoomConfig & {
   _test_only_forcedPeerId?: string
   _test_only_mdnsHostFallbackToLoopback?: boolean
   _test_only_sharedPeerIdleMs?: number
@@ -865,6 +872,8 @@ export type RoomWithPlugins<
       : UnionToIntersection<InferPluginApi<P>>
     : unknown)
 
+declare const joinRoomConfigBrand: unique symbol
+
 export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (<
   const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
     undefined
@@ -873,7 +882,7 @@ export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (<
   roomId: string,
   callbacks?: JoinRoomCallbacks
 ) => RoomWithPlugins<TPlugins>) & {
-  readonly __config?: TConfig
+  readonly [joinRoomConfigBrand]?: TConfig
 }
 
 export type SocketClient = {
@@ -999,6 +1008,7 @@ export type SignalContext = {
   announceIntervalMs: number
   requeueAnnounce?: () => void
   selfId?: string
+  selfIdP?: Promise<string>
   onPeerDiscovered?: (
     peerId: string,
     relayId: number,

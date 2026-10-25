@@ -3,7 +3,6 @@ import {
   canPersistLocalIdentity,
   canonicalizePubJwk,
   computeUserIdFingerprint,
-  createUserIdentity,
   decodePublicKey,
   encodePublicKey,
   fromBase64Url,
@@ -133,9 +132,9 @@ export const formatSelfCertifyingRoomId = (
 }
 
 export const createAdminRoom = async (
+  appId: string,
   baseRoomId: string,
   options?: {
-    appId?: string
     identity?: UserIdentityConfig
   }
 ): Promise<{
@@ -145,21 +144,21 @@ export const createAdminRoom = async (
   userId: string
   identity: UserIdentity
 }> => {
+  if (!appId || typeof appId !== 'string') {
+    throw mkErr('appId is required')
+  }
   if (!baseRoomId || typeof baseRoomId !== 'string') {
     throw mkErr('baseRoomId is required')
   }
   const parsed = parseSelfCertifyingRoomId(baseRoomId)
   const cleanBase = parsed.baseRoomId
-  const identity =
-    options?.identity !== undefined || options?.appId !== undefined
-      ? await resolveUserIdentity(
-          options.appId ?? '',
-          cleanBase,
-          options.identity !== undefined
-            ? {identity: options.identity}
-            : {preferLocal: canPersistLocalIdentity()}
-        )
-      : await createUserIdentity()
+  const identity = await resolveUserIdentity(
+    appId,
+    cleanBase,
+    options?.identity !== undefined
+      ? {identity: options.identity}
+      : {preferLocal: canPersistLocalIdentity()}
+  )
   const fingerprint = computeUserIdFingerprint(identity.userId)
   const roomId = formatSelfCertifyingRoomId(cleanBase, fingerprint)
 
@@ -3003,6 +3002,9 @@ export const roles = (
         getAuthorityInfo: authority.getAuthorityInfo
       })
 
+      for (const peerId of kernel.getActivePeerIds()) {
+        void sendAuthSyncToPeer(peerId)
+      }
       kernel.onPeerActivated(peerId => {
         void sendAuthSyncToPeer(peerId)
       })

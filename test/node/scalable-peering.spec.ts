@@ -1938,7 +1938,7 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
 
 void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ admin: true }), createAdminRoom, and userId-pinned rooms', async () => {
   // 1. Standalone createAdminRoom helper unified with UserIdentity
-  const provisioned = await createAdminRoom('watch-party')
+  const provisioned = await createAdminRoom('auth-boot-app', 'watch-party')
   assert.equal(provisioned.baseRoomId, 'watch-party')
   assert.match(provisioned.fingerprint, /^[0-9A-Za-z]{16}$/)
   assert.equal(provisioned.userId, provisioned.identity.userId)
@@ -2155,7 +2155,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
 })
 
 void test('Privileged actions, role delegation, sub-delegation, and revocation across mesh and multi-hop overlays', async () => {
-  const provisioned = await createAdminRoom('raid-room')
+  const provisioned = await createAdminRoom('priv-action-app', 'raid-room')
   const roomId = provisioned.roomId
   const appId = 'priv-action-app'
 
@@ -2600,7 +2600,7 @@ void test('Broadcast tree root pinning for verified admins, Hop-1 unauthorized b
   hop1RelayOverlay.destroy()
 
   // 3. Multi-layer room.ban(peerId) enforcement
-  const provisioned = await createAdminRoom('ban-test-room')
+  const provisioned = await createAdminRoom('ban-test-app', 'ban-test-room')
   const roomId = provisioned.roomId
   const appId = 'ban-test-app'
 
@@ -2699,17 +2699,14 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
   // 1. createAdminRoom with an existing UserIdentity deterministically derives the same fingerprint across rooms
   const hostUser = await createUserIdentity()
   const otherUser = await createUserIdentity()
-  const roomA1 = await createAdminRoom('lobby', {
-    identity: hostUser,
-    appId: 'app-one'
+  const roomA1 = await createAdminRoom('app-one', 'lobby', {
+    identity: hostUser
   })
-  const roomB1 = await createAdminRoom('general', {
-    identity: hostUser,
-    appId: 'app-one'
+  const roomB1 = await createAdminRoom('app-one', 'general', {
+    identity: hostUser
   })
-  const roomOther = await createAdminRoom('lobby', {
-    identity: otherUser,
-    appId: 'app-one'
+  const roomOther = await createAdminRoom('app-one', 'lobby', {
+    identity: otherUser
   })
   assert.equal(
     roomA1.fingerprint,
@@ -2773,9 +2770,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
   // 4. Multi-hop topology: room.getPeers() PeerInfo, cascading delegator revocation,
   //    offer-stage bulk rejection on role-protected actions, and serialized concurrent state.set()
   //    Line topology: admin -- bob -- carol -- mallory
-  const provisioned = await createAdminRoom('audit-room', {
-    appId: 'audit-app'
-  })
+  const provisioned = await createAdminRoom('audit-app', 'audit-room')
   const roomId = provisioned.roomId
   const appId = 'audit-app'
   const peerIds = ['admin', 'bob', 'carol', 'mallory']
@@ -3439,7 +3434,7 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
   let maxObservedControlFrameBytes = 0
   let oversizedDrops = 0
   const peerCount = 25
-  const provisioned = await createAdminRoom('c1-cluster-room')
+  const provisioned = await createAdminRoom('c1-cluster-app', 'c1-cluster-room')
   const roomId = provisioned.roomId
   const appId = 'c1-cluster-app'
   const peerIds = Array.from(
@@ -3769,7 +3764,7 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
 })
 
 void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as a PeerBanRecord', async () => {
-  const provisioned = await createAdminRoom('c3-live-room')
+  const provisioned = await createAdminRoom('c3-live-app', 'c3-live-room')
   const roomId = provisioned.roomId
   const appId = 'c3-live-app'
   const [modUser, attackerUser] = await Promise.all([
@@ -4564,6 +4559,25 @@ void test('Mutual edge confirmation, multi-neighbor down eviction, ephemeral ide
       routeToAlice.nextHop,
       'mallory',
       'unilateral neighbor claim by mallory must not attract routes to alice'
+    )
+
+    // 3a-media: Even though 'alice' is a valid multi-hop virtual peer with a known descriptor at 'bob',
+    // only bob's expected parent on alice's broadcast tree (relay1) may relay media claiming origin 'alice';
+    // mallory (a direct neighbor not on alice's broadcast tree parent link) is rejected!
+    assert.equal(
+      bob.isExpectedMediaRelayParent('alice', 'relay1'),
+      true,
+      'expected broadcast tree parent (relay1) must be accepted for alice media relay'
+    )
+    assert.equal(
+      bob.isExpectedMediaRelayParent('alice', 'mallory'),
+      false,
+      'unrelated direct neighbor (mallory) must be rejected when claiming to relay media from alice'
+    )
+    assert.equal(
+      bob.isExpectedMediaRelayParent('alice', 'relay2'),
+      false,
+      'non-parent neighbor (relay2) must not be accepted when relay1 is the active broadcast tree parent'
     )
 
     // 3b. Single neighbor (relay2) drops alice and gossips down: ['alice'].

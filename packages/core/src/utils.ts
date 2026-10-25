@@ -327,6 +327,27 @@ export const log = (...args: unknown[]): void => console.log(...args)
 
 export const selfCertifyingRoomRegex = /^(.*)\.~([0-9A-Za-z]{16})$/
 
+export const reservedRoomPropertyNames = new Set([
+  'makeAction',
+  'leave',
+  'ping',
+  'isPassive',
+  'getPeers',
+  'getUsers',
+  'getSelf',
+  'addStream',
+  'removeStream',
+  'addTrack',
+  'removeTrack',
+  'replaceTrack',
+  'onPeerJoin',
+  'onPeerLeave',
+  'onUserJoin',
+  'onUserLeave',
+  'onPeerStream',
+  'onPeerTrack'
+])
+
 export const definePlugin = <
   TName extends string = string,
   TApi extends Record<string, unknown> = Record<string, never>
@@ -348,6 +369,9 @@ export const definePlugin = <
 ): RoomPlugin<TName, TApi> => {
   if (!name || typeof name !== 'string') {
     throw mkErr('plugin name must be a non-empty string')
+  }
+  if (reservedRoomPropertyNames.has(name)) {
+    throw mkErr(`plugin name "${name}" is a reserved room property`)
   }
   if (!spec || typeof spec.setup !== 'function') {
     throw mkErr(`plugin "${name}" must provide a setup(kernel) function`)
@@ -380,6 +404,12 @@ export const getConfiguredPlugins = (
       throw mkErr(
         'invalid plugin in use[]; expected a plugin created with definePlugin()'
       )
+    }
+    if (reservedRoomPropertyNames.has(item.name)) {
+      throw mkErr(`plugin name "${item.name}" is a reserved room property`)
+    }
+    if (byName.has(item.name)) {
+      throw mkErr(`duplicate plugin "${item.name}" in use[]`)
     }
     byName.set(item.name, item)
   }

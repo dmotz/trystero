@@ -64,7 +64,7 @@ You can see what people are building with Trystero
   - [`createUserIdentity()`](#createuseridentity)
   - [`importUserIdentity(input)`](#importuseridentityinput)
   - [`exportUserIdentity(identity)`](#exportuseridentityidentity)
-  - [`createAdminRoom(baseRoomId, [options])`](#createadminroombaseroomid-options)
+  - [`createAdminRoom(appId, baseRoomId, [options])`](#createadminroomappid-baseroomid-options)
   - [`getRelaySockets()`](#getrelaysockets)
   - [`pauseRelayReconnection()`](#pauserelayreconnection)
   - [`resumeRelayReconnection()`](#resumerelayreconnection)
@@ -732,7 +732,8 @@ const guestRoom = joinRoom({appId: 'trivia-night', use: [roles()]}, roomId)
 > would leave the fingerprinted room without a root admin if you ever needed to
 > rejoin later. Trystero logs a warning if `selfAsAdmin: true` is used with an
 > ephemeral identity. You can also generate the `roomId` ahead of time before
-> calling `joinRoom()` using `await createAdminRoom('friday-quiz')`.
+> calling `joinRoom()` using
+> `await createAdminRoom('trivia-night', 'friday-quiz')`.
 
 #### 2. Specifying admin `userId`s (fixed room names or co-admins)
 
@@ -1840,7 +1841,7 @@ Returns an object with the following methods:
 
 ### `roles([config])`
 
-Creates the opt-in room authority plugin (`RoomPlugin<'roles', RolesRoomApi>`)
+Creates the opt-in room authority plugin (`RoomPlugin<'roles', RolesPluginApi>`)
 for `joinRoom()`. Pass in `use: [roles(config)]`:
 
 - `roles()` - Enables role and state verification for a participant joining a
@@ -1855,7 +1856,7 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 ### `scale([config])`
 
 Creates the opt-in multi-hop scaling plugin
-(`RoomPlugin<'scale', ScaleRoomApi>`) for `joinRoom()`. Pass in
+(`RoomPlugin<'scale', ScalePluginApi>`) for `joinRoom()`. Pass in
 `use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`,
 `'broadcast'`, `'mesh'`, or a `ScaleConfig` object:
 
@@ -1894,12 +1895,12 @@ Exports a `UserIdentity` (created via `createUserIdentity()` or
 persisting in custom storage. Throws if the identity is backed by non-exportable
 browser storage (`'session'` or `'local'`).
 
-### `createAdminRoom(baseRoomId, [options])`
+### `createAdminRoom(appId, baseRoomId, [options])`
 
-Resolves a `UserIdentity` (from `options.identity`, defaulting to `'local'` when
-persistent browser storage is available) and formats a self-certifying room ID
-(`<baseRoomId>.~<fingerprint>`), returning a promise that resolves to
-`{roomId, baseRoomId, fingerprint, userId, identity}`.
+Resolves a `UserIdentity` for `appId` (from `options.identity`, defaulting to
+`'local'` when persistent browser storage is available) and formats a
+self-certifying room ID (`<baseRoomId>.~<fingerprint>`), returning a promise
+that resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
 
 ### `getRelaySockets()`
 

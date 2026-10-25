@@ -144,14 +144,16 @@ resolveRoomId: async ({appId, roomId, userIdentityP}) => {
 
 ### 2. `setup(kernel, preResolvedState)` _(room initialization)_
 
-Runs synchronously when the room is created. Inside `setup`, your plugin can:
+Runs as soon as the local endpoint's `peerId` (`kernel.selfId`) is ready when
+the room is created. Inside `setup`, your plugin can:
 
 1. Register internal wire actions (`kernel.makeInternalAction(...)`) or public
    actions (`kernel.makeAction(...)`).
 2. Subscribe to peer and room lifecycle hooks (`onPeerActivated`,
    `onPeerDeactivated`, `onRoomIdChanged`, `onLeave`).
 3. Return an object of methods (`TApi`) to merge onto the returned `Room`
-   instance.
+   instance (cannot shadow reserved core `Room` properties or duplicate another
+   plugin's exported method name).
 
 ---
 

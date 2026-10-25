@@ -206,7 +206,10 @@ move.onMessage = (data, {userId, metadata, roles}) => {
   objects directly (`Record<string, RTCPeerConnection>`), `getPeers()` now
   returns rich peer descriptors (`Record<string, PeerInfo>`), which works for
   both direct WebRTC neighbors and multi-hop overlay peers.
-- **New `await room.getSelf()`**: Returns your own verified
+- **New `await room.getSelf()` (replaces removed `selfId` export)**: The
+  top-level `selfId` export has been removed so endpoint P-256 identity keys are
+  generated lazily via WebCrypto without top-level `await`. Use
+  `await room.getSelf()` to get your verified
   `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`.
 
 #### Before (0.26.x)
@@ -221,8 +224,8 @@ const peerIds = Object.keys(peers)
 #### After (0.27.0)
 
 ```js
-// Get your own verified userId and peerId
-const {userId: myUserId} = await room.getSelf()
+// Get your own verified userId and peerId (replaces top-level `selfId`)
+const {peerId: myPeerId, userId: myUserId} = await room.getSelf()
 
 // Get all other connected users in the room
 const users = room.getUsers() // { [userId]: { peerIds: [...], roles: [...] } }
@@ -301,15 +304,23 @@ const room = joinRoom(
 ### Scenario 3: Allowlists, Roles, and Moderation (Replacing `onPeerHandshake` Auth)
 
 Instead of gating physical connections with `onPeerHandshake`, 0.27.0 provides
-cryptographic **self-certifying rooms** (`roles(true)`), **signed role
-certificates** (`grantRole`), **action/state role gating**, and **signed bans**
-(`ban`) that work across both full-mesh and multi-hop topologies.
+cryptographic **self-certifying rooms** (`use: [roles({selfAsAdmin: true})]`),
+**signed role certificates** (`grantRole`), **action/state role gating**, and
+**signed bans** (`ban`) that work across both full-mesh and multi-hop
+topologies.
 
 ```js
 import {joinRoom, roles} from 'trystero'
 
 // --- Host (Room Creator) ---
-const room = joinRoom({appId: 'poker-club', ...roles(true)}, 'table-1')
+const room = joinRoom(
+  {
+    appId: 'poker-club',
+    identity: 'local',
+    use: [roles({selfAsAdmin: true})]
+  },
+  'table-1'
+)
 
 // Wait for the room ID containing the admin public key fingerprint
 const {roomId: inviteRoomId} = await room.getSelf()
@@ -334,7 +345,13 @@ room.onUserJoin = async ({userId}) => {
 
 ```js
 // --- Joining Participant ---
-const room = joinRoom({appId: 'poker-club', ...roles()}, inviteRoomIdFromUrl)
+const room = joinRoom(
+  {
+    appId: 'poker-club',
+    use: [roles()]
+  },
+  inviteRoomIdFromUrl
+)
 
 const betAction = room.makeAction('bet', {roles: ['admin', 'player']})
 const tableState = room.makeState('table', {pot: 0}, {roles: ['admin']})
@@ -390,12 +407,12 @@ const room = joinRoom(
 
 Create a user identity with `await createUserIdentity()` and store its exported
 `userKey` (`exportUserIdentity(identity)`) securely on your backend. Restore it
-by passing that key as `config.identity` when the backend joins the room with an
-RTC polyfill. Guests can trust its `userId` on a fixed room name using
-`...roles(serverUserId)` (or `...roles([serverUserId])`), or use a
-self-certifying room ID from
-`await createAdminRoom(baseRoomId, {identity: serverIdentity})` along with
-`...roles()`.
+with `const serverIdentity = await importUserIdentity(savedUserKey)` and pass
+`identity: serverIdentity` when the backend joins the room with an RTC polyfill.
+Guests can trust its `userId` on a fixed room name using
+`use: [roles({admins: [serverUserId]})]`, or use a self-certifying room ID from
+`await createAdminRoom(appId, baseRoomId, {identity: serverIdentity})` along
+with `use: [roles()]`.
 
 The backend can issue roles with `room.grantRole()` while it is connected. There
 is no public standalone role-certificate import API in this beta.

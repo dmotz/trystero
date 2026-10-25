@@ -273,17 +273,9 @@ export type EndpointIdentity = {
   sign: (payload: Uint8Array) => Promise<Uint8Array>
 }
 
-let fallbackSelfId = ''
-DEV: {
-  const chars = new Uint8Array(peerIdLength)
-  crypto.getRandomValues(chars)
-  for (const b of chars) {
-    fallbackSelfId += base62Alphabet[b % 62]!
-  }
-}
-
-let resolvedDefaultSelfId = fallbackSelfId
-export const getResolvedDefaultSelfId = (): string => resolvedDefaultSelfId
+let resolvedDefaultSelfId: string | null = null
+export const getResolvedDefaultSelfId = (): string | null =>
+  resolvedDefaultSelfId
 
 let defaultEndpointIdentityPromise: Promise<EndpointIdentity> | null = null
 
@@ -321,14 +313,18 @@ const generateEndpointIdentity = async (
 export const getDefaultEndpointIdentity = (): Promise<EndpointIdentity> =>
   (defaultEndpointIdentityPromise ??= generateEndpointIdentity().then(id => {
     resolvedDefaultSelfId = id.peerId
-    DEV: if (fallbackSelfId && fallbackSelfId !== id.peerId) {
-      resolvedTestEndpointCanonicalJwk.set(
-        fallbackSelfId,
-        canonicalizePubJwk(id.signPubJwk)
-      )
-    }
     return id
   }))
+
+export const getDefaultSelfId = (): Promise<string> =>
+  getDefaultEndpointIdentity().then(id => id.peerId)
+
+export const resolveSelfId = (explicitSelfId?: string): Promise<string> =>
+  explicitSelfId
+    ? Promise.resolve(explicitSelfId)
+    : resolvedDefaultSelfId
+      ? Promise.resolve(resolvedDefaultSelfId)
+      : getDefaultSelfId()
 
 const endpointIdentityByPeerId = new Map<string, Promise<EndpointIdentity>>()
 const registeredTestForcedPeerIds = new Set<string>()
@@ -337,11 +333,7 @@ const resolvedTestEndpointCanonicalJwk = new Map<string, string>()
 export const registerTestForcedPeerId = (
   peerId: string
 ): Promise<EndpointIdentity> => {
-  if (
-    !peerId ||
-    peerId === resolvedDefaultSelfId ||
-    peerId === fallbackSelfId
-  ) {
+  if (!peerId || peerId === resolvedDefaultSelfId) {
     return getDefaultEndpointIdentity()
   }
   const existing = endpointIdentityByPeerId.get(peerId)
@@ -364,11 +356,7 @@ export const registerTestForcedPeerId = (
 export const getOrCreateEndpointIdentity = (
   peerId?: string
 ): Promise<EndpointIdentity> => {
-  DEV: if (
-    peerId &&
-    peerId !== resolvedDefaultSelfId &&
-    peerId !== fallbackSelfId
-  ) {
+  DEV: if (peerId && peerId !== resolvedDefaultSelfId) {
     return registerTestForcedPeerId(peerId)
   }
   return getDefaultEndpointIdentity()
@@ -794,13 +782,9 @@ const getOrCreateRuntimeUserIdentity = (
 }
 
 export const getDefaultTestUserIdentity = (
-  peerId: string
+  peerId?: string | null
 ): Promise<UserIdentity> => {
-  if (
-    !peerId ||
-    peerId === resolvedDefaultSelfId ||
-    peerId === fallbackSelfId
-  ) {
+  if (!peerId || peerId === resolvedDefaultSelfId) {
     return getDefaultUserIdentity()
   }
   let cached = testUserIdentityByPeerId.get(peerId)
@@ -815,13 +799,9 @@ export const getDefaultTestUserIdentity = (
 }
 
 export const getDefaultTestUserIdentityUserIdSync = (
-  peerId: string
+  peerId?: string | null
 ): string => {
-  if (
-    !peerId ||
-    peerId === resolvedDefaultSelfId ||
-    peerId === fallbackSelfId
-  ) {
+  if (!peerId || peerId === resolvedDefaultSelfId) {
     void getDefaultUserIdentity()
     return resolvedDefaultUserId
   }
@@ -833,6 +813,13 @@ export const getDefaultTestUserIdentityUserIdSync = (
   const slug = toBase64Url(encodeBytes(`trystero-test-uid:${peerId}`))
   return slug.padEnd(43, '0').slice(0, 43)
 }
+
+const stripExportableSecret = (identity: UserIdentity): UserIdentity => ({
+  userId: identity.userId,
+  publicKey: identity.publicKey,
+  signPubJwk: identity.signPubJwk,
+  sign: identity.sign
+})
 
 const loadOrCreateFromWebStorage = (
   storage: Storage,
@@ -851,7 +838,7 @@ const loadOrCreateFromWebStorage = (
       const existing = storage.getItem(key)
       if (existing) {
         try {
-          return await importUserIdentity(existing)
+          return stripExportableSecret(await importUserIdentity(existing))
         } catch {
           /* Stored value was corrupted; regenerate and overwrite below */
         }
@@ -860,7 +847,7 @@ const loadOrCreateFromWebStorage = (
       const raceExisting = storage.getItem(key)
       if (raceExisting) {
         try {
-          return await importUserIdentity(raceExisting)
+          return stripExportableSecret(await importUserIdentity(raceExisting))
         } catch {
           /* fall through */
         }
@@ -869,9 +856,9 @@ const loadOrCreateFromWebStorage = (
       storage.setItem(key, exportedKey)
       const verifyRead = storage.getItem(key)
       if (verifyRead && verifyRead !== exportedKey) {
-        return await importUserIdentity(verifyRead)
+        return stripExportableSecret(await importUserIdentity(verifyRead))
       }
-      return created
+      return stripExportableSecret(created)
     } catch (err) {
       throw mkErr(
         `failed to persist ${label} user identity for app "${appId}": ${
@@ -903,6 +890,38 @@ const buildUserIdentityFromIdbRecord = (
   sign: (payload: Uint8Array) =>
     ecdsaSign(rec.privateKey, payload as BufferSource)
 })
+
+const generateNonExtractableIdbRecord =
+  async (): Promise<StoredIdbIdentityRecord> => {
+    const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, false, [
+      'sign',
+      'verify'
+    ])
+    const rawPubJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey)
+    const signPubJwk: JsonWebKey = {
+      crv: 'P-256',
+      kty: 'EC',
+      x: rawPubJwk.x ?? '',
+      y: rawPubJwk.y ?? ''
+    }
+    const rec = await getVerifiedPubKeyRecord(signPubJwk, keyPair.publicKey)
+    return {
+      userId: rec!.userId,
+      publicKey: encodePublicKey(signPubJwk),
+      signPubJwk,
+      privateKey: keyPair.privateKey
+    }
+  }
+
+const generateRandomTabToken = (): string => {
+  const bytes = new Uint8Array(24)
+  crypto.getRandomValues(bytes)
+  let token = ''
+  for (const b of bytes) {
+    token += base62Alphabet[b % 62]!
+  }
+  return token
+}
 
 const openIdentityDb = (): Promise<IDBDatabase> =>
   new Promise((resolve, reject) => {
@@ -987,6 +1006,64 @@ const withNavigatorLock = async <T>(
   return fn()
 }
 
+const loadOrCreateSessionIdentity = (
+  sessionStore: Storage,
+  appId: string
+): Promise<UserIdentity> => {
+  if (!hasIndexedDB()) {
+    return loadOrCreateFromWebStorage(sessionStore, appId, 'session')
+  }
+
+  const inflight = sessionMutexByApp.get(appId)
+  if (inflight) {
+    return inflight
+  }
+
+  const tokenKey = `${storagePrefix}session:${appId}`
+  const promise = (async (): Promise<UserIdentity> => {
+    let tabToken = sessionStore.getItem(tokenKey)
+    if (!tabToken || !/^[0-9A-Za-z]{16,64}$/.test(tabToken)) {
+      const generated = generateRandomTabToken()
+      sessionStore.setItem(tokenKey, generated)
+      const verified = sessionStore.getItem(tokenKey)
+      tabToken =
+        verified && /^[0-9A-Za-z]{16,64}$/.test(verified) ? verified : generated
+    }
+
+    const idbKey = `session:${appId}:${tabToken}`
+    return withNavigatorLock(`${storagePrefix}${idbKey}`, async () => {
+      try {
+        const db = await openIdentityDb()
+        try {
+          const existing = await idbGetRecord(db, idbKey)
+          if (
+            existing &&
+            existing.userId &&
+            existing.signPubJwk &&
+            existing.privateKey &&
+            (await verifyUserIdKey(existing.userId, existing.signPubJwk))
+          ) {
+            return buildUserIdentityFromIdbRecord(existing)
+          }
+
+          const candidate = await generateNonExtractableIdbRecord()
+          const committed = await idbAddOrGetRecord(db, idbKey, candidate)
+          return buildUserIdentityFromIdbRecord(committed)
+        } finally {
+          db.close()
+        }
+      } catch {
+        return loadOrCreateFromWebStorage(sessionStore, appId, 'session')
+      }
+    })
+  })().finally(() => {
+    sessionMutexByApp.delete(appId)
+  })
+
+  sessionMutexByApp.set(appId, promise)
+  return promise
+}
+
 const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
   const inflight = localMutexByApp.get(appId)
   if (inflight) {
@@ -999,7 +1076,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
       const existingRaw = localStore.getItem(`${storagePrefix}${appId}`)
       if (existingRaw) {
         try {
-          return await importUserIdentity(existingRaw)
+          return stripExportableSecret(await importUserIdentity(existingRaw))
         } catch {
           /* ignore corrupted localStorage entry */
         }
@@ -1021,32 +1098,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
             return buildUserIdentityFromIdbRecord(existing)
           }
 
-          const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, false, [
-            'sign',
-            'verify'
-          ])
-          const rawPubJwk = await crypto.subtle.exportKey(
-            'jwk',
-            keyPair.publicKey
-          )
-          const signPubJwk: JsonWebKey = {
-            crv: 'P-256',
-            kty: 'EC',
-            x: rawPubJwk.x ?? '',
-            y: rawPubJwk.y ?? ''
-          }
-          const rec = await getVerifiedPubKeyRecord(
-            signPubJwk,
-            keyPair.publicKey
-          )
-          const userId = rec!.userId
-          const publicKey = encodePublicKey(signPubJwk)
-          const candidate: StoredIdbIdentityRecord = {
-            userId,
-            publicKey,
-            signPubJwk,
-            privateKey: keyPair.privateKey
-          }
+          const candidate = await generateNonExtractableIdbRecord()
           const committed = await idbAddOrGetRecord(db, appId, candidate)
           return buildUserIdentityFromIdbRecord(committed)
         } finally {
@@ -1089,7 +1141,7 @@ export const resolveUserIdentity = async (
     preferLocal?: boolean
     _test_only_forcedPeerId?: string
   },
-  localSelfId = resolvedDefaultSelfId
+  localSelfId: string | null = resolvedDefaultSelfId
 ): Promise<UserIdentity> => {
   const raw = config?.identity
 
@@ -1110,9 +1162,7 @@ export const resolveUserIdentity = async (
   let forcedPeerId: string | undefined
   DEV: forcedPeerId =
     config?._test_only_forcedPeerId ??
-    (localSelfId &&
-    localSelfId !== resolvedDefaultSelfId &&
-    localSelfId !== fallbackSelfId
+    (localSelfId && localSelfId !== resolvedDefaultSelfId
       ? localSelfId
       : undefined)
 
@@ -1144,7 +1194,7 @@ export const resolveUserIdentity = async (
       return getOrCreateRuntimeUserIdentity(appId)
     }
     try {
-      return await loadOrCreateFromWebStorage(sessionStore, appId, 'session')
+      return await loadOrCreateSessionIdentity(sessionStore, appId)
     } catch (err) {
       if (raw === 'session') {
         throw err

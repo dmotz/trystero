@@ -3,7 +3,7 @@ import {
   extractDtlsFingerprints,
   fromBase64Url,
   getOrCreateEndpointIdentity,
-  getResolvedDefaultSelfId,
+  resolveSelfId,
   toBase64Url,
   verifyPeerIdKey,
   verifyUserIdKey,
@@ -144,7 +144,7 @@ const verifyTranscriptDualSignatures = async (
 }
 
 export const createIdentityHandshake = (params: {
-  selfId: string
+  selfId?: string
   appId: string
   roomId: string | Promise<string>
   getUserIdentity: () => Promise<UserIdentity>
@@ -442,6 +442,7 @@ type PendingPeerState = {
 
 type HandshakeManagerDeps = {
   selfId?: string
+  selfIdP?: Promise<string>
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs: number
@@ -479,6 +480,7 @@ const toHandshakeErrorMessage = (error: Error): string => {
 
 export const createHandshakeManager = ({
   selfId: localSelfId,
+  selfIdP,
   onPeerHandshake,
   onHandshakeError,
   handshakeTimeoutMs,
@@ -671,24 +673,19 @@ export const createHandshakeManager = ({
           })
         })
 
-      const immediateSelfId = localSelfId || getResolvedDefaultSelfId()
-      const runHandshake = immediateSelfId
-        ? Promise.resolve(
-            onPeerHandshake?.(
+      const resolvedSelfIdP =
+        selfIdP ??
+        (localSelfId ? Promise.resolve(localSelfId) : resolveSelfId())
+      const runHandshake = onPeerHandshake
+        ? resolvedSelfIdP.then(effectiveSelfId =>
+            onPeerHandshake(
               id,
               sendHandshake,
               receiveHandshake,
-              immediateSelfId < id
+              effectiveSelfId < id
             )
           )
-        : getOrCreateEndpointIdentity().then(ep =>
-            onPeerHandshake?.(
-              id,
-              sendHandshake,
-              receiveHandshake,
-              ep.peerId < id
-            )
-          )
+        : Promise.resolve()
 
       void runHandshake
         .then(() => markLocalHandshakePassed(id, peer))

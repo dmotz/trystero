@@ -8,6 +8,7 @@ import {
   libName,
   mkErr,
   noOp,
+  reservedRoomPropertyNames,
   selfCertifyingRoomRegex,
   toError
 } from './utils'
@@ -29,20 +30,27 @@ import {
 import {createMediaManager, type InternalMediaMeta} from './media'
 import type {
   AddMediaOptions,
+  AuthoritativeState,
   DataPayload,
+  JsonValue,
   KernelRolesProvider,
   KernelScaleProvider,
   PeerHandle,
   PeerHandshake,
   PeerJoinContext,
   PeerLeaveContext,
+  RolesPluginApi,
   Room,
   RoomKernel,
   RoomPlugin,
   RoomWithPlugins,
+  ScalePluginApi,
   SelfInfo,
   SharedMediaPeer,
+  StateChangeContext,
+  StateConfig,
   TargetPeers,
+  TopologySnapshot,
   UserIdentity,
   UserIdentityConfig,
   UserInfo,
@@ -75,6 +83,7 @@ const registerBeforeUnloadCleanup = (cleanup: () => void): (() => void) => {
 
 export type RoomSignalingBridge = {
   getScaleProvider: () => KernelScaleProvider | null
+  setOnScaleTargetsChanged: (cb: (targetPeerIds: string[]) => void) => void
   canConnectPeer: (peerId: string) => boolean
   checkCapacityAfterPassword: (peerId: string) => void
   onPeerIdentityVerified: (
@@ -149,7 +158,7 @@ export default <
     isPassive = false,
     onBeforeLeave
   } = roomOptions
-  let localSelfId = explicitSelfId || getResolvedDefaultSelfId()
+  let localSelfId = explicitSelfId ?? getResolvedDefaultSelfId() ?? ''
   const localEndpointP = getOrCreateEndpointIdentity(explicitSelfId).then(
     ep => {
       if (!explicitSelfId) {
@@ -158,14 +167,27 @@ export default <
       return ep
     }
   )
+  const localSelfIdP = explicitSelfId
+    ? Promise.resolve(explicitSelfId)
+    : localEndpointP.then(ep => ep.peerId)
   const peerMap: Record<string, PeerHandle> = {}
   const activePeerMap: Record<string, PeerHandle> = {}
   const peerUserIds = new Map<string, string>()
   const peerPubKeys = new Map<string, JsonWebKey>()
   const activeUserPeers = new Map<string, Set<string>>()
+  const pendingActionAuthorities = new Map<string, string[]>()
+  const plugins = getConfiguredPlugins(roomOptions.use)
+  const hasRolesPlugin = plugins.some(p => p.name === 'roles')
+  const hasScalePlugin = plugins.some(p => p.name === 'scale')
+  if (!hasRolesPlugin && selfCertifyingRoomRegex.test(initialRoomId)) {
+    throw mkErr('self-certifying room ID requires roles() in joinRoom config')
+  }
   let effectiveRoomId = initialRoomId
   let rolesProvider: KernelRolesProvider | null = null
   let scaleProvider: KernelScaleProvider | null = null
+  let scaleTargetsChangedCallback: ((targetPeerIds: string[]) => void) | null =
+    null
+  let roomInstanceRef: Room | null = null
   const peerActivatedListeners: Array<
     (peerId: string, peer: PeerHandle) => void
   > = []
@@ -563,8 +585,13 @@ export default <
         ? scaleProvider.broadcastInline(frame, onProgress)
         : Promise.resolve(false),
     registerActionAuthority: (namespace, roles) => {
-      if (!rolesProvider) {
+      if (!rolesProvider && !hasRolesPlugin) {
         throw mkErr('action role gating requires roles() in joinRoom config')
+      }
+      if (roles.length > 0) {
+        pendingActionAuthorities.set(namespace, [...roles])
+      } else {
+        pendingActionAuthorities.delete(namespace)
       }
       scaleProvider?.registerActionAuthority(namespace, roles)
     },
@@ -572,36 +599,52 @@ export default <
     onUnauthorizedAction: () => {
       scaleProvider?.recordSignatureFailure()
     },
-    signActionPayload: (namespace, requiredRoles, data, userMetadata) =>
-      rolesProvider
+    signActionPayload: async (namespace, requiredRoles, data, userMetadata) => {
+      if (!rolesProvider && hasRolesPlugin) {
+        await pluginSetupP
+      }
+      return rolesProvider
         ? rolesProvider.signActionPayload(
             namespace,
             requiredRoles,
             data,
             userMetadata
           )
-        : Promise.resolve(userMetadata ?? null),
-    verifyActionOffer: (namespace, peerId, requiredRoles, wireMetadata) =>
-      rolesProvider
+        : (userMetadata ?? null)
+    },
+    verifyActionOffer: async (
+      namespace,
+      peerId,
+      requiredRoles,
+      wireMetadata
+    ) => {
+      if (!rolesProvider && hasRolesPlugin) {
+        await pluginSetupP
+      }
+      return rolesProvider
         ? rolesProvider.verifyActionOffer(
             namespace,
             peerId,
             requiredRoles,
             wireMetadata
           )
-        : Promise.resolve({
+        : {
             valid: true,
             ...(wireMetadata === undefined ? {} : {userMetadata: wireMetadata}),
             roles: []
-          }),
-    verifyActionPayload: (
+          }
+    },
+    verifyActionPayload: async (
       namespace,
       peerId,
       requiredRoles,
       data,
       wireMetadata
-    ) =>
-      rolesProvider
+    ) => {
+      if (!rolesProvider && hasRolesPlugin) {
+        await pluginSetupP
+      }
+      return rolesProvider
         ? rolesProvider.verifyActionPayload(
             namespace,
             peerId,
@@ -609,11 +652,12 @@ export default <
             data,
             wireMetadata
           )
-        : Promise.resolve({
+        : {
             valid: true,
             ...(wireMetadata === undefined ? {} : {userMetadata: wireMetadata}),
             roles: []
-          })
+          }
+    }
   })
   const makeActionInternal = actionManager.makeInternalAction
   const handleData = actionManager.handleData
@@ -834,8 +878,19 @@ export default <
     },
     registerScaleProvider: provider => {
       scaleProvider = provider
+      if (scaleTargetsChangedCallback) {
+        provider.setOnTargetsChanged(scaleTargetsChangedCallback)
+      }
+      for (const [ns, roles] of pendingActionAuthorities.entries()) {
+        provider.registerActionAuthority(ns, roles)
+      }
       for (const [pid, pubKey] of peerPubKeys.entries()) {
         provider.setPeerSignPublicKey(pid, pubKey)
+      }
+      for (const [id, peer] of entries(activePeerMap)) {
+        if (!provider.isVirtualPeer(id)) {
+          provider.addDirectPeer(id, peer)
+        }
       }
     },
     getRolesProvider: () => rolesProvider,
@@ -924,7 +979,6 @@ export default <
     }
   }
 
-  const plugins = getConfiguredPlugins(roomOptions.use)
   if (
     !userIdentityP &&
     plugins.some(isSelfAsAdminPlugin) &&
@@ -935,16 +989,178 @@ export default <
     )
   }
   const pluginApis: Record<string, unknown> = {}
-  for (const plugin of plugins) {
-    const preState = preResolvedPlugins?.get(plugin)
-    const api = plugin.setup(kernel, preState)
-    if (api && typeof api === 'object') {
-      Object.assign(pluginApis, api)
+  let didRunPluginSetup = false
+  let pluginSetupError: unknown = null
+  const runPluginSetup = (): void => {
+    if (didRunPluginSetup) {
+      if (pluginSetupError) {
+        throw pluginSetupError
+      }
+      return
+    }
+    didRunPluginSetup = true
+    try {
+      const seenPluginApiKeys = new Set<string>()
+      for (const plugin of plugins) {
+        const preState = preResolvedPlugins?.get(plugin)
+        const api = plugin.setup(kernel, preState)
+        if (api && typeof api === 'object') {
+          for (const key of keys(api as Record<string, unknown>)) {
+            if (reservedRoomPropertyNames.has(key)) {
+              throw mkErr(
+                `plugin "${plugin.name}" cannot override reserved room property "${key}"`
+              )
+            }
+            if (seenPluginApiKeys.has(key)) {
+              throw mkErr(
+                `plugin "${plugin.name}" defines duplicate room property "${key}"`
+              )
+            }
+            seenPluginApiKeys.add(key)
+          }
+          Object.assign(pluginApis, api)
+        }
+      }
+      if (!rolesProvider && selfCertifyingRoomRegex.test(initialRoomId)) {
+        throw mkErr(
+          'self-certifying room ID requires roles() in joinRoom config'
+        )
+      }
+      if (roomInstanceRef) {
+        for (const [k, v] of entries(pluginApis)) {
+          if (!reservedRoomPropertyNames.has(k)) {
+            ;(roomInstanceRef as Record<string, unknown>)[k] = v
+          }
+        }
+      }
+    } catch (err) {
+      pluginSetupError = err
+      throw err
     }
   }
 
-  if (!rolesProvider && selfCertifyingRoomRegex.test(initialRoomId)) {
-    throw mkErr('self-certifying room ID requires roles() in joinRoom config')
+  if (hasScalePlugin && !localSelfId) {
+    const scaleShim: ScalePluginApi = {
+      getTopology: (): TopologySnapshot =>
+        scaleProvider
+          ? scaleProvider.getSnapshot()
+          : {
+              mode: 'auto',
+              activeMode: 'mesh',
+              selfId: localSelfId,
+              directPeerIds: [],
+              roomPeerIds: [],
+              routes: {},
+              mediaTrees: {},
+              stats: {
+                messagesSent: 0,
+                messagesReceived: 0,
+                messagesForwarded: 0,
+                duplicatesDropped: 0,
+                signatureFailures: 0,
+                lazyRepairsSent: 0,
+                lazyRepairsResolved: 0,
+                treeReparents: 0
+              }
+            }
+    }
+    Object.assign(pluginApis, scaleShim)
+  }
+
+  if (hasRolesPlugin && !localSelfId) {
+    const rolesShim: RolesPluginApi = {
+      makeState: <T extends JsonValue = JsonValue>(
+        namespace: string,
+        initialValue: T,
+        stateConfig?: StateConfig<T>
+      ): AuthoritativeState<T> => {
+        if (
+          didRunPluginSetup &&
+          typeof pluginApis['makeState'] === 'function'
+        ) {
+          return (pluginApis['makeState'] as RolesPluginApi['makeState'])(
+            namespace,
+            initialValue,
+            stateConfig
+          )
+        }
+        const currentVal = initialValue
+        let realState: AuthoritativeState<T> | null = null
+        let pendingChangeHandler:
+          | ((value: T, prev: T, context: StateChangeContext) => void)
+          | null = null
+        const readyStateP = pluginSetupP.then(() => {
+          const fn = pluginApis['makeState'] as RolesPluginApi['makeState']
+          realState = fn(namespace, currentVal, stateConfig)
+          if (pendingChangeHandler) {
+            realState.onChange = pendingChangeHandler
+          }
+          return realState
+        })
+        void readyStateP.catch(noOp)
+        return {
+          get: () => (realState ? realState.get() : currentVal),
+          set: async (next: T | ((prev: T) => T)) => {
+            const s = realState ?? (await readyStateP)
+            await s.set(next)
+          },
+          getMeta: () => (realState ? realState.getMeta() : null),
+          get onChange() {
+            return realState ? realState.onChange : pendingChangeHandler
+          },
+          set onChange(cb) {
+            pendingChangeHandler = cb
+            if (realState) {
+              realState.onChange = cb
+            }
+          }
+        }
+      },
+      grantRole: async (peerId, role, options) => {
+        await pluginSetupP
+        return (pluginApis['grantRole'] as RolesPluginApi['grantRole'])(
+          peerId,
+          role,
+          options
+        )
+      },
+      revokeRole: async (peerId, role) => {
+        await pluginSetupP
+        return (pluginApis['revokeRole'] as RolesPluginApi['revokeRole'])(
+          peerId,
+          role
+        )
+      },
+      getRoles: (peerId?: string) =>
+        didRunPluginSetup && typeof pluginApis['getRoles'] === 'function'
+          ? (pluginApis['getRoles'] as RolesPluginApi['getRoles'])(peerId)
+          : getPeerRoles(peerId),
+      ban: async (peerId, options) => {
+        await pluginSetupP
+        return (pluginApis['ban'] as RolesPluginApi['ban'])(peerId, options)
+      },
+      isBanned: (peerId: string) =>
+        didRunPluginSetup && typeof pluginApis['isBanned'] === 'function'
+          ? (pluginApis['isBanned'] as RolesPluginApi['isBanned'])(peerId)
+          : isPeerBanned(peerId)
+    }
+    Object.assign(pluginApis, rolesShim)
+  }
+
+  let pluginSetupP: Promise<void>
+  if (localSelfId) {
+    runPluginSetup()
+    pluginSetupP = Promise.resolve()
+  } else {
+    pluginSetupP = localEndpointP.then(() => {
+      try {
+        runPluginSetup()
+      } catch (err) {
+        onSelfLeave()
+        throw err
+      }
+    })
+    void pluginSetupP.catch(noOp)
   }
 
   const getActiveUniqueUsers = (): Set<string> => {
@@ -1140,11 +1356,10 @@ export default <
       userIdentityP !== undefined)
   ) {
     effectiveOnPeerHandshake = async (id, send, receive, isInitiator) => {
+      const resolvedSelfId = localSelfId || (await localSelfIdP)
       await Promise.all([
         resolvedUserIdentityP,
-        id === (localSelfId || getResolvedDefaultSelfId())
-          ? undefined
-          : getDefaultTestUserIdentity(id)
+        id === resolvedSelfId ? undefined : getDefaultTestUserIdentity(id)
       ])
       await onPeerHandshake?.(id, send, receive, isInitiator)
     }
@@ -1152,6 +1367,7 @@ export default <
 
   const handshakeManager = createHandshakeManager({
     selfId: localSelfId,
+    selfIdP: localSelfIdP,
     ...(effectiveOnPeerHandshake === undefined
       ? {}
       : {onPeerHandshake: effectiveOnPeerHandshake}),
@@ -1318,12 +1534,11 @@ export default <
         scaleProvider?.isOverlayActive() &&
         meta.o !== localSelfId &&
         !isPeerBanned(meta.o) &&
-        (activePeerMap[meta.o] ||
-          scaleProvider.isVirtualPeer(meta.o) ||
-          Boolean(scaleProvider.getRoute(meta.o)))
+        scaleProvider.isExpectedMediaRelayParent(meta.o, fromPeerId)
       )
       if (!isValidRelayOrigin) {
-        return {...meta, o: fromPeerId}
+        const {o: _ignored, ...rest} = meta
+        return rest as T
       }
     }
     return meta
@@ -1533,8 +1748,12 @@ export default <
     getSelf: async (): Promise<SelfInfo> => {
       const [, resolvedUser] = await Promise.all([
         localEndpointP,
-        resolvedUserIdentityP
+        resolvedUserIdentityP,
+        pluginSetupP
       ])
+      if (pluginSetupError) {
+        throw pluginSetupError
+      }
       const userId = resolvedUser.userId
       if (rolesProvider) {
         const auth = await rolesProvider.getAuthorityInfo()
@@ -1810,8 +2029,14 @@ export default <
     }
   }
 
+  roomInstanceRef = roomInstance
+
   roomSignalingBridges.set(roomInstance, {
     getScaleProvider: () => scaleProvider,
+    setOnScaleTargetsChanged: cb => {
+      scaleTargetsChangedCallback = cb
+      scaleProvider?.setOnTargetsChanged(cb)
+    },
     canConnectPeer: peerId =>
       !isPeerBanned(peerId) &&
       !rejectedAsFullByPeers.has(peerId) &&

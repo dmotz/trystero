@@ -5,7 +5,6 @@ import {
   canonicalizePubJwk,
   getCachedPubKeyRecord,
   getOrCreateEndpointIdentity,
-  getResolvedDefaultSelfId,
   isPeerIdKeyCachedValid,
   isUserEndpointProofCachedValid,
   signUserEndpointProof,
@@ -112,10 +111,6 @@ type OverlayControlMessage =
   | {
       t: 'iwant'
       ids: string[]
-    }
-  | {
-      t: 'prune'
-      peerId: string
     }
 
 type BroadcastEnvelopeHeader = {
@@ -830,6 +825,10 @@ export type OverlayManager = {
   ) => Promise<boolean>
   sendUnicast: (targetPeerId: string, frame: Uint8Array) => void
   getMediaTargets: (broadcasterId?: string) => string[]
+  isExpectedMediaRelayParent: (
+    broadcasterId: string,
+    fromPeerId: string
+  ) => boolean
   registerBroadcastStream: (
     broadcasterId: string,
     streamKey: string,
@@ -900,7 +899,7 @@ export const createOverlayManager = ({
   onRelayMediaStream,
   onRelayMediaTrack
 }: OverlayManagerDeps): OverlayManager => {
-  let selfId = initialSelfId || getResolvedDefaultSelfId()
+  let selfId = initialSelfId ?? ''
   void getOrCreateEndpointIdentity(initialSelfId).then(ep => {
     if (!initialSelfId && ep.peerId !== selfId) {
       knownRoster.delete(selfId)
@@ -925,7 +924,6 @@ export const createOverlayManager = ({
   const adjacency = new Map<string, Set<string>>()
   const pinnedSignKeys = new Map<string, string>()
   const derivedPairwiseKeys = new Map<string, Promise<CryptoKey>>()
-  const prunedDirectPeers = new Set<string>()
   const departedPeers = new Set<string>()
   const downPeersSeq = new Map<string, number>()
   const pendingDownCandidates = new Set<string>()
@@ -2088,13 +2086,6 @@ export const createOverlayManager = ({
       return
     }
 
-    if (msg.t === 'prune') {
-      if (typeof msg.peerId === 'string' && msg.peerId === fromPeerId) {
-        prunedDirectPeers.add(fromPeerId)
-      }
-      return
-    }
-
     if (msg.t === 'leave') {
       const leavingId = msg.peerId
       if (!leavingId || leavingId === selfId) {
@@ -2645,7 +2636,6 @@ export const createOverlayManager = ({
 
       departedPeers.delete(peerId)
       downPeersSeq.delete(peerId)
-      prunedDirectPeers.delete(peerId)
       knownRoster.add(peerId)
 
       const timer = unreachableTimers.get(peerId)
@@ -2710,28 +2700,14 @@ export const createOverlayManager = ({
         return false
       }
 
-      const wasGracefulPrune = prunedDirectPeers.delete(peerId)
-
-      if (!wasGracefulPrune) {
-        // Peer disconnected unexpectedly or left; mark departed and remove its stale link-state
-        const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
-        downPeersSeq.set(peerId, lastSeq)
-        departedPeers.add(peerId)
-        purgePeerFromGraph(peerId)
-      } else {
-        // Only the direct edge between selfId and peerId was pruned
-        adjacency.get(peerId)?.delete(selfId)
-      }
+      // Peer disconnected unexpectedly or left; mark departed and remove its stale link-state
+      const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
+      downPeersSeq.set(peerId, lastSeq)
+      departedPeers.add(peerId)
+      purgePeerFromGraph(peerId)
 
       recomputeTopologyAndRoutes()
-      void publishLocalDescriptor(wasGracefulPrune ? undefined : [peerId])
-
-      // If peerId is still reachable via another multi-hop route, promote it to a virtual peer!
-      if (wasGracefulPrune && !departedPeers.has(peerId) && routes[peerId]) {
-        const vPeer = createVirtualPeer(peerId)
-        onVirtualPeerJoin(peerId, vPeer)
-        return true
-      }
+      void publishLocalDescriptor([peerId])
 
       return false
     },
@@ -2781,6 +2757,29 @@ export const createOverlayManager = ({
       return broadcasterId === selfId
         ? [...directPeers.keys()].slice(0, config.fanout)
         : []
+    },
+
+    isExpectedMediaRelayParent: (
+      broadcasterId: string,
+      fromPeerId: string
+    ): boolean => {
+      if (
+        !broadcasterId ||
+        broadcasterId === selfId ||
+        bannedPeers.has(broadcasterId) ||
+        departedPeers.has(broadcasterId) ||
+        !directPeers.has(fromPeerId)
+      ) {
+        return false
+      }
+      if (broadcasterId === fromPeerId) {
+        return true
+      }
+      if (!virtualPeers.has(broadcasterId) && !routes[broadcasterId]) {
+        return false
+      }
+      const {parentId} = getCachedTreeChildren(broadcasterId, config.fanout)
+      return parentId === fromPeerId
     },
 
     registerBroadcastStream: (
