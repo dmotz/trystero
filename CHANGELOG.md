@@ -5,43 +5,46 @@
 ### Improvements
 
 - 🕸️ **Opt-in, tree-shakeable room scaling (`scale()`)** - added `scale()`
-  plugin for `joinRoom({appId, ...scale()})`, connecting peers directly in small
-  groups (`<= 12` peers) and automatically switching to a bounded-degree
+  plugin for `joinRoom({appId, use: [scale()]})`, connecting peers directly in
+  small groups (`<= 12` peers) and automatically switching to a bounded-degree
   `'gossip'` relay overlay (`maxConnections: 6` by default) as rooms grow to
   dozens or hundreds of peers. You can also opt into `'mesh'`, `'gossip'`, or
-  `'broadcast'` (for one-to-many broadcasts) or pass a `ScaleConfig` object to
-  customize connection and routing limits. Apps that do not import `scale()`
-  tree-shake the entire overlay plugin out of their bundle.
+  `'broadcast'` (for one-to-many broadcasts) or pass a `ScaleConfig` object
+  (`{mode, maxConnections, autoThreshold, fanout}`) to customize connection
+  limits. Apps that do not import `scale()` tree-shake the entire overlay plugin
+  out of their bundle.
 - All room APIs (`makeAction`, `makeState`, `addStream`, `addTrack`,
   `replaceTrack`, `ping`, `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work
   transparently across both direct and multi-hop peers. Broadcast media in
-  scalable topologies routes through a branching tree with automatic reparenting
-  if an upstream peer disconnects. Targeted media establishes direct WebRTC
-  connections to its recipients, which can exceed the topology's
-  `maxConnections` target. Multi-hop messages are ECDSA-signed (with ECDH +
-  AES-GCM end-to-end encryption for targeted sends) so intermediate relays
-  cannot forge or read traffic.
-- Added `room.getTopology()` to inspect the active topology mode, direct and
-  multi-hop peer lists, routing paths, media broadcast trees, and forwarding
-  stats.
+  scalable topologies routes hop-by-hop through a branching tree with automatic
+  reparenting if an upstream peer disconnects. Targeted media establishes direct
+  1-hop WebRTC connections to its recipients, which can exceed the topology's
+  `maxConnections` target. Multi-hop data messages are ECDSA-signed (with ECDH +
+  AES-GCM end-to-end encryption for targeted data sends) so intermediate relays
+  cannot forge or read data traffic.
+- Added `room.getTopology()` (on rooms configured with `scale()`) to inspect the
+  active topology mode, direct and multi-hop peer lists, routing paths, media
+  broadcast trees, and forwarding stats.
 - 👑 **Opt-in, tree-shakeable room admins, custom roles, and peer banning
-  (`roles()`)** - added `roles()` plugin for `joinRoom({appId, ...roles(...)})`
-  (`roles()`, `roles(true)`, a trusted `userId` or array of `userId`s, or a
-  `RolesConfig` object) for zero-trust public-key room administration unified
-  with user identity (`userId`). Passing `...roles(true)` appends a 16-character
-  Base62 fingerprint suffix derived from the host's `userId` to the room ID
-  (`<roomId>.<fingerprint>`) so guests automatically verify the room creator
-  from the invite room ID alone (when joining with `...roles()`), and the host
-  automatically regains admin authority when rejoining with the same `userId`.
-  Joining a fingerprinted room ID without `roles()` throws an error. Apps that
-  do not import `roles()` tree-shake the entire authority plugin out of their
-  bundle.
+  (`roles()`)** - added `roles()` plugin for
+  `joinRoom({appId, use: [roles(...)]})` (`roles()`,
+  `roles({selfAsAdmin: true})`, and `roles({admins: [...]})`) for zero-trust
+  public-key room administration unified with user identity (`userId`). Passing
+  `roles({selfAsAdmin: true})` appends a `.~` separator and 16-character Base62
+  fingerprint suffix derived from the host's `userId` to the room ID
+  (`<roomId>.~<fingerprint>`) so guests automatically verify the room creator
+  from the invite room ID alone (when joining with `use: [roles()]`), and the
+  host automatically regains admin authority when rejoining with the same
+  persistent `userId`. Joining a fingerprinted room ID without `roles()` throws
+  an error. Apps that do not import `roles()` tree-shake the entire authority
+  plugin out of their bundle.
 - Added `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`,
-  `room.ban()`, `room.isBanned()`, and expanded `room.getSelf()` (returning
+  `room.ban()`, `room.isBanned()` (on rooms configured with `roles()`), and
+  expanded `room.getSelf()` (returning
   `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`), plus
-  top-level helpers `createAdminRoom()`, `parseSelfCertifyingRoomId()`,
-  `formatSelfCertifyingRoomId()`, `computePublicKeyFingerprint()`, and
-  `definePlugin()` (for authoring custom/3rd-party room plugins).
+  top-level helpers `createAdminRoom()` and `definePlugin()` (for authoring
+  custom/3rd-party room plugins with TypeScript return-type inference via
+  `use: [...]`).
 - Actions now accept a `roles` option (`makeAction(name, {roles})`) to restrict
   sending or requesting to `'admin'` or specific custom roles, with the sender's
   verified `roles` included in `onMessage` and `onRequest` contexts.
@@ -54,23 +57,21 @@
   room.
 - 🚪 **Room size limits** - added `limit` to room config to cap the maximum
   number of unique users in a room (including the local user). When a room is at
-  capacity, additional joiners are rejected during handshake before triggering
-  `onPeerJoin` on existing members, receive `error: 'room full'` via
-  `onJoinError`, and automatically leave the room.
+  capacity, additional joiners are rejected on that peer link during handshake
+  before triggering `onPeerJoin` on existing members and receive
+  `error: 'room full'` via `onJoinError`.
 - 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every
-  peer now has both a self-certifying 20-character Base62 endpoint `peerId`
-  (`selfId`, derived from its ECDSA P-256 public key and verified with DTLS
-  fingerprint binding during handshake and across multi-hop overlays) and a
-  persistent 43-character Base64url `userId`
-  ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) public-key
+  peer now has both a lazily generated self-certifying 20-character Base62
+  endpoint `peerId` (derived from its ECDSA P-256 public key and verified with
+  DTLS fingerprint binding during the direct WebRTC handshake, plus signed
+  descriptors across multi-hop overlays) and a persistent 43-character Base64url
+  `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) public-key
   thumbprint).
 - Added `identity` to room config (`'session'` default in browsers, `'local'`
   stored in IndexedDB with `localStorage` fallback across tabs and future
-  visits, `'none'` for ephemeral runtime, or a custom `UserIdentity` /
-  `trystero_uk_...` key / loader function), plus top-level helpers
-  `createUserIdentity()`, `importUserIdentity()`, `exportUserIdentity()`,
-  `derivePeerId()`, `deriveUserId()`, `verifyPeerIdKey()`, and
-  `verifyUserIdKey()`.
+  visits, `'none'` for ephemeral runtime, or a custom `UserIdentity` / loader
+  function), plus top-level helpers `createUserIdentity()`,
+  `importUserIdentity()`, and `exportUserIdentity()`.
 - 👥 **Multi-tab user presence & targeting** - added `room.onUserJoin`,
   `room.onUserLeave`, `room.getUsers()`, and `room.getSelf()`. Every `target` /
   `targets` option (`send`, `request`, `requestMany`, `ping`, media methods, and
@@ -83,6 +84,21 @@
   tree-shaking bundlers and ESM CDNs.
 
 ### ⚠️ Breaking changes
+
+The top-level synchronous `selfId` export has been removed so that endpoint
+identities are generated lazily on first `joinRoom()` call via WebCrypto
+(`crypto.subtle`) without import-time side effects or top-level `await`. Use
+`await room.getSelf()` instead:
+
+```js
+// Before:
+import {joinRoom, selfId} from 'trystero'
+
+// Now:
+import {joinRoom} from 'trystero'
+const room = joinRoom({appId: 'my-app'}, 'room-1')
+const {peerId, userId} = await room.getSelf()
+```
 
 Room event handlers now receive `{peerId, userId, ...}` context objects instead
 of a bare `peerId` string (with `stream` / `track, stream` remaining first on
