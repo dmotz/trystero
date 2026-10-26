@@ -646,13 +646,10 @@ When a room is already at capacity:
   Trystero verifies the password proof _before_ checking room capacity. Users
   with the wrong password receive a password error rather than `'room full'`, so
   outsiders cannot probe whether a private room is full.
-- **Simultaneous burst joins**: What if 5 players click "Join" at the exact same
-  millisecond on an empty `limit: 2` room? Peers include their join metadata
-  (join timestamp `t` and established member status) in their handshake
-  readiness packet and coalesce concurrent arrivals over a short 25ms window.
-  Every peer deterministically selects the same winning `userId`s (established
-  member > earliest join timestamp > peer ID tie-breaker) and turns away the
-  excess joiners with `'room full'`.
+- **Concurrent joins on an empty room**: When multiple peers join an empty room
+  at the same time, seats are admitted in `peerId` order and excess joiners are
+  turned away with `'room full'`. Once a room is established and at capacity,
+  existing members immediately reject new arrivals.
 - **Multi-hop rooms**: When `scale()` is enabled, capacity checks also account
   for verified multi-hop overlay peers across `'gossip'` and `'broadcast'`
   topologies.

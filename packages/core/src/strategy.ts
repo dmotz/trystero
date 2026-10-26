@@ -581,7 +581,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       getPeerHandle: peerId => bridgeRef.current?.getPeerHandle(peerId),
       onVerified: (peerId, verified) => {
         bridgeRef.current?.onPeerIdentityVerified(peerId, verified)
-        bridgeRef.current?.checkCapacityAfterPassword(peerId)
       }
     })
     const composedPeerHandshake = composePassword(composeIdentity())
