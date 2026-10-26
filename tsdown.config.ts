@@ -45,7 +45,8 @@ export default [
     entry: 'src/index.ts',
     dts: true,
     unbundle: true,
-    sourcemap: true,
+    sourcemap: false,
+    minify: false,
     exports: true,
     ...packageDepsConfig,
     publint: ci,
@@ -59,30 +60,9 @@ export default [
     entry: {server: 'src/server.ts'},
     dts: true,
     unbundle: true,
-    sourcemap: true,
+    sourcemap: false,
+    minify: false,
     clean: false,
-    exports: true,
-    ...packageDepsConfig,
-    publint: ci,
-    attw: ci,
-    ...dropDevLabelStatements
-  },
-  {
-    workspace: {
-      include: ['packages/trystero']
-    },
-    entry: {
-      index: 'src/index.ts',
-      nostr: 'src/nostr.ts',
-      torrent: 'src/torrent.ts',
-      mqtt: 'src/mqtt.ts',
-      ipfs: 'src/ipfs.ts',
-      supabase: 'src/supabase.ts',
-      firebase: 'src/firebase.ts'
-    },
-    dts: true,
-    unbundle: true,
-    sourcemap: true,
     exports: true,
     ...packageDepsConfig,
     publint: ci,
