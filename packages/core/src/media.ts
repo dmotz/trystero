@@ -4,9 +4,9 @@ import type {
   AddMediaOptions,
   JsonValue,
   MediaIdentityCache,
+  PeerHandle,
   PeerMediaContext,
   RemoteTrackRef,
-  SharedMediaPeer,
   TargetPeers
 } from './types'
 import type {InternalActionSender} from './action-wire'
@@ -44,11 +44,10 @@ type MediaManagerDeps = {
   onPeerError: (peerId: string, error: Error) => void
   iterate: (
     targets: TargetPeers,
-    f: (id: string, peer: SharedMediaPeer) => Promise<void> | void
+    f: (id: string, peer: PeerHandle) => Promise<void> | void
   ) => Promise<void>[]
   isActive: (id: string) => boolean
-  getSharedMediaPeer: (id: string) => SharedMediaPeer | null
-  preparePeer?: (id: string, peer: SharedMediaPeer) => Promise<SharedMediaPeer>
+  preparePeer?: (id: string, peer: PeerHandle) => Promise<PeerHandle>
   getPeerUserId?: (peerId: string) => string
   onRemoteStream?: (stream: MediaStream, context: RemoteMediaContext) => void
   onRemoteTrack?: (
@@ -175,7 +174,6 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
 export const createMediaManager = ({
   iterate,
   isActive,
-  getSharedMediaPeer,
   preparePeer,
   getPeerUserId,
   onPeerError,
@@ -235,7 +233,6 @@ export const createMediaManager = ({
   const localMedia = createMediaIdentityCache()
 
   const getPeerMedia = (id: string): MediaIdentityCache =>
-    getSharedMediaPeer(id)?.__trysteroMedia ??
     (peerMediaCaches[id] ??= createMediaIdentityCache())
 
   const queuePendingMeta = (
@@ -354,7 +351,7 @@ export const createMediaManager = ({
     key: string,
     metadata: JsonValue | undefined,
     sendMeta: InternalActionSender<InternalMediaMeta>,
-    op: (peer: SharedMediaPeer) => void | Promise<void>,
+    op: (peer: PeerHandle) => void | Promise<void>,
     mediaIds: Partial<InternalMediaMeta> = {}
   ): Promise<void>[] => {
     const payload = {

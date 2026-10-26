@@ -436,7 +436,6 @@ export interface BaseRoomConfig {
 export type TestOnlyRoomConfig = BaseRoomConfig & {
   _test_only_forcedPeerId?: string
   _test_only_mdnsHostFallbackToLoopback?: boolean
-  _test_only_sharedPeerIdleMs?: number
 }
 
 export type JoinRoomConfig = BaseRoomConfig & {
@@ -893,39 +892,6 @@ export type MediaIdentityCache = {
   clearRemote: () => void
 }
 
-export type SharedMediaPeer = PeerHandle & {
-  __trysteroMedia?: MediaIdentityCache
-}
-
-export type SharedPeerBinding = {
-  roomId: string
-  roomToken: string | null
-  roomTokenPromise: Promise<string>
-  handlers: PeerHandlers
-  pendingData: ArrayBuffer[]
-  pendingSendData: Uint8Array[]
-  pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}>
-  detach: () => void
-  proxy: PeerHandle
-}
-
-export type SharedPeerState = {
-  appId: string
-  peerId: string
-  peer: PeerHandle
-  bindings: Record<string, SharedPeerBinding>
-  bindingsByToken: Record<string, SharedPeerBinding>
-  pendingDataByToken: Map<string, ArrayBuffer[]>
-  remoteRoomTokens: Set<string>
-  idleTimer: ReturnType<typeof setTimeout> | null
-  controlRoomId: string | null
-  streamOwners: Map<MediaStream, Set<string>>
-  trackOwners: Map<MediaStreamTrack, {stream: MediaStream; rooms: Set<string>}>
-  media: MediaIdentityCache
-  idleMs: number
-  isClosing: boolean
-}
-
 export type PeerState = {
   offerPeer: PeerHandle | null
   offerId: string | null
@@ -975,7 +941,6 @@ export type SignalContext = {
   initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
   connectPeer: (peer: PeerHandle, peerId: string) => void
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
-  reusePeer: (peerId: string) => boolean
   checkDeactivate: () => void
   announceIntervals: number[]
   announceIntervalMs: number

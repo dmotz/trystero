@@ -27,8 +27,7 @@ for (const channelState of ['closed', 'connecting']) {
     })
     const config = {
       appId: `leave-rejoin-${channelState}-${Date.now()}`,
-      rtcPolyfill: MockRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 10
+      rtcPolyfill: MockRTCPeerConnection
     }
     const room = joinRoom(config, 'room')
     const peer = new MockPeer()
@@ -65,7 +64,7 @@ for (const channelState of ['closed', 'connecting']) {
       }
 
       await room.leave()
-      assert.equal(sendCount, channelState === 'closed' ? 0 : 2)
+      assert.equal(sendCount, channelState === 'closed' ? 0 : 1)
       rejoinedRoom = joinRoom(config, 'room')
       assert.notEqual(rejoinedRoom, room)
       assert.equal(initCount, 2)

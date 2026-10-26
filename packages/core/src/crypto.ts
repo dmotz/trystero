@@ -148,11 +148,6 @@ export const genKey = async (
     ['encrypt', 'decrypt']
   )
 
-export const deriveRoomNamespace = async (
-  appId: string,
-  roomId: string
-): Promise<string> => toHex(await sha256(`${libName}:${appId}:${roomId}`))
-
 const joinChar = '$'
 const ivJoinChar = ','
 

@@ -45,7 +45,6 @@ import type {
   RoomWithPlugins,
   ScalePluginApi,
   SelfInfo,
-  SharedMediaPeer,
   StateChangeContext,
   StateConfig,
   TargetPeers,
@@ -330,16 +329,16 @@ export default <
   const pendingMediaPeers = new Map<
     string,
     {
-      promise: Promise<SharedMediaPeer>
-      resolve: (peer: SharedMediaPeer) => void
+      promise: Promise<PeerHandle>
+      resolve: (peer: PeerHandle) => void
       reject: (reason: Error) => void
     }
   >()
 
   const ensureMediaPeer = (
     id: string,
-    peer: SharedMediaPeer
-  ): Promise<SharedMediaPeer> => {
+    peer: PeerHandle
+  ): Promise<PeerHandle> => {
     if (isDirectPeer(id)) {
       return Promise.resolve(peer)
     }
@@ -347,9 +346,9 @@ export default <
     if (pending) {
       return pending.promise
     }
-    let resolve!: (peer: SharedMediaPeer) => void
+    let resolve!: (peer: PeerHandle) => void
     let reject!: (reason: Error) => void
-    const promise = new Promise<SharedMediaPeer>((res, rej) => {
+    const promise = new Promise<PeerHandle>((res, rej) => {
       resolve = res
       reject = rej
     })
@@ -472,11 +471,8 @@ export default <
     onPeerError,
     getPeerUserId,
     preparePeer: ensureMediaPeer,
-    iterate: (targets, f) =>
-      iterate(targets, (id, peer) => f(id, peer as SharedMediaPeer)),
+    iterate,
     isActive: id => Boolean(activePeerMap[id]),
-    getSharedMediaPeer: id =>
-      (peerMap[id] as SharedMediaPeer | undefined) ?? null,
     onRemoteStream: (stream, {originPeerId, metadata, key, broadcast}) => {
       recordStreamTracks(stream)
       if (scaleProvider?.isOverlayActive() && broadcast) {
@@ -1321,7 +1317,7 @@ export default <
           scaleProvider?.handleOverlayFrame(id, frame)
         }
       }
-      pendingMediaPeers.get(id)?.resolve(peer as SharedMediaPeer)
+      pendingMediaPeers.get(id)?.resolve(peer)
       for (const cb of peerActivatedListeners) {
         cb(id, peer)
       }

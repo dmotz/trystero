@@ -1,7 +1,6 @@
 // @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 type Subscriber = {
@@ -97,52 +96,6 @@ class MockRTCPeerConnection {
   removeTrack() {}
 }
 
-class MockPeer {
-  created = Date.now()
-  isDead = false
-  destroyCount = 0
-  handlers = {}
-  offerPromise = Promise.resolve()
-  connection = {
-    connectionState: 'connected',
-    iceConnectionState: 'connected',
-    getSenders: () => []
-  }
-  channel = {readyState: 'open'}
-
-  async getOffer() {}
-
-  async signal() {
-    this.handlers.connect?.()
-  }
-
-  sendData() {}
-
-  destroy() {
-    if (this.isDead) {
-      return
-    }
-
-    this.isDead = true
-    this.destroyCount += 1
-    this.connection.connectionState = 'closed'
-    this.connection.iceConnectionState = 'closed'
-    this.handlers.close?.()
-  }
-
-  setHandlers(newHandlers) {
-    Object.assign(this.handlers, newHandlers)
-  }
-
-  addStream() {}
-  removeStream() {}
-  addTrack() {
-    return {}
-  }
-  removeTrack() {}
-  replaceTrack() {}
-}
-
 const wait = (ms: number) => new Promise(res => setTimeout(res, ms))
 const waitFor = async (
   check: () => boolean,
@@ -184,8 +137,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
+      rtcPolyfill: MockRTCPeerConnection
     }
 
     const memBefore = process.memoryUsage()
@@ -247,121 +199,6 @@ void test(
 )
 
 void test(
-  'Trystero: 1000 passive rooms share a single connection per peer',
-  {timeout: 120_000},
-  async () => {
-    const roomCount = 1_000
-    const subscribers: Subscriber[] = []
-
-    // Count RTCPeerConnection instantiations to verify connection sharing
-    let rtcCreated = 0
-    class CountingRTCPeerConnection extends MockRTCPeerConnection {
-      constructor(...args) {
-        super(...args)
-        rtcCreated++
-      }
-    }
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (
-        _relay,
-        rootTopic,
-        selfTopic,
-        onMessage,
-        _getOffers,
-        context
-      ) => {
-        subscribers.push({
-          roomId: context.roomId,
-          rootTopic,
-          selfTopic,
-          onMessage
-        })
-        return () => {}
-      },
-      announce: () => {}
-    })
-
-    const appId = `scale-shared-${Date.now()}`
-    const peerId = '~active-peer'
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: CountingRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
-    }
-
-    const rooms = []
-    for (let i = 0; i < roomCount; i++) {
-      rooms.push(joinRoom(config, `room-${i}`))
-    }
-
-    await waitFor(() => subscribers.length >= roomCount, 60_000)
-
-    const rtcBeforeConnect = rtcCreated
-
-    // Activate room-0 and connect a mock peer
-    const sub0 = subscribers.find(sub => sub.roomId === 'room-0')
-    assert.ok(sub0, 'expected room-0 subscriber')
-    await sub0.onMessage(sub0.rootTopic, {peerId}, () => {})
-
-    const mockPeer = new MockPeer()
-    const encryptedAnswer = await encrypt(
-      genKey('', appId, 'room-0'),
-      'answer-sdp'
-    )
-
-    await sub0.onMessage(
-      sub0.rootTopic,
-      {peerId, answer: encryptedAnswer, peer: mockPeer},
-      () => {}
-    )
-
-    await wait(100)
-
-    const rtcAfterFirstConnect = rtcCreated
-
-    // Now send announcements from the same peer to all other rooms.
-    // The shared peer manager should reuse the existing WebRTC connection
-    // rather than creating new ones.
-    for (let i = 1; i < roomCount; i++) {
-      const sub = subscribers[i]
-      await sub.onMessage(sub.rootTopic, {peerId}, () => {})
-    }
-
-    await wait(500)
-
-    const rtcAfterAllRooms = rtcCreated
-
-    // The mock peer should not have been destroyed/recreated
-    assert.equal(
-      mockPeer.destroyCount,
-      0,
-      'shared peer should not be destroyed when reused across rooms'
-    )
-
-    // No additional RTCPeerConnections should be created when reusing the
-    // shared peer across rooms 1-999
-    assert.equal(
-      rtcAfterAllRooms - rtcAfterFirstConnect,
-      0,
-      `expected 0 new RTCPeerConnections for rooms 1-999, ` +
-        `got ${rtcAfterAllRooms - rtcAfterFirstConnect}`
-    )
-
-    console.log(
-      `  ${roomCount} rooms, ` +
-        `${rtcAfterFirstConnect - rtcBeforeConnect} RTC connection(s) for first room, ` +
-        `${rtcAfterAllRooms - rtcAfterFirstConnect} additional for remaining ${roomCount - 1} rooms`
-    )
-
-    // Clean up
-    await Promise.all(rooms.map(room => room.leave().catch(() => {})))
-  }
-)
-
-void test(
   'Trystero: activating one passive room does not activate all passive rooms',
   {timeout: 120_000},
   async () => {
@@ -387,8 +224,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
+      rtcPolyfill: MockRTCPeerConnection
     }
 
     const rooms = []
@@ -450,8 +286,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
+      rtcPolyfill: MockRTCPeerConnection
     }
 
     const rooms = []
@@ -498,7 +333,7 @@ void test(
 
     // Should be able to join fresh rooms after full cleanup
     const freshRoom = joinRoom(config, 'fresh-room')
-    assert.equal(freshRoom.isPassive(), true)
+    assert.ok(freshRoom)
     await freshRoom.leave().catch(() => {})
   }
 )

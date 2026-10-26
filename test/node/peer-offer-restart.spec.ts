@@ -3,40 +3,23 @@ import test from './test.ts'
 import {MockRTCPeerConnection} from './peer-harness.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import initPeer from '../../packages/core/src/peer.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
-import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 
-void test('a prewarmed offer does not replay and destroy its connected room peer', async t => {
+void test('a prewarmed offer does not replay when signal handler is attached', async t => {
   const peer = initPeer(true, {
     appId: 'prewarmed-offer-test',
     rtcPolyfill: MockRTCPeerConnection as never
   })
-  const manager = new SharedPeerManager()
-  let joins = 0
-  const room = manager.registerRoom(
-    'prewarmed-offer-test',
-    'room',
-    Promise.resolve('room-token'),
-    {
-      active: true,
-      onPeer: proxy => {
-        joins++
-        proxy.setHandlers({signal: () => {}})
-      },
-      onDetach: () => {}
-    }
-  )
   t.after(() => {
-    room.leave()
     peer.destroy()
   })
 
   const offer = await peer.getOffer()
   assert.ok(offer)
   assert.equal(offer.type, 'offer')
-  room.connect('remote', peer, 60_000)
-  assert.equal(joins, 1)
+  const replayedSignals: unknown[] = []
+  peer.setHandlers({signal: signal => replayedSignals.push(signal)})
   assert.equal(peer.isDead, false)
+  assert.deepEqual(replayedSignals, [])
 })
 
 void test('unanswered offer restarts preserve the pending data channel without rollback', async t => {
@@ -72,29 +55,12 @@ void test('unanswered offer restarts preserve the pending data channel without r
   assert.equal(pc.rollbacks, 1)
 })
 
-void test('a restarted prewarmed offer does not queue in pendingSignals or destroy its shared peer', async t => {
+void test('a restarted prewarmed offer does not queue in pendingSignals', async t => {
   const peer = initPeer(true, {
     appId: 'restarted-prewarmed-offer-test',
     rtcPolyfill: MockRTCPeerConnection as never
   })
-  const manager = new SharedPeerManager()
-  let joins = 0
-  const replayedSignals: unknown[] = []
-  const room = manager.registerRoom(
-    'restarted-prewarmed-offer-test',
-    'room',
-    Promise.resolve('room-token'),
-    {
-      active: true,
-      onPeer: proxy => {
-        joins++
-        proxy.setHandlers({signal: signal => replayedSignals.push(signal)})
-      },
-      onDetach: () => {}
-    }
-  )
   t.after(() => {
-    room.leave()
     peer.destroy()
   })
 
@@ -103,8 +69,8 @@ void test('a restarted prewarmed offer does not queue in pendingSignals or destr
   assert.ok(restarted)
   assert.equal(restarted.type, 'offer')
 
-  room.connect('remote', peer, 60_000)
-  assert.equal(joins, 1)
+  const replayedSignals: unknown[] = []
+  peer.setHandlers({signal: signal => replayedSignals.push(signal)})
   assert.equal(peer.isDead, false)
   assert.deepEqual(replayedSignals, [])
 })

@@ -219,8 +219,8 @@ const createMemorySignalBus = () => {
     Set<(topic: string, data: string) => void>
   >()
 
-  const makeJoinRoom = () => {
-    const rawJoinRoom = createTopicStrategy({
+  const makeJoinRoom = () =>
+    createTopicStrategy({
       steadyAnnounceIntervalMs: 120,
       init: () => ({}),
       subscribeTopic: (_relay, topic, onTopicMessage) => {
@@ -244,15 +244,6 @@ const createMemorySignalBus = () => {
         }
       }
     })
-    return (config: any, roomId: string, callbacks?: any) =>
-      rawJoinRoom(
-        config && typeof config === 'object'
-          ? {_test_only_sharedPeerIdleMs: 5, ...config}
-          : config,
-        roomId,
-        callbacks
-      )
-  }
 
   return {makeJoinRoom}
 }

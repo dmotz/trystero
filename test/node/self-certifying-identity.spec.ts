@@ -247,8 +247,8 @@ const createMemorySignalBus = () => {
     Set<(topic: string, data: string) => void>
   >()
 
-  const makeJoinRoom = () => {
-    const rawJoinRoom = createTopicStrategy({
+  const makeJoinRoom = () =>
+    createTopicStrategy({
       steadyAnnounceIntervalMs: 120,
       init: () => ({}),
       subscribeTopic: (_relay, topic, onTopicMessage) => {
@@ -276,15 +276,6 @@ const createMemorySignalBus = () => {
         }
       }
     })
-    return (config: any, roomId: string, callbacks?: any) =>
-      rawJoinRoom(
-        config && typeof config === 'object'
-          ? {_test_only_sharedPeerIdleMs: 5, ...config}
-          : config,
-        roomId,
-        callbacks
-      )
-  }
 
   return {makeJoinRoom}
 }
@@ -1214,11 +1205,6 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
     dtsContent.includes('_test_only_mdnsHostFallbackToLoopback'),
     false,
     'built .d.mts must not expose _test_only_mdnsHostFallbackToLoopback'
-  )
-  assert.equal(
-    dtsContent.includes('_test_only_sharedPeerIdleMs'),
-    false,
-    'built .d.mts must not expose _test_only_sharedPeerIdleMs'
   )
   assert.equal(
     dtsContent.includes('__config?:'),

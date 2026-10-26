@@ -1,5 +1,5 @@
 import {isSelfAsAdminPlugin} from './authority'
-import {decrypt, deriveRoomNamespace, encrypt, genKey, sha1} from './crypto'
+import {decrypt, encrypt, genKey, sha1} from './crypto'
 import {
   getDefaultEndpointIdentity,
   registerTestForcedPeerId,
@@ -7,14 +7,14 @@ import {
   validateIdentityConfig
 } from './identity'
 import {OfferManager} from './offer-manager'
-import {createIdentityHandshake, createPasswordHandshake} from './handshake'
+import {createIdentityHandshake} from './handshake'
 import initPeer from './peer'
 import room, {getRoomSignalingBridge, type RoomSignalingBridge} from './room'
-import {SharedPeerManager} from './shared-peer'
 import {
   createSignalHandler,
   clearConnectedPeer,
   detachConnectedPeer,
+  getConnectedPeerHealth,
   getState,
   markPeerConnected,
   resetAnsweringState,
@@ -54,7 +54,6 @@ import type {
 const announceIntervalMs = 5_333
 const announceWarmupIntervalsMs = [233, 533, 1_333] as const
 const passiveActivationGraceMs = 7_533
-const sharedPeerIdleMsDefault = 123_333
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
@@ -70,7 +69,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     string,
     Record<string, (rejoining?: boolean) => void>
   > = {}
-  const sharedPeers = new SharedPeerManager()
   const hasActiveRooms = (): boolean =>
     values(occupiedRooms).some(rooms => keys(rooms).length > 0)
 
@@ -193,7 +191,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     }
 
-    let membershipRef: {rekey: (newRoomId: string) => void} | null = null
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const effectiveRoomIdP = resolvedRoomIdP?.then(res => {
       effectiveRoomId = res.effectiveRoomId
@@ -202,7 +199,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       strategyContext.roomId = res.effectiveRoomId
       if (res.effectiveRoomId !== roomId && !didLeaveRoom) {
         ;(occupiedRooms[scopeAppId] ??= {})[res.effectiveRoomId] = joinedRoom
-        membershipRef?.rekey(res.effectiveRoomId)
       }
       return res.effectiveRoomId
     })
@@ -221,16 +217,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const key = effectiveRoomIdP
       ? effectiveRoomIdP.then(rid => genKey(config.password ?? '', appId, rid))
       : genKey(config.password ?? '', appId, roomId)
-    const roomNamespacePromise = effectiveRoomIdP
-      ? effectiveRoomIdP.then(rid => deriveRoomNamespace(appId, rid))
-      : deriveRoomNamespace(appId, roomId)
-    let sharedPeerIdleMs = sharedPeerIdleMsDefault
-    DEV: {
-      const testConfig = config as TestOnlyRoomConfig
-      if (testConfig._test_only_sharedPeerIdleMs !== undefined) {
-        sharedPeerIdleMs = testConfig._test_only_sharedPeerIdleMs
-      }
-    }
 
     let didLeaveRoom = false
     let isLeavingRoom = false
@@ -275,7 +261,45 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const connectPeer = (peer: PeerHandle, peerId: string): void => {
-      membership.connect(peerId, peer, sharedPeerIdleMs)
+      if (didLeaveRoom || isLeavingRoom) {
+        peer.destroy()
+        return
+      }
+
+      const state = getState(ctx.peerStates, peerId)
+
+      if (state.connectedPeer && state.connectedPeer !== peer) {
+        if (getConnectedPeerHealth(state.connectedPeer) !== 'stale') {
+          peer.destroy()
+          return
+        }
+
+        clearConnectedPeer(state, peerId, 'replaced')
+      }
+
+      markPeerConnected(state, peer)
+
+      if (isPassive && !ctx.isActive) {
+        ctx.isActive = true
+
+        if (ctx.requeueAnnounce) {
+          ctx.requeueAnnounce()
+        } else {
+          passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+          passiveActivationTimeout = setTimeout(
+            checkDeactivate,
+            passiveActivationGraceMs
+          )
+        }
+      }
+
+      onPeerConnect(peer, peerId)
+      resetOfferState(state)
+
+      if (peer.isDead && state.connectedPeer === peer) {
+        detachConnectedPeer(state, peer)
+        checkDeactivate()
+      }
     }
 
     let disconnectReannounceQueued = false
@@ -345,8 +369,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceTimeouts.forEach(resetTimer)
         announceTimeouts.length = 0
         deactivateRelayAnnouncements()
-
-        membership.setActive(false)
       }
     }
 
@@ -369,7 +391,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       initPeer,
       connectPeer,
       disconnectPeer,
-      reusePeer: peerId => membership.reuse(peerId),
       checkDeactivate,
       announceIntervals: [],
       announceIntervalMs,
@@ -533,8 +554,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceTimeouts.length = 0
         passiveActivationTimeout = resetTimer(passiveActivationTimeout)
 
-        membership.setActive(true)
-
         passiveActivationTimeout = setTimeout(
           checkDeactivate,
           passiveActivationGraceMs
@@ -567,12 +586,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
 
-    const sharedPassword = config.password ?? ''
-    const {compose: composePassword} = createPasswordHandshake(
-      sharedPassword,
-      appId,
-      effectiveRoomIdP ?? roomId
-    )
     const {compose: composeIdentity} = createIdentityHandshake({
       ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
       appId,
@@ -583,7 +596,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         bridgeRef.current?.onPeerIdentityVerified(peerId, verified)
       }
     })
-    const composedPeerHandshake = composePassword(composeIdentity())
+    const composedPeerHandshake = composeIdentity()
 
     const releaseOccupiedRoom = (): void => {
       const appRooms = occupiedRooms[scopeAppId]
@@ -633,13 +646,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
       releaseOccupiedRoom()
       clearLeavingCleanup()
-      membership.leave()
 
-      entries(ctx.peerStates).forEach(([peerId, state]) => {
+      entries(ctx.peerStates).forEach(([, state]) => {
         if (state.connectedPeer && !state.connectedPeer.isDead) {
-          if (!sharedPeers.owns(scopeAppId, peerId, state.connectedPeer)) {
-            state.connectedPeer.destroy()
-          }
+          state.connectedPeer.destroy()
         }
 
         if (state.answeringPeer && !state.answeringPeer.isDead) {
@@ -745,51 +755,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     signalingBridge?.setOnScaleTargetsChanged(missingTargets => {
       if (!didLeaveRoom) {
         missingTargets.forEach(targetId => {
-          if (!ctx.reusePeer(targetId)) {
-            ctx.dialPeer?.(targetId)
-          }
+          ctx.dialPeer?.(targetId)
         })
       }
     })
-
-    const membership = sharedPeers.registerRoom(
-      scopeAppId,
-      effectiveRoomId,
-      roomNamespacePromise,
-      {
-        active: !isPassive || ctx.isActive,
-        shouldAttach: peerId =>
-          (signalingBridge?.canConnectPeer(peerId) ?? true) &&
-          (signalingBridge
-            ?.getScaleProvider()
-            ?.shouldConnectPeer(peerId, 'inbound') ??
-            true),
-        onPeer: (proxy, peerId, physical) => {
-          const state = getState(ctx.peerStates, peerId)
-          markPeerConnected(state, physical)
-          if (isPassive && !ctx.isActive) {
-            ctx.isActive = true
-            membership.setActive(true)
-            if (ctx.requeueAnnounce) {
-              ctx.requeueAnnounce()
-            } else {
-              passiveActivationTimeout = resetTimer(passiveActivationTimeout)
-              passiveActivationTimeout = setTimeout(
-                checkDeactivate,
-                passiveActivationGraceMs
-              )
-            }
-          }
-          onPeerConnect(proxy, peerId)
-          resetOfferState(state)
-        },
-        onDetach: (peerId, physical) => {
-          detachConnectedPeer(ctx.peerStates[peerId], physical)
-          checkDeactivate()
-        }
-      }
-    )
-    membershipRef = membership
 
     return (occupiedRooms[scopeAppId][roomId] =
       joinedRoom) as RoomWithPlugins<TPlugins>

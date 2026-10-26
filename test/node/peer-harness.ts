@@ -54,37 +54,6 @@ export const encodeInternalAction = type => {
   return packet.buffer
 }
 
-export const roomFrame = (
-  token: string,
-  payloadOrSize: ArrayBuffer | Uint8Array | number[] | number = 16_384
-) => {
-  const name = encoder.encode(token)
-  const payload =
-    typeof payloadOrSize === 'number'
-      ? new Uint8Array(payloadOrSize)
-      : payloadOrSize instanceof Uint8Array
-        ? payloadOrSize
-        : Array.isArray(payloadOrSize)
-          ? Uint8Array.from(payloadOrSize)
-          : new Uint8Array(payloadOrSize)
-  const bytes = new Uint8Array(3 + name.length + payload.byteLength)
-  bytes[0] = 1
-  new DataView(bytes.buffer).setUint16(1, name.length)
-  bytes.set(name, 3)
-  bytes.set(payload, 3 + name.length)
-  return bytes.buffer
-}
-
-export const presenceFrame = (token: string, present = true) => {
-  const bytes = encoder.encode(token)
-  const frame = new Uint8Array(4 + bytes.length)
-  frame[0] = 2
-  frame[1] = Number(present)
-  new DataView(frame.buffer).setUint16(2, bytes.length)
-  frame.set(bytes, 4)
-  return frame.buffer
-}
-
 export const actionStartFrame = (
   id: number,
   size: number,

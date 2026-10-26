@@ -1,6 +1,5 @@
 import {sha1} from './crypto'
 import {resolveSelfId} from './identity'
-import {getConnectedPeerHealth} from './shared-peer'
 import {
   all,
   candidateType,
@@ -20,6 +19,36 @@ import type {
   Signal,
   SignalContext
 } from './types'
+
+const isPeerUnderlyingStale = (peer: PeerHandle): boolean => {
+  const {connection, channel} = peer
+
+  return (
+    peer.isDead ||
+    connection.connectionState === 'closed' ||
+    connection.connectionState === 'failed' ||
+    connection.iceConnectionState === 'closed' ||
+    connection.iceConnectionState === 'failed' ||
+    channel?.readyState === 'closing' ||
+    channel?.readyState === 'closed'
+  )
+}
+
+export const getConnectedPeerHealth = (
+  peer: PeerHandle
+): 'live' | 'transient' | 'stale' => {
+  if (isPeerUnderlyingStale(peer)) {
+    return 'stale'
+  }
+
+  const {channel} = peer
+
+  if (!channel || channel.readyState !== 'open') {
+    return 'transient'
+  }
+
+  return 'live'
+}
 
 const offerPostAnswerTtlMs = 23_333
 const offerTtl = 57_333
@@ -1059,10 +1088,6 @@ export const createSignalHandler = (ctx: SignalContext) => {
 
           clearConnectedPeer(state, peerId, 'message-from-prolonged-disconnect')
         }
-      }
-
-      if (ctx.reusePeer(peerId)) {
-        return
       }
 
       const isAnnouncement = Boolean(peerId && !offer && !answer && !candidate)

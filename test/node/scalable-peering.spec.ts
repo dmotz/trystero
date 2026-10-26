@@ -45,7 +45,6 @@ import {
 import createRoom, {
   getRoomSignalingBridge
 } from '../../packages/core/src/room.ts'
-import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import {
   decodeBytes,
@@ -3035,95 +3034,6 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
   sampleFrame.set(sampleMeta, 36)
   const headerInfo = inspectActionWireHeader(sampleFrame)
   assert.deepEqual(headerInfo, {type: 'chat', metadata: {hello: 'world'}})
-
-  // 7. SharedPeerManager respects shouldAttach and rekey(effectiveRoomId)
-  const localMgr = new SharedPeerManager()
-  const remoteMgr1 = new SharedPeerManager()
-  const remoteMgr2 = new SharedPeerManager()
-  const attachedInConstrainedRoom: string[] = []
-  const constrainedToken = '0123456789abcdef0123456789abcdef01234567'
-  const lobbyToken = 'fedcba9876543210fedcba9876543210fedcba98'
-
-  const localLobby = localMgr.registerRoom(
-    'shared-app',
-    'lobby-room',
-    Promise.resolve(lobbyToken),
-    {
-      active: true,
-      onPeer: () => {},
-      onDetach: () => {}
-    }
-  )
-  const localConstrained = localMgr.registerRoom(
-    'shared-app',
-    'raw-room',
-    Promise.resolve(constrainedToken),
-    {
-      active: true,
-      shouldAttach: peerId => peerId === 'peer-1',
-      onPeer: (_peer, peerId) => {
-        attachedInConstrainedRoom.push(peerId)
-      },
-      onDetach: () => {}
-    }
-  )
-  localConstrained.rekey('raw-room.0123456789abcdef')
-
-  const r1Lobby = remoteMgr1.registerRoom(
-    'shared-app',
-    'lobby-room',
-    Promise.resolve(lobbyToken),
-    {active: true, onPeer: () => {}, onDetach: () => {}}
-  )
-  const r1Constrained = remoteMgr1.registerRoom(
-    'shared-app',
-    'raw-room.0123456789abcdef',
-    Promise.resolve(constrainedToken),
-    {active: true, onPeer: () => {}, onDetach: () => {}}
-  )
-
-  const r2Lobby = remoteMgr2.registerRoom(
-    'shared-app',
-    'lobby-room',
-    Promise.resolve(lobbyToken),
-    {active: true, onPeer: () => {}, onDetach: () => {}}
-  )
-  const r2Constrained = remoteMgr2.registerRoom(
-    'shared-app',
-    'raw-room.0123456789abcdef',
-    Promise.resolve(constrainedToken),
-    {active: true, onPeer: () => {}, onDetach: () => {}}
-  )
-
-  const {peerA: p1Local, peerB: p1Remote} = linkPeers(
-    new LinkedPeer(),
-    new LinkedPeer()
-  )
-  const {peerA: p2Local, peerB: p2Remote} = linkPeers(
-    new LinkedPeer(),
-    new LinkedPeer()
-  )
-  localLobby.connect('peer-1', p1Local, 5_000)
-  r1Lobby.connect('local-peer', p1Remote, 5_000)
-  localLobby.connect('peer-2', p2Local, 5_000)
-  r2Lobby.connect('local-peer', p2Remote, 5_000)
-  await wait(40)
-
-  assert.deepEqual(
-    attachedInConstrainedRoom,
-    ['peer-1'],
-    'SharedPeerManager must only auto-attach shared peers approved by shouldAttach'
-  )
-  localLobby.leave()
-  localConstrained.leave()
-  r1Lobby.leave()
-  r1Constrained.leave()
-  r2Lobby.leave()
-  r2Constrained.leave()
-  p1Local.destroy()
-  p1Remote.destroy()
-  p2Local.destroy()
-  p2Remote.destroy()
 })
 
 void test('Targeted media stays private for direct and multi-hop recipients', async () => {

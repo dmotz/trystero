@@ -1,4 +1,3 @@
-import {sha256} from './crypto'
 import {
   extractDtlsFingerprints,
   fromBase64Url,
@@ -17,7 +16,6 @@ import {
   resetTimer,
   toError,
   toErrorMessage,
-  toHex,
   toJson
 } from './utils'
 import type {
@@ -31,7 +29,6 @@ import type {
   UserIdentity
 } from './types'
 
-const overlapRoomPasswordErr = mkErr('incorrect password for overlapping room')
 const peerIdentityErr = mkErr('peer identity verification failed')
 
 export type HandshakeReadyPayload =
@@ -340,81 +337,6 @@ export const createIdentityHandshake = (params: {
       await nextHandshake?.(peerId, send, receive, isInitiator)
       await run(peerId, send, receive, isInitiator)
     }
-
-  return {run, compose}
-}
-
-export const createPasswordHandshake = (
-  password: string,
-  appId: string,
-  roomId: string | Promise<string>
-): {
-  run: (
-    send: HandshakeSender,
-    receive: HandshakeReceiver,
-    isInitiator: boolean
-  ) => Promise<void>
-  compose: (userHandshake?: PeerHandshake) => PeerHandshake | undefined
-} => {
-  const hashChallenge = async (challenge: string): Promise<string> =>
-    toHex(await sha256(`${challenge}:${password}:${appId}:${await roomId}`))
-
-  const run = async (
-    send: HandshakeSender,
-    receive: HandshakeReceiver,
-    isInitiator: boolean
-  ): Promise<void> => {
-    if (!password) {
-      return
-    }
-
-    if (isInitiator) {
-      const challenge = genId(36)
-      await send({__trystero_pw: 'challenge', c: challenge})
-      const {data} = await receive()
-
-      if (
-        !data ||
-        typeof data !== 'object' ||
-        (data as {__trystero_pw?: unknown}).__trystero_pw !== 'response' ||
-        typeof (data as {h?: unknown}).h !== 'string'
-      ) {
-        throw overlapRoomPasswordErr
-      }
-
-      const expected = await hashChallenge(challenge)
-
-      if ((data as {h: string}).h !== expected) {
-        throw overlapRoomPasswordErr
-      }
-
-      return
-    }
-
-    const {data} = await receive()
-
-    if (
-      !data ||
-      typeof data !== 'object' ||
-      (data as {__trystero_pw?: unknown}).__trystero_pw !== 'challenge' ||
-      typeof (data as {c?: unknown}).c !== 'string'
-    ) {
-      throw overlapRoomPasswordErr
-    }
-
-    await send({
-      __trystero_pw: 'response',
-      h: await hashChallenge((data as {c: string}).c)
-    })
-  }
-
-  const compose = (userHandshake?: PeerHandshake): PeerHandshake | undefined =>
-    password || userHandshake
-      ? async (peerId, send, receive, isInitiator): Promise<void> => {
-          await run(send, receive, isInitiator)
-          await userHandshake?.(peerId, send, receive, isInitiator)
-        }
-      : undefined
 
   return {run, compose}
 }

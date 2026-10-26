@@ -1018,7 +1018,7 @@ void test(
 )
 
 void test(
-  'Trystero: passive peer deactivates when last peer sends graceful @_leave while shared peer stays open',
+  'Trystero: passive peer deactivates when last peer sends graceful @_leave',
   {timeout: 10_000},
   async () => {
     let deactivateCount = 0
@@ -1094,7 +1094,7 @@ void test(
       await activeRoom.leave()
 
       await waitFor(() => deactivateCount > 0)
-      assert.equal(peerA.isDead, false)
+      assert.equal(peerA.isDead, true)
       assert.equal(Object.keys(room.getPeers()).length, 0)
     } finally {
       await activeRoom?.leave().catch(() => {})

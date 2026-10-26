@@ -7,7 +7,8 @@ import {
 } from '../../packages/core/src/signal-handler.ts'
 import initPeer from '../../packages/core/src/peer.ts'
 import {OfferManager} from '../../packages/core/src/offer-manager.ts'
-import {MockRTCPeerConnection} from './peer-harness.ts'
+import createStrategy from '../../packages/core/src/strategy.ts'
+import {MockRTCPeerConnection, wait, waitFor} from './peer-harness.ts'
 
 const selfId = 'K'.repeat(20)
 
@@ -51,7 +52,6 @@ const fixture = t => {
     isLeaving: () => leaving,
     isPassive: false,
     isActive: true,
-    reusePeer: () => false,
     offerManager: {
       checkout: async () => [{peer: peer(), offer: 'offer'}],
       claimLeased() {},
@@ -402,3 +402,205 @@ void test('untrusted serialized or non-handle peer fields and array payloads are
   assert.equal(claimed, 0)
   assert.equal(Object.keys(f.ctx.peerStates).length, 0)
 })
+
+type Subscriber = {
+  rootTopic: string
+  selfTopic: string
+  onMessage: (
+    topic: string,
+    msg: unknown,
+    signalPeer: (peerTopic: string, signal: string) => void
+  ) => Promise<void> | void
+}
+
+void test(
+  'Trystero: isolates same roomId across appIds on one strategy instance',
+  {timeout: 10_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+    let initCount = 0
+
+    const joinRoom = createStrategy({
+      init: () => {
+        initCount += 1
+        return {}
+      },
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {}
+    })
+
+    const roomId = 'shared-room'
+    const appAConfig = {
+      appId: `app-a-${Date.now()}`,
+      rtcPolyfill: MockRTCPeerConnection as any
+    }
+    const appBConfig = {
+      appId: `app-b-${Date.now()}`,
+      relayConfig: {urls: ['wss://ignored-for-second-app.example']},
+      rtcPolyfill: MockRTCPeerConnection as any
+    }
+
+    const appARoom = joinRoom(appAConfig, roomId)
+    const appBRoom = joinRoom(appBConfig, roomId)
+
+    try {
+      await waitFor(() => subscribers.length >= 2)
+
+      const appASub = subscribers[0]
+      const appBSub = subscribers[1]
+
+      assert.equal(
+        initCount,
+        1,
+        'strategy init should run once for a shared createStrategy instance'
+      )
+      assert.notEqual(
+        appARoom,
+        appBRoom,
+        'same roomId in different appIds should not reuse the same room instance'
+      )
+      assert.notEqual(
+        appASub.rootTopic,
+        appBSub.rootTopic,
+        'root topics should be app-scoped for same roomId'
+      )
+      assert.notEqual(
+        appASub.selfTopic,
+        appBSub.selfTopic,
+        'self topics should be app-scoped for same roomId'
+      )
+
+      let crossSignalCount = 0
+
+      await appASub.onMessage(
+        appBSub.rootTopic,
+        {peerId: 'peer-from-app-b'},
+        () => {
+          crossSignalCount += 1
+        }
+      )
+      await appBSub.onMessage(
+        appASub.rootTopic,
+        {peerId: 'peer-from-app-a'},
+        () => {
+          crossSignalCount += 1
+        }
+      )
+
+      assert.equal(
+        crossSignalCount,
+        0,
+        'cross-app announcements should be ignored when topics do not match the room app scope'
+      )
+    } finally {
+      await appARoom.leave().catch(() => {})
+      await appBRoom.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'higher-ID peer replies with own announcement to lower-ID peer selfTopic',
+  {timeout: 5_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+    const appId = `reply-announce-${Date.now()}`
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {}
+    })
+
+    const room = joinRoom(
+      {appId, rtcPolyfill: MockRTCPeerConnection as any},
+      'reply-room'
+    )
+
+    try {
+      const {peerId: selfId} = await room.getSelf()
+      const lowerPeerId =
+        String.fromCharCode(selfId.charCodeAt(0) - 1) + selfId.slice(1)
+      await waitFor(() => subscribers.length >= 1)
+      const sub = subscribers[0]
+
+      const signalCalls: {topic: string; signal: string}[] = []
+
+      await sub.onMessage(
+        sub.rootTopic,
+        {peerId: lowerPeerId},
+        (topic, signal) => signalCalls.push({topic, signal})
+      )
+
+      await wait(50)
+
+      assert.equal(signalCalls.length, 1, 'should reply to lower-ID peer')
+
+      const payload = JSON.parse(signalCalls[0].signal)
+      assert.equal(payload.peerId, selfId, 'reply should contain our peerId')
+      assert.ok(
+        !payload.offer && !payload.answer && !payload.candidate,
+        'reply should only contain peerId, not SDP fields.'
+      )
+    } finally {
+      await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'lower-ID peer does not reply to announcement from higher-ID peer',
+  {timeout: 5_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+    const appId = `no-reply-${Date.now()}`
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {}
+    })
+
+    const room = joinRoom(
+      {appId, rtcPolyfill: MockRTCPeerConnection as any},
+      'no-reply-room'
+    )
+
+    try {
+      const {peerId: selfId} = await room.getSelf()
+      const higherPeerId =
+        String.fromCharCode(selfId.charCodeAt(0) + 1) + selfId.slice(1)
+      await waitFor(() => subscribers.length >= 1)
+      const sub = subscribers[0]
+
+      const replyCalls: string[] = []
+
+      await sub.onMessage(
+        sub.rootTopic,
+        {peerId: higherPeerId},
+        (_topic, signal) => {
+          const parsed = JSON.parse(signal)
+
+          if (!parsed.offer && !parsed.answer && !parsed.candidate) {
+            replyCalls.push(signal)
+          }
+        }
+      )
+
+      await wait(50)
+
+      assert.equal(replyCalls.length, 0, 'lower-ID peer should not reply.')
+    } finally {
+      await room.leave().catch(() => {})
+    }
+  }
+)
