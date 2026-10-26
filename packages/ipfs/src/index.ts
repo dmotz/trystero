@@ -3,14 +3,12 @@ import {
   createTopicStrategy,
   decodeBytes,
   encodeBytes,
-  libName,
   toJson,
   type BaseRoomConfig,
   type JoinRoom
 } from '@trystero-p2p/core'
 
-const contentTopic = (topic: string): string =>
-  `/${libName.toLowerCase()}-${topic}/0/msg/json`
+const contentTopic = (topic: string): string => `/trystero-${topic}/0/msg/json`
 
 const sendMessage = (
   node: LightNode,

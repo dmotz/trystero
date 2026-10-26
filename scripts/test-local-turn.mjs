@@ -215,7 +215,7 @@ const stop = child =>
   })
 
 const main = async strategy => {
-  const bundle = readFileSync(join(root, `dist/trystero-${strategy}.min.js`))
+  const bundle = readFileSync(join(root, `test/dist/trystero-${strategy}.js`))
   const turnPort = await freeUdpPort()
   const username = `trystero-${randomUUID()}`
   const password = randomBytes(18).toString('hex')

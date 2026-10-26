@@ -53,7 +53,7 @@ void test(
         0,
         'passive peer should not announce while inactive'
       )
-      assert.equal(room.isPassive(), true, 'isPassive() should return true')
+      assert.equal('isPassive' in room, false)
     } finally {
       await room.leave().catch(() => {})
     }
@@ -91,11 +91,7 @@ void test(
       await waitFor(() => announceCount > 0)
 
       assert.ok(announceCount > 0, 'non-passive peer should announce')
-      assert.equal(
-        room.isPassive(),
-        false,
-        'isPassive() should return false for non-passive peer'
-      )
+      assert.equal('isPassive' in room, false)
     } finally {
       await room.leave().catch(() => {})
     }
@@ -875,7 +871,7 @@ void test(
 
     // Verify the room is fully cleaned up by joining again
     const room2 = joinRoom(config, 'test-room-2')
-    assert.equal(room2.isPassive(), true)
+    assert.notEqual(room2, room)
     await room2.leave().catch(() => {})
   }
 )

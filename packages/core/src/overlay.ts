@@ -36,9 +36,9 @@ import type {
   PeerHandlers,
   RoleCertificate,
   RoomPlugin,
+  ScaleConfig,
   ScalePluginApi,
   Signal,
-  TopologyConfig,
   TopologyMediaTree,
   TopologyMode,
   TopologyRoute,
@@ -135,7 +135,7 @@ const validModes = new Set<TopologyMode>([
 ])
 
 export const normalizeTopologyConfig = (
-  topology?: TopologyMode | TopologyConfig
+  topology?: TopologyMode | ScaleConfig
 ): ResolvedTopologyConfig => {
   if (!topology) {
     return {
@@ -146,7 +146,7 @@ export const normalizeTopologyConfig = (
     }
   }
 
-  const raw: TopologyConfig =
+  const raw: ScaleConfig =
     typeof topology === 'string' ? {mode: topology} : topology
   const mode = raw.mode ?? 'auto'
 
@@ -771,7 +771,7 @@ export type OverlayManagerDeps = {
   appId?: string
   roomId?: string
   password?: string
-  topology?: TopologyMode | TopologyConfig
+  topology?: TopologyMode | ScaleConfig
   getLocalUserIdentity?: () => Promise<UserIdentity> | UserIdentity
   onVirtualPeerJoin: (peerId: string, virtualPeer: PeerHandle) => void
   onVirtualPeerLeave: (peerId: string, reason?: Error) => void
@@ -3277,7 +3277,7 @@ export const createOverlayManager = ({
 }
 
 export const scale = (
-  topology?: TopologyMode | TopologyConfig
+  topology?: TopologyMode | ScaleConfig
 ): RoomPlugin<'scale', ScalePluginApi> => {
   // Validate eagerly at call time
   normalizeTopologyConfig(topology)

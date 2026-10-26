@@ -14,7 +14,6 @@ import {
 import {
   createTopicStrategy,
   fromJson,
-  libName,
   type BaseRelayConfig,
   type BaseRoomConfig,
   type JoinRoom,
@@ -22,7 +21,7 @@ import {
 } from '@trystero-p2p/core'
 
 const presencePath = '_'
-const defaultRootPath = `__${libName.toLowerCase()}__`
+const defaultRootPath = '__trystero__'
 const dbs: Record<string, ReturnType<typeof getDatabase>> = {}
 const presenceRefs: Record<string, DatabaseReference> = {}
 const presenceMessages: Record<string, Record<string, unknown>> = {}

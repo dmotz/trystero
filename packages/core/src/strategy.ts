@@ -685,7 +685,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       ...(composedPeerHandshake
         ? {onPeerHandshake: composedPeerHandshake}
         : {}),
-      isPassive,
       onBeforeLeave: () => {
         isLeavingRoom = true
         announceTimeouts.forEach(resetTimer)

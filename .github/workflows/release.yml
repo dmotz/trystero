@@ -1,4 +1,4 @@
-name: Publish packages and release bundles
+name: Publish packages and create release
 
 on:
   push:
@@ -58,7 +58,7 @@ jobs:
             echo "prerelease=false" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Build packages and browser bundles
+      - name: Build packages
         run: pnpm build
 
       - name: Check types and lint
@@ -85,7 +85,7 @@ jobs:
             echo "exists=false" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Create GitHub release with JS bundles
+      - name: Create GitHub release
         if: steps.gh_release.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
@@ -94,6 +94,3 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
-          files: |
-            dist/trystero-*.min.js
-            dist/trystero-*.min.js.map

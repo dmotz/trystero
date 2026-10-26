@@ -90,24 +90,25 @@ export default [
     attw: ci,
     ...dropDevLabelStatements
   },
-  ...strategyNames.map((name, index) => ({
-    workspace: false as const,
-    entry: {
-      [`trystero-${name}.min`]: `packages/${name}/src/index.ts`
-    },
-    outDir: 'dist',
-    dts: false,
-    format: 'es' as const,
-    platform: 'browser' as const,
-    sourcemap: true,
-    minify: !testBuild,
-    ...browserBundleDepsConfig,
-    alias: {
-      '@trystero-p2p/core': coreSourcePath,
-      crypto: empty,
-      'node:crypto': empty
-    },
-    clean: index === 0,
-    ...dropDevLabelStatements
-  }))
+  ...(testBuild
+    ? strategyNames.map((name, index) => ({
+        workspace: false as const,
+        entry: {
+          [`trystero-${name}`]: `packages/${name}/src/index.ts`
+        },
+        outDir: 'test/dist',
+        dts: false,
+        format: 'es' as const,
+        platform: 'browser' as const,
+        sourcemap: true,
+        minify: false,
+        ...browserBundleDepsConfig,
+        alias: {
+          '@trystero-p2p/core': coreSourcePath,
+          crypto: empty,
+          'node:crypto': empty
+        },
+        clean: index === 0
+      }))
+    : [])
 ]

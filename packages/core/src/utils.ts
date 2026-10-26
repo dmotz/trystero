@@ -231,15 +231,6 @@ export const makeSocket = (
   return client
 }
 
-export const socketGetter =
-  <T extends {socket: WebSocket}>(
-    clientMap: Record<string, T>
-  ): (() => Record<string, WebSocket>) =>
-  () =>
-    fromEntries(
-      entries(clientMap).map(([url, client]) => [url, client.socket])
-    ) as Record<string, WebSocket>
-
 type RelayScopedStore<T, TRelay extends object> = {
   forKey: (key: string) => Record<string, T>
   forRelay: (relay: TRelay) => Record<string, T>
@@ -331,7 +322,6 @@ export const reservedRoomPropertyNames = new Set([
   'makeAction',
   'leave',
   'ping',
-  'isPassive',
   'getPeers',
   'getUsers',
   'getSelf',

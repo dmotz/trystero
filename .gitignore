@@ -1,5 +1,6 @@
 node_modules
 dist
+test/dist
 packages/*/README.md
 test-results
 playwright-report

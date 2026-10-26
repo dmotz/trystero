@@ -229,12 +229,6 @@ void test(
       `expected ${roomCount} subscriptions`
     )
 
-    // Sanity: all rooms report as passive
-    assert.ok(
-      rooms.every(r => r.isPassive()),
-      'all rooms should be passive'
-    )
-
     // All rooms should be ready (subscribed) within 60 seconds
     assert.ok(
       readyTimeMs < 60_000,

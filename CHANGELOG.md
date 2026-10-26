@@ -81,7 +81,7 @@
   one tab on `request`/`requestMany`/`ping`). `userId` is also included in all
   action, state, and progress callback contexts.
 - 📦 **Tree-shaking & `"sideEffects": false`** - enabled `"sideEffects": false`
-  across all packages and deprecated prebuilt `.min.js` bundles in favor of
+  across all packages and removed prebuilt `.min.js` release bundles in favor of
   tree-shaking bundlers and ESM CDNs.
 
 ### ⚠️ Breaking changes

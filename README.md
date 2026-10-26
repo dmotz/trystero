@@ -117,12 +117,6 @@ No package manager? You can also use an ESM CDN:
 </script>
 ```
 
-> **Note:** Prebuilt `.min.js` bundles (`dist/trystero-*.min.js`) are
-> deprecated. Use a package manager with a modern tree-shaking bundler (Vite,
-> Rollup, esbuild, webpack, etc.) or an ESM CDN like `esm.run` so optional
-> plugins such as `roles()` and `scale()` are only included in your bundle when
-> imported.
-
 The default Trystero package runs on the Nostr network, but you can swap in any
 other stategy by changing which package you import:
 
@@ -1524,10 +1518,6 @@ Returns an object with the following methods:
   - `hops` - Hop distance (`1` for direct peers, `>= 2` for multi-hop overlay
     peers).
   - `roles` - Array of verified roles currently held by that peer.
-
-- ### `isPassive()`
-
-  Returns whether the room was joined with `passive: true`.
 
 - ### `getTopology()`
 

@@ -79,12 +79,12 @@ const onConsole = (strategy, browser, pageN) => async msg => {
 }
 
 const resolveSourceMapLocation = async (url, lineNumber, columnNumber) => {
-  if (!url.includes('/dist/trystero-') || !url.includes('.min.js')) {
+  if (!url.includes('/test/dist/trystero-') || !url.endsWith('.js')) {
     return {url, lineNumber, columnNumber}
   }
 
   try {
-    const match = url.match(/trystero-([^.]+)\.min\.js/)
+    const match = url.match(/trystero-([^.]+)\.js/)
 
     if (!match) {
       return {url, lineNumber, columnNumber}
@@ -93,8 +93,9 @@ const resolveSourceMapLocation = async (url, lineNumber, columnNumber) => {
     const strategy = match[1]
     const sourceMapPath = join(
       projectRoot,
+      'test',
       'dist',
-      `trystero-${strategy}.min.js.map`
+      `trystero-${strategy}.js.map`
     )
 
     let consumer = sourceMapCache.get(sourceMapPath)

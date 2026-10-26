@@ -563,7 +563,7 @@ const main = async (browser: Browser, siteUrl: string) => {
 
 log('Starting Nostr relay updater; loading built Trystero browser bundle')
 const bundle = await readFile(
-  new URL('../dist/trystero-nostr.min.js', import.meta.url)
+  new URL('../test/dist/trystero-nostr.js', import.meta.url)
 )
 const site = createServer((request, response) => {
   response.setHeader(

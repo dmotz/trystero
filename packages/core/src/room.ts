@@ -114,7 +114,6 @@ type RoomOptions = {
   onPeerHandshake?: PeerHandshake
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs?: number
-  isPassive?: boolean
   onBeforeLeave?: () => void
 }
 
@@ -155,7 +154,6 @@ export default <
     onHandshakeError,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
     maxReceiveBytes,
-    isPassive = false,
     onBeforeLeave
   } = roomOptions
   let localSelfId = explicitSelfId ?? getResolvedDefaultSelfId() ?? ''
@@ -1069,29 +1067,29 @@ export default <
 
   if (hasRolesPlugin && !localSelfId) {
     const rolesShim: RolesPluginApi = {
-      makeState: <T extends JsonValue = JsonValue>(
+      makeState: <T = JsonValue>(
         namespace: string,
-        initialValue: T,
+        initialValue: T extends JsonValue ? T : never,
         stateConfig?: StateConfig<T>
       ): AuthoritativeState<T> => {
         if (
           didRunPluginSetup &&
           typeof pluginApis['makeState'] === 'function'
         ) {
-          return (pluginApis['makeState'] as RolesPluginApi['makeState'])(
+          return (pluginApis['makeState'] as RolesPluginApi['makeState'])<T>(
             namespace,
             initialValue,
             stateConfig
           )
         }
-        const currentVal = initialValue
+        const currentVal: T = initialValue
         let realState: AuthoritativeState<T> | null = null
         let pendingChangeHandler:
           | ((value: T, prev: T, context: StateChangeContext) => void)
           | null = null
         const readyStateP = pluginSetupP.then(() => {
           const fn = pluginApis['makeState'] as RolesPluginApi['makeState']
-          realState = fn(namespace, currentVal, stateConfig)
+          realState = fn<T>(namespace, initialValue, stateConfig)
           if (pendingChangeHandler) {
             realState.onChange = pendingChangeHandler
           }
@@ -1742,8 +1740,6 @@ export default <
 
       return Date.now() - start
     },
-
-    isPassive: () => isPassive,
 
     getSelf: async (): Promise<SelfInfo> => {
       const [, resolvedUser] = await Promise.all([

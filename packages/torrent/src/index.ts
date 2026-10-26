@@ -1,12 +1,9 @@
 import {
   createRelayManager,
   createStrategy,
-  entries,
   fromJson,
   genId,
   getRelays,
-  keys,
-  libName,
   makeSocket,
   sha1,
   toJson,
@@ -15,6 +12,8 @@ import {
   type OfferRecord,
   type SocketClient
 } from '@trystero-p2p/core'
+
+const {entries, keys} = Object
 
 const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const topicToInfoHash: Record<string, string> = {}
@@ -97,7 +96,7 @@ const send = async (
 
 const warn = (url: string, msg: string, didFail = false): void =>
   console.warn(
-    `${libName}: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
+    `Trystero: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
   )
 
 const getRoomOutstandingOffers = (

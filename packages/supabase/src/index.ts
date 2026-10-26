@@ -5,14 +5,13 @@ import {
 } from '@supabase/supabase-js'
 import {
   createTopicStrategy,
-  entries,
   fromJson,
-  keys,
-  values,
   type BaseRelayConfig,
   type BaseRoomConfig,
   type JoinRoom
 } from '@trystero-p2p/core'
+
+const {entries, keys, values} = Object
 
 const events = {
   broadcast: 'broadcast',

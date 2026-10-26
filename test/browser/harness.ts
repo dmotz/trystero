@@ -53,7 +53,7 @@ export const withStrategyBrowserPair = (
         console.log(`\n👺 using proxy: ${proxy}\n`)
       }
 
-      const scriptUrl = `../dist/trystero-${strategy}.min.js`
+      const scriptUrl = `./dist/trystero-${strategy}.js`
       const context2 = await browser.newContext({
         ignoreHTTPSErrors: true,
         ...(proxy

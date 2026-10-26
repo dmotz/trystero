@@ -30,7 +30,6 @@ import {
   toJson
 } from './utils'
 import type {
-  AuthorityConfig,
   AuthoritativeState,
   AuthoritativeStateRecord,
   DataPayload,
@@ -39,10 +38,10 @@ import type {
   PeerBanRecord,
   RoleCertificate,
   RoleRevocationRecord,
-  RolesInput,
+  RolesConfig,
   RolesPluginApi,
-  RoomAuthorityInfo,
   RoomPlugin,
+  SelfInfo,
   StateChangeContext,
   StateConfig,
   TargetPeers,
@@ -208,8 +207,8 @@ const addRootEntry = async (
 const allowedRolesConfigKeys = new Set(['selfAsAdmin', 'admins'])
 
 export const normalizeRolesConfig = (
-  input?: RolesInput
-): AuthorityConfig | undefined => {
+  input?: RolesConfig
+): RolesConfig | undefined => {
   if (input === undefined) {
     return undefined
   }
@@ -243,7 +242,7 @@ export const normalizeRolesConfig = (
 
 export const resolveRoomAuthority = async (
   rawRoomId: string,
-  adminOption?: RolesInput,
+  adminOption?: RolesConfig,
   localUserP?: Promise<UserIdentity>
 ): Promise<ResolvedRoomAuthority> => {
   const normalized = normalizeRolesConfig(adminOption)
@@ -1147,7 +1146,7 @@ export const verifyActionAuth = async (
   }
 }
 
-export const stateRecordCanonicalPayload = <T extends JsonValue = JsonValue>(
+export const stateRecordCanonicalPayload = <T = JsonValue>(
   rec: Omit<AuthoritativeStateRecord<T>, 'sig' | 'hash'>
 ): string =>
   toJson([
@@ -1213,7 +1212,7 @@ export const validateStateRecordShape = (
   )
 }
 
-export const signStateRecord = async <T extends JsonValue = JsonValue>(
+export const signStateRecord = async <T = JsonValue>(
   signerPrivateKey: CryptoKey,
   signerPubJwk: JsonWebKey,
   cert: RoleCertificate,
@@ -1272,7 +1271,7 @@ export const signStateRecord = async <T extends JsonValue = JsonValue>(
   }
 }
 
-export const verifyStateRecord = async <T extends JsonValue = JsonValue>(
+export const verifyStateRecord = async <T = JsonValue>(
   rec: AuthoritativeStateRecord<T>,
   appId: string,
   roomId: string,
@@ -1361,7 +1360,7 @@ export const compareStateRecords = (
   return a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0
 }
 
-type StateInstanceEntry<T extends JsonValue = JsonValue> = {
+type StateInstanceEntry<T = JsonValue> = {
   namespace: string
   value: T
   record: AuthoritativeStateRecord<T> | null
@@ -1376,7 +1375,7 @@ export type RoomAuthorityDeps = {
   selfId: string
   appId: string
   initialRoomId: string
-  admin?: RolesInput
+  admin?: RolesConfig
   resolvedAuthorityP?: Promise<ResolvedRoomAuthority>
   getLocalCryptoIdentity: () => Promise<{
     peerId?: string
@@ -2348,9 +2347,9 @@ export const createRoomAuthority = ({
       }
     },
 
-    makeState: <T extends JsonValue = JsonValue>(
+    makeState: <T = JsonValue>(
       namespace: string,
-      initialValue: T,
+      initialValue: T extends JsonValue ? T : never,
       config: StateConfig<T> | undefined,
       broadcastRecord: (
         record: AuthoritativeStateRecord<JsonValue>
@@ -2487,7 +2486,7 @@ export const createRoomAuthority = ({
       }
     },
 
-    getAuthorityInfo: async (): Promise<RoomAuthorityInfo> => {
+    getAuthorityInfo: async (): Promise<Omit<SelfInfo, 'peerId'>> => {
       const {resolved} = await ready
       const roles = getPeerRoles(localSelfId)
       return {
@@ -2723,7 +2722,7 @@ export const isSelfAsAdminPlugin = (plugin: RoomPlugin<string, any>): boolean =>
   selfAsAdminPlugins.has(plugin)
 
 export const roles = (
-  config?: RolesInput
+  config?: RolesConfig
 ): RoomPlugin<'roles', RolesPluginApi> => {
   const normalizedConfig = normalizeRolesConfig(config)
   const plugin = definePlugin<'roles', RolesPluginApi>('roles', {
@@ -3072,9 +3071,9 @@ export const roles = (
       })
 
       return {
-        makeState: <T extends JsonValue = JsonValue>(
+        makeState: <T = JsonValue>(
           namespace: string,
-          initialValue: T,
+          initialValue: T extends JsonValue ? T : never,
           stateConfig?: StateConfig<T>
         ): AuthoritativeState<T> =>
           authority.makeState(

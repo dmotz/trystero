@@ -2,19 +2,19 @@ import {schnorr} from '@noble/secp256k1'
 import {
   createRelayManager,
   createTopicStrategy,
+  encodeBytes,
   fromJson,
   genId,
   getRelays,
-  hashWith,
-  libName,
   makeSocket,
-  strToNum,
-  toHex,
   toJson,
   type JoinRoom,
   type JoinRoomConfig,
   type SocketClient
 } from '@trystero-p2p/core'
+
+const toHex = (bytes: Uint8Array): string =>
+  Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
 
 const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const defaultRedundancy = 5
@@ -95,7 +95,9 @@ const subscribeSince = (): number =>
   Math.max(0, now() - subscribeClockSkewSeconds)
 
 const topicToKind = (topic: string): number =>
-  (kindCache[topic] ??= strToNum(topic, 10_000) + 20_000)
+  (kindCache[topic] ??=
+    (topic.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % 10_000) +
+    20_000)
 
 export const createEvent = async (
   topic: string,
@@ -109,16 +111,20 @@ export const createEvent = async (
     pubkey
   }
 
-  const id = await hashWith(
-    'SHA-256',
-    toJson([
-      0,
-      payload.pubkey,
-      payload.created_at,
-      payload.kind,
-      payload.tags,
-      payload.content
-    ])
+  const id = new Uint8Array(
+    await crypto.subtle.digest(
+      'SHA-256',
+      encodeBytes(
+        toJson([
+          0,
+          payload.pubkey,
+          payload.created_at,
+          payload.kind,
+          payload.tags,
+          payload.content
+        ])
+      ) as BufferSource
+    )
   )
 
   return toJson([
@@ -388,7 +394,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
               >(data)
 
             if (msgType !== eventMsgType) {
-              const prefix = `${libName}: relay failure from ${client.url} - `
+              const prefix = `Trystero: relay failure from ${client.url} - `
               const rejectionReason =
                 msgType === 'CLOSED' && typeof payload === 'string'
                   ? payload

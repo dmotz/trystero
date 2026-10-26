@@ -64,14 +64,12 @@ export type RelayConfig = BaseRelayConfig & {
 
 export type TopologyMode = 'mesh' | 'auto' | 'gossip' | 'broadcast'
 
-export type TopologyConfig = {
+export type ScaleConfig = {
   mode?: TopologyMode
   maxConnections?: number
   autoThreshold?: number
   fanout?: number
 }
-
-export type ScaleConfig = TopologyConfig
 
 export type TopologyRoute = {
   nextHop: string
@@ -135,10 +133,6 @@ export type RolesConfig = {
   admins?: string[]
 }
 
-export type AuthorityConfig = RolesConfig
-
-export type RolesInput = RolesConfig
-
 export type RoleCertificate = {
   v: 1
   certId: string
@@ -193,7 +187,7 @@ export type PeerBanRecord = {
   sig: string
 }
 
-export type AuthoritativeStateRecord<T extends JsonValue = JsonValue> = {
+export type AuthoritativeStateRecord<T = JsonValue> = {
   v: 1
   appId: string
   roomId: string
@@ -213,15 +207,6 @@ export type AuthoritativeStateRecord<T extends JsonValue = JsonValue> = {
   hash: string
 }
 
-export type RoomAuthorityInfo = {
-  roomId: string
-  baseRoomId: string
-  fingerprint: string | null
-  isAdmin: boolean
-  roles: string[]
-  userId: string
-}
-
 export type StateChangeContext = {
   updatedBy: string
   userId?: string
@@ -232,12 +217,12 @@ export type StateChangeContext = {
   hash: string
 }
 
-export type StateConfig<T extends JsonValue = JsonValue> = {
+export type StateConfig<T = JsonValue> = {
   roles?: string | string[]
   validate?: (next: T, prev: T, context: StateChangeContext) => boolean
 }
 
-export type AuthoritativeState<T extends JsonValue = JsonValue> = {
+export type AuthoritativeState<T = JsonValue> = {
   get: () => T
   set: (next: T | ((prev: T) => T)) => Promise<void>
   getMeta: () => StateChangeContext | null
@@ -279,7 +264,7 @@ export type KernelRolesProvider = {
     data: DataPayload,
     wireMetadata?: JsonValue
   ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
-  getAuthorityInfo: () => Promise<RoomAuthorityInfo>
+  getAuthorityInfo: () => Promise<Omit<SelfInfo, 'peerId'>>
 }
 
 export type KernelScaleProvider = {
@@ -463,12 +448,6 @@ export type JoinRoomConfig = BaseRoomConfig & {
   relayConfig?: RelayConfig
 }
 
-export type ProgressHandler = (
-  percent: number,
-  peerId: string,
-  metadata?: JsonValue
-) => void
-
 export type ActionProgressContext = {
   peerId: string
   userId: string
@@ -640,9 +619,9 @@ export type SelfInfo = {
 }
 
 export type RolesPluginApi = {
-  makeState: <T extends JsonValue = JsonValue>(
+  makeState: <T = JsonValue>(
     namespace: string,
-    initialValue: T,
+    initialValue: T extends JsonValue ? T : never,
     config?: StateConfig<T>
   ) => AuthoritativeState<T>
   grantRole: (
@@ -673,7 +652,6 @@ export type Room = {
   }
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
-  isPassive: () => boolean
   getSelf: () => Promise<SelfInfo>
   getPeers: () => Record<string, PeerInfo>
   getUsers: () => Record<string, UserInfo>

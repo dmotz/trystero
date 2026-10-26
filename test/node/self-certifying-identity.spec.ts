@@ -1518,3 +1518,122 @@ void test('Session identity with IndexedDB: stores non-extractable CryptoKey key
   )
   await hostJoined.leave()
 })
+
+void test('makeState widens primitive literals, isPassive is removed, and core exports/types are pruned', async () => {
+  const {makeJoinRoom} = createMemorySignalBus()
+  const joinRoom = makeJoinRoom()
+
+  const room = joinRoom(
+    {
+      appId: 'state-widening-app',
+      identity: 'none',
+      use: [roles({selfAsAdmin: true})],
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'state-widening-room'
+  )
+
+  assert.equal(
+    'isPassive' in room,
+    false,
+    'isPassive() method must be removed from Room'
+  )
+
+  const counter = room.makeState('counter', 0)
+  await counter.set(1)
+  await counter.set(n => n + 1)
+  assert.equal(counter.get(), 2)
+
+  const label = room.makeState('label', 'initial')
+  await label.set('updated')
+  assert.equal(label.get(), 'updated')
+
+  const flag = room.makeState('flag', false)
+  await flag.set(true)
+  assert.equal(flag.get(), true)
+
+  const mode = room.makeState<'a' | 'b'>('mode', 'a')
+  await mode.set('b')
+  // @ts-expect-error explicit union type parameter must still reject 'c'
+  void mode.set('c').catch(() => {})
+  assert.equal(mode.get(), 'b')
+
+  await room.leave()
+
+  const coreExports = await import('../../packages/core/src/index.ts')
+  for (const pruned of [
+    'hashWith',
+    'all',
+    'entries',
+    'getConfiguredPlugins',
+    'keys',
+    'libName',
+    'socketGetter',
+    'strToNum',
+    'toHex',
+    'values'
+  ]) {
+    assert.equal(
+      pruned in coreExports,
+      false,
+      `"${pruned}" must not be exported from @trystero-p2p/core`
+    )
+  }
+
+  for (const kept of [
+    'createStrategy',
+    'createTopicStrategy',
+    'createRelayManager',
+    'makeSocket',
+    'getRelays',
+    'sha1',
+    'toJson',
+    'fromJson',
+    'encodeBytes',
+    'decodeBytes',
+    'genId',
+    'createAdminRoom',
+    'roles',
+    'scale',
+    'definePlugin',
+    'createUserIdentity',
+    'exportUserIdentity',
+    'importUserIdentity',
+    'pauseRelayReconnection',
+    'resumeRelayReconnection'
+  ]) {
+    assert.equal(
+      typeof (coreExports as Record<string, unknown>)[kept],
+      'function',
+      `"${kept}" must remain exported from @trystero-p2p/core`
+    )
+  }
+
+  const indexDts = readFileSync(
+    resolve(process.cwd(), 'packages/core/dist/index.d.mts'),
+    'utf8'
+  )
+  const typesDts = readFileSync(
+    resolve(process.cwd(), 'packages/core/dist/types.d.mts'),
+    'utf8'
+  )
+  for (const removedType of [
+    'AuthorityConfig',
+    'TopologyConfig',
+    'RolesInput',
+    'RoomAuthorityInfo'
+  ]) {
+    assert.equal(
+      indexDts.includes(removedType),
+      false,
+      `${removedType} must not appear in packages/core/dist/index.d.mts`
+    )
+    assert.equal(
+      typesDts.includes(removedType),
+      false,
+      `${removedType} must not appear in packages/core/dist/types.d.mts`
+    )
+  }
+  assert.equal(indexDts.includes('RolesConfig'), true)
+  assert.equal(indexDts.includes('ScaleConfig'), true)
+})
