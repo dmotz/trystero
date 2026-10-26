@@ -38,12 +38,6 @@
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
-    "./firebase": "./dist/firebase.mjs",
-    "./ipfs": "./dist/ipfs.mjs",
-    "./mqtt": "./dist/mqtt.mjs",
-    "./nostr": "./dist/nostr.mjs",
-    "./supabase": "./dist/supabase.mjs",
-    "./torrent": "./dist/torrent.mjs",
     "./package.json": "./package.json"
   },
   "dependencies": {

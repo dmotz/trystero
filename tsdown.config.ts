@@ -40,8 +40,7 @@ const dropDevLabelStatements = testBuild
 export default [
   {
     workspace: {
-      include: ['packages/*'],
-      exclude: ['packages/trystero']
+      include: ['packages/*']
     },
     entry: 'src/index.ts',
     dts: true,

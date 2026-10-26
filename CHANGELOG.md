@@ -141,6 +141,10 @@ capacity enforcement (`config.limit`), and role/admin authorization (`roles()`,
 multi-hop topologies; for per-message/request payload filtering, use
 `action.onReceive`.
 
+Deprecated `trystero/<strategy>` subpath exports have been removed; `trystero`
+is now solely a convenience wrapper for `@trystero-p2p/nostr`. Import strategies
+directly from `@trystero-p2p/<strategy>` (or `'trystero'` for Nostr).
+
 ## [0.26.0](https://github.com/dmotz/trystero/releases/tag/0.26.0) - 2026-10-04
 
 ### Improvements

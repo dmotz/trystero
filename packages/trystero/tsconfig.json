@@ -5,12 +5,5 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
-  "references": [
-    {"path": "../nostr"},
-    {"path": "../torrent"},
-    {"path": "../mqtt"},
-    {"path": "../ipfs"},
-    {"path": "../supabase"},
-    {"path": "../firebase"}
-  ]
+  "references": [{"path": "../nostr"}]
 }
