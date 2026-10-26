@@ -227,8 +227,7 @@ const createOverlayCluster = async ({
         id,
         activeSet,
         effectiveMode,
-        norm.maxConnections,
-        norm.fanout
+        norm.maxConnections
       )
       for (const targetId of targets) {
         if (activeSet.has(targetId)) {
@@ -318,22 +317,21 @@ const createOverlayCluster = async ({
   }
 }
 
-void test('Topology algorithms: symmetric gossip and broadcast neighbor selection & shortest-path routing', () => {
+void test('Topology algorithms: symmetric gossip neighbor selection & shortest-path routing', () => {
   const peerCount = 200
   const peerIds = Array.from(
     {length: peerCount},
     (_, i) => `peer-${String(i).padStart(4, '0')}`
   )
 
-  for (const mode of ['gossip', 'broadcast'] as const) {
+  for (const mode of ['gossip'] as const) {
     const maxConnections = 8
-    const fanout = 3
     const adjacency = new Map<string, Set<string>>()
 
     for (const id of peerIds) {
       adjacency.set(
         id,
-        computeTargetNeighbors(id, peerIds, mode, maxConnections, fanout)
+        computeTargetNeighbors(id, peerIds, mode, maxConnections)
       )
     }
 
@@ -698,7 +696,7 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
   const fanout = 4
   const cluster = await createOverlayCluster({
     peerCount,
-    topology: {mode: 'broadcast', maxConnections: 8, fanout},
+    topology: {mode: 'gossip', maxConnections: 8, fanout},
     media: true
   })
 
@@ -1239,8 +1237,11 @@ void test('Elegant API & automatic configuration: joinRoom with scale "auto" tra
   assert.equal(normalizeTopologyConfig().mode, 'auto')
   assert.equal(normalizeTopologyConfig('mesh').mode, 'mesh')
   assert.equal(normalizeTopologyConfig('gossip').mode, 'gossip')
-  assert.equal(normalizeTopologyConfig('broadcast').mode, 'broadcast')
   assert.equal(normalizeTopologyConfig('auto').mode, 'auto')
+  assert.throws(
+    () => normalizeTopologyConfig('broadcast' as any),
+    /invalid topology mode/
+  )
 
   // Start with 6 peers (<= autoThreshold of 8): should remain in 'mesh' mode
   const smallCluster = await createOverlayCluster({
@@ -2473,42 +2474,8 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   await Promise.all([viewer1.leave(), viewer2.leave()])
 })
 
-void test('Broadcast tree root pinning for verified admins, Hop-1 unauthorized broadcast drop, and multi-layer room.ban enforcement', async () => {
-  // 1. Verify computeTargetNeighbors pins privilegedPeers to index 0 (broadcast tree root)
-  // even when the admin has a lexicographically high peerId ('zzzz-admin')
-  const roster = [
-    'aaaa-peer',
-    'bbbb-peer',
-    'cccc-peer',
-    'dddd-peer',
-    'zzzz-admin'
-  ]
-  const priv = new Set(['zzzz-admin'])
-  const rootTargets = computeTargetNeighbors(
-    'zzzz-admin',
-    roster,
-    'broadcast',
-    6,
-    2,
-    priv
-  )
-  // As index 0 in binary tree (fanout 2), 'zzzz-admin' has children at index 1 ('aaaa-peer') and index 2 ('bbbb-peer')
-  assert.ok(rootTargets.has('aaaa-peer'))
-  assert.ok(rootTargets.has('bbbb-peer'))
-  const child1Targets = computeTargetNeighbors(
-    'aaaa-peer',
-    roster,
-    'broadcast',
-    6,
-    2,
-    priv
-  )
-  assert.ok(
-    child1Targets.has('zzzz-admin'),
-    'first non-privileged peer (index 1) must select privileged root (index 0) as its tree parent'
-  )
-
-  // 2. Hop-1 relay drops unauthorized overlay broadcast before forwarding downstream
+void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcement', async () => {
+  // 1. Hop-1 relay drops unauthorized overlay broadcast before forwarding downstream
   const forwardedToDownstream: Uint8Array[] = []
   const malloryOverlay = createOverlayManager({
     selfId: 'mallory-ov',
@@ -3162,7 +3129,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
 void test('Targeted media stays private for direct and multi-hop recipients', async () => {
   const cluster = await createOverlayCluster({
     peerCount: 8,
-    topology: {mode: 'broadcast', maxConnections: 6, fanout: 2},
+    topology: {mode: 'gossip', maxConnections: 4, fanout: 2},
     media: true
   })
   try {
@@ -3220,7 +3187,7 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
 void test('Removing a broadcast track prevents replay after topology healing', async () => {
   const cluster = await createOverlayCluster({
     peerCount: 8,
-    topology: {mode: 'broadcast', maxConnections: 6, fanout: 2},
+    topology: {mode: 'gossip', maxConnections: 4, fanout: 2},
     media: true
   })
   try {
@@ -3250,7 +3217,7 @@ void test('Removing and replacing tracks updates broadcast streams before topolo
   for (const replace of [false, true]) {
     const cluster = await createOverlayCluster({
       peerCount: 8,
-      topology: {mode: 'broadcast', maxConnections: 6, fanout: 2},
+      topology: {mode: 'gossip', maxConnections: 4, fanout: 2},
       media: true
     })
     try {
@@ -3531,7 +3498,7 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
   try {
     const activeSet = new Set(peerIds)
     for (const id of activeSet) {
-      const targets = computeTargetNeighbors(id, activeSet, 'gossip', 6, 4)
+      const targets = computeTargetNeighbors(id, activeSet, 'gossip', 6)
       for (const targetId of targets) {
         connectPair(id, targetId)
       }

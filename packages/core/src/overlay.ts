@@ -127,12 +127,7 @@ type UnicastEnvelopeHeader = {
   s?: string
 }
 
-const validModes = new Set<TopologyMode>([
-  'mesh',
-  'auto',
-  'gossip',
-  'broadcast'
-])
+const validModes = new Set<TopologyMode>(['mesh', 'auto', 'gossip'])
 
 export const normalizeTopologyConfig = (
   topology?: TopologyMode | ScaleConfig
@@ -159,9 +154,7 @@ export const normalizeTopologyConfig = (
     throw mkErr('scale.fanout must be an integer >= 2')
   }
 
-  const maxConnections =
-    raw.maxConnections ??
-    (mode === 'broadcast' ? fanout + 3 : defaultMaxConnections)
+  const maxConnections = raw.maxConnections ?? defaultMaxConnections
   if (!Number.isSafeInteger(maxConnections) || maxConnections < 2) {
     throw mkErr('scale.maxConnections must be an integer >= 2')
   }
@@ -182,23 +175,12 @@ export const normalizeTopologyConfig = (
 export const computeTargetNeighbors = (
   localPeerId: string,
   rosterIds: Iterable<string>,
-  activeMode: 'mesh' | 'gossip' | 'broadcast',
-  maxConnections: number,
-  fanout: number,
-  privilegedPeers?: ReadonlySet<string>
+  activeMode: 'mesh' | 'gossip',
+  maxConnections: number
 ): Set<string> => {
   const unique = new Set<string>(rosterIds)
   unique.add(localPeerId)
-  const sorted = [...unique].sort((a, b) => {
-    if (privilegedPeers && privilegedPeers.size > 0) {
-      const aPriv = privilegedPeers.has(a) ? 0 : 1
-      const bPriv = privilegedPeers.has(b) ? 0 : 1
-      if (aPriv !== bPriv) {
-        return aPriv - bPriv
-      }
-    }
-    return a < b ? -1 : a > b ? 1 : 0
-  })
+  const sorted = [...unique].sort()
   const total = sorted.length
   const selfIdx = sorted.indexOf(localPeerId)
   const targets = new Set<string>()
@@ -213,36 +195,6 @@ export const computeTargetNeighbors = (
         targets.add(id)
       }
     }
-    return targets
-  }
-
-  if (activeMode === 'broadcast') {
-    if (selfIdx > 0) {
-      const parentIdx = Math.floor((selfIdx - 1) / fanout)
-      const parentId = sorted[parentIdx]
-      if (parentId && parentId !== localPeerId) {
-        targets.add(parentId)
-      }
-    }
-
-    for (let k = 1; k <= fanout; k++) {
-      const childIdx = selfIdx * fanout + k
-      const childId = sorted[childIdx]
-      if (childId && childId !== localPeerId) {
-        targets.add(childId)
-      }
-    }
-
-    // Ring predecessor and successor provide symmetric backup paths if a tree parent drops.
-    const prevId = sorted[(selfIdx - 1 + total) % total]
-    const nextId = sorted[(selfIdx + 1) % total]
-    if (prevId && prevId !== localPeerId) {
-      targets.add(prevId)
-    }
-    if (nextId && nextId !== localPeerId) {
-      targets.add(nextId)
-    }
-
     return targets
   }
 
@@ -809,7 +761,7 @@ export type OverlayManagerDeps = {
 export type OverlayManager = {
   config: ResolvedTopologyConfig
   isOverlayActive: () => boolean
-  getActiveMode: () => 'mesh' | 'gossip' | 'broadcast'
+  getActiveMode: () => 'mesh' | 'gossip'
   isOverlayFrame: (data: ArrayBuffer) => boolean
   handleOverlayFrame: (fromPeerId: string, data: ArrayBuffer) => void
   addDirectPeer: (peerId: string, peer: PeerHandle) => void
@@ -876,7 +828,6 @@ export type OverlayManager = {
   getPeerSignPublicKey: (peerId: string) => JsonWebKey | undefined
   setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
-  setPrivilegedPeer: (peerId: string, isPrivileged: boolean) => void
   markPeerBanned: (peerId: string, keyThumbprint?: string) => void
   isPeerBanned: (peerId: string) => boolean
   registerActionAuthority: (actionType: string, roles: string[]) => void
@@ -914,7 +865,6 @@ export const createOverlayManager = ({
   const requiredDirectPeers = new Set<string>()
   const virtualPeers = new Map<string, PeerHandle>()
   const knownRoster = new Set<string>(selfId ? [selfId] : [])
-  const privilegedPeers = new Set<string>()
   const bannedPeers = new Set<string>()
   const bannedKeyThumbprints = new Set<string>()
   const peerSignPubKeys = new Map<string, JsonWebKey>()
@@ -967,7 +917,7 @@ export const createOverlayManager = ({
   let localSeq = 0
   let lastChurnAtMs = 0
   let isDestroyed = false
-  let currentActiveMode: 'mesh' | 'gossip' | 'broadcast' =
+  let currentActiveMode: 'mesh' | 'gossip' =
     config.mode === 'auto' ? 'mesh' : config.mode
   let routes: Record<string, TopologyRoute> = {}
   let identityReady: CryptoIdentity | null = null
@@ -983,7 +933,7 @@ export const createOverlayManager = ({
     treeReparents: 0
   }
 
-  if (config.mode === 'gossip' || config.mode === 'broadcast') {
+  if (config.mode === 'gossip') {
     void getOrCreateCryptoIdentity(selfId).then(id => {
       if (!isDestroyed) {
         identityReady = id
@@ -999,8 +949,8 @@ export const createOverlayManager = ({
       currentActiveMode = 'mesh'
       return
     }
-    if (config.mode === 'gossip' || config.mode === 'broadcast') {
-      currentActiveMode = config.mode
+    if (config.mode === 'gossip') {
+      currentActiveMode = 'gossip'
       return
     }
     // 'auto' mode with hysteresis
@@ -1296,9 +1246,7 @@ export const createOverlayManager = ({
         selfId,
         knownRoster,
         currentActiveMode,
-        config.maxConnections,
-        config.fanout,
-        privilegedPeers
+        config.maxConnections
       )
       requiredDirectPeers.forEach(id => targets.add(id))
       const missing = [...targets].filter(id => !directPeers.has(id))
@@ -3013,9 +2961,7 @@ export const createOverlayManager = ({
         selfId,
         knownRoster,
         currentActiveMode,
-        config.maxConnections,
-        config.fanout,
-        privilegedPeers
+        config.maxConnections
       )
 
       if (targets.has(peerId)) {
@@ -3047,9 +2993,7 @@ export const createOverlayManager = ({
           selfId,
           knownRoster,
           currentActiveMode,
-          config.maxConnections,
-          config.fanout,
-          privilegedPeers
+          config.maxConnections
         )
       ])
     },
@@ -3087,34 +3031,14 @@ export const createOverlayManager = ({
 
     setLocalRoleCertificate: (cert: RoleCertificate | null): void => {
       localRoleCert = cert
-      if (cert && cert.roles.includes('admin')) {
-        privilegedPeers.add(selfId)
-      } else {
-        privilegedPeers.delete(selfId)
-      }
       if (isOverlayActive()) {
         void publishLocalDescriptor()
-      }
-    },
-
-    setPrivilegedPeer: (peerId: string, isPrivileged: boolean): void => {
-      const changed = isPrivileged
-        ? !privilegedPeers.has(peerId)
-        : privilegedPeers.has(peerId)
-      if (isPrivileged) {
-        privilegedPeers.add(peerId)
-      } else {
-        privilegedPeers.delete(peerId)
-      }
-      if (changed && !isDestroyed) {
-        recomputeTopologyAndRoutes()
       }
     },
 
     markPeerBanned: (peerId: string, keyThumbprint?: string): void => {
       bannedPeers.add(peerId)
       requiredDirectPeers.delete(peerId)
-      privilegedPeers.delete(peerId)
       if (keyThumbprint) {
         bannedKeyThumbprints.add(keyThumbprint)
       }

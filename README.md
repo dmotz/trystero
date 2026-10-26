@@ -651,8 +651,7 @@ When a room is already at capacity:
   turned away with `'room full'`. Once a room is established and at capacity,
   existing members immediately reject new arrivals.
 - **Multi-hop rooms**: When `scale()` is enabled, capacity checks also account
-  for verified multi-hop overlay peers across `'gossip'` and `'broadcast'`
-  topologies.
+  for verified multi-hop overlay peers.
 
 </details>
 
@@ -932,22 +931,8 @@ config object:
 - `'gossip'` – Always uses the bounded-degree gossip relay network, even in
   small rooms. Useful when building a massive multiplayer world or public town
   square where you want every user's connection count capped from the start.
-- `'broadcast'` – Organizes peers into a branching broadcast tree. Ideal when
-  one or a few hosts are streaming video, audio, or live updates to a large
-  audience (like a webinar, live DJ set, or stage presentation).
 - `'mesh'` – Everyone always connects directly to everyone else (the default
   when `scale()` is omitted).
-
-```js
-// Example: a live stage app where a presenter streams video to a large audience
-const room = joinRoom(
-  {
-    appId: 'live-stage',
-    use: [scale('broadcast')]
-  },
-  'main-hall'
-)
-```
 
 You can also fine-tune connection limits by passing an object to `scale()`:
 
@@ -960,7 +945,7 @@ const room = joinRoom(
         mode: 'auto',
         autoThreshold: 12, // switch to 'gossip' above 12 peers
         maxConnections: 6, // target direct WebRTC connections per peer
-        fanout: 3 // downstream children per node in broadcast trees
+        fanout: 3 // downstream children per node in media broadcast trees
       })
     ]
   },
@@ -984,15 +969,15 @@ streams are being routed.
   repair so messages reach every peer reliably without flooding redundant
   copies. Point-to-point messages (`target`) route along shortest paths with
   disjoint backup next-hops for instant failover.
-- **Broadcast trees (`'broadcast'` and media streaming)**: In `'broadcast'`
-  mode—and whenever any peer calls `addStream()` without `target` in `'gossip'`
-  mode—Trystero builds a deterministic $k$-ary application-layer multicast (ALM)
-  tree rooted at the broadcaster. Each internal peer decodes the incoming stream
-  and forwards the `MediaStreamTrack`s to its downstream children (`fanout: 3`
-  by default), so a broadcaster can stream audio or video to dozens of viewers
-  while only uploading to 3 peers. Targeted media (`addStream` with `target`)
-  establishes a direct 1-hop WebRTC connection to each selected peer instead of
-  traversing relays.
+- **Media broadcast trees**: Whenever any peer calls `addStream()` or
+  `addTrack()` without `target` in `'gossip'` mode, Trystero builds a
+  deterministic $k$-ary application-layer multicast (ALM) tree rooted at the
+  broadcaster. Each internal peer decodes the incoming stream and forwards the
+  `MediaStreamTrack`s to its downstream children (`fanout: 3` by default), so a
+  broadcaster can stream audio or video to dozens of viewers while only
+  uploading to 3 peers. Targeted media (`addStream` with `target`) establishes a
+  direct 1-hop WebRTC connection to each selected peer instead of traversing
+  relays.
 - **End-to-end data security across hops**: For data channels, every peer
   automatically generates an ephemeral WebCrypto signing keypair (ECDSA P-256)
   and encryption keypair (ECDH P-256). Link-state descriptors and data
@@ -1520,8 +1505,8 @@ Returns an object with the following methods:
 
   _(Added to `Room` when `scale(...)` is included in `use: [...]`)_ Returns a
   `TopologySnapshot` describing how peers in the room are currently connected
-  and routing data: `mode`, `activeMode` (`'mesh' | 'gossip' | 'broadcast'`),
-  `selfId`, `directPeerIds`, `roomPeerIds`, `routes`, `mediaTrees`, and `stats`
+  and routing data: `mode`, `activeMode` (`'mesh' | 'gossip'`), `selfId`,
+  `directPeerIds`, `roomPeerIds`, `routes`, `mediaTrees`, and `stats`
   (`messagesSent`, `messagesReceived`, `messagesForwarded`, `duplicatesDropped`,
   `signatureFailures`, `lazyRepairsSent`, `lazyRepairsResolved`,
   `treeReparents`).
@@ -1845,15 +1830,15 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 Creates the opt-in multi-hop scaling plugin
 (`RoomPlugin<'scale', ScalePluginApi>`) for `joinRoom()`. Pass in
 `use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`,
-`'broadcast'`, `'mesh'`, or a `ScaleConfig` object:
+`'mesh'`, or a `ScaleConfig` object:
 
-- `mode` - `'auto' | 'mesh' | 'gossip' | 'broadcast'` (default: `'auto'`).
+- `mode` - `'auto' | 'mesh' | 'gossip'` (default: `'auto'`).
 - `maxConnections` - Maximum target direct WebRTC connections per browser in
-  scalable modes (default: `6`, or `fanout + 3` in `'broadcast'` mode).
+  scalable modes (default: `6`).
 - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
   `'gossip'` (default: `12`).
-- `fanout` - Number of downstream peers each node forwards to in `'broadcast'`
-  mode and media broadcast trees (default: `3`).
+- `fanout` - Number of downstream peers each node forwards to in media broadcast
+  trees (default: `3`).
 
 ### `definePlugin(name, spec)`
 

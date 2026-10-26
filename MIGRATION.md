@@ -32,7 +32,7 @@ boilerplate—and eliminates subtle security and topology footguns.
    core protocol and tree-shaken when `roles()` is not imported.
 4. **Scalable Multi-Hop Topologies**: Rooms are no longer restricted to
    full-mesh WebRTC (`O(N²)` connections). By opting in with `scale()` (supports
-   `'auto'`, `'gossip'`, or `'broadcast'`), rooms can scale to hundreds of
+   `'auto'`, `'gossip'`, or `'mesh'`), rooms can scale to hundreds of
    participants using multi-hop overlay routing with end-to-end cryptographic
    sender verification, while apps that don't import `scale()` pay zero bundle
    overhead.
@@ -55,12 +55,12 @@ security footguns:
 
 1. **False Sense of Security in Multi-Hop Topologies**: `onPeerHandshake`
    operated during the physical WebRTC connection setup. In scalable topologies
-   (`scale()` with `'auto'`, `'gossip'`, or `'broadcast'`), a peer only
-   establishes physical WebRTC connections with a handful of 1-hop neighbors
-   (`maxConnections`), while communicating with everyone else over multi-hop
-   overlay routing. A physical handshake gate would **never run** for 2+ hop
-   peers—giving developers a false sense of security that they had gated the
-   room when unverified peers could still route messages through neighbors.
+   (`scale()` with `'auto'` or `'gossip'`), a peer only establishes physical
+   WebRTC connections with a handful of 1-hop neighbors (`maxConnections`),
+   while communicating with everyone else over multi-hop overlay routing. A
+   physical handshake gate would **never run** for 2+ hop peers—giving
+   developers a false sense of security that they had gated the room when
+   unverified peers could still route messages through neighbors.
 2. **Unverified Signaling IDs**: Previously, `peerId` was just a random string
    announced over the signaling server. Using `onPeerHandshake` to check an
    allowlist of `peerId`s was vulnerable to spoofing on public relays unless

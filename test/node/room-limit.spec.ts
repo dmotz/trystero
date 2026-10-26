@@ -789,7 +789,7 @@ void test(
     const {makeJoinRoom} = createMemorySignalBus()
     const appId = `limit-overlay-${Date.now()}`
     const roomId = 'tree-room'
-    const scaleConfig = {mode: 'broadcast' as const, maxConnections: 2}
+    const scaleConfig = {mode: 'gossip' as const, maxConnections: 2}
 
     const peerIds = ['node-1', 'node-2', 'node-3', 'node-4']
     const rooms: any[] = []

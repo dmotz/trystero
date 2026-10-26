@@ -43,7 +43,7 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
                 ...config,
                 use: [
                   window.trystero.scale({
-                    mode: 'broadcast',
+                    mode: 'gossip',
                     maxConnections: 2,
                     fanout: 2
                   })

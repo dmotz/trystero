@@ -1390,7 +1390,6 @@ export type RoomAuthorityDeps = {
   onRoomIdResolved: (effectiveRoomId: string) => void
   onPeerPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   onLocalRoleCertificate: (cert: RoleCertificate | null) => void
-  onPrivilegedPeer: (peerId: string, isPrivileged: boolean) => void
   onPeerBanned: (
     peerId: string,
     keyThumbprint?: string,
@@ -1416,7 +1415,6 @@ export const createRoomAuthority = ({
   onRoomIdResolved,
   onPeerPublicKey,
   onLocalRoleCertificate,
-  onPrivilegedPeer,
   onPeerBanned,
   onSignatureFailure
 }: RoomAuthorityDeps) => {
@@ -1769,7 +1767,6 @@ export const createRoomAuthority = ({
           peerCerts.set(localSelfId, rootCert)
           userCerts.set(localAdminUser.userId, rootCert)
           onLocalRoleCertificate(rootCert)
-          onPrivilegedPeer(localSelfId, true)
         }
       }
     }
@@ -1809,14 +1806,6 @@ export const createRoomAuthority = ({
         const existingU = userCerts.get(subUid)
         if (!existingU || existingU.iat <= cert.iat) {
           userCerts.set(subUid, cert)
-        }
-      }
-      const effectiveRoles = getEffectiveRolesForCert(cert)
-      const isAdminRole = effectiveRoles.includes('admin')
-      onPrivilegedPeer(cert.subPeerId, isAdminRole)
-      if (subUid) {
-        for (const pid of getUserPeerIds?.(subUid) ?? []) {
-          onPrivilegedPeer(pid, isAdminRole)
         }
       }
       const localUid = getPeerUserId?.(localSelfId)
@@ -1895,13 +1884,6 @@ export const createRoomAuthority = ({
         const uList = userRevocations.get(targetUid) ?? []
         uList.push(rev)
         userRevocations.set(targetUid, uList)
-      }
-      const remainingRoles = getPeerRoles(rev.targetPeerId)
-      onPrivilegedPeer(rev.targetPeerId, remainingRoles.includes('admin'))
-      if (targetUid) {
-        for (const pid of getUserPeerIds?.(targetUid) ?? []) {
-          onPrivilegedPeer(pid, getPeerRoles(pid).includes('admin'))
-        }
       }
       const localUid = getPeerUserId?.(localSelfId)
       if (
@@ -2770,8 +2752,6 @@ export const roles = (
           kernel.setPeerPublicKey(peerId, pubKey),
         onLocalRoleCertificate: cert =>
           kernel.getScaleProvider()?.setLocalRoleCertificate(cert),
-        onPrivilegedPeer: (peerId, isPriv) =>
-          kernel.getScaleProvider()?.setPrivilegedPeer(peerId, isPriv),
         onPeerBanned: (peerId, keyThumbprint, targetUserId) => {
           const sp = kernel.getScaleProvider()
           sp?.markPeerBanned(peerId, keyThumbprint)

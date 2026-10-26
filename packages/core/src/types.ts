@@ -62,7 +62,7 @@ export type RelayConfig = BaseRelayConfig & {
   redundancy?: number
 }
 
-export type TopologyMode = 'mesh' | 'auto' | 'gossip' | 'broadcast'
+export type TopologyMode = 'mesh' | 'auto' | 'gossip'
 
 export type ScaleConfig = {
   mode?: TopologyMode
@@ -96,7 +96,7 @@ export type TopologyStats = {
 
 export type TopologySnapshot = {
   mode: TopologyMode
-  activeMode: 'mesh' | 'gossip' | 'broadcast'
+  activeMode: 'mesh' | 'gossip'
   selfId: string
   directPeerIds: string[]
   roomPeerIds: string[]
@@ -331,7 +331,6 @@ export type KernelScaleProvider = {
   getPeerSignPublicKey: (peerId: string) => JsonWebKey | undefined
   setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
-  setPrivilegedPeer: (peerId: string, isPrivileged: boolean) => void
   markPeerBanned: (peerId: string, keyThumbprint?: string) => void
   isPeerBanned: (peerId: string) => boolean
   registerActionAuthority: (actionType: string, roles: string[]) => void

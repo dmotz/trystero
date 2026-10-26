@@ -48,7 +48,6 @@ const setup = async () => {
     onRoomIdResolved: () => {},
     onPeerPublicKey: () => {},
     onLocalRoleCertificate: () => {},
-    onPrivilegedPeer: () => {},
     onPeerBanned: () => {},
     onSignatureFailure: () => {}
   })
@@ -499,7 +498,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     onRoomIdResolved: () => {},
     onPeerPublicKey: () => {},
     onLocalRoleCertificate: () => {},
-    onPrivilegedPeer: () => {},
     onPeerBanned: () => {},
     onSignatureFailure: () => {}
   })
@@ -761,7 +759,6 @@ void test('clock skew hardening: reject future-dated records, floor re-granted c
     onRoomIdResolved: () => {},
     onPeerPublicKey: () => {},
     onLocalRoleCertificate: () => {},
-    onPrivilegedPeer: () => {},
     onPeerBanned: () => {},
     onSignatureFailure: () => {}
   })
