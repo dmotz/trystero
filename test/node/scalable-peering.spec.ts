@@ -2465,8 +2465,8 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   // Verify compareStateRecords deterministic ordering
   assert.equal(
     compareStateRecords(
-      {epoch: 1, seq: 2, ts: 100, updatedBy: 'a', hash: '11'} as any,
-      {epoch: 1, seq: 1, ts: 200, updatedBy: 'b', hash: '22'} as any
+      {seq: 2, ts: 100, updatedBy: 'a', hash: '11'} as any,
+      {seq: 1, ts: 200, updatedBy: 'b', hash: '22'} as any
     ) > 0,
     true
   )
@@ -3853,9 +3853,6 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       targetPeerId: capturedRevocation.targetPeerId,
       ...(capturedRevocation.targetUserId
         ? {targetUserId: capturedRevocation.targetUserId}
-        : {}),
-      ...(capturedRevocation.targetCertId
-        ? {targetKeyThumbprint: capturedRevocation.targetCertId}
         : {}),
       ...(capturedRevocation.role ? {reason: capturedRevocation.role} : {}),
       seq: capturedRevocation.seq,

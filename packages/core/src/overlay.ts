@@ -2,7 +2,6 @@ import {inspectActionWireHeader} from './action-wire'
 import {ecdsaSign, sha1, sha256} from './crypto'
 import {maxActionFrameBytes, maxOverlayHeaderBytes} from './data-limits'
 import {
-  canonicalizePubJwk,
   getCachedPubKeyRecord,
   getOrCreateEndpointIdentity,
   isPeerIdKeyCachedValid,
@@ -828,7 +827,7 @@ export type OverlayManager = {
   getPeerSignPublicKey: (peerId: string) => JsonWebKey | undefined
   setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
-  markPeerBanned: (peerId: string, keyThumbprint?: string) => void
+  markPeerBanned: (peerId: string) => void
   isPeerBanned: (peerId: string) => boolean
   registerActionAuthority: (actionType: string, roles: string[]) => void
   recordSignatureFailure: () => void
@@ -866,7 +865,6 @@ export const createOverlayManager = ({
   const virtualPeers = new Map<string, PeerHandle>()
   const knownRoster = new Set<string>(selfId ? [selfId] : [])
   const bannedPeers = new Set<string>()
-  const bannedKeyThumbprints = new Set<string>()
   const peerSignPubKeys = new Map<string, JsonWebKey>()
   const actionAuthorities = new Map<string, string[]>()
   let localRoleCert: RoleCertificate | null = null
@@ -1411,16 +1409,6 @@ export const createOverlayManager = ({
     }
 
     const keyThumbprint = toJson(d.signPubKey)
-    const canonicalThumbprint =
-      typeof d.signPubKey.x === 'string' && typeof d.signPubKey.y === 'string'
-        ? canonicalizePubJwk(d.signPubKey)
-        : keyThumbprint
-    if (
-      bannedKeyThumbprints.has(keyThumbprint) ||
-      bannedKeyThumbprints.has(canonicalThumbprint)
-    ) {
-      return false
-    }
     const pinned = pinnedSignKeys.get(d.peerId)
     if (pinned && pinned !== keyThumbprint) {
       return false
@@ -1522,18 +1510,6 @@ export const createOverlayManager = ({
     }
 
     const keyThumbprint = toJson(d.signPubKey)
-    const canonicalThumbprint =
-      typeof d.signPubKey.x === 'string' && typeof d.signPubKey.y === 'string'
-        ? canonicalizePubJwk(d.signPubKey)
-        : keyThumbprint
-    if (
-      bannedKeyThumbprints.has(keyThumbprint) ||
-      bannedKeyThumbprints.has(canonicalThumbprint)
-    ) {
-      bannedPeers.add(d.peerId)
-      stats.signatureFailures++
-      return false
-    }
     const pinned = pinnedSignKeys.get(d.peerId)
     if (pinned && pinned !== keyThumbprint) {
       stats.signatureFailures++
@@ -3036,25 +3012,9 @@ export const createOverlayManager = ({
       }
     },
 
-    markPeerBanned: (peerId: string, keyThumbprint?: string): void => {
+    markPeerBanned: (peerId: string): void => {
       bannedPeers.add(peerId)
       requiredDirectPeers.delete(peerId)
-      if (keyThumbprint) {
-        bannedKeyThumbprints.add(keyThumbprint)
-      }
-      const pinned = pinnedSignKeys.get(peerId)
-      if (pinned) {
-        bannedKeyThumbprints.add(pinned)
-      }
-      const knownPubKey =
-        peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey
-      if (
-        knownPubKey &&
-        typeof knownPubKey.x === 'string' &&
-        typeof knownPubKey.y === 'string'
-      ) {
-        bannedKeyThumbprints.add(canonicalizePubJwk(knownPubKey))
-      }
       const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
       downPeersSeq.set(peerId, lastSeq)
       departedPeers.add(peerId)
@@ -3075,26 +3035,7 @@ export const createOverlayManager = ({
       }
     },
 
-    isPeerBanned: (peerId: string): boolean => {
-      if (bannedPeers.has(peerId)) {
-        return true
-      }
-      const thumbprint = pinnedSignKeys.get(peerId)
-      if (thumbprint && bannedKeyThumbprints.has(thumbprint)) {
-        return true
-      }
-      const knownPubKey =
-        peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey
-      if (
-        knownPubKey &&
-        typeof knownPubKey.x === 'string' &&
-        typeof knownPubKey.y === 'string' &&
-        bannedKeyThumbprints.has(canonicalizePubJwk(knownPubKey))
-      ) {
-        return true
-      }
-      return false
-    },
+    isPeerBanned: (peerId: string): boolean => bannedPeers.has(peerId),
 
     registerActionAuthority: (actionType: string, roles: string[]): void => {
       if (roles.length > 0) {

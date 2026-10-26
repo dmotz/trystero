@@ -146,7 +146,6 @@ export type RoleCertificate = {
   canDelegate?: boolean
   isRoot?: boolean
   iat: number
-  exp?: number
   parentCert?: RoleCertificate
   sig: string
 }
@@ -176,7 +175,6 @@ export type PeerBanRecord = {
   issuerPeerId: string
   targetPeerId: string
   targetUserId?: string
-  targetKeyThumbprint?: string
   reason?: string
   seq: number
   ts: number
@@ -192,7 +190,6 @@ export type AuthoritativeStateRecord<T = JsonValue> = {
   appId: string
   roomId: string
   namespace: string
-  epoch: number
   seq: number
   prevHash: string
   ts: number
@@ -212,7 +209,6 @@ export type StateChangeContext = {
   userId?: string
   roles: string[]
   seq: number
-  epoch: number
   timestamp: number
   hash: string
 }
@@ -331,7 +327,7 @@ export type KernelScaleProvider = {
   getPeerSignPublicKey: (peerId: string) => JsonWebKey | undefined
   setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
-  markPeerBanned: (peerId: string, keyThumbprint?: string) => void
+  markPeerBanned: (peerId: string) => void
   isPeerBanned: (peerId: string) => boolean
   registerActionAuthority: (actionType: string, roles: string[]) => void
   recordSignatureFailure: () => void
@@ -626,7 +622,7 @@ export type RolesPluginApi = {
   grantRole: (
     targetId: string,
     role: string | string[],
-    options?: {canDelegate?: boolean; expiresInMs?: number}
+    options?: {canDelegate?: boolean}
   ) => Promise<RoleCertificate>
   revokeRole: (targetId: string, role?: string) => Promise<void>
   getRoles: (targetId?: string) => string[]

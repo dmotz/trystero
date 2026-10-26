@@ -818,10 +818,9 @@ roles (like `'moderator'` or `'dj'`), revoke those roles later, or permanently
 ban a disruptive user from the room:
 
 ```js
-// Promote a user to 'moderator' for 1 hour (and let them promote others too)
+// Promote a user to 'moderator' (and let them promote others too)
 await room.grantRole(userId, 'moderator', {
-  canDelegate: true,
-  expiresInMs: 60 * 60 * 1000
+  canDelegate: true
 })
 
 // Check which verified roles a user currently has
@@ -856,13 +855,13 @@ admin certificates.
   verify from the `userId` alone who owns the room.
 - **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
   `RoleCertificate` binding the recipient's `peerId`, `userId`, and public key
-  to the granted role(s), optional expiration timestamp, and `canDelegate` flag.
-  Because the certificate binds `subUserId`, a promoted user retains their roles
-  across page reloads and multiple open tabs by presenting a signed `userProof`
-  linking their new endpoint `peerId` to their `userId`. Peers verify the full
-  signature chain back to a root admin key and check against signed
-  `RoleRevocationRecord`s. Likewise, `room.ban()` bans both the target `peerId`
-  and `userId` across all current and future tabs.
+  to the granted role(s) and `canDelegate` flag (up to a maximum delegation
+  depth of 2). Because the certificate binds `subUserId`, a promoted user
+  retains their roles across page reloads and multiple open tabs by presenting a
+  signed `userProof` linking their new endpoint `peerId` to their `userId`.
+  Peers verify the full signature chain back to a root admin key and check
+  against signed `RoleRevocationRecord`s. Likewise, `room.ban()` bans both the
+  target `peerId` and `userId` across all current and future tabs.
 - **Tamper-proof state syncing (`makeState`)**: Each state update is signed with
   a monotonically increasing sequence number (`seq`) and chained to the SHA-256
   hash of the previous state record (`prevHash`, verified for successive updates
@@ -870,7 +869,7 @@ admin certificates.
   cache and serve the latest state snapshot to late joiners—the newcomer simply
   verifies the writer's signature on the snapshot. Concurrent updates across
   co-admins converge deterministically using last-writer-wins ordering
-  `(epoch, seq, timestamp, hash)`.
+  `(seq, timestamp, hash)`.
 - **Edge filtering & private signaling**: In multi-hop topologies, immediate
   neighbors (Hop-1 relays) verify role certificates, signatures, and
   `PeerBanRecord`s before forwarding packets, stopping unauthorized traffic or
@@ -1527,8 +1526,8 @@ Returns an object with the following methods:
     `(prev) => next`). Rejects if the local user lacks permission or validation
     fails.
   - `getMeta()` - Returns metadata about the latest update (`updatedBy`,
-    `userId`, `roles`, `seq`, `epoch`, `timestamp`, `hash`) or `null` if still
-    at `initialValue`.
+    `userId`, `roles`, `seq`, `timestamp`, `hash`) or `null` if still at
+    `initialValue`.
   - `onChange` - Nullable callback `(value, prev, context) => void` called
     whenever a verified state update arrives.
 
@@ -1540,8 +1539,6 @@ Returns an object with the following methods:
   or to hold that role with `canDelegate: true`.
   - `options.canDelegate` - **(optional)** Boolean allowing the recipient to
     grant those role(s) to other peers as well.
-  - `options.expiresInMs` - **(optional)** How long the role remains valid in
-    milliseconds.
 
 - ### `revokeRole(targetId, [role])`
 
