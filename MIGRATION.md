@@ -40,6 +40,10 @@ boilerplate—and eliminates subtle security and topology footguns.
    release bundles have been removed in favor of tree-shaking bundlers (or ESM
    CDNs like `esm.run`) so optional plugins like `roles()` and `scale()` are
    only bundled when imported.
+6. **IPFS Strategy Removed**: The experimental IPFS strategy
+   (`@trystero-p2p/ipfs`) has been removed because it was not a good fit for
+   Trystero's purposes (huge bundle size, very slow connection time, few relays,
+   and little usage).
 
 ---
 

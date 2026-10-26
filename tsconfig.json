@@ -20,7 +20,6 @@
     {"path": "./packages/nostr"},
     {"path": "./packages/torrent"},
     {"path": "./packages/mqtt"},
-    {"path": "./packages/ipfs"},
     {"path": "./packages/supabase"},
     {"path": "./packages/firebase"},
     {"path": "./packages/ws-relay"},

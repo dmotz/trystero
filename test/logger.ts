@@ -20,7 +20,6 @@ export const emojis = {
   torrent: '🌊',
   supabase: '⚡️',
   firebase: '🔥',
-  ipfs: '🪐',
   'ws-relay': '🔌'
 }
 

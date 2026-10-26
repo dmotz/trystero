@@ -8,7 +8,7 @@ Trystero makes browsers discover each other and communicate directly. No
 accounts. No deploying infrastructure. Just import and connect.
 
 Peers can connect via 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥Firebase,
-🪐 IPFS, or a 🔌 self-hosted WebSocket relay – all using the same API.
+or a 🔌 self-hosted WebSocket relay – all using the same API.
 
 Besides making peer matching automatic, Trystero offers some nice abstractions
 on top of WebRTC:
@@ -82,8 +82,7 @@ is needed to exchange peer information
 ([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
 this involves running your own matchmaking server but Trystero abstracts this
 away for you and offers multiple strategies for connecting peers (currently
-BitTorrent, Nostr, MQTT, Supabase, Firebase, IPFS, and self-hosted WebSocket
-relay).
+BitTorrent, Nostr, MQTT, Supabase, Firebase, and self-hosted WebSocket relay).
 
 The important point to remember is this:
 
@@ -128,8 +127,6 @@ import {joinRoom} from '@trystero-p2p/torrent'
 import {joinRoom} from '@trystero-p2p/supabase'
 // or
 import {joinRoom} from '@trystero-p2p/firebase'
-// or
-import {joinRoom} from '@trystero-p2p/ipfs'
 // or
 import {joinRoom} from '@trystero-p2p/ws-relay'
 ```
@@ -1425,8 +1422,8 @@ the same namespace will return the same room instance.
 
   - `trickleIce` - **(optional)** Boolean controlling whether ICE candidates are
     sent incrementally (`true`) or bundled with SDP (`false`). Default is
-    strategy-dependent: `true` for most strategies, `false` for BitTorrent and
-    IPFS unless explicitly set.
+    strategy-dependent: `true` for most strategies, `false` for BitTorrent
+    unless explicitly set.
 
   - `turnConfig` - **(optional)** Specifies a custom list of TURN servers to use
     (see
@@ -1910,10 +1907,10 @@ until `resumeRelayReconnection()` is called.
 By default Trystero uses the Nostr network which is highly decentralized with
 hundreds of active relays running. This is a good choice if you're interested in
 decentralization and high redundancy. The other decentralized strategies are
-recommended in the order of MQTT, BitTorrent, and IPFS, based on robustness.
-These networks have far less relay redundancy than Nostr, but you might prefer
-them for other reasons. You can of course host your own relay server for any of
-these strategies.
+recommended in the order of MQTT and BitTorrent, based on robustness. These
+networks have far less relay redundancy than Nostr, but you might prefer them
+for other reasons. You can of course host your own relay server for any of these
+strategies.
 
 For a middleground between using public relays and self-hosting, the built-in
 Supabase and Firebase strategies are a good option.

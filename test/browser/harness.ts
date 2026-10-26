@@ -11,8 +11,7 @@ const useTestOnlyMdnsFallback =
 
 export const sleep = ms => new Promise(res => setTimeout(res, ms))
 
-export const concurrentRooms = strategy =>
-  strategy === 'ipfs' || strategy === 'torrent' ? 1 : 3
+export const concurrentRooms = strategy => (strategy === 'torrent' ? 1 : 3)
 
 const defaultRelayRedundancy = 4
 
@@ -39,9 +38,7 @@ export const withStrategyBrowserPair = (
     const initialConnectionResults = []
 
     const run = async () => {
-      if (strategy === 'ipfs') {
-        test.setTimeout(180_000)
-      } else if (strategy === 'torrent') {
+      if (strategy === 'torrent') {
         test.setTimeout(120_000)
       }
 

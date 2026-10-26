@@ -4,7 +4,6 @@ const testBuild = process.env['TEST_BUILD'] === '1'
 
 const strategyNames = [
   'firebase',
-  'ipfs',
   'mqtt',
   'nostr',
   'supabase',

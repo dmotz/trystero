@@ -3,9 +3,8 @@
 Trystero's plugin API lets you extend `joinRoom()` with custom peer-to-peer
 capabilities—such as CRDT document synchronization (Yjs, Automerge), spatial
 audio, custom state engines, or telemetry—that work across **every signaling
-strategy** (`nostr`, `torrent`, `mqtt`, `firebase`, `supabase`, `ipfs`,
-`ws-relay`) and across both direct WebRTC meshes and multi-hop `scale()`
-topologies.
+strategy** (`nostr`, `torrent`, `mqtt`, `firebase`, `supabase`, `ws-relay`) and
+across both direct WebRTC meshes and multi-hop `scale()` topologies.
 
 Built-in plugins (`scale()` and `roles()`) use the exact same `definePlugin` and
 `RoomKernel` primitives documented in this guide.

@@ -6,7 +6,6 @@ import {build} from 'tsdown'
 
 const strategies = [
   'firebase',
-  'ipfs',
   'mqtt',
   'nostr',
   'supabase',
