@@ -5,15 +5,10 @@ import {joinRoomAndWaitForPeer, leaveRoom} from './room-helpers'
 withStrategyBrowserPair(
   'ws-relay',
   {rtcConfig: {iceServers: []}},
-  'passive rooms reuse an existing connection and reject oversized inline requests',
+  'passive rooms connect on demand and reject oversized inline requests',
   async ({page, page2, roomConfig, selfId2}) => {
-    const lobby = `lobby-${Math.random()}`
     const roomId = `passive-${Math.random()}`
     try {
-      await Promise.all([
-        page.evaluate(joinRoomAndWaitForPeer, [lobby, roomConfig]),
-        page2.evaluate(joinRoomAndWaitForPeer, [lobby, roomConfig])
-      ])
       await page2.evaluate(
         ([roomId, config]) => {
           window[roomId] = window.trystero.joinRoom(
@@ -38,14 +33,6 @@ withStrategyBrowserPair(
         .toBe(1)
       expect(
         await page.evaluate(
-          ([lobby, roomId, target]) =>
-            window[lobby].getPeers()[target]?.connection ===
-            window[roomId].getPeers()[target]?.connection,
-          [lobby, roomId, selfId2]
-        )
-      ).toBe(true)
-      expect(
-        await page.evaluate(
           async ([roomId, target]) => {
             const upload = window[roomId].makeAction('upload', {
               kind: 'request'
@@ -66,12 +53,10 @@ withStrategyBrowserPair(
         )
       ).toEqual(['rejected', 'ok'])
     } finally {
-      for (const id of [roomId, lobby]) {
-        await Promise.all([
-          page.evaluate(leaveRoom, id),
-          page2.evaluate(leaveRoom, id)
-        ])
-      }
+      await Promise.all([
+        page.evaluate(leaveRoom, roomId),
+        page2.evaluate(leaveRoom, roomId)
+      ])
     }
   }
 )

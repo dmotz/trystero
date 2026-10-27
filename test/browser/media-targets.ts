@@ -36,7 +36,7 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
       ids.push(
         await page.evaluate(
           async ({roomId, config}) => {
-            const scriptUrl = '../dist/trystero-ws-relay.min.js'
+            const scriptUrl = './test/dist/trystero-ws-relay.js'
             window.trystero = await import(scriptUrl)
             const room = (window[roomId] = window.trystero.joinRoom(
               {
