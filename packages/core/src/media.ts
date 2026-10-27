@@ -323,7 +323,7 @@ export const createMediaManager = ({
             const nextSet = new Set(effectiveTracks)
             for (const [prevTrack] of synced) {
               if (!nextSet.has(prevTrack)) {
-                mediaPeer.removeTrack(prevTrack)
+                mediaPeer.removeTrack(prevTrack, stream)
                 synced.delete(prevTrack)
               }
             }
@@ -383,7 +383,7 @@ export const createMediaManager = ({
           const rawSet = new Set(stream.getTracks?.() ?? [])
           for (const [track] of prevTracks) {
             if (!rawSet.has(track)) {
-              peer.removeTrack(track)
+              peer.removeTrack(track, stream)
             }
           }
         }

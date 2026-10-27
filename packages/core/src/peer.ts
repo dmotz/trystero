@@ -711,10 +711,13 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
     },
 
-    removeTrack: track => {
+    removeTrack: (track, stream) => {
       const sender = pc.getSenders().find(s => s.track === track)
 
       if (sender) {
+        if (stream) {
+          streamSenders.get(stream)?.delete(sender)
+        }
         pc.removeTrack(sender)
       }
     },

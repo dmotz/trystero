@@ -6,6 +6,8 @@ import {
   // @ts-expect-error Internal source import crosses a referenced package boundary.
 } from '../../packages/core/src/media.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
+import initPeer from '../../packages/core/src/peer.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
 import {LinkedMediaPeer, MockPeer, linkPeers, turn} from './peer-harness.ts'
 
@@ -298,3 +300,75 @@ void test(
     }
   }
 )
+
+void test('recycled transceiver sender after removeTrack is not stopped when original stream is removed', () => {
+  type FakeSender = {kind: string; track: any}
+  const senders: FakeSender[] = []
+
+  class RecyclingPeerConnection {
+    connectionState = 'connected'
+    iceConnectionState = 'connected'
+    signalingState = 'stable'
+    localDescription = null
+    remoteDescription = null
+    addEventListener() {}
+    removeEventListener() {}
+    close() {}
+    getSenders() {
+      return senders
+    }
+    addTrack(track: any) {
+      let sender = senders.find(s => s.kind === track.kind && s.track === null)
+      if (sender) {
+        sender.track = track
+      } else {
+        sender = {kind: track.kind, track}
+        senders.push(sender)
+      }
+      return sender
+    }
+    removeTrack(sender: FakeSender) {
+      sender.track = null
+    }
+  }
+
+  const peer = initPeer(false, {
+    appId: 'test',
+    rtcPolyfill: RecyclingPeerConnection as any
+  })
+
+  const audioTrack = {id: 'mic', kind: 'audio'} as unknown as MediaStreamTrack
+  const camTrack = {id: 'cam', kind: 'video'} as unknown as MediaStreamTrack
+  const screenTrack = {
+    id: 'screen',
+    kind: 'video'
+  } as unknown as MediaStreamTrack
+
+  let streamATracks = [audioTrack, camTrack]
+  const streamA = {
+    id: 'stream-a',
+    getTracks: () => [...streamATracks]
+  } as unknown as MediaStream
+  const streamB = {
+    id: 'stream-b',
+    getTracks: () => [screenTrack]
+  } as unknown as MediaStream
+
+  peer.addStream(streamA)
+  assert.equal(senders.length, 2)
+
+  // Drop camTrack from streamA: vacates the video transceiver sender
+  streamATracks = [audioTrack]
+  peer.removeTrack(camTrack, streamA)
+  assert.equal(senders[1]?.track, null)
+
+  // Adding streamB recycles the vacant video transceiver sender
+  peer.addStream(streamB)
+  assert.equal(senders.length, 2)
+  assert.equal(senders[1]?.track, screenTrack)
+
+  // Removing streamA must only stop audioTrack and leave streamB's recycled video sender untouched
+  peer.removeStream(streamA)
+  assert.equal(senders[0]?.track, null)
+  assert.equal(senders[1]?.track, screenTrack)
+})

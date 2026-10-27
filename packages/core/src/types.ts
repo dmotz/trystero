@@ -672,7 +672,7 @@ export type PeerHandle = {
   addStream: (stream: MediaStream) => void
   removeStream: (stream: MediaStream) => void
   addTrack: (track: MediaStreamTrack, stream: MediaStream) => void
-  removeTrack: (track: MediaStreamTrack) => void
+  removeTrack: (track: MediaStreamTrack, stream?: MediaStream) => void
   replaceTrack: (
     oldTrack: MediaStreamTrack,
     newTrack: MediaStreamTrack
