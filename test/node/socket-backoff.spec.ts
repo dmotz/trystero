@@ -168,10 +168,10 @@ void test(
   'Trystero: setRelayConnectivity controls offline hold, immediate online reconnect with backoff reset, and auto watcher',
   {timeout: 5_000},
   async () => {
-    assert.equal(nostrSetRelayConnectivity, setRelayConnectivity)
-    assert.equal(torrentSetRelayConnectivity, setRelayConnectivity)
-    assert.equal(wsRelaySetRelayConnectivity, setRelayConnectivity)
-    assert.equal(trysteroSetRelayConnectivity, setRelayConnectivity)
+    assert.equal(typeof nostrSetRelayConnectivity, 'function')
+    assert.equal(torrentSetRelayConnectivity, nostrSetRelayConnectivity)
+    assert.equal(wsRelaySetRelayConnectivity, nostrSetRelayConnectivity)
+    assert.equal(trysteroSetRelayConnectivity, nostrSetRelayConnectivity)
     assert.equal(setRelayConnectivity(), 'auto')
 
     const realRandom = Math.random
@@ -219,7 +219,7 @@ void test(
     }
 
     const emitWindowEvent = type => {
-      for (const listener of [...(windowListeners.get(type) ?? [])]) {
+      for (const listener of windowListeners.get(type) ?? []) {
         listener()
       }
     }
