@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -70,7 +71,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ steps.version.outputs.npm_tag }}
-        run: pnpm -r publish --no-git-checks --access public --tag "${NPM_TAG}"
+        run:
+          pnpm -r publish --provenance --no-git-checks --access public --tag
+          "${NPM_TAG}"
 
       - name: Check if GitHub release already exists
         id: gh_release

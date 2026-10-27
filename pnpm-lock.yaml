@@ -283,10 +283,6 @@ importers:
       '@trystero-p2p/core':
         specifier: workspace:*
         version: link:../core
-    devDependencies:
-      '@types/node':
-        specifier: ^26.6.4
-        version: 26.6.5
 
   packages/torrent:
     dependencies:

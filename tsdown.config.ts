@@ -42,7 +42,7 @@ export default [
       include: ['packages/*']
     },
     entry: 'src/index.ts',
-    dts: true,
+    dts: {generator: 'oxc'},
     unbundle: true,
     sourcemap: false,
     minify: false,
@@ -57,7 +57,7 @@ export default [
       include: ['packages/ws-relay']
     },
     entry: {server: 'src/server.ts'},
-    dts: true,
+    dts: {generator: 'oxc'},
     unbundle: true,
     sourcemap: false,
     minify: false,

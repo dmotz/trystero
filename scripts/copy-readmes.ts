@@ -3,11 +3,13 @@ import {join, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 
 const root = resolve(fileURLToPath(import.meta.url), '../..')
-const readmePath = join(root, 'README.md')
+const filesToCopy = ['README.md', 'LICENSE']
 
-if (!existsSync(readmePath)) {
-  console.error('copy-readmes: missing root README.md')
-  process.exit(1)
+for (const file of filesToCopy) {
+  if (!existsSync(join(root, file))) {
+    console.error(`copy-readmes: missing root ${file}`)
+    process.exit(1)
+  }
 }
 
 const packagesDir = join(root, 'packages')
@@ -23,6 +25,8 @@ for (const name of readdirSync(packagesDir)) {
     continue
   }
 
-  copyFileSync(readmePath, join(pkgDir, 'README.md'))
-  console.log(`README.md -> packages/${name}/`)
+  for (const file of filesToCopy) {
+    copyFileSync(join(root, file), join(pkgDir, file))
+    console.log(`${file} -> packages/${name}/`)
+  }
 }

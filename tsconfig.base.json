@@ -19,10 +19,9 @@
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": false,
-    "declaration": true,
-    "isolatedDeclarations": true,
+    "skipLibCheck": true,
     "composite": true,
+    "declaration": true,
     "noEmitOnError": true,
     "newLine": "lf",
     "types": []

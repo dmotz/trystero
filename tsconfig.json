@@ -3,7 +3,6 @@
   "compilerOptions": {
     "composite": false,
     "declaration": false,
-    "isolatedDeclarations": false,
     "noEmit": true,
     "strict": false,
     "noImplicitAny": false,
@@ -20,11 +19,11 @@
   "references": [
     {"path": "./packages/core"},
     {"path": "./packages/nostr"},
+    {"path": "./packages/trystero"},
     {"path": "./packages/torrent"},
     {"path": "./packages/mqtt"},
-    {"path": "./packages/supabase"},
     {"path": "./packages/firebase"},
-    {"path": "./packages/ws-relay"},
-    {"path": "./packages/trystero"}
+    {"path": "./packages/supabase"},
+    {"path": "./packages/ws-relay"}
   ]
 }

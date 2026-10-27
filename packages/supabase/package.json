@@ -23,6 +23,11 @@
     "email": "dan@oxism.com",
     "url": "https://oxism.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmotz/trystero.git",
+    "directory": "packages/supabase"
+  },
   "files": [
     "dist"
   ],
@@ -36,8 +41,5 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
     "@trystero-p2p/core": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^26.6.4"
   }
 }

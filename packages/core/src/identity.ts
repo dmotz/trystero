@@ -34,7 +34,7 @@ export const fingerprintLength = 16
 const peerIdRegex = /^[0-9A-Za-z]{20}$/
 const userIdRegex = /^[A-Za-z0-9_-]{43}$/
 
-export const userKeyPrefix: string = `${libId}_uk_`
+const userKeyPrefix = `${libId}_uk_`
 const storagePrefix = `${libId}:user_identity:v1:`
 const idbDbName = `${libId}_identity_v1`
 const idbStoreName = 'identities'

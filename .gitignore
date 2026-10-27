@@ -2,6 +2,7 @@ node_modules
 dist
 test/dist
 packages/*/README.md
+packages/*/LICENSE
 test-results
 playwright-report
 *.tsbuildinfo
