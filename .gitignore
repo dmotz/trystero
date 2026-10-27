@@ -7,5 +7,4 @@ playwright-report
 *.tsbuildinfo
 _ignore
 knip.json
-pnpm-lock.yaml
 .pnpm-store

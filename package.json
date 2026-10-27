@@ -82,5 +82,8 @@
     "werift": "^0.24.4",
     "ws": "^8.22.0"
   },
+  "engines": {
+    "node": ">=26"
+  },
   "packageManager": "pnpm@12.6.0"
 }

@@ -38,7 +38,7 @@ export {
   toJson
 }
 
-export const authMetaKey = `__${libId}Auth`
+export const authMetaKey: string = `__${libId}Auth`
 
 export const warn = (msg: string): void => console.warn(`${libName}: ${msg}`)
 
@@ -57,16 +57,16 @@ export const logActionHandlerErr = (err: unknown): void =>
   logErr('action handler', err)
 
 export const peerDisconnectedMsg = 'peer disconnected'
-export const peerDisconnectedErr = mkErr(peerDisconnectedMsg)
+export const peerDisconnectedErr: Error = mkErr(peerDisconnectedMsg)
 export const peerBannedMsg = 'peer banned'
-export const peerBannedErr = mkErr(peerBannedMsg)
-export const peerLeftRoomErr = mkErr('peer left room')
-export const roomLeftErr = mkErr('room left')
+export const peerBannedErr: Error = mkErr(peerBannedMsg)
+export const peerLeftRoomErr: Error = mkErr('peer left room')
+export const roomLeftErr: Error = mkErr('room left')
 export const roomFullMsg = 'room full'
-export const roomFullErr = mkErr(roomFullMsg)
+export const roomFullErr: Error = mkErr(roomFullMsg)
 export const operationAbortedMsg = 'operation aborted'
 export const insufficientAuthPrefix = 'insufficient authority'
-export const invalidP256KeyErr = mkErr('invalid ECDSA P-256 public key')
+export const invalidP256KeyErr: Error = mkErr('invalid ECDSA P-256 public key')
 
 export const posSafeIntErr = (name: string): Error =>
   mkErr(`${name} must be a positive safe integer`)
@@ -74,7 +74,9 @@ export const posSafeIntErr = (name: string): Error =>
 export const requiresRolesErr = (feature: string): Error =>
   mkErr(`${feature} requires roles() in joinRoom config`)
 
-export const selfCertRoomRolesErr = requiresRolesErr('self-certifying room ID')
+export const selfCertRoomRolesErr: Error = requiresRolesErr(
+  'self-certifying room ID'
+)
 
 export const actionRedefinedErr = (type: string): Error =>
   mkErr(`action type "${type}" cannot be redefined`)
@@ -107,11 +109,14 @@ export const genId = (n: number): string => {
   return out
 }
 
-export const all = Promise.all.bind(Promise)
+export const all: typeof Promise.all = Promise.all.bind(Promise)
 
-export const isBrowser = typeof window !== 'undefined'
+export const isBrowser: boolean = typeof window !== 'undefined'
 
-export const {entries, fromEntries, keys, values} = Object
+export const entries: typeof Object.entries = Object.entries
+export const fromEntries: typeof Object.fromEntries = Object.fromEntries
+export const keys: typeof Object.keys = Object.keys
+export const values: typeof Object.values = Object.values
 
 export const noOp = (): void => {}
 
@@ -177,7 +182,7 @@ export const getRelays = <
 
 export const strToNum = (
   str: string,
-  limit = Number.MAX_SAFE_INTEGER
+  limit: number = Number.MAX_SAFE_INTEGER
 ): number => str.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % limit
 
 const defaultRetryMs = 3333
@@ -368,9 +373,9 @@ export const watchOnline = (): (() => void) => {
 
 export const log = (...args: unknown[]): void => console.log(...args)
 
-export const selfCertifyingRoomRegex = /^(.*)\.~([0-9A-Za-z]{16})$/
+export const selfCertifyingRoomRegex: RegExp = /^(.*)\.~([0-9A-Za-z]{16})$/
 
-export const reservedRoomPropertyNames = new Set([
+export const reservedRoomPropertyNames: Set<string> = new Set([
   'ready',
   'makeAction',
   'leave',

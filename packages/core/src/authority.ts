@@ -1367,7 +1367,76 @@ export type RoomAuthorityDeps = {
   onSignatureFailure: () => void
 }
 
-export type RoomAuthority = ReturnType<typeof createRoomAuthority>
+export type RoomAuthority = {
+  ready: Promise<{resolved: ResolvedRoomAuthority}>
+  getEffectiveRoomId: () => string
+  getPeerRoles: (targetPeerOrUserId?: string) => string[]
+  isPeerBanned: (peerOrUserId: string) => boolean
+  registerPeerPublicKey: (peerId: string, jwk: JsonWebKey) => void
+  hasCertForPeer: (peerId?: string) => boolean
+  hasRevocationSig: (sig?: string) => boolean
+  hasBanSig: (targetPeerId?: string, sig?: string) => boolean
+  verifyAndApplyCert: (cert: RoleCertificate) => Promise<boolean>
+  verifyAndApplyRevocation: (rev: RoleRevocationRecord) => Promise<boolean>
+  verifyAndApplyBan: (ban: PeerBanRecord) => Promise<boolean>
+  verifyAndApplyStateRecord: (
+    record: AuthoritativeStateRecord
+  ) => Promise<boolean>
+  canPeerSendAction: (
+    peerId: string,
+    requiredRoles: readonly string[],
+    inlineCert?: RoleCertificate
+  ) => Promise<boolean>
+  signActionPayload: (
+    namespace: string,
+    requiredRoles: readonly string[],
+    data: DataPayload,
+    userMetadata?: JsonValue
+  ) => Promise<JsonValue>
+  verifyActionOffer: (
+    namespace: string,
+    peerId: string,
+    requiredRoles: readonly string[],
+    wireMetadata?: JsonValue
+  ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
+  verifyActionPayload: (
+    namespace: string,
+    peerId: string,
+    requiredRoles: readonly string[],
+    data: DataPayload,
+    wireMetadata?: JsonValue
+  ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
+  buildSyncMessage: (force?: boolean) => Promise<{
+    pubKey: JsonWebKey
+    certs?: RoleCertificate[]
+    revocations?: RoleRevocationRecord[]
+    bans?: PeerBanRecord[]
+    states?: AuthoritativeStateRecord[]
+  } | null>
+  makeState: <T = JsonValue>(
+    namespace: string,
+    initialValue: T extends JsonValue ? T : never,
+    config: StateConfig<T> | undefined,
+    broadcastRecord: (
+      record: AuthoritativeStateRecord<JsonValue>
+    ) => Promise<void>
+  ) => AuthoritativeState<T>
+  getAuthorityInfo: () => Promise<Omit<SelfInfo, 'peerId'>>
+  issueRoleCertificate: (
+    peerOrUserId: string,
+    role: string | string[],
+    options: {canDelegate?: boolean} | undefined,
+    requestWhois: () => void
+  ) => Promise<RoleCertificate>
+  issueRoleRevocation: (
+    peerOrUserId: string,
+    role?: string
+  ) => Promise<RoleRevocationRecord>
+  issuePeerBan: (
+    peerOrUserId: string,
+    options?: {reason?: string}
+  ) => Promise<PeerBanRecord>
+}
 
 export const createRoomAuthority = ({
   selfId: initialSelfId,
@@ -1386,7 +1455,7 @@ export const createRoomAuthority = ({
   onLocalRoleCertificate,
   onPeerBanned,
   onSignatureFailure
-}: RoomAuthorityDeps) => {
+}: RoomAuthorityDeps): RoomAuthority => {
   let localSelfId = initialSelfId
   let effectiveRoomId = initialRoomId
   const rootFingerprints = new Set<string>()

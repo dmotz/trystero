@@ -2,11 +2,11 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
 export const libName = 'Trystero'
-export const libId = libName.toLowerCase()
+export const libId: string = libName.toLowerCase()
 
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
-export const toJson = JSON.stringify
+export const toJson: typeof JSON.stringify = JSON.stringify
 
 export const fromJson = <T>(s: string): T => {
   try {

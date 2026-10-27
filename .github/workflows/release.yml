@@ -31,11 +31,10 @@ jobs:
         with:
           node-version: '26'
           cache: pnpm
-          cache-dependency-path: package.json
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Validate release tag
         id: version

@@ -21,6 +21,7 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": false,
     "declaration": true,
+    "isolatedDeclarations": true,
     "composite": true,
     "noEmitOnError": true,
     "newLine": "lf",
