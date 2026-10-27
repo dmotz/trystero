@@ -944,107 +944,6 @@ void test('Peer dropping & mesh-breaking scenarios: 25% mass churn, targeted rel
   }
 })
 
-void test('Plumtree lazy repair (ihave / iwant) recovers broadcasts when an eager push link drops a frame', async () => {
-  const delivered: Array<{from: string; text: string}> = []
-  const sentToB: Uint8Array[] = []
-  const sentToA: Uint8Array[] = []
-
-  const overlayA = createOverlayManager({
-    selfId: 'peer-A',
-    topology: {mode: 'gossip', maxConnections: 4},
-    onVirtualPeerJoin: () => {},
-    onVirtualPeerLeave: () => {},
-    onDeliverData: () => {}
-  })
-
-  const overlayB = createOverlayManager({
-    selfId: 'peer-B',
-    topology: {mode: 'gossip', maxConnections: 4},
-    onVirtualPeerJoin: () => {},
-    onVirtualPeerLeave: () => {},
-    onDeliverData: (origin, data) => {
-      delivered.push({
-        from: origin,
-        text: decodeBytes(new Uint8Array(data))
-      })
-    }
-  })
-
-  const peerHandleAtoB = {
-    isDead: false,
-    connection: {} as any,
-    channel: {readyState: 'open'} as any,
-    getOffer: async () => undefined,
-    signal: async () => undefined,
-    sendData: (data: Uint8Array) => {
-      sentToB.push(data.slice())
-      overlayB.handleOverlayFrame('peer-A', data.slice().buffer)
-    },
-    destroy: () => {},
-    setHandlers: () => {},
-    addStream: () => {},
-    removeStream: () => {},
-    addTrack: () => ({}) as any,
-    removeTrack: () => {},
-    replaceTrack: async () => {}
-  }
-
-  const peerHandleBtoA = {
-    ...peerHandleAtoB,
-    sendData: (data: Uint8Array) => {
-      sentToA.push(data.slice())
-      overlayA.handleOverlayFrame('peer-B', data.slice().buffer)
-    }
-  }
-
-  overlayA.addDirectPeer('peer-B', peerHandleAtoB)
-  overlayB.addDirectPeer('peer-A', peerHandleBtoA)
-  await wait(40)
-
-  // Peer A broadcasts a signed frame while eager push to B is temporarily dropped
-  const payload = encodeBytes('recovered-via-lazy-iwant')
-  let droppedMsgId = ''
-  const savedSend = peerHandleAtoB.sendData
-  peerHandleAtoB.sendData = (data: Uint8Array) => {
-    const parsed = unpackOverlayBinary(data)
-    if (parsed?.kind === overlayBroadcastKind) {
-      droppedMsgId = parsed.header['m'] as string
-      return
-    }
-    savedSend(data)
-  }
-  await overlayA.broadcastInline(payload)
-  await wait(10)
-  peerHandleAtoB.sendData = savedSend
-
-  assert.ok(droppedMsgId, 'expected eager broadcast packet to be intercepted')
-  assert.equal(
-    delivered.length,
-    0,
-    'B should not have received the dropped eager frame yet'
-  )
-
-  // Now A sends an ihave lazy advertisement to B
-  overlayB.handleOverlayFrame(
-    'peer-A',
-    packOverlayControl({
-      t: 'ihave',
-      items: [{m: droppedMsgId, o: 'peer-A'}]
-    }).slice().buffer
-  )
-
-  await waitFor(() => delivered.length === 1, 1_000)
-  assert.deepEqual(delivered[0], {
-    from: 'peer-A',
-    text: 'recovered-via-lazy-iwant'
-  })
-  assert.equal(overlayB.getSnapshot().stats.lazyRepairsSent, 1)
-  assert.equal(overlayA.getSnapshot().stats.lazyRepairsResolved, 1)
-
-  overlayA.destroy()
-  overlayB.destroy()
-})
-
 void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper rejection, and ECDH end-to-end unicast encryption', async () => {
   // Create a 3-hop chain: Alice <-> Relay <-> Bob
   const wireTapOnRelay: Uint8Array[] = []
@@ -1895,7 +1794,7 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
   assert.notEqual(bobRoute.nextHop, bobRoute.backupNextHop)
 
   // Send 5 broadcasts from Alice -> Bob while blackholeRelay drops 100% of data packets
-  // (Plumtree eager/lazy recovery delivers via honestRelay), then mark blackholeRelay link dead
+  // (flood + dedupe delivers via honestRelay), then mark blackholeRelay link dead
   // on Alice so unicast automatically fails over to backupNextHop (honestRelay)
   for (let i = 0; i < 5; i++) {
     await alice.broadcastInline(encodeBytes(`byz-broadcast-${i}`))

@@ -89,8 +89,6 @@ export type TopologyStats = {
   messagesForwarded: number
   duplicatesDropped: number
   signatureFailures: number
-  lazyRepairsSent: number
-  lazyRepairsResolved: number
   treeReparents: number
 }
 

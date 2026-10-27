@@ -63,8 +63,6 @@ const defaultAutoThreshold = 12
 const defaultFanout = 3
 const defaultMaxHops = 8
 const maxSeenMessages = 4_096
-const maxCachedBroadcasts = 256
-const churnBoostWindowMs = 4_000
 const unreachableGraceMs = 80
 
 export type ResolvedTopologyConfig = {
@@ -107,14 +105,6 @@ type OverlayControlMessage =
       peerId: string
       seq: number
       sig?: string
-    }
-  | {
-      t: 'ihave'
-      items: Array<{m: string; o: string}>
-    }
-  | {
-      t: 'iwant'
-      ids: string[]
     }
 
 type BroadcastEnvelopeHeader = {
@@ -884,15 +874,8 @@ export const createOverlayManager = ({
   const pendingDownCandidates = new Set<string>()
   const unreachableTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  // Seen-message deduplication cache and recent broadcast cache for Plumtree lazy repair
+  // Seen-message deduplication cache
   const seenMessages = createBoundedSet<string>(maxSeenMessages)
-  const cachedBroadcastFrames = createBoundedCache<string, Uint8Array>(
-    maxCachedBroadcasts
-  )
-  const missingBroadcastTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >()
 
   // Active broadcast streams/tracks (both local and relayed) for automatic tree distribution & healing
   const activeStreams = new Map<
@@ -920,7 +903,6 @@ export const createOverlayManager = ({
   >()
 
   let localSeq = 0
-  let lastChurnAtMs = 0
   let isDestroyed = false
   let currentActiveMode: 'mesh' | 'gossip' =
     config.mode === 'auto' ? 'mesh' : config.mode
@@ -933,8 +915,6 @@ export const createOverlayManager = ({
     messagesForwarded: 0,
     duplicatesDropped: 0,
     signatureFailures: 0,
-    lazyRepairsSent: 0,
-    lazyRepairsResolved: 0,
     treeReparents: 0
   }
 
@@ -992,10 +972,6 @@ export const createOverlayManager = ({
 
   const rememberSeenMessage = (msgId: string): boolean =>
     seenMessages.add(msgId)
-
-  const cacheBroadcastFrame = (msgId: string, frame: Uint8Array): void => {
-    cachedBroadcastFrames.set(msgId, frame)
-  }
 
   const sendToDirectNeighbor = (peerId: string, frame: Uint8Array): boolean => {
     const peer = directPeers.get(peerId)
@@ -1329,9 +1305,6 @@ export const createOverlayManager = ({
 
   const maxDescriptorNeighbors = Math.max(32, config.maxConnections * 4)
   const maxDepartedPeers = 1_024
-  const maxMissingBroadcastTimers = 256
-  const maxIhaveItemsPerFrame = 32
-  const maxIwantIdsPerFrame = 16
   const maxGossipEntriesPerFrame = 64
 
   const isValidDescriptorNeighbors = (
@@ -1742,44 +1715,8 @@ export const createOverlayManager = ({
     }
   }
 
-  const getEagerAndLazyBroadcastTargets = (
-    originPeerId: string,
-    excludePeerId?: string
-  ): {eager: string[]; lazy: string[]} => {
-    const allNeighbors = [...directPeers.keys()].filter(
-      id => id !== excludePeerId && id !== originPeerId
-    )
-    if (allNeighbors.length === 0) {
-      return {eager: [], lazy: []}
-    }
-
-    const inChurnWindow = Date.now() - lastChurnAtMs < churnBoostWindowMs
-    if (inChurnWindow) {
-      return {eager: allNeighbors, lazy: []}
-    }
-
-    // Use the BFS tree rooted at originPeerId for primary eager push
-    const {childrenIds} = getCachedTreeChildren(
-      originPeerId,
-      Math.max(config.fanout, config.maxConnections)
-    )
-    const eagerSet = new Set<string>(
-      childrenIds.filter(id => allNeighbors.includes(id))
-    )
-
-    // Ensure at least one path (or all neighbors if tree hasn't converged yet)
-    if (eagerSet.size === 0) {
-      allNeighbors.forEach(id => eagerSet.add(id))
-    }
-
-    const eager = [...eagerSet]
-    const lazy = allNeighbors.filter(id => !eagerSet.has(id))
-    return {eager, lazy}
-  }
-
   const forwardBroadcastPacket = (
     originPeerId: string,
-    msgId: string,
     ttl: number,
     header: BroadcastEnvelopeHeader,
     payload: Uint8Array,
@@ -1789,23 +1726,9 @@ export const createOverlayManager = ({
       return
     }
     const packet = packOverlayBinary(overlayBroadcastKind, ttl, header, payload)
-    cacheBroadcastFrame(msgId, packet)
-
-    const {eager, lazy} = getEagerAndLazyBroadcastTargets(
-      originPeerId,
-      fromPeerId
-    )
-    for (const targetId of eager) {
-      sendToDirectNeighbor(targetId, packet)
-    }
-
-    if (lazy.length > 0) {
-      const ihave = packOverlayControl({
-        t: 'ihave',
-        items: [{m: msgId, o: originPeerId}]
-      })
-      for (const lazyId of lazy) {
-        sendToDirectNeighbor(lazyId, ihave)
+    for (const neighborId of directPeers.keys()) {
+      if (neighborId !== fromPeerId && neighborId !== originPeerId) {
+        sendToDirectNeighbor(neighborId, packet)
       }
     }
   }
@@ -1835,7 +1758,7 @@ export const createOverlayManager = ({
       ...(sig ? {s: sig} : {})
     }
 
-    forwardBroadcastPacket(selfId, msgId, defaultMaxHops, header, frame)
+    forwardBroadcastPacket(selfId, defaultMaxHops, header, frame)
 
     if (onProgress) {
       const allRoomPeers = new Set([...directPeers.keys(), ...keys(routes)])
@@ -2065,61 +1988,6 @@ export const createOverlayManager = ({
       return
     }
 
-    if (msg.t === 'ihave' && Array.isArray(msg.items)) {
-      const missing: string[] = []
-      for (const item of msg.items.slice(0, maxIhaveItemsPerFrame)) {
-        if (
-          item &&
-          typeof item.m === 'string' &&
-          isValidOverlayMsgId(item.m) &&
-          !seenMessages.has(item.m) &&
-          !missingBroadcastTimers.has(item.m)
-        ) {
-          missing.push(item.m)
-        }
-      }
-
-      if (missing.length > 0) {
-        // Schedule a quick lazy repair request if eager push hasn't delivered it
-        for (const m of missing) {
-          if (missingBroadcastTimers.size >= maxMissingBroadcastTimers) {
-            break
-          }
-          const timer = setTimeout(() => {
-            missingBroadcastTimers.delete(m)
-            if (!isDestroyed && !seenMessages.has(m)) {
-              stats.lazyRepairsSent++
-              sendToDirectNeighbor(
-                fromPeerId,
-                packOverlayControl({t: 'iwant', ids: [m]})
-              )
-            }
-          }, 15)
-          missingBroadcastTimers.set(m, timer)
-        }
-      }
-      return
-    }
-
-    if (msg.t === 'iwant' && Array.isArray(msg.ids)) {
-      const uniqueIds = [
-        ...new Set(
-          msg.ids.filter(
-            (id): id is string =>
-              typeof id === 'string' && isValidOverlayMsgId(id)
-          )
-        )
-      ].slice(0, maxIwantIdsPerFrame)
-      for (const id of uniqueIds) {
-        const cached = cachedBroadcastFrames.get(id)
-        if (cached) {
-          stats.lazyRepairsResolved++
-          sendToDirectNeighbor(fromPeerId, cached)
-        }
-      }
-      return
-    }
-
     if (msg.t === 'gossip' && Array.isArray(msg.descriptors)) {
       const newlyUpdated: PeerDescriptor[] = []
       const newDown: string[] = []
@@ -2245,7 +2113,6 @@ export const createOverlayManager = ({
         }
 
         pendingDownCandidates.delete(downId)
-        lastChurnAtMs = Date.now()
         const lastSeq = descriptors.get(downId)?.seq ?? 0
         recordDepartedPeer(downId, lastSeq)
         purgePeerFromGraph(downId)
@@ -2348,12 +2215,6 @@ export const createOverlayManager = ({
         return
       }
 
-      const pendingRepairTimer = missingBroadcastTimers.get(msgId)
-      if (pendingRepairTimer) {
-        resetTimer(pendingRepairTimer)
-        missingBroadcastTimers.delete(msgId)
-      }
-
       // Ensure origin is registered as a virtual peer if not already known
       ensureOriginVirtualPeer(origin, fromPeerId)
 
@@ -2365,7 +2226,6 @@ export const createOverlayManager = ({
         stats.messagesForwarded++
         forwardBroadcastPacket(
           origin,
-          msgId,
           ttl - 1,
           {o: origin, m: msgId, ...(sig ? {s: sig} : {})},
           payload,
@@ -2613,7 +2473,6 @@ export const createOverlayManager = ({
       }
 
       directPeers.delete(peerId)
-      lastChurnAtMs = Date.now()
 
       // Clear forwardedTo state for this peer on active media streams
       for (const s of activeStreams.values()) {
@@ -3097,10 +2956,6 @@ export const createOverlayManager = ({
         resetTimer(timer)
       }
       unreachableTimers.clear()
-      for (const timer of missingBroadcastTimers.values()) {
-        resetTimer(timer)
-      }
-      missingBroadcastTimers.clear()
       for (const vPeer of virtualPeers.values()) {
         vPeer.destroy()
       }

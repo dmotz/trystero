@@ -960,11 +960,11 @@ streams are being routed.
   bounded-degree circulant ring with deterministic multi-scale logarithmic
   chords, keeping the network diameter to $O(\log N)$ hops even as rooms grow to
   hundreds of peers. Routing tables require mutual neighbor confirmation in
-  signed link-state descriptors before using an edge. Broadcasts use a
-  Plumtree-style epidemic push tree combined with lazy `ihave`/`iwant` gossip
-  repair so messages reach every peer reliably without flooding redundant
-  copies. Point-to-point messages (`target`) route along shortest paths with
-  disjoint backup next-hops for instant failover.
+  signed link-state descriptors before using an edge. Broadcasts propagate
+  across neighbor links with message-ID deduplication so messages reach every
+  peer reliably along the fastest available paths. Point-to-point messages
+  (`target`) route along shortest paths with disjoint backup next-hops for
+  instant failover.
 - **Media broadcast trees**: Whenever any peer calls `addStream()` or
   `addTrack()` without `target` in `'gossip'` mode, Trystero builds a
   deterministic $k$-ary application-layer multicast (ALM) tree rooted at the
@@ -1504,8 +1504,7 @@ Returns an object with the following methods:
   and routing data: `mode`, `activeMode` (`'mesh' | 'gossip'`), `selfId`,
   `directPeerIds`, `roomPeerIds`, `routes`, `mediaTrees`, and `stats`
   (`messagesSent`, `messagesReceived`, `messagesForwarded`, `duplicatesDropped`,
-  `signatureFailures`, `lazyRepairsSent`, `lazyRepairsResolved`,
-  `treeReparents`).
+  `signatureFailures`, `treeReparents`).
 
 - ### `makeState(namespace, initialValue, [config])`
 

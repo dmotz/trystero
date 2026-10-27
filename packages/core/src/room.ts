@@ -1028,8 +1028,6 @@ export default <
                 messagesForwarded: 0,
                 duplicatesDropped: 0,
                 signatureFailures: 0,
-                lazyRepairsSent: 0,
-                lazyRepairsResolved: 0,
                 treeReparents: 0
               }
             }
