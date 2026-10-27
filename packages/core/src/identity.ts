@@ -1011,11 +1011,13 @@ export const resolveUserIdentity = async (
 
   const defaultMode: UserIdentityPersistence = forcedPeerId
     ? 'none'
-    : config?.preferLocal && canPersistLocalIdentity()
-      ? 'local'
-      : getSessionStorage()
-        ? 'session'
-        : 'none'
+    : !canPersistLocalIdentity()
+      ? 'none'
+      : config?.preferLocal
+        ? 'local'
+        : getSessionStorage()
+          ? 'session'
+          : 'none'
 
   const mode: UserIdentityPersistence = raw ?? defaultMode
 
