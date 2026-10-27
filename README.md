@@ -401,12 +401,12 @@ const room = joinRoom(
 )
 ```
 
-| `identity` value                        | `userId` lifetime                                                                                                                 |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `'session'` _(browser default)_         | Reused across page reloads in the same tab (`sessionStorage`), reset when the tab closes.                                         |
-| `'local'`                               | Reused across all open tabs and future visits on the same device (`IndexedDB` / `localStorage`) until browser storage is cleared. |
-| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload or process restart generates a new `userId`.                                          |
-| Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno).                          |
+| `identity` value                        | `userId` lifetime                                                                                                |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `'session'` _(browser default)_         | Reused across page reloads in the same tab (`sessionStorage` + `IndexedDB`), reset when the tab closes.          |
+| `'local'`                               | Reused across all open tabs and future visits on the same device (`IndexedDB`) until browser storage is cleared. |
+| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload or process restart generates a new `userId`.                         |
+| Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno).         |
 
 ### Multiple connections for a single user (`userId` vs `peerId`)
 
@@ -468,7 +468,7 @@ tab alone:
 - **Atomic browser storage**: In `identity: 'local'` mode, Trystero coordinates
   first-time key creation across concurrent tabs using `navigator.locks` and
   atomic `IndexedDB` transactions storing a non-extractable WebCrypto
-  `CryptoKey` (with `localStorage` fallback).
+  `CryptoKey`.
 
 </details>
 
@@ -1358,12 +1358,13 @@ the same namespace will return the same room instance.
 
   - `identity` - **(optional)** Controls how the local user's `userId` is loaded
     and saved (see [User identity](#user-identity)):
-    - `'session'` _(default in browsers)_ - Persists the user identity in
-      `sessionStorage` scoped to `appId` so page reloads in the same tab keep
-      the same `userId`.
+    - `'session'` _(default in browsers)_ - Persists the user identity for the
+      current tab (using a `sessionStorage` token and a non-extractable
+      IndexedDB `CryptoKey`) scoped to `appId` so page reloads in the same tab
+      keep the same `userId`.
     - `'local'` - Persists the user identity across tabs and future visits on
       the same device using IndexedDB (with a non-extractable WebCrypto
-      `CryptoKey`) and `localStorage` fallback.
+      `CryptoKey`).
     - `'none'` _(default outside browsers)_ - Generates a fresh runtime `userId`
       that is discarded when the page reloads or process exits.
     - `UserIdentity | ((context: {appId: string, roomId: string}) => UserIdentity | Promise<UserIdentity>)` -

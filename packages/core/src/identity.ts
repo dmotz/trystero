@@ -14,7 +14,7 @@ import {
   toBase64Url,
   toJson
 } from './crypto'
-import {invalidP256KeyErr, toErrorMessage} from './utils'
+import {invalidP256KeyErr, warn} from './utils'
 import type {
   UserIdentity,
   UserIdentityConfig,
@@ -48,18 +48,6 @@ const userIdMismatchErr = mkErr(
 const invalidCustomIdentityErr = mkErr(
   'invalid custom user identity; use "none", "session", "local", loader, or importUserIdentity()'
 )
-const noSessionStorageErr = mkErr('sessionStorage is not available')
-const noLocalStorageErr = mkErr(
-  'persistent local storage is not available; use a custom identity loader'
-)
-const persistIdentityErr = (
-  label: string,
-  appId: string,
-  err: unknown
-): Error =>
-  mkErr(
-    `failed to persist ${label} identity for "${appId}": ${toErrorMessage(err, '')}`
-  )
 const idbErr = (op: string): Error => mkErr(`IndexedDB ${op} failed`)
 const idbGetErr = idbErr('get')
 
@@ -684,33 +672,17 @@ const coerceCustomUserIdentity = async (
   throw invalidCustomIdentityErr
 }
 
-const canUseWebStorage = (
-  getStorage: () => Storage | undefined
-): Storage | null => {
+const getSessionStorage = (): Storage | null => {
   try {
-    const storage = getStorage()
-    if (!storage || typeof storage.getItem !== 'function') {
-      return null
-    }
-    return storage
+    const storage =
+      typeof globalThis !== 'undefined' && 'sessionStorage' in globalThis
+        ? (globalThis as {sessionStorage?: Storage}).sessionStorage
+        : undefined
+    return storage && typeof storage.getItem === 'function' ? storage : null
   } catch {
     return null
   }
 }
-
-const getSessionStorage = (): Storage | null =>
-  canUseWebStorage(() =>
-    typeof globalThis !== 'undefined' && 'sessionStorage' in globalThis
-      ? (globalThis as {sessionStorage?: Storage}).sessionStorage
-      : undefined
-  )
-
-const getLocalStorage = (): Storage | null =>
-  canUseWebStorage(() =>
-    typeof globalThis !== 'undefined' && 'localStorage' in globalThis
-      ? (globalThis as {localStorage?: Storage}).localStorage
-      : undefined
-  )
 
 const hasIndexedDB = (): boolean => {
   try {
@@ -726,22 +698,13 @@ const hasIndexedDB = (): boolean => {
 
 export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   const raw = config?.identity
-  if (raw === undefined || raw === 'none') {
-    return
-  }
-  if (raw === 'session') {
-    if (!getSessionStorage()) {
-      throw noSessionStorageErr
-    }
-    return
-  }
-  if (raw === 'local') {
-    if (!hasIndexedDB() && !getLocalStorage()) {
-      throw noLocalStorageErr
-    }
-    return
-  }
-  if (typeof raw === 'function') {
+  if (
+    raw === undefined ||
+    raw === 'none' ||
+    raw === 'session' ||
+    raw === 'local' ||
+    typeof raw === 'function'
+  ) {
     return
   }
   if (isUserIdentityObjectStructural(raw)) {
@@ -819,62 +782,6 @@ export const getDefaultTestUserIdentityUserIdSync = (
   void getDefaultTestUserIdentity(peerId)
   const slug = toBase64Url(encodeBytes(`${testUidPrefix}${peerId}`))
   return slug.padEnd(43, '0').slice(0, 43)
-}
-
-const stripExportableSecret = (identity: UserIdentity): UserIdentity => ({
-  userId: identity.userId,
-  publicKey: identity.publicKey,
-  signPubJwk: identity.signPubJwk,
-  sign: identity.sign
-})
-
-const loadOrCreateFromWebStorage = (
-  storage: Storage,
-  appId: string,
-  label: string
-): Promise<UserIdentity> => {
-  const mutexMap = label === 'session' ? sessionMutexByApp : null
-  const inflight = mutexMap?.get(appId)
-  if (inflight) {
-    return inflight
-  }
-
-  const key = `${storagePrefix}${appId}`
-  const p = (async (): Promise<UserIdentity> => {
-    try {
-      const existing = storage.getItem(key)
-      if (existing) {
-        try {
-          return stripExportableSecret(await importUserIdentity(existing))
-        } catch {
-          /* Stored value was corrupted; regenerate and overwrite below */
-        }
-      }
-      const created = await createUserIdentity()
-      const raceExisting = storage.getItem(key)
-      if (raceExisting) {
-        try {
-          return stripExportableSecret(await importUserIdentity(raceExisting))
-        } catch {
-          /* fall through */
-        }
-      }
-      const exportedKey = exportUserIdentity(created)
-      storage.setItem(key, exportedKey)
-      const verifyRead = storage.getItem(key)
-      if (verifyRead && verifyRead !== exportedKey) {
-        return stripExportableSecret(await importUserIdentity(verifyRead))
-      }
-      return stripExportableSecret(created)
-    } catch (err) {
-      throw persistIdentityErr(label, appId, err)
-    } finally {
-      mutexMap?.delete(appId)
-    }
-  })()
-
-  mutexMap?.set(appId, p)
-  return p
 }
 
 type StoredIdbIdentityRecord = {
@@ -1007,14 +914,33 @@ const withNavigatorLock = async <T>(
   return fn()
 }
 
+const loadOrCreateIdbIdentity = (idbKey: string): Promise<UserIdentity> =>
+  withNavigatorLock(`${storagePrefix}${idbKey}`, async () => {
+    const db = await openIdentityDb()
+    try {
+      const existing = await idbGetRecord(db, idbKey)
+      if (
+        existing &&
+        existing.userId &&
+        existing.signPubJwk &&
+        existing.privateKey &&
+        (await verifyUserIdKey(existing.userId, existing.signPubJwk))
+      ) {
+        return buildUserIdentityFromIdbRecord(existing)
+      }
+
+      const candidate = await generateNonExtractableIdbRecord()
+      const committed = await idbAddOrGetRecord(db, idbKey, candidate)
+      return buildUserIdentityFromIdbRecord(committed)
+    } finally {
+      db.close()
+    }
+  })
+
 const loadOrCreateSessionIdentity = (
   sessionStore: Storage,
   appId: string
 ): Promise<UserIdentity> => {
-  if (!hasIndexedDB()) {
-    return loadOrCreateFromWebStorage(sessionStore, appId, 'session')
-  }
-
   const inflight = sessionMutexByApp.get(appId)
   if (inflight) {
     return inflight
@@ -1031,32 +957,7 @@ const loadOrCreateSessionIdentity = (
         verified && /^[0-9A-Za-z]{16,64}$/.test(verified) ? verified : generated
     }
 
-    const idbKey = `session:${appId}:${tabToken}`
-    return withNavigatorLock(`${storagePrefix}${idbKey}`, async () => {
-      try {
-        const db = await openIdentityDb()
-        try {
-          const existing = await idbGetRecord(db, idbKey)
-          if (
-            existing &&
-            existing.userId &&
-            existing.signPubJwk &&
-            existing.privateKey &&
-            (await verifyUserIdKey(existing.userId, existing.signPubJwk))
-          ) {
-            return buildUserIdentityFromIdbRecord(existing)
-          }
-
-          const candidate = await generateNonExtractableIdbRecord()
-          const committed = await idbAddOrGetRecord(db, idbKey, candidate)
-          return buildUserIdentityFromIdbRecord(committed)
-        } finally {
-          db.close()
-        }
-      } catch {
-        return loadOrCreateFromWebStorage(sessionStore, appId, 'session')
-      }
-    })
+    return loadOrCreateIdbIdentity(`session:${appId}:${tabToken}`)
   })().finally(() => {
     sessionMutexByApp.delete(appId)
   })
@@ -1071,53 +972,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
     return inflight
   }
 
-  const promise = withNavigatorLock(`${storagePrefix}${appId}`, async () => {
-    const localStore = getLocalStorage()
-    if (localStore) {
-      const existingRaw = localStore.getItem(`${storagePrefix}${appId}`)
-      if (existingRaw) {
-        try {
-          return stripExportableSecret(await importUserIdentity(existingRaw))
-        } catch {
-          /* ignore corrupted localStorage entry */
-        }
-      }
-    }
-
-    if (hasIndexedDB()) {
-      try {
-        const db = await openIdentityDb()
-        try {
-          const existing = await idbGetRecord(db, appId)
-          if (
-            existing &&
-            existing.userId &&
-            existing.signPubJwk &&
-            existing.privateKey &&
-            (await verifyUserIdKey(existing.userId, existing.signPubJwk))
-          ) {
-            return buildUserIdentityFromIdbRecord(existing)
-          }
-
-          const candidate = await generateNonExtractableIdbRecord()
-          const committed = await idbAddOrGetRecord(db, appId, candidate)
-          return buildUserIdentityFromIdbRecord(committed)
-        } finally {
-          db.close()
-        }
-      } catch (err) {
-        if (!localStore) {
-          throw persistIdentityErr('local', appId, err)
-        }
-      }
-    }
-
-    if (localStore) {
-      return loadOrCreateFromWebStorage(localStore, appId, 'local')
-    }
-
-    throw noLocalStorageErr
-  }).finally(() => {
+  const promise = loadOrCreateIdbIdentity(appId).finally(() => {
     localMutexByApp.delete(appId)
   })
 
@@ -1125,8 +980,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
   return promise
 }
 
-export const canPersistLocalIdentity = (): boolean =>
-  hasIndexedDB() || Boolean(getLocalStorage())
+export const canPersistLocalIdentity = hasIndexedDB
 
 export const resolveUserIdentity = async (
   appId: string,
@@ -1171,32 +1025,41 @@ export const resolveUserIdentity = async (
 
   const mode: UserIdentityPersistence = raw ?? defaultMode
 
-  if (mode === 'none') {
+  const fallbackToNone = (shouldWarn?: boolean): Promise<UserIdentity> => {
+    if (shouldWarn) {
+      warn("IndexedDB unavailable; falling back to identity: 'none'")
+    }
     DEV: if (forcedPeerId) {
       return getDefaultTestUserIdentity(forcedPeerId)
     }
     return getOrCreateRuntimeUserIdentity(appId)
   }
 
+  if (mode === 'none') {
+    return fallbackToNone()
+  }
+
+  if (!hasIndexedDB()) {
+    return fallbackToNone(true)
+  }
+
   if (mode === 'session') {
     const sessionStore = getSessionStorage()
     if (!sessionStore) {
-      if (raw === 'session') {
-        throw noSessionStorageErr
-      }
-      return getOrCreateRuntimeUserIdentity(appId)
+      return fallbackToNone(true)
     }
     try {
       return await loadOrCreateSessionIdentity(sessionStore, appId)
-    } catch (err) {
-      if (raw === 'session') {
-        throw err
-      }
-      return getOrCreateRuntimeUserIdentity(appId)
+    } catch {
+      return fallbackToNone(true)
     }
   }
 
-  return loadOrCreateLocalIdentity(appId)
+  try {
+    return await loadOrCreateLocalIdentity(appId)
+  } catch {
+    return fallbackToNone(true)
+  }
 }
 
 export const userEndpointProofPayload = (params: {

@@ -384,36 +384,9 @@ void test('Identity config validation & persistence modes: none, session, local,
     /importUserIdentity/
   )
 
-  // Throws synchronously when 'session' or 'local' is explicitly requested without storage
-  assert.throws(
-    () =>
-      joinRoom(
-        {
-          appId: 'no-storage-app',
-          identity: 'session',
-          rtcPolyfill: InMemoryRTCPeerConnection as any
-        },
-        'room-session'
-      ),
-    /sessionStorage is not available/
-  )
-
-  assert.throws(
-    () =>
-      joinRoom(
-        {
-          appId: 'no-storage-app',
-          identity: 'local',
-          rtcPolyfill: InMemoryRTCPeerConnection as any
-        },
-        'room-local'
-      ),
-    /persistent local storage/
-  )
-
-  // Simulate sessionStorage and localStorage
   const sessionStore = new Map<string, string>()
   const localStore = new Map<string, string>()
+  const idbStore = new Map<string, any>()
   const makeMockStorage = (map: Map<string, string>) => ({
     getItem: (k: string) => map.get(k) ?? null,
     setItem: (k: string, v: string) => {
@@ -424,10 +397,104 @@ void test('Identity config validation & persistence modes: none, session, local,
     }
   })
 
+  const mockIndexedDB = {
+    open: () => {
+      const req: any = {
+        result: {
+          objectStoreNames: {
+            contains: () => true
+          },
+          createObjectStore: () => ({}),
+          transaction: () => ({
+            objectStore: () => ({
+              get: (key: string) => {
+                const getReq: any = {
+                  result: idbStore.get(key),
+                  onsuccess: null,
+                  onerror: null
+                }
+                queueMicrotask(() => getReq.onsuccess?.())
+                return getReq
+              },
+              add: (val: any, key: string) => {
+                const addReq: any = {
+                  onsuccess: null,
+                  onerror: null
+                }
+                queueMicrotask(() => {
+                  if (idbStore.has(key)) {
+                    addReq.onerror?.({preventDefault: () => {}})
+                  } else {
+                    idbStore.set(key, val)
+                    addReq.onsuccess?.()
+                  }
+                })
+                return addReq
+              }
+            }),
+            onabort: null,
+            onerror: null
+          }),
+          close: () => {}
+        },
+        onupgradeneeded: null,
+        onsuccess: null,
+        onerror: null
+      }
+      queueMicrotask(() => req.onsuccess?.())
+      return req
+    }
+  }
+
   const prevSession = (globalThis as any).sessionStorage
   const prevLocal = (globalThis as any).localStorage
+  const prevIdb = (globalThis as any).indexedDB
   ;(globalThis as any).sessionStorage = makeMockStorage(sessionStore)
   ;(globalThis as any).localStorage = makeMockStorage(localStore)
+
+  // Falls back to 'none' and warns when IndexedDB is unavailable (no plaintext Web Storage fallback)
+  const warnings: string[] = []
+  const origWarn = console.warn
+  console.warn = (...args: any[]) => {
+    warnings.push(args.map(String).join(' '))
+  }
+  try {
+    const noIdbSessionRoom = joinRoom(
+      {
+        appId: 'no-idb-app',
+        _test_only_forcedPeerId: 'peer-noidb-s',
+        identity: 'session',
+        rtcPolyfill: InMemoryRTCPeerConnection as any
+      },
+      'room-session'
+    )
+    const noIdbLocalRoom = joinRoom(
+      {
+        appId: 'no-idb-app',
+        _test_only_forcedPeerId: 'peer-noidb-l',
+        identity: 'local',
+        rtcPolyfill: InMemoryRTCPeerConnection as any
+      },
+      'room-local'
+    )
+    const [selfNoIdbS, selfNoIdbL] = await Promise.all([
+      noIdbSessionRoom.getSelf(),
+      noIdbLocalRoom.getSelf()
+    ])
+    assert.notEqual(selfNoIdbS.userId, selfNoIdbL.userId)
+    assert.equal(sessionStore.size, 0)
+    assert.equal(localStore.size, 0)
+    assert.equal(
+      warnings.filter(w => /IndexedDB.*none/i.test(w)).length,
+      2,
+      'must warn and fall back to "none" when IndexedDB is unavailable'
+    )
+    await Promise.all([noIdbSessionRoom.leave(), noIdbLocalRoom.leave()])
+  } finally {
+    console.warn = origWarn
+  }
+
+  ;(globalThis as any).indexedDB = mockIndexedDB
 
   try {
     // 'session' reuses userId within same appId and isolates across appIds
@@ -523,6 +590,7 @@ void test('Identity config validation & persistence modes: none, session, local,
   } finally {
     ;(globalThis as any).sessionStorage = prevSession
     ;(globalThis as any).localStorage = prevLocal
+    ;(globalThis as any).indexedDB = prevIdb
   }
 })
 

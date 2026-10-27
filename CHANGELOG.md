@@ -68,10 +68,10 @@
   thumbprint).
 - Added `identity` to room config (`'session'` default in browsers using a
   per-tab `sessionStorage` token backed by a non-extractable IndexedDB
-  `CryptoKey` with `sessionStorage` fallback, `'local'` stored in IndexedDB with
-  `localStorage` fallback across tabs and future visits, `'none'` for ephemeral
-  runtime, or a custom `UserIdentity` / loader function), plus top-level helpers
-  `createUserIdentity()`, `importUserIdentity()`, and `exportUserIdentity()`.
+  `CryptoKey`, `'local'` stored in IndexedDB across tabs and future visits,
+  `'none'` for ephemeral runtime, or a custom `UserIdentity` / loader function),
+  plus top-level helpers `createUserIdentity()`, `importUserIdentity()`, and
+  `exportUserIdentity()`.
 - 👥 **Multi-tab user presence & targeting** - added `room.onUserJoin`,
   `room.onUserLeave`, `room.getUsers()`, and `room.getSelf()`. Every `target` /
   `targets` option (`send`, `request`, `requestMany`, `ping`, media methods, and
