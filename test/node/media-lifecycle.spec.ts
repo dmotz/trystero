@@ -372,3 +372,70 @@ void test('recycled transceiver sender after removeTrack is not stopped when ori
   assert.equal(senders[0]?.track, null)
   assert.equal(senders[1]?.track, screenTrack)
 })
+
+void test('receiveRemoteStream and receiveStreamMeta emit when receiver transceiver track IDs differ from sender track IDs', () => {
+  const remoteContexts: Array<{
+    tracks?: MediaStreamTrack[]
+    metadata: unknown
+  }> = []
+  const emitted: Array<{streamId: string; metadata: unknown}> = []
+  const media = createMediaManager({
+    iterate: () => [],
+    isActive: () => true,
+    onPeerError: () => {},
+    onRemoteStream: (_stream, ctx) => {
+      remoteContexts.push({tracks: ctx.tracks, metadata: ctx.metadata})
+    }
+  })
+  media.onPeerStream = (stream, {metadata}) => {
+    emitted.push({streamId: stream.id, metadata})
+  }
+
+  let receiverTracks = [
+    {id: 'receiver-local-audio-uuid'} as unknown as MediaStreamTrack
+  ]
+  const remoteStream = {
+    id: 'shared-stream-id',
+    getTracks: () => [...receiverTracks]
+  } as unknown as MediaStream
+
+  media.receiveStreamMeta(
+    {
+      k: 'stream-key-1',
+      s: 'shared-stream-id',
+      t: ['sender-audio-id', 'sender-video-id'],
+      m: {phase: 'first'}
+    },
+    'peer-a'
+  )
+
+  // First ontrack fires with only 1 of 2 tracks present on the remote stream
+  media.receiveRemoteStream('peer-a', remoteStream)
+  assert.equal(emitted.length, 0)
+
+  // Second ontrack fires once both tracks are attached (with receiver-local UUIDs)
+  receiverTracks = [
+    {id: 'receiver-local-audio-uuid'} as unknown as MediaStreamTrack,
+    {id: 'receiver-local-video-uuid'} as unknown as MediaStreamTrack
+  ]
+  media.receiveRemoteStream('peer-a', remoteStream)
+  assert.deepEqual(emitted, [
+    {streamId: 'shared-stream-id', metadata: {phase: 'first'}}
+  ])
+  assert.equal(remoteContexts[0]?.tracks, undefined)
+
+  // Subsequent metadata update on the cached stream emits immediately without waiting for new tracks
+  media.receiveStreamMeta(
+    {
+      k: 'stream-key-1',
+      s: 'shared-stream-id',
+      t: ['sender-audio-id', 'sender-video-id'],
+      m: {phase: 'second'}
+    },
+    'peer-a'
+  )
+  assert.deepEqual(emitted, [
+    {streamId: 'shared-stream-id', metadata: {phase: 'first'}},
+    {streamId: 'shared-stream-id', metadata: {phase: 'second'}}
+  ])
+})

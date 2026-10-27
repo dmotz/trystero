@@ -251,11 +251,19 @@ export const createMediaManager = ({
       typeof stream.id === 'string' ? stream.id : undefined
     )
 
-    const tracks = trackIds
-      ? (stream.getTracks?.() ?? []).filter(
+    const rawStreamTracks = stream.getTracks?.() ?? []
+    const matchedTracks = trackIds
+      ? rawStreamTracks.filter(
           t => typeof t?.id === 'string' && trackIds.includes(t.id)
         )
       : undefined
+    const tracks =
+      matchedTracks &&
+      (matchedTracks.length > 0 ||
+        trackIds?.length === 0 ||
+        rawStreamTracks.length === 0)
+        ? matchedTracks
+        : undefined
 
     const sourcePeerId = originPeerId ?? id
     const userId = getPeerUserId ? getPeerUserId(sourcePeerId) : sourcePeerId
@@ -432,14 +440,9 @@ export const createMediaManager = ({
       const cachedTracks = cached?.getTracks?.() ?? []
 
       if (cachedTracks.length > 0) {
-        const cachedTrackIds = new Set(
-          cachedTracks
-            .map(t => t?.id)
-            .filter((tid): tid is string => typeof tid === 'string')
-        )
         const waitingForNewTracks = Boolean(
           parsed.trackIds?.length &&
-          parsed.trackIds.some(tid => !cachedTrackIds.has(tid))
+          cachedTracks.length < parsed.trackIds.length
         )
         if (!waitingForNewTracks) {
           emitStream(
@@ -477,18 +480,13 @@ export const createMediaManager = ({
       }
 
       const candidate = queue[index]!
-      if (candidate.trackIds?.length) {
-        const currentIds = new Set(
-          (stream.getTracks?.() ?? [])
-            .map(t => t?.id)
-            .filter((tid): tid is string => typeof tid === 'string')
-        )
-        if (
-          currentIds.size > 0 &&
-          candidate.trackIds.some(tid => !currentIds.has(tid))
-        ) {
-          return
-        }
+      const currentTracks = stream.getTracks?.() ?? []
+      if (
+        candidate.trackIds?.length &&
+        currentTracks.length > 0 &&
+        currentTracks.length < candidate.trackIds.length
+      ) {
+        return
       }
 
       const [next] = queue.splice(index, 1)
