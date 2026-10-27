@@ -781,14 +781,16 @@ Many apps need official room state that everyone can read, but only the host or
 authorized roles can update—like the current question in a quiz game, the active
 video URL in a watch party, or the current slide in a presentation.
 
-With `room.makeState()` (enabled when `roles()` is passed to `joinRoom()`),
-whenever an authorized user updates the state, every user in the room receives
-the verified update. Better yet, **if a new user joins the room late—or even
-after the host has closed their laptop and left—existing users in the room
-automatically sync the latest official state to the newcomer** without being
-able to tamper with it:
+With `room.makeState()` (available after `await room.ready` when `roles()` is
+passed to `joinRoom()`), whenever an authorized user updates the state, every
+user in the room receives the verified update. Better yet, **if a new user joins
+the room late—or even after the host has closed their laptop and left—existing
+users in the room automatically sync the latest official state to the newcomer**
+without being able to tamper with it:
 
 ```js
+await room.ready
+
 const roundState = room.makeState(
   'round-state',
   {round: 1, phase: 'lobby'},
@@ -949,9 +951,9 @@ const room = joinRoom(
 )
 ```
 
-At any time, you can call `room.getTopology()` to see which mode is active,
-which peers are connected directly vs. through relays, and how data and media
-streams are being routed.
+Once `await room.ready` resolves, you can call `room.getTopology()` at any time
+to see which mode is active, which peers are connected directly vs. through
+relays, and how data and media streams are being routed.
 
 <details>
   <summary>How it works behind the scenes</summary>
@@ -997,11 +999,11 @@ import {joinRoom, definePlugin} from 'trystero'
 const myPlugin = (options = {}) =>
   definePlugin('myPlugin', {
     setup(kernel) {
-      const sync = kernel.makeInternalAction('@_my_sync')
+      const sync = kernel.makeInternalAction('my_sync')
       kernel.onLeave(() => {
         // clean up resources when room.leave() is called
       })
-      // Any methods returned here are merged onto the Room instance (and inferred in TypeScript)
+      // Any methods returned here are merged onto the Room instance when room.ready resolves
       return {
         syncNow: data => sync.send(data)
       }
@@ -1015,6 +1017,9 @@ const room = joinRoom(
   },
   'doc-1'
 )
+
+await room.ready
+await room.syncNow({hello: 'world'})
 ```
 
 ### React hooks
@@ -1373,9 +1378,11 @@ the same namespace will return the same room instance.
 
   - `use` - **(optional)** Array of `RoomPlugin`s created with `roles()`,
     `scale()`, or `definePlugin()`. TypeScript automatically infers the extra
-    methods added to the returned `Room` instance from the plugins passed in
-    `use` (e.g. `makeState`, `grantRole`, `revokeRole`, `getRoles`, `ban`, and
-    `isBanned` from `roles()`, or `getTopology` from `scale()`). See the
+    methods added to the returned `Room` instance (`RoomWithPlugins`) from the
+    plugins passed in `use` (e.g. `makeState`, `grantRole`, `revokeRole`,
+    `getRoles`, `ban`, and `isBanned` from `roles()`, or `getTopology` from
+    `scale()`). Plugin methods attach to `room` when `await room.ready` (or
+    `await room.getSelf()`) resolves. See the
     [Plugin Authoring Guide](docs/plugins.md) for creating custom plugins.
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
@@ -1452,7 +1459,14 @@ the same namespace will return the same room instance.
     `details` is an object containing `appId`, `roomId`, `peerId`, and `error`
     describing the failure.
 
-Returns an object with the following methods:
+Returns an object with the following properties and methods:
+
+- ### `ready`
+
+  A `Promise<void>` that resolves once the local endpoint identity is
+  initialized and any plugins passed in `config.use` have run their `setup()`
+  and attached their methods to `room`. (`await room.getSelf()` also waits for
+  `room.ready`.)
 
 - ### `leave()`
 
@@ -1500,18 +1514,20 @@ Returns an object with the following methods:
 
 - ### `getTopology()`
 
-  _(Added to `Room` when `scale(...)` is included in `use: [...]`)_ Returns a
-  `TopologySnapshot` describing how peers in the room are currently connected
-  and routing data: `mode`, `activeMode` (`'mesh' | 'gossip'`), `selfId`,
-  `directPeerIds`, `roomPeerIds`, `routes`, `mediaTrees`, and `stats`
-  (`messagesSent`, `messagesReceived`, `messagesForwarded`, `duplicatesDropped`,
-  `signatureFailures`, `treeReparents`).
+  _(Added to `Room` when `scale(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Returns a `TopologySnapshot` describing how peers
+  in the room are currently connected and routing data: `mode`, `activeMode`
+  (`'mesh' | 'gossip'`), `selfId`, `directPeerIds`, `roomPeerIds`, `routes`,
+  `mediaTrees`, and `stats` (`messagesSent`, `messagesReceived`,
+  `messagesForwarded`, `duplicatesDropped`, `signatureFailures`,
+  `treeReparents`).
 
 - ### `makeState(namespace, initialValue, [config])`
 
-  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Creates or
-  retrieves a shared, admin-controlled state container (`AuthoritativeState<T>`)
-  that any peer can read and only authorized roles can update.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Creates or retrieves a shared, admin-controlled
+  state container (`AuthoritativeState<T>`) that any peer can read and only
+  authorized roles can update.
   - `namespace` - Unique name for this state within the room.
   - `initialValue` - Initial state value before any update is received.
   - `config.roles` - **(optional)** Role or array of roles allowed to update
@@ -1533,38 +1549,42 @@ Returns an object with the following methods:
 
 - ### `grantRole(targetId, role, [options])`
 
-  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Grants
-  `role` (a role name string or array of strings) to `targetId` (which can be
-  either a `peerId` or a `userId`). Requires the local user to be an `'admin'`
-  or to hold that role with `canDelegate: true`.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Grants `role` (a role name string or array of
+  strings) to `targetId` (which can be either a `peerId` or a `userId`).
+  Requires the local user to be an `'admin'` or to hold that role with
+  `canDelegate: true`.
   - `options.canDelegate` - **(optional)** Boolean allowing the recipient to
     grant those role(s) to other peers as well.
 
 - ### `revokeRole(targetId, [role])`
 
-  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Revokes
-  `role` (or all roles if omitted) from `targetId` (`peerId` or `userId`).
-  Delegated moderators cannot revoke a root `'admin'`.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Revokes `role` (or all roles if omitted) from
+  `targetId` (`peerId` or `userId`). Delegated moderators cannot revoke a root
+  `'admin'`.
 
 - ### `getRoles([targetId])`
 
-  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Returns the
-  array of verified roles currently held by `targetId` (`peerId` or `userId`, or
-  by the local user if `targetId` is omitted).
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Returns the array of verified roles currently held
+  by `targetId` (`peerId` or `userId`, or by the local user if `targetId` is
+  omitted).
 
 - ### `ban(targetId, [options])`
 
-  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Permanently
-  bans `targetId` (`peerId` or `userId`) from the room (requires `'admin'`
-  role). Immediately disconnects all endpoints belonging to that peer or user,
-  removes any roles they held, and blocks future connection offers or messages
-  from them.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Permanently bans `targetId` (`peerId` or `userId`)
+  from the room (requires `'admin'` role). Immediately disconnects all endpoints
+  belonging to that peer or user, removes any roles they held, and blocks future
+  connection offers or messages from them.
   - `options.reason` - **(optional)** Optional reason string for the ban.
 
 - ### `isBanned(targetId)`
 
-  _(Added to `Room` when `roles(...)` is included in `use: [...]`)_ Returns
-  `true` if `targetId` (`peerId` or `userId`) has been banned from the room.
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Returns `true` if `targetId` (`peerId` or `userId`)
+  has been banned from the room.
 
 - ### `addStream(stream, [options])`
 
@@ -1838,7 +1858,8 @@ Creates the opt-in multi-hop scaling plugin
 
 Creates a custom or 3rd-party `RoomPlugin<TName, TApi>` that can be passed to
 `joinRoom()` via `use: [myPlugin()]`. Any methods returned from `spec.setup()`
-are merged onto the returned `Room` instance and inferred by TypeScript. See the
+are merged onto the returned `Room` instance when `room.ready` resolves and
+inferred by TypeScript (`RoomWithPlugins`). See the
 [Plugin Authoring Guide](docs/plugins.md).
 
 ### `createUserIdentity()`

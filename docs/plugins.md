@@ -45,14 +45,18 @@ const room = joinRoom(
   },
   'room-1'
 )
+
+await room.ready
 ```
 
-TypeScript automatically infers the return type of `joinRoom()` from the plugins
-passed in `use`, merging each plugin's `TApi` (such as `room.getTopology()` from
-`scale()`, `room.makeState()` / `room.grantRole()` / `room.ban()` from
-`roles()`, or custom methods from third-party plugins) onto the returned `Room`
-instance. If a plugin is not imported by the application, bundlers completely
-tree-shake it from the final bundle.
+TypeScript automatically infers the return type of `joinRoom()`
+(`RoomWithPlugins`) from the plugins passed in `use`, merging each plugin's
+`TApi` (such as `room.getTopology()` from `scale()`, `room.makeState()` /
+`room.grantRole()` / `room.ban()` from `roles()`, or custom methods from
+third-party plugins) onto the returned `Room` type. Plugin `setup()` runs and
+attaches these methods onto `room` when `await room.ready` (or
+`await room.getSelf()`) resolves. If a plugin is not imported by the
+application, bundlers completely tree-shake it from the final bundle.
 
 ---
 
@@ -143,16 +147,17 @@ resolveRoomId: async ({appId, roomId, userIdentityP}) => {
 
 ### 2. `setup(kernel, preResolvedState)` _(room initialization)_
 
-Runs as soon as the local endpoint's `peerId` (`kernel.selfId`) is ready when
-the room is created. Inside `setup`, your plugin can:
+Runs as soon as the local endpoint's `peerId` (`kernel.selfId`) resolves when
+the room is created, right before `room.ready` resolves. Inside `setup`, your
+plugin can:
 
 1. Register internal wire actions (`kernel.makeInternalAction(...)`) or public
    actions (`kernel.makeAction(...)`).
 2. Subscribe to peer and room lifecycle hooks (`onPeerActivated`,
    `onPeerDeactivated`, `onRoomIdChanged`, `onLeave`).
-3. Return an object of methods (`TApi`) to merge onto the returned `Room`
-   instance (cannot shadow reserved core `Room` properties or duplicate another
-   plugin's exported method name).
+3. Return an object of methods (`TApi`) to merge onto the `Room` instance when
+   `room.ready` resolves (cannot shadow reserved core `Room` properties or
+   duplicate another plugin's exported method name).
 
 ---
 

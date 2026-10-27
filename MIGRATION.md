@@ -357,6 +357,8 @@ const room = joinRoom(
   inviteRoomIdFromUrl
 )
 
+await room.ready
+
 const betAction = room.makeAction('bet', {roles: ['admin', 'player']})
 const tableState = room.makeState('table', {pot: 0}, {roles: ['admin']})
 

@@ -371,6 +371,7 @@ export const log = (...args: unknown[]): void => console.log(...args)
 export const selfCertifyingRoomRegex = /^(.*)\.~([0-9A-Za-z]{16})$/
 
 export const reservedRoomPropertyNames = new Set([
+  'ready',
   'makeAction',
   'leave',
   'ping',

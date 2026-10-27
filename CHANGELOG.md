@@ -37,9 +37,11 @@
   persistent `userId`. Joining a fingerprinted room ID without `roles()` throws
   an error. Apps that do not import `roles()` tree-shake the entire authority
   plugin out of their bundle.
-- Added `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`,
-  `room.ban()`, `room.isBanned()` (on rooms configured with `roles()`), and
-  expanded `room.getSelf()` (returning
+- Added `room.ready` (resolving once the local endpoint identity is initialized
+  and any configured `use` plugins have attached their methods to `room`),
+  `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`, `room.ban()`,
+  `room.isBanned()` (on rooms configured with `roles()`), and expanded
+  `room.getSelf()` (returning
   `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`), plus
   top-level helpers `createAdminRoom(appId, baseRoomId, [options])` and
   `definePlugin()` (for authoring custom/3rd-party room plugins with TypeScript

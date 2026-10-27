@@ -36,32 +36,24 @@ import {
   getDefaultTestUserIdentity,
   getDefaultTestUserIdentityUserIdSync,
   getOrCreateEndpointIdentity,
-  getResolvedDefaultSelfId,
   resolveUserIdentity
 } from './identity'
 import {createMediaManager, type InternalMediaMeta} from './media'
 import type {
   AddMediaOptions,
-  AuthoritativeState,
   DataPayload,
-  JsonValue,
   KernelRolesProvider,
   KernelScaleProvider,
   PeerHandle,
   PeerHandshake,
   PeerJoinContext,
   PeerLeaveContext,
-  RolesPluginApi,
   Room,
   RoomKernel,
   RoomPlugin,
   RoomWithPlugins,
-  ScalePluginApi,
   SelfInfo,
-  StateChangeContext,
-  StateConfig,
   TargetPeers,
-  TopologySnapshot,
   UserIdentity,
   UserIdentityConfig,
   UserInfo,
@@ -166,7 +158,7 @@ export default <
     maxReceiveBytes,
     onBeforeLeave
   } = roomOptions
-  let localSelfId = explicitSelfId ?? getResolvedDefaultSelfId() ?? ''
+  let localSelfId = explicitSelfId ?? ''
   const localEndpointP = getOrCreateEndpointIdentity(explicitSelfId).then(
     ep => {
       if (!explicitSelfId) {
@@ -186,7 +178,6 @@ export default <
   const pendingActionAuthorities = new Map<string, string[]>()
   const plugins = getConfiguredPlugins(roomOptions.use)
   const hasRolesPlugin = plugins.some(p => p.name === 'roles')
-  const hasScalePlugin = plugins.some(p => p.name === 'scale')
   if (!hasRolesPlugin && selfCertifyingRoomRegex.test(initialRoomId)) {
     throw selfCertRoomRolesErr
   }
@@ -1009,112 +1000,6 @@ export default <
     }
   }
 
-  if (hasScalePlugin && !localSelfId) {
-    const scaleShim: ScalePluginApi = {
-      getTopology: (): TopologySnapshot =>
-        scaleProvider
-          ? scaleProvider.getSnapshot()
-          : {
-              mode: 'auto',
-              activeMode: 'mesh',
-              selfId: localSelfId,
-              directPeerIds: [],
-              roomPeerIds: [],
-              routes: {},
-              mediaTrees: {},
-              stats: {
-                messagesSent: 0,
-                messagesReceived: 0,
-                messagesForwarded: 0,
-                duplicatesDropped: 0,
-                signatureFailures: 0,
-                treeReparents: 0
-              }
-            }
-    }
-    Object.assign(pluginApis, scaleShim)
-  }
-
-  if (hasRolesPlugin && !localSelfId) {
-    const rolesShim: RolesPluginApi = {
-      makeState: <T = JsonValue>(
-        namespace: string,
-        initialValue: T extends JsonValue ? T : never,
-        stateConfig?: StateConfig<T>
-      ): AuthoritativeState<T> => {
-        if (
-          didRunPluginSetup &&
-          typeof pluginApis['makeState'] === 'function'
-        ) {
-          return (pluginApis['makeState'] as RolesPluginApi['makeState'])<T>(
-            namespace,
-            initialValue,
-            stateConfig
-          )
-        }
-        const currentVal: T = initialValue
-        let realState: AuthoritativeState<T> | null = null
-        let pendingChangeHandler:
-          | ((value: T, prev: T, context: StateChangeContext) => void)
-          | null = null
-        const readyStateP = pluginSetupP.then(() => {
-          const fn = pluginApis['makeState'] as RolesPluginApi['makeState']
-          realState = fn<T>(namespace, initialValue, stateConfig)
-          if (pendingChangeHandler) {
-            realState.onChange = pendingChangeHandler
-          }
-          return realState
-        })
-        void readyStateP.catch(noOp)
-        return {
-          get: () => (realState ? realState.get() : currentVal),
-          set: async (next: T | ((prev: T) => T)) => {
-            const s = realState ?? (await readyStateP)
-            await s.set(next)
-          },
-          getMeta: () => (realState ? realState.getMeta() : null),
-          get onChange() {
-            return realState ? realState.onChange : pendingChangeHandler
-          },
-          set onChange(cb) {
-            pendingChangeHandler = cb
-            if (realState) {
-              realState.onChange = cb
-            }
-          }
-        }
-      },
-      grantRole: async (peerId, role, options) => {
-        await pluginSetupP
-        return (pluginApis['grantRole'] as RolesPluginApi['grantRole'])(
-          peerId,
-          role,
-          options
-        )
-      },
-      revokeRole: async (peerId, role) => {
-        await pluginSetupP
-        return (pluginApis['revokeRole'] as RolesPluginApi['revokeRole'])(
-          peerId,
-          role
-        )
-      },
-      getRoles: (peerId?: string) =>
-        didRunPluginSetup && typeof pluginApis['getRoles'] === 'function'
-          ? (pluginApis['getRoles'] as RolesPluginApi['getRoles'])(peerId)
-          : getPeerRoles(peerId),
-      ban: async (peerId, options) => {
-        await pluginSetupP
-        return (pluginApis['ban'] as RolesPluginApi['ban'])(peerId, options)
-      },
-      isBanned: (peerId: string) =>
-        didRunPluginSetup && typeof pluginApis['isBanned'] === 'function'
-          ? (pluginApis['isBanned'] as RolesPluginApi['isBanned'])(peerId)
-          : isPeerBanned(peerId)
-    }
-    Object.assign(pluginApis, rolesShim)
-  }
-
   let pluginSetupP: Promise<void>
   if (localSelfId) {
     runPluginSetup()
@@ -1271,7 +1156,7 @@ export default <
       userIdentityP !== undefined)
   ) {
     effectiveOnPeerHandshake = async (id, send, receive, isInitiator) => {
-      const resolvedSelfId = localSelfId || (await localSelfIdP)
+      const resolvedSelfId = await localSelfIdP
       await Promise.all([
         resolvedUserIdentityP,
         id === resolvedSelfId ? undefined : getDefaultTestUserIdentity(id)
@@ -1557,6 +1442,8 @@ export default <
   }
 
   const roomInstance: Room = {
+    ready: pluginSetupP,
+
     makeAction,
 
     leave,

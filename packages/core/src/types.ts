@@ -632,6 +632,7 @@ export type ScalePluginApi = {
 }
 
 export type Room = {
+  ready: Promise<void>
   makeAction: {
     <T extends DataPayload = DataPayload>(
       namespace: string,

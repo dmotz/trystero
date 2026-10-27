@@ -1251,6 +1251,10 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
       'room-1'
     )
 
+    assert.equal(room.getCapturedSelfId, undefined)
+    await room.ready
+    assert.equal(typeof room.getCapturedSelfId, 'function')
+
     const self = await room.getSelf()
     assert.equal(typeof setupSelfId, 'string')
     assert.match(setupSelfId, /^[0-9A-Za-z]{20}$/, 'kernel.selfId in setup() must be a resolved 20-char peerId in production build')
@@ -1282,10 +1286,13 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
 })
 
 void test('Plugin API safety: rejects reserved room property names, duplicate plugin names, and duplicate plugin API property names', async () => {
-  await getDefaultEndpointIdentity()
   const {makeJoinRoom} = createMemorySignalBus()
   const joinRoom = makeJoinRoom()
 
+  assert.throws(
+    () => definePlugin('ready', {setup: () => ({})}),
+    /plugin name "ready" is a reserved room property/
+  )
   assert.throws(
     () => definePlugin('leave', {setup: () => ({})}),
     /plugin name "leave" is a reserved room property/
@@ -1300,7 +1307,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
       leave: () => Promise.resolve()
     })
   })
-  assert.throws(
+  await assert.rejects(
     () =>
       joinRoom(
         {
@@ -1309,7 +1316,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'room-shadow-1'
-      ),
+      ).ready,
     /cannot override reserved room property "leave"/
   )
 
@@ -1318,7 +1325,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
       getPeers: () => ({})
     })
   })
-  assert.throws(
+  await assert.rejects(
     () =>
       joinRoom(
         {
@@ -1327,7 +1334,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'room-shadow-2'
-      ),
+      ).ready,
     /cannot override reserved room property "getPeers"/
   )
 
@@ -1351,7 +1358,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
     /duplicate plugin "plugin-a"/
   )
 
-  assert.throws(
+  await assert.rejects(
     () =>
       joinRoom(
         {
@@ -1360,7 +1367,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'room-dup-2'
-      ),
+      ).ready,
     /defines duplicate room property "sharedFn"/
   )
 })
@@ -1592,6 +1599,14 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     false,
     'isPassive() method must be removed from Room'
   )
+  assert.equal(
+    'makeState' in room,
+    false,
+    'plugin methods attach when room.ready resolves'
+  )
+
+  await room.ready
+  assert.equal(typeof room.makeState, 'function')
 
   const counter = room.makeState('counter', 0)
   await counter.set(1)

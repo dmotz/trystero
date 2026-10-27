@@ -440,7 +440,8 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = ((
     callbacks
   )) as JoinRoom<TorrentRoomConfig>
 
-export const getRelaySockets = relayManager.getSockets
+export const getRelaySockets: () => Record<string, WebSocket> =
+  relayManager.getSockets
 
 export {
   createAdminRoom,
@@ -454,7 +455,7 @@ export {
   scale
 } from '@trystero-p2p/core'
 
-export const defaultRelayUrls = [
+export const defaultRelayUrls: string[] = [
   'open.ftorrent.com',
   'tracker.webtorrent.dev',
   'tracker.openwebtorrent.com',

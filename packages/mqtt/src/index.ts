@@ -175,7 +175,8 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
   }
 })
 
-export const getRelaySockets = relayManager.getSockets
+export const getRelaySockets: () => Record<string, WebSocket> =
+  relayManager.getSockets
 
 export {
   createAdminRoom,
@@ -187,7 +188,7 @@ export {
   scale
 } from '@trystero-p2p/core'
 
-export const defaultRelayUrls = [
+export const defaultRelayUrls: string[] = [
   'broker.emqx.io:8084/mqtt',
   'public:public@public.cloud.shiftr.io',
   'broker.hivemq.com:8884/mqtt',

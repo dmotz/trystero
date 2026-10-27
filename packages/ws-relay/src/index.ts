@@ -142,7 +142,8 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> = createTopicStrategy({
   }
 })
 
-export const getRelaySockets = relayManager.getSockets
+export const getRelaySockets: () => Record<string, WebSocket> =
+  relayManager.getSockets
 
 export {
   createAdminRoom,

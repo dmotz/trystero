@@ -522,7 +522,8 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
   }
 })
 
-export const getRelaySockets = relayManager.getSockets
+export const getRelaySockets: () => Record<string, WebSocket> =
+  relayManager.getSockets
 
 export {
   createAdminRoom,
@@ -536,7 +537,7 @@ export {
   scale
 } from '@trystero-p2p/core'
 
-export const defaultRelayUrls = [
+export const defaultRelayUrls: string[] = [
   '0x-nostr-relay.fly.dev',
   'bendernostur.duckdns.org:8443',
   'cdn.satellite.earth',

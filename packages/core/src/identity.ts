@@ -285,8 +285,6 @@ export type EndpointIdentity = {
 }
 
 let resolvedDefaultSelfId: string | null = null
-export const getResolvedDefaultSelfId = (): string | null =>
-  resolvedDefaultSelfId
 
 let defaultEndpointIdentityPromise: Promise<EndpointIdentity> | null = null
 
@@ -331,11 +329,7 @@ export const getDefaultSelfId = (): Promise<string> =>
   getDefaultEndpointIdentity().then(id => id.peerId)
 
 export const resolveSelfId = (explicitSelfId?: string): Promise<string> =>
-  explicitSelfId
-    ? Promise.resolve(explicitSelfId)
-    : resolvedDefaultSelfId
-      ? Promise.resolve(resolvedDefaultSelfId)
-      : getDefaultSelfId()
+  explicitSelfId ? Promise.resolve(explicitSelfId) : getDefaultSelfId()
 
 const endpointIdentityByPeerId = new Map<string, Promise<EndpointIdentity>>()
 const registeredTestForcedPeerIds = new Set<string>()
@@ -990,7 +984,7 @@ export const resolveUserIdentity = async (
     preferLocal?: boolean
     _test_only_forcedPeerId?: string
   },
-  localSelfId: string | null = resolvedDefaultSelfId
+  localSelfId?: string | null
 ): Promise<UserIdentity> => {
   const raw = config?.identity
 
