@@ -133,10 +133,27 @@ room.onPeerLeave = ({peerId, userId}) => {
 
 ---
 
-### 2. Media Stream & Track Callbacks (`onPeerStream` / `onPeerTrack`)
+### 2. Stream-Centric Media API (`addStream`, `replaceTrack`, `onPeerStream`)
 
-`onPeerStream` and `onPeerTrack` now keep the media object(s) first and pass
+`onPeerStream` keeps the `MediaStream` first and passes
 `{userId, peerId, metadata}` as a context object (matching `action.onMessage`).
+`addStream` and `replaceTrack` now return `Promise<void>` directly instead of
+`Promise<void>[]`.
+
+`addTrack`, `removeTrack`, and `onPeerTrack` have been removed in favor of
+idempotent `addStream` syncing:
+
+- Adding or removing a track on an active stream uses the platform's own
+  `MediaStream` methods followed by `room.addStream(stream)`
+  (`stream.addTrack(t); room.addStream(stream)` or
+  `stream.removeTrack(t); room.addStream(stream)`).
+- `room.replaceTrack(oldTrack, newTrack, {target?})` remains for
+  zero-renegotiation sender-level track swaps (such as camera switching). To
+  update metadata after a swap, re-announce with
+  `room.addStream(stream, {metadata})`, which triggers `onPeerStream` on
+  recipients with the new metadata.
+- For track-level events on remote streams, use native `stream.onaddtrack` /
+  `stream.onremovetrack` or `stream.getTracks()`.
 
 #### Before (0.26.x)
 
@@ -145,9 +162,7 @@ room.onPeerStream = (stream, peerId, metadata) => {
   attachVideo(stream, peerId, metadata)
 }
 
-room.onPeerTrack = (track, stream, peerId, metadata) => {
-  attachTrack(track, stream, peerId, metadata)
-}
+await Promise.all(room.addStream(stream))
 ```
 
 #### After (0.27.0)
@@ -157,9 +172,7 @@ room.onPeerStream = (stream, {userId, metadata}) => {
   attachVideo(stream, userId, metadata)
 }
 
-room.onPeerTrack = (track, stream, {userId, metadata}) => {
-  attachTrack(track, stream, userId, metadata)
-}
+await room.addStream(stream)
 ```
 
 ---
@@ -248,9 +261,9 @@ When a user connects from multiple tabs (or devices sharing an identity), they
 have one `userId` and multiple `peerId`s. Trystero routes traffic intelligently
 when you pass a `userId` as `target`:
 
-- **Broadcast / Push (`action.send`, `room.addStream`, `room.addTrack`)**:
-  Passing `target: userId` automatically **fans out** the payload or media
-  stream to _every_ active connection (`peerId`) belonging to that user.
+- **Broadcast / Push (`action.send`, `room.addStream`)**: Passing
+  `target: userId` automatically **fans out** the payload or media stream to
+  _every_ active connection (`peerId`) belonging to that user.
 - **Point-to-Point (`action.request`, `room.ping`)**: Passing `target: userId`
   deterministically routes to a single connection for that user so you receive a
   single response.

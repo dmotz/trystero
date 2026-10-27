@@ -283,7 +283,8 @@ export type KernelScaleProvider = {
     broadcasterId: string,
     streamKey: string,
     stream: MediaStream,
-    metadata?: JsonValue
+    metadata?: JsonValue,
+    tracks?: MediaStreamTrack[]
   ) => void
   unregisterBroadcastStream: (
     broadcasterId: string,
@@ -293,24 +294,6 @@ export type KernelScaleProvider = {
     broadcasterId: string,
     streamId: string
   ) => {stream: MediaStream; targets: string[]} | null
-  registerBroadcastTrack: (
-    broadcasterId: string,
-    trackKey: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    metadata?: JsonValue
-  ) => void
-  unregisterBroadcastTrack: (
-    broadcasterId: string,
-    trackId: string,
-    trackKeys?: string[]
-  ) => Array<{track: MediaStreamTrack; key: string; targets: string[]}>
-  replaceBroadcastTrack: (
-    broadcasterId: string,
-    oldTrack: MediaStreamTrack,
-    newTrack: MediaStreamTrack,
-    metadata?: JsonValue
-  ) => void
   requireDirectPeer: (peerId: string) => void
   notePeerDiscovered: (peerId: string) => void
   shouldConnectPeer: (
@@ -387,14 +370,6 @@ export type RoomKernel = {
     targetPeerIds: string[],
     streamKey: string,
     tracks?: MediaStreamTrack[]
-  ) => void
-  relayMediaTrack: (
-    broadcasterId: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    metadata: JsonValue | undefined,
-    targetPeerIds: string[],
-    trackKey: string
   ) => void
 }
 
@@ -648,32 +623,19 @@ export type Room = {
   getSelf: () => Promise<SelfInfo>
   getPeers: () => Record<string, PeerInfo>
   getUsers: () => Record<string, UserInfo>
-  addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
+  addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
-  addTrack: (
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    options?: AddMediaOptions
-  ) => Promise<void>[]
-  removeTrack: (track: MediaStreamTrack, options?: RemoveMediaOptions) => void
   replaceTrack: (
     oldTrack: MediaStreamTrack,
     newTrack: MediaStreamTrack,
-    options?: AddMediaOptions
-  ) => Promise<void>[]
+    options?: RemoveMediaOptions
+  ) => Promise<void>
   onPeerJoin: ((context: PeerJoinContext) => void) | null
   onPeerLeave: ((context: PeerLeaveContext) => void) | null
   onUserJoin: ((context: UserJoinContext) => void) | null
   onUserLeave: ((context: UserLeaveContext) => void) | null
   onPeerStream:
     | ((stream: MediaStream, context: PeerMediaContext) => void)
-    | null
-  onPeerTrack:
-    | ((
-        track: MediaStreamTrack,
-        stream: MediaStream,
-        context: PeerMediaContext
-      ) => void)
     | null
 }
 
@@ -694,7 +656,6 @@ export type PeerHandlers = {
   connect?: () => void
   close?: () => void
   stream?: (stream: MediaStream) => void
-  track?: (track: MediaStreamTrack, stream: MediaStream) => void
   signal?: (signal: Signal) => void
   error?: (err: Error) => void
 }
@@ -865,28 +826,14 @@ export type SocketClient = {
   send: (data: string) => void
 }
 
-export type RemoteTrackRef = {
-  track: MediaStreamTrack
-  stream: MediaStream
-}
-
 export type MediaIdentityCache = {
   getStreamKey: (stream: MediaStream) => string
-  getTrackKey: (track: MediaStreamTrack) => string
   rememberRemoteStream: (
     key: string,
     stream: MediaStream,
     streamId?: string
   ) => void
   getRemoteStream: (key: string, streamId?: string) => MediaStream | undefined
-  rememberRemoteTrack: (
-    key: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    trackId?: string,
-    streamId?: string
-  ) => void
-  getRemoteTrack: (key: string, trackId?: string) => RemoteTrackRef | undefined
   hasRemoteMedia: () => boolean
   clearRemote: () => void
 }

@@ -20,7 +20,7 @@ const metadataAction = (type: string, key: string) => {
   bytes.set(payload, 36)
   return bytes.buffer
 }
-for (const fault of ['wire', 'stream', 'track']) {
+for (const fault of ['wire', 'stream']) {
   void test(`a ${fault} fault removes and destroys the room peer`, async t => {
     t.mock.method(console, 'warn', () => {})
     const peer = new MockPeer()
@@ -93,17 +93,12 @@ for (const saturation of ['policies', 'transfers']) {
       peer.handlers.data(fileOffer(id))
     }
     let streams = 0
-    let tracks = 0
     room.onPeerStream = () => streams++
-    room.onPeerTrack = () => tracks++
     const track = {id: 'track'}
     const stream = {id: 'stream', getTracks: () => [track]}
     peer.handlers.data(metadataAction('@_stream', 's'))
     peer.handlers.stream(stream)
-    peer.handlers.data(metadataAction('@_track', 't'))
-    peer.handlers.track(track, stream)
     assert.equal(streams, 1)
-    assert.equal(tracks, 1)
     const controls: number[] = []
     peer.sendData = (bytes?: Uint8Array) => {
       if (bytes) {

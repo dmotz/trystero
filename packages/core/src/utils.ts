@@ -385,15 +385,12 @@ export const reservedRoomPropertyNames: Set<string> = new Set([
   'getSelf',
   'addStream',
   'removeStream',
-  'addTrack',
-  'removeTrack',
   'replaceTrack',
   'onPeerJoin',
   'onPeerLeave',
   'onUserJoin',
   'onUserLeave',
-  'onPeerStream',
-  'onPeerTrack'
+  'onPeerStream'
 ])
 
 const reservedPluginNameErr = (name: string): Error =>

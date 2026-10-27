@@ -1,12 +1,11 @@
 import {maxQueuedDataFrames} from './data-limits'
-import {genId, mkErr, warn} from './utils'
+import {all, genId, mkErr, toJson, warn} from './utils'
 import type {
   AddMediaOptions,
   JsonValue,
   MediaIdentityCache,
   PeerHandle,
   PeerMediaContext,
-  RemoteTrackRef,
   TargetPeers
 } from './types'
 import type {InternalActionSender} from './action-wire'
@@ -15,8 +14,7 @@ export type InternalMediaMeta = {
   k: string
   m?: JsonValue
   s?: string
-  t?: string
-  r?: string
+  t?: string[]
   o?: string
 }
 
@@ -24,8 +22,7 @@ type PendingMediaMeta = {
   key: string
   metadata?: JsonValue
   streamId?: string
-  trackId?: string
-  replacementId?: string
+  trackIds?: string[]
   originPeerId?: string
 }
 
@@ -35,9 +32,7 @@ type RemoteMediaContext = {
   key: string
   metadata: JsonValue | undefined
   broadcast: boolean
-  trackId?: string
-  replacementId?: string
-  isReplace?: boolean
+  tracks?: MediaStreamTrack[]
 }
 
 type MediaManagerDeps = {
@@ -50,11 +45,6 @@ type MediaManagerDeps = {
   preparePeer?: (id: string, peer: PeerHandle) => Promise<PeerHandle>
   getPeerUserId?: (peerId: string) => string
   onRemoteStream?: (stream: MediaStream, context: RemoteMediaContext) => void
-  onRemoteTrack?: (
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    context: RemoteMediaContext
-  ) => void
 }
 
 const toPendingMediaMeta = (value: unknown): PendingMediaMeta | null => {
@@ -64,16 +54,15 @@ const toPendingMediaMeta = (value: unknown): PendingMediaMeta | null => {
     !Array.isArray(value) &&
     typeof (value as {k?: unknown}).k === 'string'
   ) {
+    const rawTracks = (value as {t?: unknown}).t
     return {
       key: (value as {k: string}).k,
       ...(typeof (value as {s?: unknown}).s === 'string'
         ? {streamId: (value as {s: string}).s}
         : {}),
-      ...(typeof (value as {t?: unknown}).t === 'string'
-        ? {trackId: (value as {t: string}).t}
-        : {}),
-      ...(typeof (value as {r?: unknown}).r === 'string'
-        ? {replacementId: (value as {r: string}).r}
+      ...(Array.isArray(rawTracks) &&
+      rawTracks.every(id => typeof id === 'string')
+        ? {trackIds: rawTracks as string[]}
         : {}),
       ...(typeof (value as {o?: unknown}).o === 'string'
         ? {originPeerId: (value as {o: string}).o}
@@ -102,17 +91,12 @@ const makeKeyGetter =
 
 export const createMediaIdentityCache = (): MediaIdentityCache => {
   const localStreamKeys = new WeakMap<MediaStream, string>()
-  const localTrackKeys = new WeakMap<MediaStreamTrack, string>()
   const remoteStreamsByKey = new Map<string, MediaStream>()
   const remoteStreamsById = new Map<string, MediaStream>()
-  const remoteTracksByKey = new Map<string, RemoteTrackRef>()
-  const remoteTracksById = new Map<string, RemoteTrackRef>()
   const remoteStreamKeys = new WeakMap<MediaStream, string>()
-  const remoteTrackKeys = new WeakMap<MediaStreamTrack, string>()
 
   return {
     getStreamKey: makeKeyGetter(localStreamKeys),
-    getTrackKey: makeKeyGetter(localTrackKeys),
     rememberRemoteStream: (key, stream, streamId) => {
       const previous = remoteStreamKeys.get(stream)
       if (
@@ -127,46 +111,14 @@ export const createMediaIdentityCache = (): MediaIdentityCache => {
       if (streamId) {
         remoteStreamsById.set(streamId, stream)
       }
-
-      stream.getTracks?.().forEach(track => {
-        if (typeof track.id === 'string') {
-          remoteTracksById.set(track.id, {track, stream})
-        }
-      })
     },
     getRemoteStream: (key, streamId) =>
       remoteStreamsByKey.get(key) ??
       (streamId ? remoteStreamsById.get(streamId) : undefined),
-    rememberRemoteTrack: (key, track, stream, trackId, streamId) => {
-      const ref = {track, stream}
-      const previous = remoteTrackKeys.get(track)
-      if (
-        previous !== undefined &&
-        remoteTracksByKey.get(previous)?.track === track
-      ) {
-        remoteTracksByKey.delete(previous)
-      }
-      remoteTrackKeys.set(track, key)
-      remoteTracksByKey.set(key, ref)
-
-      if (trackId) {
-        remoteTracksById.set(trackId, ref)
-      }
-
-      if (streamId) {
-        remoteStreamsById.set(streamId, stream)
-      }
-    },
-    getRemoteTrack: (key, trackId) =>
-      remoteTracksByKey.get(key) ??
-      (trackId ? remoteTracksById.get(trackId) : undefined),
-    hasRemoteMedia: () =>
-      remoteStreamsByKey.size > 0 || remoteTracksByKey.size > 0,
+    hasRemoteMedia: () => remoteStreamsByKey.size > 0,
     clearRemote: () => {
       remoteStreamsByKey.clear()
       remoteStreamsById.clear()
-      remoteTracksByKey.clear()
-      remoteTracksById.clear()
     }
   }
 }
@@ -177,9 +129,17 @@ export const createMediaManager = ({
   preparePeer,
   getPeerUserId,
   onPeerError,
-  onRemoteStream,
-  onRemoteTrack
+  onRemoteStream
 }: MediaManagerDeps): {
+  getStreamKey: (stream: MediaStream) => string
+  resolveStreamTracks: (
+    stream: MediaStream,
+    tracks?: MediaStreamTrack[]
+  ) => MediaStreamTrack[]
+  getStreamMetadata: (
+    stream: MediaStream,
+    options: AddMediaOptions
+  ) => JsonValue | undefined
   addStream: (
     stream: MediaStream,
     options: AddMediaOptions,
@@ -187,64 +147,85 @@ export const createMediaManager = ({
     originPeerId?: string,
     explicitKey?: string,
     tracks?: MediaStreamTrack[]
-  ) => Promise<void>[]
+  ) => Promise<void>
   removeStream: (stream: MediaStream, target: TargetPeers) => void
-  addTrack: (
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    options: AddMediaOptions,
-    sendMeta: InternalActionSender<InternalMediaMeta>,
-    originPeerId?: string,
-    explicitKey?: string
-  ) => Promise<void>[]
-  removeTrack: (track: MediaStreamTrack, target: TargetPeers) => void
   replaceTrack: (
     oldTrack: MediaStreamTrack,
     newTrack: MediaStreamTrack,
-    options: AddMediaOptions,
-    sendMeta: InternalActionSender<InternalMediaMeta>,
-    originPeerId?: string,
-    explicitKey?: string,
-    replacementId?: string
-  ) => Promise<void>[]
+    target?: TargetPeers
+  ) => Promise<void>
   receiveStreamMeta: (meta: unknown, peerId: string) => void
-  receiveTrackMeta: (meta: unknown, peerId: string) => void
   receiveRemoteStream: (peerId: string, stream: MediaStream) => void
-  receiveRemoteTrack: (
-    peerId: string,
-    track: MediaStreamTrack,
-    stream: MediaStream
-  ) => void
   clearPeer: (peerId: string) => void
   onPeerStream:
     | ((stream: MediaStream, context: PeerMediaContext) => void)
     | null
-  onPeerTrack:
-    | ((
-        track: MediaStreamTrack,
-        stream: MediaStream,
-        context: PeerMediaContext
-      ) => void)
-    | null
 } => {
   const pendingStreamMetas: Record<string, PendingMediaMeta[]> = {}
-  const pendingTrackMetas: Record<string, PendingMediaMeta[]> = {}
   const peerMediaCaches: Record<string, MediaIdentityCache> = {}
+  const peerSyncedStreams: Record<
+    string,
+    WeakMap<MediaStream, Map<MediaStreamTrack, string>>
+  > = {}
+  const peerEmittedStreams: Record<string, WeakMap<MediaStream, string>> = {}
   const localMedia = createMediaIdentityCache()
+  const localStreamMetas = new WeakMap<MediaStream, JsonValue | undefined>()
+  const localStreamRawTracks = new WeakMap<MediaStream, Set<MediaStreamTrack>>()
+  const replacedTracks = new WeakMap<MediaStreamTrack, MediaStreamTrack>()
+  const knownLocalStreams = new Set<MediaStream>()
 
   const getPeerMedia = (id: string): MediaIdentityCache =>
     (peerMediaCaches[id] ??= createMediaIdentityCache())
 
+  const resolveTrack = (track: MediaStreamTrack): MediaStreamTrack => {
+    let current = track
+    const seen = new Set<MediaStreamTrack>()
+    while (replacedTracks.has(current) && !seen.has(current)) {
+      seen.add(current)
+      current = replacedTracks.get(current)!
+    }
+    return current
+  }
+
+  const resolveStreamTracks = (
+    stream: MediaStream,
+    tracks?: MediaStreamTrack[]
+  ): MediaStreamTrack[] => {
+    const rawTracks = tracks ?? stream.getTracks?.() ?? []
+    if (!tracks) {
+      const prevRaw = localStreamRawTracks.get(stream)
+      if (prevRaw) {
+        for (const t of rawTracks) {
+          if (!prevRaw.has(t)) {
+            replacedTracks.delete(t)
+          }
+        }
+      }
+      localStreamRawTracks.set(stream, new Set(rawTracks))
+    }
+    return rawTracks.map(resolveTrack)
+  }
+
+  const getStreamMetadata = (
+    stream: MediaStream,
+    options: AddMediaOptions
+  ): JsonValue | undefined => {
+    if (Object.hasOwn(options, 'metadata')) {
+      localStreamMetas.set(stream, options.metadata)
+      return options.metadata
+    }
+    return localStreamMetas.get(stream)
+  }
+
   const queuePendingMeta = (
     metas: Record<string, PendingMediaMeta[]>,
     id: string,
-    parsed: PendingMediaMeta,
-    kind: 'stream' | 'track'
+    parsed: PendingMediaMeta
   ): void => {
     const queue = (metas[id] ??= [])
 
     if (queue.length >= maxQueuedDataFrames) {
-      warn(`too many pending ${kind} metadata messages`)
+      warn('too many pending stream metadata messages')
       onPeerError(id, mkErr('too many pending media metadata messages'))
       return
     }
@@ -252,31 +233,13 @@ export const createMediaManager = ({
     queue.push(parsed)
   }
 
-  const takePendingMeta = (
-    queue: PendingMediaMeta[] | undefined,
-    idValue: string | undefined,
-    getMetaId: (meta: PendingMediaMeta) => string | undefined
-  ): PendingMediaMeta | undefined => {
-    if (!queue?.length) {
-      return undefined
-    }
-
-    const index = idValue
-      ? queue.findIndex(meta => {
-          const metaId = getMetaId(meta)
-          return !metaId || metaId === idValue
-        })
-      : 0
-
-    return index >= 0 ? queue.splice(index, 1)[0] : undefined
-  }
-
   const emitStream = (
     id: string,
     key: string,
     stream: MediaStream,
     metadata?: JsonValue,
-    originPeerId?: string
+    originPeerId?: string,
+    trackIds?: string[]
   ): void => {
     if (!isActive(id)) {
       return
@@ -287,6 +250,12 @@ export const createMediaManager = ({
       stream,
       typeof stream.id === 'string' ? stream.id : undefined
     )
+
+    const tracks = trackIds
+      ? (stream.getTracks?.() ?? []).filter(
+          t => typeof t?.id === 'string' && trackIds.includes(t.id)
+        )
+      : undefined
 
     const sourcePeerId = originPeerId ?? id
     const userId = getPeerUserId ? getPeerUserId(sourcePeerId) : sourcePeerId
@@ -299,137 +268,151 @@ export const createMediaManager = ({
       originPeerId: sourcePeerId,
       key,
       metadata,
-      broadcast: originPeerId !== undefined
-    })
-    manager.onPeerStream?.(stream, ctx)
-  }
-
-  const emitTrack = (
-    id: string,
-    key: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    metadata?: JsonValue,
-    originPeerId?: string,
-    metaTrackId?: string,
-    isReplace?: boolean,
-    replacementId?: string
-  ): void => {
-    if (!isActive(id)) {
-      return
-    }
-
-    getPeerMedia(id).rememberRemoteTrack(
-      key,
-      track,
-      stream,
-      typeof track.id === 'string' ? track.id : undefined,
-      typeof stream.id === 'string' ? stream.id : undefined
-    )
-
-    const sourcePeerId = originPeerId ?? id
-    const userId = getPeerUserId ? getPeerUserId(sourcePeerId) : sourcePeerId
-    const ctx: PeerMediaContext =
-      metadata === undefined
-        ? {peerId: sourcePeerId, userId}
-        : {peerId: sourcePeerId, userId, metadata}
-    onRemoteTrack?.(track, stream, {
-      fromPeerId: id,
-      originPeerId: sourcePeerId,
-      key,
-      metadata,
       broadcast: originPeerId !== undefined,
-      ...(metaTrackId === undefined ? {} : {trackId: metaTrackId}),
-      ...(replacementId === undefined ? {} : {replacementId}),
-      ...(isReplace === undefined ? {} : {isReplace})
+      ...(tracks ? {tracks} : {})
     })
-    manager.onPeerTrack?.(track, stream, ctx)
-  }
 
-  const applyMediaOp = (
-    targets: TargetPeers,
-    key: string,
-    metadata: JsonValue | undefined,
-    sendMeta: InternalActionSender<InternalMediaMeta>,
-    op: (peer: PeerHandle) => void | Promise<void>,
-    mediaIds: Partial<InternalMediaMeta> = {}
-  ): Promise<void>[] => {
-    const payload = {
-      k: key,
-      ...mediaIds,
-      ...(metadata === undefined ? {} : {m: metadata})
+    const emittedMap = (peerEmittedStreams[id] ??= new WeakMap())
+    const metaSig = metadata === undefined ? '' : `m:${toJson(metadata)}`
+    const prevSig = emittedMap.get(stream)
+    if (prevSig === undefined || prevSig !== metaSig) {
+      emittedMap.set(stream, metaSig)
+      manager.onPeerStream?.(stream, ctx)
     }
-
-    return iterate(targets, async (id, peer) => {
-      const mediaPeer = preparePeer ? await preparePeer(id, peer) : peer
-      await sendMeta(payload, id)
-      await op(mediaPeer)
-    })
   }
 
   const manager: ReturnType<typeof createMediaManager> = {
-    addStream: (stream, options, sendMeta, originPeerId, explicitKey, tracks) =>
-      applyMediaOp(
-        options.target,
-        explicitKey ?? localMedia.getStreamKey(stream),
-        options.metadata,
-        sendMeta,
-        peer => {
-          if (tracks) {
-            tracks.forEach(track => peer.addTrack(track, stream))
-          } else {
-            peer.addStream(stream)
-          }
-        },
-        {
-          s: stream.id,
-          ...(originPeerId ? {o: originPeerId} : {})
-        }
-      ),
+    getStreamKey: stream => localMedia.getStreamKey(stream),
 
-    removeStream: (stream, target) => {
-      void iterate(target, (_, peer) => peer.removeStream(stream))
-    },
+    resolveStreamTracks,
 
-    addTrack: (track, stream, options, sendMeta, originPeerId, explicitKey) =>
-      applyMediaOp(
-        options.target,
-        explicitKey ?? localMedia.getTrackKey(track),
-        options.metadata,
-        sendMeta,
-        peer => peer.addTrack(track, stream),
-        {
-          s: stream.id,
-          t: track.id,
-          ...(originPeerId ? {o: originPeerId} : {})
-        }
-      ),
+    getStreamMetadata,
 
-    removeTrack: (track, target) => {
-      void iterate(target, (_, peer) => peer.removeTrack(track))
-    },
-
-    replaceTrack: (
-      oldTrack,
-      newTrack,
+    addStream: async (
+      stream,
       options,
       sendMeta,
       originPeerId,
       explicitKey,
-      replacementId
-    ) =>
-      applyMediaOp(
-        options.target,
-        explicitKey ?? localMedia.getTrackKey(newTrack),
-        options.metadata,
-        sendMeta,
-        peer => peer.replaceTrack(oldTrack, newTrack),
-        {
-          t: oldTrack.id,
-          r: replacementId ?? newTrack.id,
-          ...(originPeerId ? {o: originPeerId} : {})
+      tracks
+    ) => {
+      knownLocalStreams.add(stream)
+      const key = explicitKey ?? localMedia.getStreamKey(stream)
+      const metadata = getStreamMetadata(stream, options)
+      const effectiveTracks = resolveStreamTracks(stream, tracks)
+      const rawTracks = stream.getTracks?.() ?? []
+
+      await all(
+        iterate(options.target, async (id, peer) => {
+          const mediaPeer = preparePeer ? await preparePeer(id, peer) : peer
+          const peerStreams = (peerSyncedStreams[id] ??= new WeakMap())
+          let synced = peerStreams.get(stream)
+
+          const isInitial = !synced
+          const toAdd: MediaStreamTrack[] = []
+
+          if (!synced) {
+            synced = new Map(
+              effectiveTracks.map(track => [
+                track,
+                typeof track?.id === 'string' ? track.id : ''
+              ])
+            )
+            peerStreams.set(stream, synced)
+          } else {
+            const nextSet = new Set(effectiveTracks)
+            for (const [prevTrack] of synced) {
+              if (!nextSet.has(prevTrack)) {
+                mediaPeer.removeTrack(prevTrack)
+                synced.delete(prevTrack)
+              }
+            }
+            for (const nextTrack of effectiveTracks) {
+              if (!synced.has(nextTrack)) {
+                toAdd.push(nextTrack)
+                synced.set(
+                  nextTrack,
+                  typeof nextTrack?.id === 'string' ? nextTrack.id : ''
+                )
+              }
+            }
+          }
+
+          const trackIds = effectiveTracks
+            .map(track => synced.get(track))
+            .filter((tid): tid is string => Boolean(tid))
+          const payload: InternalMediaMeta = {
+            k: key,
+            s: stream.id,
+            ...(trackIds.length > 0 ? {t: trackIds} : {}),
+            ...(originPeerId ? {o: originPeerId} : {}),
+            ...(metadata === undefined ? {} : {m: metadata})
+          }
+          await sendMeta(payload, id)
+
+          if (isInitial) {
+            if (
+              tracks ||
+              effectiveTracks.length !== rawTracks.length ||
+              effectiveTracks.some((t, i) => t !== rawTracks[i])
+            ) {
+              effectiveTracks.forEach(track =>
+                mediaPeer.addTrack(track, stream)
+              )
+            } else {
+              mediaPeer.addStream(stream)
+            }
+          } else {
+            toAdd.forEach(nextTrack => mediaPeer.addTrack(nextTrack, stream))
+          }
+        })
+      )
+    },
+
+    removeStream: (stream, target) => {
+      if (!target) {
+        knownLocalStreams.delete(stream)
+        localStreamMetas.delete(stream)
+        localStreamRawTracks.delete(stream)
+      }
+      void iterate(target, (id, peer) => {
+        const prevTracks = peerSyncedStreams[id]?.get(stream)
+        peerSyncedStreams[id]?.delete(stream)
+        peer.removeStream(stream)
+        if (prevTracks) {
+          const rawSet = new Set(stream.getTracks?.() ?? [])
+          for (const [track] of prevTracks) {
+            if (!rawSet.has(track)) {
+              peer.removeTrack(track)
+            }
+          }
         }
-      ),
+      })
+    },
+
+    replaceTrack: async (oldTrack, newTrack, target) => {
+      replacedTracks.set(oldTrack, newTrack)
+      replacedTracks.delete(newTrack)
+      await all(
+        iterate(target, async (id, peer) => {
+          const mediaPeer = preparePeer ? await preparePeer(id, peer) : peer
+          const peerStreams = peerSyncedStreams[id]
+          if (peerStreams) {
+            for (const stream of knownLocalStreams) {
+              const synced = peerStreams.get(stream)
+              if (synced?.has(oldTrack)) {
+                const signaledId =
+                  synced.get(oldTrack) ??
+                  (typeof oldTrack?.id === 'string' ? oldTrack.id : '')
+                synced.delete(oldTrack)
+                synced.set(newTrack, signaledId)
+              }
+            }
+          }
+          await mediaPeer.replaceTrack(oldTrack, newTrack)
+        })
+      )
+    },
 
     receiveStreamMeta: (meta, id) => {
       if (!isActive(id)) {
@@ -446,49 +429,32 @@ export const createMediaManager = ({
         parsed.key,
         parsed.streamId
       )
+      const cachedTracks = cached?.getTracks?.() ?? []
 
-      if (cached?.getTracks().length) {
-        emitStream(id, parsed.key, cached, parsed.metadata, parsed.originPeerId)
-        return
-      }
-
-      queuePendingMeta(pendingStreamMetas, id, parsed, 'stream')
-    },
-
-    receiveTrackMeta: (meta, id) => {
-      if (!isActive(id)) {
-        return
-      }
-
-      const parsed = toPendingMediaMeta(meta)
-
-      if (!parsed) {
-        return
-      }
-
-      const cached = getPeerMedia(id).getRemoteTrack(parsed.key, parsed.trackId)
-
-      if (
-        cached &&
-        cached.track.readyState !== 'ended' &&
-        (!cached.stream.getTracks ||
-          cached.stream.getTracks().includes(cached.track))
-      ) {
-        emitTrack(
-          id,
-          parsed.key,
-          cached.track,
-          cached.stream,
-          parsed.metadata,
-          parsed.originPeerId,
-          parsed.trackId,
-          !parsed.streamId && Boolean(parsed.trackId),
-          parsed.replacementId
+      if (cachedTracks.length > 0) {
+        const cachedTrackIds = new Set(
+          cachedTracks
+            .map(t => t?.id)
+            .filter((tid): tid is string => typeof tid === 'string')
         )
-        return
+        const waitingForNewTracks = Boolean(
+          parsed.trackIds?.length &&
+          parsed.trackIds.some(tid => !cachedTrackIds.has(tid))
+        )
+        if (!waitingForNewTracks) {
+          emitStream(
+            id,
+            parsed.key,
+            cached!,
+            parsed.metadata,
+            parsed.originPeerId,
+            parsed.trackIds
+          )
+          return
+        }
       }
 
-      queuePendingMeta(pendingTrackMetas, id, parsed, 'track')
+      queuePendingMeta(pendingStreamMetas, id, parsed)
     },
 
     receiveRemoteStream: (id, stream) => {
@@ -496,59 +462,56 @@ export const createMediaManager = ({
         return
       }
 
-      const next = takePendingMeta(
-        pendingStreamMetas[id],
-        typeof stream.id === 'string' ? stream.id : undefined,
-        meta => meta.streamId
-      )
-
-      if (!next) {
+      const queue = pendingStreamMetas[id]
+      if (!queue?.length) {
         return
       }
 
-      emitStream(id, next.key, stream, next.metadata, next.originPeerId)
-    },
-
-    receiveRemoteTrack: (id, track, stream) => {
-      if (!isActive(id)) {
-        return
-      }
-
-      const queue = pendingTrackMetas[id]
-      const trackId = typeof track.id === 'string' ? track.id : undefined
       const streamId = typeof stream.id === 'string' ? stream.id : undefined
-      const byTrackIdx =
-        queue && trackId
-          ? queue.findIndex(meta => meta.trackId === trackId)
-          : -1
-      const next =
-        byTrackIdx >= 0
-          ? queue?.splice(byTrackIdx, 1)[0]
-          : takePendingMeta(queue, streamId, meta => meta.streamId)
+      const index = streamId
+        ? queue.findIndex(meta => !meta.streamId || meta.streamId === streamId)
+        : 0
 
-      if (!next) {
+      if (index < 0) {
         return
       }
 
-      emitTrack(
-        id,
-        next.key,
-        track,
-        stream,
-        next.metadata,
-        next.originPeerId,
-        next.trackId
-      )
+      const candidate = queue[index]!
+      if (candidate.trackIds?.length) {
+        const currentIds = new Set(
+          (stream.getTracks?.() ?? [])
+            .map(t => t?.id)
+            .filter((tid): tid is string => typeof tid === 'string')
+        )
+        if (
+          currentIds.size > 0 &&
+          candidate.trackIds.some(tid => !currentIds.has(tid))
+        ) {
+          return
+        }
+      }
+
+      const [next] = queue.splice(index, 1)
+      if (next) {
+        emitStream(
+          id,
+          next.key,
+          stream,
+          next.metadata,
+          next.originPeerId,
+          next.trackIds
+        )
+      }
     },
 
     clearPeer: id => {
       delete pendingStreamMetas[id]
-      delete pendingTrackMetas[id]
       delete peerMediaCaches[id]
+      delete peerSyncedStreams[id]
+      delete peerEmittedStreams[id]
     },
 
-    onPeerStream: null,
-    onPeerTrack: null
+    onPeerStream: null
   }
 
   return manager

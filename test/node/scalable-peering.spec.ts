@@ -132,9 +132,8 @@ const createOverlayCluster = async ({
     }
 
     override replaceTrack(oldTrack: any, newTrack: any) {
-      this.replaceTrackCalls++
       this.lastReplacedTrack = {oldTrack, newTrack}
-      return Promise.resolve()
+      return super.replaceTrack(oldTrack, newTrack)
     }
   }
 
@@ -707,24 +706,12 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
       string,
       {streamId: string; from: string; meta: any}
     >()
-    const trackDeliveries = new Map<
-      string,
-      Array<{trackId: string; from: string; meta: any}>
-    >()
 
     for (const id of cluster.peerIds) {
-      trackDeliveries.set(id, [])
       const room = cluster.rooms.get(id)!
       room.onPeerStream = (stream, {peerId, metadata}) => {
         streamDeliveries.set(id, {
           streamId: stream.id,
-          from: peerId,
-          meta: metadata
-        })
-      }
-      room.onPeerTrack = (track, _stream, {peerId, metadata}) => {
-        trackDeliveries.get(id)!.push({
-          trackId: track.id,
           from: peerId,
           meta: metadata
         })
@@ -738,11 +725,9 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
       getTracks: () => [videoTrack1]
     } as unknown as MediaStream
 
-    await Promise.all(
-      broadcasterRoom.addStream(liveStream, {
-        metadata: {title: 'Keynote Live', fps: 60}
-      })
-    )
+    await broadcasterRoom.addStream(liveStream, {
+      metadata: {title: 'Keynote Live', fps: 60}
+    })
 
     await waitFor(() => streamDeliveries.size === peerCount - 1, 3_000)
 
@@ -771,21 +756,20 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
       `broadcaster children (${broadcasterTree.childrenIds.length}) exceeded fanout (${fanout})`
     )
 
-    // Test multi-hop replaceTrack cascading down the media tree
+    // Test sender-level replaceTrack on broadcaster (relays forward the same remote track object with zero signaling) + stream metadata re-announcement cascading down the media tree
     const videoTrack2 = {
       id: 'video-track-4k-screenshare'
     } as unknown as MediaStreamTrack
-    await Promise.all(
-      broadcasterRoom.replaceTrack(videoTrack1, videoTrack2, {
-        metadata: {mode: 'screenshare'}
-      })
-    )
+    await broadcasterRoom.replaceTrack(videoTrack1, videoTrack2)
+    await broadcasterRoom.addStream(liveStream, {
+      metadata: {mode: 'screenshare'}
+    })
 
     await waitFor(() =>
       cluster.peerIds.every(
         id =>
           id === broadcasterId ||
-          trackDeliveries.get(id)!.some(t => t.meta?.mode === 'screenshare')
+          streamDeliveries.get(id)?.meta?.mode === 'screenshare'
       )
     )
 
@@ -793,12 +777,10 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
       if (id === broadcasterId) {
         continue
       }
-      const replaced = trackDeliveries
-        .get(id)!
-        .find(t => t.meta?.mode === 'screenshare')
-      assert.ok(replaced, `peer ${id} did not receive replaced track`)
-      assert.equal(replaced.from, broadcasterId)
-      assert.deepEqual(replaced.meta, {mode: 'screenshare'})
+      const updated = streamDeliveries.get(id)
+      assert.ok(updated, `peer ${id} did not receive updated stream metadata`)
+      assert.equal(updated.from, broadcasterId)
+      assert.deepEqual(updated.meta, {mode: 'screenshare'})
     }
 
     let totalReplaceTrackCalls = 0
@@ -809,8 +791,8 @@ void test('Media streaming at scale: 100-peer ALM broadcast tree, track replacem
     }
     assert.equal(
       totalReplaceTrackCalls,
-      peerCount - 1,
-      `expected replaceTrack to cascade across all ${peerCount - 1} tree edges`
+      broadcasterTree.childrenIds.length,
+      `expected replaceTrack only on broadcaster's ${broadcasterTree.childrenIds.length} direct children`
     )
 
     // Test multi-hop removeStream cascading down the media tree
@@ -883,7 +865,7 @@ void test('Peer dropping & mesh-breaking scenarios: 25% mass churn, targeted rel
       id: 'resilient-stream',
       getTracks: () => [{id: 'audio-track-1'}]
     } as unknown as MediaStream
-    await Promise.all(cluster.rooms.get('peer-0000')!.addStream(stream))
+    await cluster.rooms.get('peer-0000')!.addStream(stream)
     await waitFor(() => streamSeenBy.size === peerCount - 1)
 
     // 1. Targeted Relay Drop: find all direct children of peer-0000 in the media tree and drop half of them,
@@ -2948,7 +2930,6 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
     assert.equal(source.getPeers()[direct].direct, true)
     assert.equal(source.getPeers()[remote].direct, false)
     const streams: string[] = []
-    const tracks: string[] = []
     for (const [id, room] of cluster.rooms) {
       getRoomSignalingBridge(room)!
         .getScaleProvider()!
@@ -2958,33 +2939,17 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
           }
         })
       room.onPeerStream = () => streams.push(id)
-      room.onPeerTrack = () => tracks.push(id)
     }
     for (const target of [direct, remote]) {
       streams.length = 0
-      tracks.length = 0
       const camera = {id: `camera-${target}`}
       const stream = {id: `private-${target}`, getTracks: () => [camera]}
-      await Promise.all(source.addStream(stream, {target}))
+      await source.addStream(stream, {target})
       await wait(100)
       assert.deepEqual(
         streams,
         [target],
         'only the requested peer receives a stream'
-      )
-      const audio = {id: `audio-${target}`}
-      await Promise.all(
-        source.addTrack(
-          audio,
-          {id: `audio-stream-${target}`, getTracks: () => [audio]},
-          {target}
-        )
-      )
-      await wait(100)
-      assert.deepEqual(
-        tracks,
-        [target],
-        'only the requested peer receives a track'
       )
       assert.equal(source.getPeers()[target].direct, true)
     }
@@ -2993,7 +2958,7 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
   }
 })
 
-void test('Removing a broadcast track prevents replay after topology healing', async () => {
+void test('Removing a broadcast stream prevents replay after topology healing', async () => {
   const cluster = await createOverlayCluster({
     peerCount: 8,
     topology: {mode: 'gossip', maxConnections: 4, fanout: 2},
@@ -3003,10 +2968,10 @@ void test('Removing a broadcast track prevents replay after topology healing', a
     const source = cluster.rooms.get('peer-0000')!
     const track = {id: 'removed-camera'}
     const stream = {id: 'removed-stream', getTracks: () => [track]}
-    await Promise.all(source.addTrack(track, stream))
+    await source.addStream(stream)
     await wait(100)
     assert.ok(cluster.addedTracks.length >= 7)
-    source.removeTrack(track)
+    source.removeStream(stream)
     await wait(100)
     cluster.addedTracks.length = 0
     cluster.dropPeer('peer-0001')
@@ -3015,7 +2980,7 @@ void test('Removing a broadcast track prevents replay after topology healing', a
     assert.deepEqual(
       cluster.addedTracks,
       [],
-      'removed tracks must never be sent again'
+      'removed streams must never be sent again'
     )
   } finally {
     await cluster.cleanup()
@@ -3033,16 +2998,20 @@ void test('Removing and replacing tracks updates broadcast streams before topolo
       const source = cluster.rooms.get('peer-0000')!
       const camera = {id: 'camera'}
       const audio = {id: 'audio'}
-      const stream = {id: 'two-track-stream', getTracks: () => [camera, audio]}
-      await Promise.all(source.addStream(stream))
+      let currentTracks = [camera, audio]
+      const stream = {
+        id: 'two-track-stream',
+        getTracks: () => [...currentTracks]
+      }
+      await source.addStream(stream)
       await wait(100)
-      let removedTrack = camera
       if (replace) {
-        removedTrack = {id: 'replacement-camera'}
-        await Promise.all(source.replaceTrack(camera, removedTrack))
+        const replacementCamera = {id: 'replacement-camera'}
+        await source.replaceTrack(camera, replacementCamera)
         await wait(100)
       }
-      source.removeTrack(removedTrack)
+      currentTracks = [audio]
+      await source.addStream(stream)
       await wait(100)
       cluster.addedTracks.length = 0
       cluster.dropPeer('peer-0001')

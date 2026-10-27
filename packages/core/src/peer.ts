@@ -46,8 +46,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   let pendingDataTimer: ReturnType<typeof setTimeout> | null = null
   const shouldTrickleIce = trickleIce !== false
   const pendingRemoteCandidates: RTCIceCandidateInit[] = []
-  const pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}> =
-    []
+  const pendingStreams: MediaStream[] = []
+  const streamSenders = new WeakMap<MediaStream, Set<RTCRtpSender>>()
   let resolveInitialOffer: ((signal: Signal | void) => void) | undefined
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
@@ -507,13 +507,12 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     const stream = e.streams[0]
 
     if (stream) {
-      if (!handlers.track && !handlers.stream) {
-        pendingTracks.push({track: e.track, stream})
+      if (!handlers.stream) {
+        pendingStreams.push(stream)
         return
       }
 
-      handlers.track?.(e.track, stream)
-      handlers.stream?.(stream)
+      handlers.stream(stream)
     }
   }
   const offerPromise = initiator
@@ -666,27 +665,51 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
         appendSignalHandler(signal)
       }
 
-      if ((handlers.track || handlers.stream) && pendingTracks.length > 0) {
-        const queued = pendingTracks.splice(0)
-        queued.forEach(({track, stream}) => {
-          handlers.track?.(track, stream)
-          handlers.stream?.(stream)
-        })
+      if (handlers.stream && pendingStreams.length > 0) {
+        const queued = pendingStreams.splice(0)
+        queued.forEach(stream => handlers.stream?.(stream))
       }
     },
 
-    addStream: stream =>
-      stream.getTracks().forEach(track => pc.addTrack(track, stream)),
+    addStream: stream => {
+      let senders = streamSenders.get(stream)
+      if (!senders) {
+        senders = new Set()
+        streamSenders.set(stream, senders)
+      }
+      stream.getTracks().forEach(track => {
+        const sender = pc.addTrack(track, stream)
+        if (sender) {
+          senders.add(sender)
+        }
+      })
+    },
 
-    removeStream: stream =>
-      pc
-        .getSenders()
+    removeStream: stream => {
+      const senders = streamSenders.get(stream)
+      if (senders) {
+        streamSenders.delete(stream)
+        senders.forEach(sender => pc.removeTrack(sender))
+        return
+      }
+      pc.getSenders()
         .filter(
           sender => sender.track && stream.getTracks().includes(sender.track)
         )
-        .forEach(sender => pc.removeTrack(sender)),
+        .forEach(sender => pc.removeTrack(sender))
+    },
 
-    addTrack: (track, stream) => pc.addTrack(track, stream),
+    addTrack: (track, stream) => {
+      const sender = pc.addTrack(track, stream)
+      if (sender && stream) {
+        let senders = streamSenders.get(stream)
+        if (!senders) {
+          senders = new Set()
+          streamSenders.set(stream, senders)
+        }
+        senders.add(sender)
+      }
+    },
 
     removeTrack: track => {
       const sender = pc.getSenders().find(s => s.track === track)

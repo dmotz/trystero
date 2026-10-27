@@ -12,15 +12,15 @@
   pass a `ScaleConfig` object (`{mode, maxConnections, autoThreshold, fanout}`)
   to customize connection limits. Apps that do not import `scale()` tree-shake
   the entire overlay plugin out of their bundle.
-- All room APIs (`makeAction`, `makeState`, `addStream`, `addTrack`,
-  `replaceTrack`, `ping`, `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work
-  transparently across both direct and multi-hop peers. Broadcast media in
-  scalable topologies routes hop-by-hop through a branching tree with automatic
-  reparenting if an upstream peer disconnects. Targeted media establishes direct
-  1-hop WebRTC connections to its recipients, which can exceed the topology's
-  `maxConnections` target. Multi-hop data messages are ECDSA-signed (with ECDH +
-  AES-GCM end-to-end encryption for targeted data sends) so intermediate relays
-  cannot forge or read data traffic.
+- All room APIs (`makeAction`, `makeState`, `addStream`, `replaceTrack`, `ping`,
+  `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work transparently across both
+  direct and multi-hop peers. Broadcast media in scalable topologies routes
+  hop-by-hop through a branching tree with automatic reparenting if an upstream
+  peer disconnects. Targeted media establishes direct 1-hop WebRTC connections
+  to its recipients, which can exceed the topology's `maxConnections` target.
+  Multi-hop data messages are ECDSA-signed (with ECDH + AES-GCM end-to-end
+  encryption for targeted data sends) so intermediate relays cannot forge or
+  read data traffic.
 - Added `room.getTopology()` (on rooms configured with `scale()`) to inspect the
   active topology mode, direct and multi-hop peer lists, routing paths, media
   broadcast trees, and forwarding stats.
@@ -103,8 +103,7 @@ const {peerId, userId} = await room.getSelf()
 ```
 
 Room event handlers now receive `{peerId, userId, ...}` context objects instead
-of a bare `peerId` string (with `stream` / `track, stream` remaining first on
-media handlers):
+of a bare `peerId` string (with `stream` remaining first on `onPeerStream`):
 
 ```js
 room.onPeerJoin = ({peerId, userId, roles}) =>
@@ -112,8 +111,21 @@ room.onPeerJoin = ({peerId, userId, roles}) =>
 room.onPeerLeave = ({peerId, userId}) =>
   console.log(`${peerId} (${userId}) left`)
 room.onPeerStream = (stream, {peerId, userId, metadata}) => {}
-room.onPeerTrack = (track, stream, {peerId, userId, metadata}) => {}
 ```
+
+The media API has been streamlined around `MediaStream` as the unit of media
+sync (`addStream`, `removeStream`, `replaceTrack`, and `onPeerStream`):
+
+- `addStream(stream, {target?, metadata?})` and
+  `replaceTrack(oldTrack, newTrack, {target?})` now return `Promise<void>`
+  instead of `Promise<void>[]`.
+- `addStream` is now idempotent and syncs the stream's current tracks and
+  metadata (calling `stream.addTrack(t); room.addStream(stream)` or
+  `stream.removeTrack(t); room.addStream(stream)` adds or removes tracks on
+  existing peer senders, and re-calling `room.addStream(stream, {metadata})`
+  with changed metadata re-triggers `onPeerStream` on recipients).
+- `addTrack`, `removeTrack`, `onPeerTrack`, and the `metadata` option on
+  `replaceTrack` have been removed.
 
 `room.getPeers()` now returns a map of `PeerInfo` objects
 (`{userId, connection, direct, hops, roles}`) instead of raw `RTCPeerConnection`

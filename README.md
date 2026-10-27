@@ -907,17 +907,17 @@ When you include `use: [scale()]` (which defaults to `'auto'` mode):
   connections (`maxConnections: 6` by default) and passes messages and media
   streams along to the rest of the room.
 
-All of your code (`makeAction`, `makeState`, `addStream`, `addTrack`, `ping`,
-`onUserJoin`, `onUserLeave`, and `getUsers()`) works the exact same way no
-matter how many people are in the room or whether two users are connected
+All of your code (`makeAction`, `makeState`, `addStream`, `replaceTrack`,
+`ping`, `onUserJoin`, `onUserLeave`, and `getUsers()`) works the exact same way
+no matter how many people are in the room or whether two users are connected
 directly or through other peers.
 
 Broadcast media travels through the relay tree. Targeted media establishes a
 direct WebRTC connection to each selected endpoint, so other participants do not
 receive or relay its audio/video. These connections can exceed the overlay's
 `maxConnections` target and remain available until the peer or room disconnects.
-Await the promises returned by `addStream`, `addTrack`, and `replaceTrack` to
-handle connection failures.
+Await the promise returned by `addStream` or `replaceTrack` to handle connection
+failures.
 
 You can customize how `scale()` connects peers by passing a mode string or
 config object:
@@ -967,15 +967,14 @@ relays, and how data and media streams are being routed.
   peer reliably along the fastest available paths. Point-to-point messages
   (`target`) route along shortest paths with disjoint backup next-hops for
   instant failover.
-- **Media broadcast trees**: Whenever any peer calls `addStream()` or
-  `addTrack()` without `target` in `'gossip'` mode, Trystero builds a
-  deterministic $k$-ary application-layer multicast (ALM) tree rooted at the
-  broadcaster. Each internal peer decodes the incoming stream and forwards the
-  `MediaStreamTrack`s to its downstream children (`fanout: 3` by default), so a
-  broadcaster can stream audio or video to dozens of viewers while only
-  uploading to 3 peers. Targeted media (`addStream` with `target`) establishes a
-  direct 1-hop WebRTC connection to each selected peer instead of traversing
-  relays.
+- **Media broadcast trees**: Whenever any peer calls `addStream()` without
+  `target` in `'gossip'` mode, Trystero builds a deterministic $k$-ary
+  application-layer multicast (ALM) tree rooted at the broadcaster. Each
+  internal peer decodes the incoming stream and forwards the `MediaStreamTrack`s
+  to its downstream children (`fanout: 3` by default), so a broadcaster can
+  stream audio or video to dozens of viewers while only uploading to 3 peers.
+  Targeted media (`addStream` with `target`) establishes a direct 1-hop WebRTC
+  connection to each selected peer instead of traversing relays.
 - **End-to-end data security across hops**: For data channels, every peer
   automatically generates an ephemeral WebCrypto signing keypair (ECDSA P-256)
   and encryption keypair (ECDH P-256). Link-state descriptors and data
@@ -1588,7 +1587,11 @@ Returns an object with the following properties and methods:
 
 - ### `addStream(stream, [options])`
 
-  Broadcasts media stream to other peers.
+  Broadcasts or syncs a media stream to other peers and returns a
+  `Promise<void>` that resolves once the stream has been offered to all matching
+  targets. Calling `addStream` again with the same `MediaStream` is idempotent
+  and syncs any added or removed tracks (`stream.addTrack()` /
+  `stream.removeTrack()`) and updated `metadata`.
   - `stream` - A `MediaStream` with audio and/or video to send to peers in the
     room.
 
@@ -1600,7 +1603,8 @@ Returns an object with the following properties and methods:
   - `options.metadata` - **(optional)** Additional metadata (any serializable
     type) to be sent with the stream. This is useful when sending multiple
     streams so recipients know which is which (e.g. a webcam versus a screen
-    capture).
+    capture). Re-calling `addStream(stream, {metadata})` with different metadata
+    fires `onPeerStream` again on recipients with the updated metadata.
 
 - ### `removeStream(stream, [options])`
 
@@ -1610,40 +1614,16 @@ Returns an object with the following properties and methods:
   - `options.target` - **(optional)** If specified, the stream is removed only
     from the target `peerId` or `userId` (string) or list of IDs (array).
 
-- ### `addTrack(track, stream, [options])`
-
-  Adds a new media track to a stream.
-  - `track` - A `MediaStreamTrack` to add to an existing stream.
-
-  - `stream` - The target `MediaStream` to attach the new track to.
-
-  - `options.target` - **(optional)** If specified, the track is sent only to
-    the target `peerId` or `userId` (string) or list of IDs (array).
-
-  - `options.metadata` - **(optional)** Additional metadata (any serializable
-    type) to be sent with the track. See `metadata` notes for `addStream()`
-    above for more details.
-
-- ### `removeTrack(track, [options])`
-
-  Removes a media track.
-  - `track` - The `MediaStreamTrack` to remove.
-
-  - `options.target` - **(optional)** If specified, the track is removed only
-    from the target `peerId` or `userId` (string) or list of IDs (array).
-
 - ### `replaceTrack(oldTrack, newTrack, [options])`
 
-  Replaces a media track with a new one.
-  - `oldTrack` - The `MediaStreamTrack` to remove.
+  Swaps a media track at the `RTCRtpSender` level without renegotiation and
+  returns a `Promise<void>`.
+  - `oldTrack` - The `MediaStreamTrack` to replace.
 
-  - `newTrack` - A `MediaStreamTrack` to attach.
+  - `newTrack` - A `MediaStreamTrack` to attach in its place.
 
   - `options.target` - **(optional)** If specified, the track is replaced only
     for the target `peerId` or `userId` (string) or list of IDs (array).
-
-  - `options.metadata` - **(optional)** Additional metadata (any serializable
-    type) to be sent with the replacement track.
 
 - ### `onUserJoin`
 
@@ -1708,7 +1688,8 @@ Returns an object with the following properties and methods:
 
 - ### `onPeerStream`
 
-  A callback property that will be called when a user sends a media stream.
+  A callback property that will be called when a user sends a media stream (and
+  again if the sender re-announces the stream with updated `metadata`).
   Assigning a new function replaces the previous handler; assigning `null`
   clears it.
   - `callback(stream, {userId, peerId, metadata})` - Function to run whenever a
@@ -1721,23 +1702,6 @@ Returns an object with the following properties and methods:
   ```js
   room.onPeerStream = (stream, {userId, metadata}) =>
     console.log(`got stream from ${userId}`, stream, metadata)
-  ```
-
-- ### `onPeerTrack`
-
-  A callback property that will be called when a user sends a media track.
-  Assigning a new function replaces the previous handler; assigning `null`
-  clears it.
-  - `callback(track, stream, {userId, peerId, metadata})` - Function to run
-    whenever a user sends a media track, called with the `MediaStreamTrack`,
-    attached `MediaStream`, and a context object containing `userId`, `peerId`,
-    and optional `metadata` (see `addTrack()` above for details).
-
-  Example:
-
-  ```js
-  room.onPeerTrack = (track, stream, {userId, metadata}) =>
-    console.log(`got track from ${userId}`, track, metadata)
   ```
 
 - ### `makeAction(actionId, [config])`

@@ -7,13 +7,7 @@ import {
 } from '../../packages/core/src/media.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
-import {
-  LinkedMediaPeer,
-  MockPeer,
-  linkPeers,
-  turn,
-  withTimeout
-} from './peer-harness.ts'
+import {LinkedMediaPeer, MockPeer, linkPeers, turn} from './peer-harness.ts'
 
 void test('media metadata keeps one current alias per native object and preserves native ID lookup', () => {
   const cache = createMediaIdentityCache()
@@ -26,28 +20,20 @@ void test('media metadata keeps one current alias per native object and preserve
     onPeerError: (_id, error) => errors.push(error)
   })
   cache.rememberRemoteStream('initial-stream', stream, stream.id)
-  cache.rememberRemoteTrack('initial-track', track, stream, track.id, stream.id)
   manager.receiveStreamMeta({k: 'initial-stream', s: stream.id}, 'peer')
   manager.receiveRemoteStream('peer', stream)
-  manager.receiveTrackMeta({k: 'initial-track', t: track.id}, 'peer')
-  manager.receiveRemoteTrack('peer', track, stream)
   for (let i = 0; i < 1000; i++) {
     cache.rememberRemoteStream(`stream-${i}`, stream, stream.id)
-    cache.rememberRemoteTrack(`track-${i}`, track, stream, track.id, stream.id)
     manager.receiveStreamMeta({k: `stream-${i}`, s: stream.id}, 'peer')
-    manager.receiveTrackMeta({k: `track-${i}`, t: track.id}, 'peer')
   }
   for (let i = 0; i < 999; i++) {
     assert.equal(cache.getRemoteStream(`stream-${i}`), undefined)
-    assert.equal(cache.getRemoteTrack(`track-${i}`), undefined)
   }
   assert.equal(cache.getRemoteStream('stream-999'), stream)
-  assert.equal(cache.getRemoteTrack('track-999')?.track, track)
   assert.equal(cache.getRemoteStream('initial-stream', stream.id), stream)
-  assert.equal(cache.getRemoteTrack('initial-track', track.id)?.track, track)
   assert.deepEqual(errors, [])
   cache.clearRemote()
-  assert.equal(cache.getRemoteTrack('track-999', track.id), undefined)
+  assert.equal(cache.getRemoteStream('stream-999', stream.id), undefined)
 })
 
 for (const fail of [false, true]) {
@@ -68,9 +54,7 @@ for (const fail of [false, true]) {
       onPeerError: () => {}
     })
     let settled = false
-    const operation = Promise.all(
-      media.replaceTrack(oldTrack, newTrack, {}, async () => {})
-    )
+    const operation = media.replaceTrack(oldTrack, newTrack)
     const result = operation.then(
       () => {
         settled = true
@@ -93,12 +77,17 @@ for (const fail of [false, true]) {
 }
 
 void test(
-  'Trystero: replaceTrack on a stream track resolves on direct rooms',
+  'Trystero: replaceTrack on a stream track resolves on direct rooms and addStream syncs tracks and metadata',
   {timeout: 10_000},
   async () => {
     const initialTrack = {id: 'initial-video-track'}
     const replacementTrack = {id: 'replacement-video-track'}
-    const localStream = {id: 'video-stream', getTracks: () => [initialTrack]}
+    const extraAudioTrack = {id: 'extra-audio-track'}
+    let currentTracks = [initialTrack]
+    const localStream = {
+      id: 'video-stream',
+      getTracks: () => [...currentTracks]
+    }
     let directRoomA = null
     let directRoomB = null
 
@@ -133,34 +122,98 @@ void test(
       registerDirectB(directPeerB, 'peer-a')
       await Promise.all([joinDirectA, joinDirectB])
 
-      const directStreamReceived = new Promise(resolve => {
-        directRoomB.onPeerStream = (stream, {peerId}) =>
-          resolve({streamId: stream.id, peerId})
+      const streamEvents: Array<{
+        streamId: string
+        trackIds: string[]
+        peerId: string
+        metadata: unknown
+      }> = []
+      directRoomB.onPeerStream = (stream, {peerId, metadata}) => {
+        streamEvents.push({
+          streamId: stream.id,
+          trackIds: stream.getTracks().map(t => t.id),
+          peerId,
+          metadata
+        })
+      }
+
+      await directRoomA.addStream(localStream as any, {
+        target: 'peer-b',
+        metadata: {mode: 'camera'}
       })
-      await Promise.all(
-        directRoomA.addStream(localStream as any, {target: 'peer-b'})
+      assert.equal(directPeerA.addStreamCalls, 1)
+      assert.deepEqual(streamEvents, [
+        {
+          streamId: 'video-stream',
+          trackIds: ['initial-video-track'],
+          peerId: 'peer-a',
+          metadata: {mode: 'camera'}
+        }
+      ])
+
+      // Re-calling addStream with identical tracks and metadata is a no-op on senders and does not re-fire onPeerStream
+      await directRoomA.addStream(localStream as any, {
+        target: 'peer-b',
+        metadata: {mode: 'camera'}
+      })
+      assert.equal(directPeerA.addStreamCalls, 1)
+      assert.equal(directPeerA.addTrackCalls, 0)
+      assert.equal(directPeerA.removeTrackCalls, 0)
+      assert.equal(streamEvents.length, 1)
+
+      // replaceTrack swaps at the sender level without renegotiation
+      await directRoomA.replaceTrack(
+        initialTrack as any,
+        replacementTrack as any,
+        {target: 'peer-b'}
       )
-      assert.deepEqual(await withTimeout(directStreamReceived), {
+      assert.equal(directPeerA.replaceTrackCalls, 1)
+
+      // Re-announcing stream with updated metadata after replaceTrack keeps the replaced track (no removeTrack/addTrack churn) and fires onPeerStream again
+      await directRoomA.addStream(localStream as any, {
+        target: 'peer-b',
+        metadata: {mode: 'screenshare'}
+      })
+      assert.equal(directPeerA.addTrackCalls, 0)
+      assert.equal(directPeerA.removeTrackCalls, 0)
+      assert.equal(streamEvents.length, 2)
+      assert.deepEqual(streamEvents[1], {
         streamId: 'video-stream',
-        peerId: 'peer-a'
+        trackIds: ['initial-video-track'],
+        peerId: 'peer-a',
+        metadata: {mode: 'screenshare'}
       })
 
-      const replacedOnDirect = new Promise(resolve => {
-        directRoomB.onPeerTrack = (track, stream, {peerId, metadata}) =>
-          resolve({trackId: track.id, streamId: stream.id, peerId, metadata})
+      // Adding a track to the local stream and calling addStream syncs only the added track
+      currentTracks = [initialTrack, extraAudioTrack]
+      await directRoomA.addStream(localStream as any, {
+        target: 'peer-b',
+        metadata: {mode: 'screenshare'}
       })
-      await Promise.all(
-        directRoomA.replaceTrack(initialTrack as any, replacementTrack as any, {
-          target: 'peer-b',
-          metadata: {direct: true}
-        })
+      assert.equal(directPeerA.addTrackCalls, 1)
+      assert.equal(directPeerA.removeTrackCalls, 0)
+      assert.deepEqual(
+        directPeerB.remoteStreams
+          .get('video-stream')
+          ?.stream.getTracks()
+          .map(t => t.id),
+        ['initial-video-track', 'extra-audio-track']
       )
-      assert.deepEqual(await withTimeout(replacedOnDirect), {
-        trackId: 'initial-video-track',
-        streamId: 'video-stream',
-        peerId: 'peer-a',
-        metadata: {direct: true}
+
+      // Removing a track from the local stream and calling addStream removes that track's sender
+      currentTracks = [initialTrack]
+      await directRoomA.addStream(localStream as any, {
+        target: 'peer-b',
+        metadata: {mode: 'screenshare'}
       })
+      assert.equal(directPeerA.removeTrackCalls, 1)
+      assert.deepEqual(
+        directPeerB.remoteStreams
+          .get('video-stream')
+          ?.stream.getTracks()
+          .map(t => t.id),
+        ['initial-video-track']
+      )
     } finally {
       await directRoomA?.leave().catch(() => {})
       await directRoomB?.leave().catch(() => {})
@@ -221,11 +274,11 @@ void test(
       }
 
       await Promise.all([
-        ...roomA.addStream(avStream as any, {
+        roomA.addStream(avStream as any, {
           target: 'peer-b',
           metadata: {kind: 'camera'}
         }),
-        ...roomA.addStream(screenStream as any, {
+        roomA.addStream(screenStream as any, {
           target: 'peer-b',
           metadata: {kind: 'screen'}
         })

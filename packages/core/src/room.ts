@@ -1,7 +1,6 @@
 import {
   entries,
   fromEntries,
-  genId,
   getConfiguredPlugins,
   isBrowser,
   keys,
@@ -48,6 +47,7 @@ import type {
   PeerHandshake,
   PeerJoinContext,
   PeerLeaveContext,
+  RemoveMediaOptions,
   Room,
   RoomKernel,
   RoomPlugin,
@@ -127,10 +127,9 @@ type PendingPongWaiter = {
 type MediaControlMessage =
   | {op: 'connect'}
   | {
-      op: 'rmStream' | 'rmTrack'
+      op: 'rmStream'
       o: string
       id: string
-      keys?: string[]
     }
 
 export default <
@@ -326,10 +325,6 @@ export default <
   const pendingOverlayFrames = new Map<string, ArrayBuffer[]>()
   const promotedFromVirtual = new Set<string>()
   const suppressVirtualJoin = new Set<string>()
-  const knownBroadcastTracks = new Map<
-    string,
-    {track: MediaStreamTrack; stream: MediaStream}
-  >()
   const pendingMediaPeers = new Map<
     string,
     {
@@ -463,92 +458,23 @@ export default <
   const onPeerError = (id: string, error: Error): void =>
     kickPeer(id, undefined, error)
 
-  const recordStreamTracks = (stream: MediaStream): void => {
-    stream.getTracks?.().forEach(track => {
-      if (track && typeof track.id === 'string') {
-        knownBroadcastTracks.set(track.id, {track, stream})
-      }
-    })
-  }
-
   const mediaManager = createMediaManager({
     onPeerError,
     getPeerUserId,
     preparePeer: ensureMediaPeer,
     iterate,
     isActive: id => Boolean(activePeerMap[id]),
-    onRemoteStream: (stream, {originPeerId, metadata, key, broadcast}) => {
-      recordStreamTracks(stream)
+    onRemoteStream: (
+      stream,
+      {originPeerId, metadata, key, broadcast, tracks}
+    ) => {
       if (scaleProvider?.isOverlayActive() && broadcast) {
         scaleProvider.registerBroadcastStream(
           originPeerId,
           key,
           stream,
-          metadata
-        )
-      }
-    },
-    onRemoteTrack: (
-      track,
-      stream,
-      {
-        originPeerId,
-        metadata,
-        key,
-        trackId: metaTrackId,
-        replacementId,
-        isReplace,
-        broadcast
-      }
-    ) => {
-      if (
-        scaleProvider?.isOverlayActive() &&
-        broadcast &&
-        (isReplace || (metaTrackId && metaTrackId !== track.id))
-      ) {
-        const oldEntry = metaTrackId
-          ? knownBroadcastTracks.get(metaTrackId)
-          : undefined
-        if (replacementId) {
-          knownBroadcastTracks.set(replacementId, {track, stream})
-        }
-        scaleProvider.replaceBroadcastTrack(
-          originPeerId,
-          oldEntry?.track ?? track,
-          track,
-          metadata
-        )
-        if (typeof track.id === 'string') {
-          knownBroadcastTracks.set(track.id, {track, stream})
-        }
-        const targets = scaleProvider.getMediaTargets(originPeerId)
-        if (targets.length > 0) {
-          void mediaManager.replaceTrack(
-            oldEntry?.track ?? track,
-            track,
-            {
-              target: targets,
-              ...(metadata === undefined ? {} : {metadata})
-            },
-            trackMetaAction.send,
-            originPeerId,
-            key,
-            replacementId
-          )
-        }
-        return
-      }
-
-      if (typeof track.id === 'string') {
-        knownBroadcastTracks.set(track.id, {track, stream})
-      }
-      if (scaleProvider?.isOverlayActive() && broadcast) {
-        scaleProvider.registerBroadcastTrack(
-          originPeerId,
-          key,
-          track,
-          stream,
-          metadata
+          metadata,
+          tracks
         )
       }
     }
@@ -762,9 +688,6 @@ export default <
   const streamMetaAction = makeActionInternal<InternalMediaMeta>('stream', {
     maxPayloadBytes: 64 * 1024
   })
-  const trackMetaAction = makeActionInternal<InternalMediaMeta>('track', {
-    maxPayloadBytes: 64 * 1024
-  })
   const mediaControlAction = makeActionInternal<MediaControlMessage>('mctrl')
   const leaveAction = makeActionInternal<string>('leave', {
     sendToPending: true,
@@ -922,26 +845,6 @@ export default <
         broadcasterId,
         streamKey,
         tracks
-      )
-    },
-    relayMediaTrack: (
-      broadcasterId,
-      track,
-      stream,
-      metadata,
-      targetPeerIds,
-      trackKey
-    ) => {
-      void mediaManager.addTrack(
-        track,
-        stream,
-        {
-          target: targetPeerIds,
-          ...(metadata === undefined ? {} : {metadata})
-        },
-        trackMetaAction.send,
-        broadcasterId,
-        trackKey
       )
     }
   }
@@ -1299,10 +1202,6 @@ export default <
     mediaManager.receiveStreamMeta(sanitizeIncomingMediaMeta(meta, id), id)
   )
 
-  trackMetaAction.onMessage((meta, id) =>
-    mediaManager.receiveTrackMeta(sanitizeIncomingMediaMeta(meta, id), id)
-  )
-
   mediaControlAction.onMessage((msg, id) => {
     if (!msg || typeof msg !== 'object') {
       return
@@ -1322,21 +1221,6 @@ export default <
       if (removed && removed.targets.length > 0) {
         mediaManager.removeStream(removed.stream, removed.targets)
       }
-    } else if (msg.op === 'rmTrack') {
-      const trackKeys = Array.isArray(msg.keys)
-        ? msg.keys.filter(key => typeof key === 'string')
-        : []
-      const trackId = knownBroadcastTracks.get(msg.id)?.track.id ?? msg.id
-      if (scaleProvider) {
-        for (const removed of scaleProvider.unregisterBroadcastTrack(
-          id,
-          trackId,
-          trackKeys
-        )) {
-          mediaManager.removeTrack(removed.track, removed.targets)
-        }
-      }
-      knownBroadcastTracks.delete(msg.id)
     }
   })
 
@@ -1418,11 +1302,6 @@ export default <
       stream: stream => {
         if (!isPeerBanned(id)) {
           mediaManager.receiveRemoteStream(id, stream)
-        }
-      },
-      track: (track, stream) => {
-        if (!isPeerBanned(id)) {
-          mediaManager.receiveRemoteTrack(id, track, stream)
         }
       },
       close: () => exitPeer(id, peer, peerDisconnectedErr),
@@ -1569,31 +1448,37 @@ export default <
     },
 
     addStream: (stream, options: AddMediaOptions = {}) => {
-      recordStreamTracks(stream)
       if (scaleProvider?.isOverlayActive() && !options.target) {
-        const streamKey = genId(20)
+        const streamKey = mediaManager.getStreamKey(stream)
+        const metadata = mediaManager.getStreamMetadata(stream, options)
+        const tracks = mediaManager.resolveStreamTracks(stream)
         scaleProvider.registerBroadcastStream(
           localSelfId,
           streamKey,
           stream,
-          options.metadata
+          metadata,
+          tracks
         )
         const targets = scaleProvider.getMediaTargets(localSelfId)
         if (!targets.length) {
-          return []
+          return Promise.resolve()
         }
         return mediaManager.addStream(
           stream,
-          {...options, target: targets},
+          {
+            target: targets,
+            ...(metadata === undefined ? {} : {metadata})
+          },
           streamMetaAction.send,
           localSelfId,
-          streamKey
+          streamKey,
+          tracks
         )
       }
       return mediaManager.addStream(stream, options, streamMetaAction.send)
     },
 
-    removeStream: (stream, options = {}) => {
+    removeStream: (stream, options: RemoveMediaOptions = {}) => {
       if (scaleProvider?.isOverlayActive() && !options.target) {
         const targets = scaleProvider.unregisterBroadcastStream(
           localSelfId,
@@ -1612,96 +1497,12 @@ export default <
       mediaManager.removeStream(stream, options.target)
     },
 
-    addTrack: (track, stream, options: AddMediaOptions = {}) => {
-      if (typeof track.id === 'string') {
-        knownBroadcastTracks.set(track.id, {track, stream})
-      }
-      if (scaleProvider?.isOverlayActive() && !options.target) {
-        const trackKey = genId(20)
-        scaleProvider.registerBroadcastTrack(
-          localSelfId,
-          trackKey,
-          track,
-          stream,
-          options.metadata
-        )
-        const targets = scaleProvider.getMediaTargets(localSelfId)
-        if (!targets.length) {
-          return []
-        }
-        return mediaManager.addTrack(
-          track,
-          stream,
-          {...options, target: targets},
-          trackMetaAction.send,
-          localSelfId,
-          trackKey
-        )
-      }
-      return mediaManager.addTrack(track, stream, options, trackMetaAction.send)
-    },
-
-    removeTrack: (track, options = {}) => {
-      if (!options.target && scaleProvider) {
-        const removed = scaleProvider.unregisterBroadcastTrack(
-          localSelfId,
-          track.id
-        )
-        knownBroadcastTracks.delete(track.id)
-        if (removed.length > 0) {
-          void mediaControlAction
-            .send({
-              op: 'rmTrack',
-              o: localSelfId,
-              id: track.id,
-              keys: removed.map(entry => entry.key)
-            })
-            .catch(noOp)
-        }
-      }
-      mediaManager.removeTrack(track, options.target)
-    },
-
-    replaceTrack: (oldTrack, newTrack, options: AddMediaOptions = {}) => {
-      const existing =
-        typeof oldTrack.id === 'string'
-          ? knownBroadcastTracks.get(oldTrack.id)
-          : undefined
-      if (typeof newTrack.id === 'string') {
-        knownBroadcastTracks.set(newTrack.id, {
-          track: newTrack,
-          stream: existing?.stream ?? ({} as MediaStream)
-        })
-      }
-      if (scaleProvider?.isOverlayActive() && !options.target) {
-        const sp = scaleProvider
-        const trackKey = genId(20)
-        const targets = sp.getMediaTargets(localSelfId)
-        const replacements = mediaManager.replaceTrack(
-          oldTrack,
-          newTrack,
-          {...options, target: targets},
-          trackMetaAction.send,
-          localSelfId,
-          trackKey
-        )
-        return [
-          Promise.all(replacements).then(() => {
-            sp.replaceBroadcastTrack(
-              localSelfId,
-              oldTrack,
-              newTrack,
-              options.metadata
-            )
-          })
-        ]
-      }
-      return mediaManager.replaceTrack(
-        oldTrack,
-        newTrack,
-        options,
-        trackMetaAction.send
-      )
+    replaceTrack: (oldTrack, newTrack, options: RemoveMediaOptions = {}) => {
+      const target =
+        scaleProvider?.isOverlayActive() && !options.target
+          ? scaleProvider.getMediaTargets(localSelfId)
+          : options.target
+      return mediaManager.replaceTrack(oldTrack, newTrack, target)
     },
 
     ...pluginApis,
@@ -1770,14 +1571,6 @@ export default <
 
     set onPeerStream(handler) {
       mediaManager.onPeerStream = handler
-    },
-
-    get onPeerTrack() {
-      return mediaManager.onPeerTrack
-    },
-
-    set onPeerTrack(handler) {
-      mediaManager.onPeerTrack = handler
     }
   }
 

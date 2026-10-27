@@ -484,7 +484,7 @@ const gossipEnvelopeOverheadBytes = 32
 export const packGossipControlFrames = (
   descriptors: PeerDescriptor[],
   downPeers?: string[],
-  maxFrameBytes = maxActionFrameBytes
+  maxFrameBytes: number = maxActionFrameBytes
 ): Uint8Array[] => {
   const hasDown = Boolean(downPeers && downPeers.length > 0)
   if (descriptors.length === 0 && !hasDown) {
@@ -744,14 +744,6 @@ export type OverlayManagerDeps = {
     streamKey: string,
     tracks?: MediaStreamTrack[]
   ) => void
-  onRelayMediaTrack?: (
-    broadcasterId: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    metadata: JsonValue | undefined,
-    targetPeerIds: string[],
-    trackKey: string
-  ) => void
 }
 
 export type OverlayManager = {
@@ -781,7 +773,8 @@ export type OverlayManager = {
     broadcasterId: string,
     streamKey: string,
     stream: MediaStream,
-    metadata?: JsonValue
+    metadata?: JsonValue,
+    tracks?: MediaStreamTrack[]
   ) => void
   unregisterBroadcastStream: (
     broadcasterId: string,
@@ -791,24 +784,6 @@ export type OverlayManager = {
     broadcasterId: string,
     streamId: string
   ) => {stream: MediaStream; targets: string[]} | null
-  registerBroadcastTrack: (
-    broadcasterId: string,
-    trackKey: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    metadata?: JsonValue
-  ) => void
-  unregisterBroadcastTrack: (
-    broadcasterId: string,
-    trackId: string,
-    trackKeys?: string[]
-  ) => Array<{track: MediaStreamTrack; key: string; targets: string[]}>
-  replaceBroadcastTrack: (
-    broadcasterId: string,
-    oldTrack: MediaStreamTrack,
-    newTrack: MediaStreamTrack,
-    metadata?: JsonValue
-  ) => void
   requireDirectPeer: (peerId: string) => void
   notePeerDiscovered: (peerId: string) => void
   shouldConnectPeer: (
@@ -843,8 +818,7 @@ export const createOverlayManager = ({
   onDeliverData,
   canPeerSendAction,
   onPeerDescriptorCert,
-  onRelayMediaStream,
-  onRelayMediaTrack
+  onRelayMediaStream
 }: OverlayManagerDeps): OverlayManager => {
   let selfId = initialSelfId ?? ''
   void getOrCreateEndpointIdentity(initialSelfId).then(ep => {
@@ -877,7 +851,7 @@ export const createOverlayManager = ({
   // Seen-message deduplication cache
   const seenMessages = createBoundedSet<string>(maxSeenMessages)
 
-  // Active broadcast streams/tracks (both local and relayed) for automatic tree distribution & healing
+  // Active broadcast streams (both local and relayed) for automatic tree distribution & healing
   const activeStreams = new Map<
     string,
     {
@@ -888,17 +862,6 @@ export const createOverlayManager = ({
       metadata?: JsonValue
       forwardedTo: Set<string>
       currentParentId: string | null
-    }
-  >()
-  const activeTracks = new Map<
-    string,
-    {
-      broadcasterId: string
-      trackKey: string
-      track: MediaStreamTrack
-      stream: MediaStream
-      metadata?: JsonValue
-      forwardedTo: Set<string>
     }
   >()
 
@@ -1108,28 +1071,6 @@ export const createOverlayManager = ({
           newTargets,
           entry.streamKey,
           entry.tracks
-        )
-      }
-    }
-
-    for (const entry of activeTracks.values()) {
-      const {childrenIds} = getCachedTreeChildren(
-        entry.broadcasterId,
-        config.fanout
-      )
-      const newTargets = childrenIds.filter(
-        childId => directPeers.has(childId) && !entry.forwardedTo.has(childId)
-      )
-
-      if (newTargets.length > 0) {
-        newTargets.forEach(id => entry.forwardedTo.add(id))
-        onRelayMediaTrack?.(
-          entry.broadcasterId,
-          entry.track,
-          entry.stream,
-          entry.metadata,
-          newTargets,
-          entry.trackKey
         )
       }
     }
@@ -2478,9 +2419,6 @@ export const createOverlayManager = ({
       for (const s of activeStreams.values()) {
         s.forwardedTo.delete(peerId)
       }
-      for (const t of activeTracks.values()) {
-        t.forwardedTo.delete(peerId)
-      }
 
       if (!isOverlayActive()) {
         knownRoster.delete(peerId)
@@ -2524,18 +2462,16 @@ export const createOverlayManager = ({
       ) {
         return [...directPeers.keys()]
       }
-      for (const map of [activeStreams, activeTracks]) {
-        for (const entry of map.values()) {
-          if (
-            entry.broadcasterId === broadcasterId &&
-            entry.forwardedTo.size > 0
-          ) {
-            const activeForwarded = [...entry.forwardedTo].filter(id =>
-              directPeers.has(id)
-            )
-            if (activeForwarded.length > 0) {
-              return activeForwarded
-            }
+      for (const entry of activeStreams.values()) {
+        if (
+          entry.broadcasterId === broadcasterId &&
+          entry.forwardedTo.size > 0
+        ) {
+          const activeForwarded = [...entry.forwardedTo].filter(id =>
+            directPeers.has(id)
+          )
+          if (activeForwarded.length > 0) {
+            return activeForwarded
           }
         }
       }
@@ -2576,7 +2512,8 @@ export const createOverlayManager = ({
       broadcasterId: string,
       streamKey: string,
       stream: MediaStream,
-      metadata?: JsonValue
+      metadata?: JsonValue,
+      tracks?: MediaStreamTrack[]
     ): void => {
       const mapKey = `${broadcasterId}:${streamKey}`
       const {parentId, childrenIds} = getCachedTreeChildren(
@@ -2584,7 +2521,26 @@ export const createOverlayManager = ({
         config.fanout
       )
       const existing = activeStreams.get(mapKey)
+      const nextTracks = tracks ?? stream.getTracks?.()
+      const prevTracks = existing
+        ? (existing.tracks ?? existing.stream.getTracks?.())
+        : undefined
+      const tracksChanged = Boolean(
+        existing &&
+        nextTracks &&
+        prevTracks &&
+        (nextTracks.length !== prevTracks.length ||
+          nextTracks.some((t, i) => t !== prevTracks[i]))
+      )
+      const metaChanged = Boolean(
+        existing &&
+        (metadata === undefined ? '' : toJson(metadata)) !==
+          (existing.metadata === undefined ? '' : toJson(existing.metadata))
+      )
       const forwardedTo = existing?.forwardedTo ?? new Set<string>()
+      if (tracksChanged || metaChanged) {
+        forwardedTo.clear()
+      }
 
       if (broadcasterId === selfId) {
         // Broadcaster initially sends to its getMediaTargets
@@ -2597,7 +2553,7 @@ export const createOverlayManager = ({
         broadcasterId,
         streamKey,
         stream,
-        ...(existing?.tracks ? {tracks: existing.tracks} : {}),
+        ...(nextTracks ? {tracks: [...nextTracks]} : {}),
         ...(metadata === undefined ? {} : {metadata}),
         forwardedTo,
         currentParentId: parentId
@@ -2621,12 +2577,6 @@ export const createOverlayManager = ({
           activeStreams.delete(key)
         }
       }
-      for (const [key, entry] of activeTracks) {
-        if (entry.broadcasterId === broadcasterId && entry.stream === stream) {
-          targets.push(...entry.forwardedTo)
-          activeTracks.delete(key)
-        }
-      }
       return targets
     },
 
@@ -2646,107 +2596,7 @@ export const createOverlayManager = ({
           removed.targets.push(...targets)
         }
       }
-      for (const [key, entry] of activeTracks) {
-        if (
-          entry.broadcasterId === broadcasterId &&
-          entry.stream.id === streamId
-        ) {
-          removed ??= {stream: entry.stream, targets: []}
-          removed.targets.push(...entry.forwardedTo)
-          activeTracks.delete(key)
-        }
-      }
       return removed
-    },
-
-    registerBroadcastTrack: (
-      broadcasterId: string,
-      trackKey: string,
-      track: MediaStreamTrack,
-      stream: MediaStream,
-      metadata?: JsonValue
-    ): void => {
-      const mapKey = `${broadcasterId}:${trackKey}`
-      const {childrenIds} = getCachedTreeChildren(broadcasterId, config.fanout)
-      const existing = activeTracks.get(mapKey)
-      const forwardedTo = existing?.forwardedTo ?? new Set<string>()
-
-      if (broadcasterId === selfId) {
-        childrenIds
-          .filter(id => directPeers.has(id))
-          .forEach(id => forwardedTo.add(id))
-      }
-
-      activeTracks.set(mapKey, {
-        broadcasterId,
-        trackKey,
-        track,
-        stream,
-        ...(metadata === undefined ? {} : {metadata}),
-        forwardedTo
-      })
-
-      if (broadcasterId !== selfId) {
-        syncMediaTrees()
-      }
-    },
-
-    unregisterBroadcastTrack: (broadcasterId, trackId, trackKeys = []) => {
-      const removed = []
-      for (const [key, entry] of activeTracks) {
-        if (
-          entry.broadcasterId === broadcasterId &&
-          (entry.track.id === trackId || trackKeys.includes(entry.trackKey))
-        ) {
-          activeTracks.delete(key)
-          removed.push({
-            track: entry.track,
-            key: entry.trackKey,
-            targets: [...entry.forwardedTo]
-          })
-        }
-      }
-      for (const [key, entry] of activeStreams) {
-        if (entry.broadcasterId !== broadcasterId) {
-          continue
-        }
-        const tracks = entry.tracks ?? entry.stream.getTracks()
-        const track = tracks.find(item => item.id === trackId)
-        if (track) {
-          entry.tracks = tracks.filter(item => item !== track)
-          removed.push({
-            track,
-            key: entry.streamKey,
-            targets: [...entry.forwardedTo]
-          })
-          if (entry.tracks.length === 0) {
-            activeStreams.delete(key)
-          }
-        }
-      }
-      return removed
-    },
-
-    replaceBroadcastTrack: (broadcasterId, oldTrack, newTrack, metadata) => {
-      for (const entry of activeTracks.values()) {
-        if (entry.broadcasterId === broadcasterId && entry.track === oldTrack) {
-          entry.track = newTrack
-          if (metadata !== undefined) {
-            entry.metadata = metadata
-          }
-        }
-      }
-      for (const entry of activeStreams.values()) {
-        const tracks = entry.tracks ?? entry.stream.getTracks()
-        if (
-          entry.broadcasterId === broadcasterId &&
-          tracks.includes(oldTrack)
-        ) {
-          entry.tracks = tracks.map(track =>
-            track === oldTrack ? newTrack : track
-          )
-        }
-      }
     },
 
     requireDirectPeer: peerId => {
@@ -2962,7 +2812,6 @@ export const createOverlayManager = ({
       virtualPeers.clear()
       directPeers.clear()
       activeStreams.clear()
-      activeTracks.clear()
     },
 
     getSnapshot: (): TopologySnapshot => {
@@ -3055,22 +2904,6 @@ export const scale = (
             targetPeerIds,
             streamKey,
             tracks
-          ),
-        onRelayMediaTrack: (
-          broadcasterId,
-          track,
-          stream,
-          metadata,
-          targetPeerIds,
-          trackKey
-        ) =>
-          kernel.relayMediaTrack(
-            broadcasterId,
-            track,
-            stream,
-            metadata,
-            targetPeerIds,
-            trackKey
           )
       })
 

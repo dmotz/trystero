@@ -170,58 +170,6 @@ const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
     meta: streamMeta,
     streamType
   })
-
-  const onPeerTrack = ([roomId, streamMeta]) =>
-    new Promise((res, rej) => {
-      const timeout = setTimeout(
-        () => rej(new Error('timed out waiting for metadata track')),
-        10_000
-      )
-
-      window[roomId].onPeerTrack = (
-        track,
-        stream,
-        {peerId, metadata: meta}
-      ) => {
-        clearTimeout(timeout)
-        res({
-          peerId,
-          meta,
-          streamType: stream.constructor.name,
-          trackType: track.constructor.name
-        })
-      }
-
-      setTimeout(async () => {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: true
-        })
-        window[roomId].addTrack(stream.getTracks()[0], stream, {
-          metadata: streamMeta
-        })
-      }, 999)
-    })
-
-  const [peer2TrackInfo, peer1TrackInfo] = await Promise.all([
-    page.evaluate(onPeerTrack, streamArgs),
-    page2.evaluate(onPeerTrack, streamArgs)
-  ])
-
-  const trackType = 'MediaStreamTrack'
-
-  expect(peer1TrackInfo).toEqual({
-    peerId: peer1Id,
-    meta: streamMeta,
-    streamType,
-    trackType
-  })
-  expect(peer2TrackInfo).toEqual({
-    peerId: peer2Id,
-    meta: streamMeta,
-    streamType,
-    trackType
-  })
 }
 
 const verifyMessageActions = async ({page, page2, roomNs}) => {

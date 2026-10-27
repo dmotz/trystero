@@ -269,12 +269,12 @@ export class LinkedPeer {
   }
 
   addStream(_stream?: TestMediaStream) {}
-  removeStream() {}
+  removeStream(_stream?: TestMediaStream) {}
   addTrack(_track?: TestMediaTrack, _stream?: TestMediaStream) {
     return {}
   }
-  removeTrack() {}
-  replaceTrack() {}
+  removeTrack(_track?: TestMediaTrack) {}
+  async replaceTrack(_oldTrack?: TestMediaTrack, _newTrack?: TestMediaTrack) {}
 }
 
 export class BufferedPeer extends LinkedPeer {
@@ -308,6 +308,10 @@ export class BufferedPeer extends LinkedPeer {
 
 export class LinkedMediaPeer extends LinkedPeer {
   addStreamCalls = 0
+  addTrackCalls = 0
+  removeTrackCalls = 0
+  replaceTrackCalls = 0
+  replacedTrackIds = new Map<string, string>()
   remoteStreams = new Map<
     string,
     {stream: TestMediaStream; tracksById: Map<string, TestMediaTrack>}
@@ -339,7 +343,7 @@ export class LinkedMediaPeer extends LinkedPeer {
     return {stream: streamEntry.stream, track: remoteTrack, isNew: true}
   }
 
-  addStream(stream: TestMediaStream) {
+  override addStream(stream: TestMediaStream) {
     this.addStreamCalls += 1
 
     stream.getTracks().forEach(track => {
@@ -348,24 +352,46 @@ export class LinkedMediaPeer extends LinkedPeer {
       )?.ensureRemoteTrack(track, stream)
 
       if (remote?.isNew) {
-        this.partner?.handlers.track?.(remote.track, remote.stream)
         this.partner?.handlers.stream?.(remote.stream)
       }
     })
   }
 
-  addTrack(track: TestMediaTrack, stream: TestMediaStream) {
+  override removeStream(stream: TestMediaStream) {
+    ;(this.partner as LinkedMediaPeer | null)?.remoteStreams.delete(stream.id)
+  }
+
+  override addTrack(track: TestMediaTrack, stream: TestMediaStream) {
+    this.addTrackCalls += 1
     const remote = (this.partner as LinkedMediaPeer | null)?.ensureRemoteTrack(
       track,
       stream
     )
 
     if (remote?.isNew) {
-      this.partner?.handlers.track?.(remote.track, remote.stream)
       this.partner?.handlers.stream?.(remote.stream)
     }
 
     return {}
+  }
+
+  override removeTrack(track: TestMediaTrack) {
+    this.removeTrackCalls += 1
+    const targetId = this.replacedTrackIds.get(track.id) ?? track.id
+    ;(this.partner as LinkedMediaPeer | null)?.remoteStreams.forEach(entry => {
+      entry.tracksById.delete(targetId)
+    })
+  }
+
+  override async replaceTrack(
+    oldTrack: TestMediaTrack,
+    newTrack: TestMediaTrack
+  ) {
+    this.replaceTrackCalls += 1
+    if (oldTrack?.id && newTrack?.id) {
+      const originalId = this.replacedTrackIds.get(oldTrack.id) ?? oldTrack.id
+      this.replacedTrackIds.set(newTrack.id, originalId)
+    }
   }
 }
 

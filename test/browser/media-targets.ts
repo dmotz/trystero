@@ -111,7 +111,7 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
       async ([roomId, target]) => {
         const stream = await navigator.mediaDevices.getUserMedia({video: true})
         window.__streamSwitchLocalStream = stream
-        await Promise.all(window[roomId].addStream(stream, {target}))
+        await window[roomId].addStream(stream, {target})
       },
       [roomId, targetId]
     )
