@@ -17,6 +17,7 @@ import {
 import type {
   BaseRoomConfig,
   RelayConfig,
+  RelayConnectivity,
   RoomPlugin,
   SocketClient
 } from './types'
@@ -190,22 +191,90 @@ const defaultRetryMs = 3333
 const maxRetryMs = 60_000
 const socketRetryPeriods: Record<string, number> = {}
 
-let reconnectionLockingPromise: Promise<void> | null = null
-let resolver: (() => void) | null = null
-
-export const pauseRelayReconnection = (): void => {
-  if (!reconnectionLockingPromise) {
-    reconnectionLockingPromise = new Promise<void>(resolve => {
-      resolver = resolve
-    }).finally(() => {
-      resolver = null
-      reconnectionLockingPromise = null
-    })
-  }
+type SocketController = {
+  disconnect: () => void
+  reconnect: () => void
 }
 
-export const resumeRelayReconnection = (): void => {
-  resolver?.()
+const socketControllers = new Set<SocketController>()
+let relayConnectivity: RelayConnectivity = 'auto'
+let isRelayOffline = false
+let stopWatchingOnline: (() => void) | null = null
+
+const holdRelaySockets = (): void => {
+  isRelayOffline = true
+  socketControllers.forEach(controller => controller.disconnect())
+}
+
+const reconnectRelaySockets = (): void => {
+  isRelayOffline = false
+  keys(socketRetryPeriods).forEach(url => {
+    socketRetryPeriods[url] = defaultRetryMs
+  })
+  socketControllers.forEach(controller => controller.reconnect())
+}
+
+const attachOnlineWatcher = (): void => {
+  if (stopWatchingOnline || typeof addEventListener !== 'function') {
+    return
+  }
+
+  const controller = new AbortController()
+
+  addEventListener('online', reconnectRelaySockets, {
+    signal: controller.signal
+  })
+  addEventListener('offline', holdRelaySockets, {
+    signal: controller.signal
+  })
+
+  stopWatchingOnline = () => controller.abort()
+}
+
+const detachOnlineWatcher = (): void => {
+  stopWatchingOnline?.()
+  stopWatchingOnline = null
+}
+
+export const setRelayConnectivity = (
+  mode?: RelayConnectivity
+): RelayConnectivity => {
+  if (mode === undefined) {
+    return relayConnectivity
+  }
+
+  if (mode !== 'online' && mode !== 'offline' && mode !== 'auto') {
+    throw mkErr(`invalid relay connectivity mode "${String(mode)}"`)
+  }
+
+  if (mode === 'offline') {
+    detachOnlineWatcher()
+    relayConnectivity = 'offline'
+    holdRelaySockets()
+    return relayConnectivity
+  }
+
+  if (mode === 'online') {
+    detachOnlineWatcher()
+    relayConnectivity = 'online'
+    reconnectRelaySockets()
+    return relayConnectivity
+  }
+
+  if (relayConnectivity === 'auto') {
+    attachOnlineWatcher()
+    return relayConnectivity
+  }
+
+  const wasOffline = isRelayOffline
+  relayConnectivity = 'auto'
+  attachOnlineWatcher()
+
+  if (wasOffline) {
+    reconnectRelaySockets()
+  }
+
+  return relayConnectivity
 }
 
 export const makeSocket = (
@@ -219,28 +288,52 @@ export const makeSocket = (
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   let resolveReady: (_: SocketClient) => void = noOp
 
+  client.url = url
   client.isClosed = false
+  client.send = noOp
   client.ready = new Promise(res => (resolveReady = res))
 
-  const init = (): void => {
-    if (client.isClosed) {
+  if (relayConnectivity === 'auto') {
+    attachOnlineWatcher()
+  }
+
+  const clearRetryTimer = (): void => {
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
+    }
+  }
+
+  const detachSocket = (socket: WebSocket | undefined): void => {
+    if (!socket) {
       return
     }
 
-    retryTimer = undefined
+    socket.onopen = null
+    socket.onclose = null
+    socket.onmessage = null
+  }
+
+  const init = (): void => {
+    if (client.isClosed || isRelayOffline) {
+      return
+    }
+
+    clearRetryTimer()
     isReconnectPending = false
 
     const socket = new WebSocket(url)
+    client.socket = socket
+    client.url = socket.url ?? url
 
     socket.onclose = () => {
-      if (client.isClosed || isReconnectPending) {
+      if (client.isClosed || isReconnectPending || client.socket !== socket) {
         return
       }
 
       isReconnectPending = true
 
-      if (reconnectionLockingPromise) {
-        void reconnectionLockingPromise.then(init)
+      if (isRelayOffline) {
         return
       }
 
@@ -251,10 +344,12 @@ export const makeSocket = (
     }
 
     socket.onmessage = e => onMessage(String(e.data))
-    client.socket = socket
-    client.url = socket.url
 
     socket.onopen = () => {
+      if (client.isClosed || client.socket !== socket) {
+        return
+      }
+
       const isReconnect = didOpen
 
       didOpen = true
@@ -273,18 +368,51 @@ export const makeSocket = (
     }
   }
 
-  client.close = () => {
-    client.isClosed = true
+  const controller: SocketController = {
+    disconnect: () => {
+      if (client.isClosed) {
+        return
+      }
 
-    if (retryTimer !== undefined) {
-      clearTimeout(retryTimer)
-      retryTimer = undefined
+      clearRetryTimer()
+
+      if (!isReconnectPending) {
+        isReconnectPending = true
+        const socket = client.socket
+        detachSocket(socket)
+        socket?.close()
+      }
+    },
+    reconnect: () => {
+      if (client.isClosed) {
+        return
+      }
+
+      socketRetryPeriods[url] = defaultRetryMs
+      clearRetryTimer()
+
+      if (isReconnectPending) {
+        init()
+      }
     }
-
-    client.socket.close()
   }
 
-  init()
+  socketControllers.add(controller)
+
+  client.close = () => {
+    client.isClosed = true
+    socketControllers.delete(controller)
+    clearRetryTimer()
+    const socket = client.socket
+    detachSocket(socket)
+    socket?.close()
+  }
+
+  if (isRelayOffline) {
+    isReconnectPending = true
+  } else {
+    init()
+  }
 
   return client
 }
@@ -353,23 +481,6 @@ export const createRelayManager = <TRelay extends object>(
         })
       ) as Record<string, WebSocket>
   }
-}
-
-export const watchOnline = (): (() => void) => {
-  if (isBrowser) {
-    const controller = new AbortController()
-
-    addEventListener('online', resumeRelayReconnection, {
-      signal: controller.signal
-    })
-    addEventListener('offline', pauseRelayReconnection, {
-      signal: controller.signal
-    })
-
-    return () => controller.abort()
-  }
-
-  return noOp
 }
 
 export const log = (...args: unknown[]): void => console.log(...args)

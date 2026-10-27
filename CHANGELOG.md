@@ -158,6 +158,18 @@ Deprecated `trystero/<strategy>` subpath exports have been removed; `trystero`
 is now solely a convenience wrapper for `@trystero-p2p/nostr`. Import strategies
 directly from `@trystero-p2p/<strategy>` (or `'trystero'` for Nostr).
 
+`relayConfig.manualReconnection`, `pauseRelayReconnection()`, and
+`resumeRelayReconnection()` have been replaced by a single process-wide
+`setRelayConnectivity(mode)` export (`'offline' | 'online' | 'auto'`):
+
+```js
+import {setRelayConnectivity} from 'trystero'
+
+setRelayConnectivity('offline') // close relay sockets, cancel pending retries, hold reconnection
+setRelayConnectivity('online') // reconnect now (reset backoff), stay under manual control
+setRelayConnectivity('auto') // default: follow the browser's online/offline events
+```
+
 ## [0.26.0](https://github.com/dmotz/trystero/releases/tag/0.26.0) - 2026-10-04
 
 ### Improvements

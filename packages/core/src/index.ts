@@ -10,8 +10,7 @@ export {
   genId,
   getRelays,
   makeSocket,
-  pauseRelayReconnection,
-  resumeRelayReconnection,
+  setRelayConnectivity,
   toJson
 } from './utils'
 
@@ -63,6 +62,7 @@ export type {
   PeerResult,
   PeerTarget,
   RelayConfig,
+  RelayConnectivity,
   RemoveMediaOptions,
   RequestAction,
   RequestActionConfig,

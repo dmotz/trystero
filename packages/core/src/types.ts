@@ -52,8 +52,9 @@ export type TurnServerConfig = {
   credentialType?: string
 }
 
+export type RelayConnectivity = 'online' | 'offline' | 'auto'
+
 export type BaseRelayConfig = {
-  manualReconnection?: boolean
   warnOnRelayFailure?: boolean
 }
 

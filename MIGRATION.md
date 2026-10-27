@@ -253,6 +253,22 @@ const peers = room.getPeers() // { [peerId]: { userId, connection, direct, hops,
 
 ---
 
+### 5. Relay Connectivity Control (`setRelayConnectivity`)
+
+`relayConfig.manualReconnection`, `pauseRelayReconnection()`, and
+`resumeRelayReconnection()` have been replaced by a single process-wide
+`setRelayConnectivity(mode)` export (`'offline' | 'online' | 'auto'`). Calling
+it with `'online'` or `'offline'` detaches the browser `online`/`offline`
+watcher; `'auto'` re-attaches it:
+
+- `manualReconnection: true` + `pauseRelayReconnection()` →
+  `setRelayConnectivity('offline')`
+- `resumeRelayReconnection()` → `setRelayConnectivity('online')`
+- `manualReconnection: true` alone (ignoring browser `online`/`offline` events)
+  → call `setRelayConnectivity('online')` once at startup
+
+---
+
 ## Common Scenarios & Recipes in 0.27.0
 
 ### Scenario 1: Media & Data Fan-Out Across Multi-Tab Users

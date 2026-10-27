@@ -66,8 +66,7 @@ You can see what people are building with Trystero
   - [`exportUserIdentity(identity)`](#exportuseridentityidentity)
   - [`createAdminRoom(appId, baseRoomId, [options])`](#createadminroomappid-baseroomid-options)
   - [`getRelaySockets()`](#getrelaysockets)
-  - [`pauseRelayReconnection()`](#pauserelayreconnection)
-  - [`resumeRelayReconnection()`](#resumerelayreconnection)
+  - [`setRelayConnectivity(mode)`](#setrelayconnectivitymode)
 - [Which strategy should I choose?](#which-strategy-should-i-choose)
 
 ---
@@ -1397,12 +1396,6 @@ the same namespace will return the same room instance.
       simultaneously. Passing a `urls` option will cause this option to be
       ignored as the entire list will be used.
 
-    - `manualReconnection` - **(optional, 🐦 Nostr and 🌊 BitTorrent only)**
-      Boolean (default: `false`) that when set to `true` disables automatically
-      pausing and resuming reconnection attempts when the browser goes offline
-      and comes back online. This is useful if you want to manage this behavior
-      yourself.
-
     - `warnOnRelayFailure` - **(optional)** Boolean (default: `true`) that when
       set to `false` suppresses warnings caused by relay failures. This includes
       failed announce attempts and strategy-specific failure messages from
@@ -1872,17 +1865,23 @@ console.log(getRelaySockets())
 //  }
 ```
 
-### `pauseRelayReconnection()`
+### `setRelayConnectivity(mode)`
 
-**(🐦 Nostr, 🌊 BitTorrent only)** Normally Trystero will try to automatically
-reconnect to relay sockets unless `relayConfig.manualReconnection: true` is set
-in the room config. Calling this function stops relay reconnection attempts
-until `resumeRelayReconnection()` is called.
+**(🌊 BitTorrent, 🐦 Nostr, 🔌 WebSocket relay only)** Controls process-wide
+relay socket connectivity (`'auto' | 'online' | 'offline'`) and returns the
+current mode (also returned when called with no arguments).
 
-### `resumeRelayReconnection()`
+```js
+import {setRelayConnectivity} from 'trystero'
 
-**(🐦 Nostr, 🌊 BitTorrent only)** Allows relay reconnection attempts to resume.
-(See `pauseRelayReconnection()` above).
+setRelayConnectivity('offline') // close relay sockets, cancel pending retries, hold reconnection
+setRelayConnectivity('online') // reconnect now (reset backoff), stay under manual control
+setRelayConnectivity('auto') // default: follow the browser's online/offline events
+```
+
+Calling `setRelayConnectivity('online')` or `setRelayConnectivity('offline')`
+detaches the built-in browser `online`/`offline` watcher (manual mode), while
+`'auto'` re-attaches it.
 
 ## Which strategy should I choose?
 

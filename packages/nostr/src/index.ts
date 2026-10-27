@@ -324,7 +324,7 @@ const publishMessage = async (
     return isAnnouncement ? stopAnnouncing : undefined
   }
   const remaining = getRelayBackoffMs(client)
-  if (remaining > 0 || client.socket.readyState !== 1) {
+  if (remaining > 0 || client.socket?.readyState !== 1) {
     return isAnnouncement
       ? nextAnnounce(Math.max(steadyAnnounceIntervalMs, remaining))
       : undefined
@@ -344,7 +344,7 @@ const publishMessage = async (
   if (
     getRelayBackoffMs(client) > 0 ||
     client.isClosed ||
-    client.socket.readyState !== 1
+    client.socket?.readyState !== 1
   ) {
     return isAnnouncement ? nextAnnounce(steadyAnnounceIntervalMs) : undefined
   }
@@ -531,10 +531,9 @@ export {
   definePlugin,
   exportUserIdentity,
   importUserIdentity,
-  pauseRelayReconnection,
-  resumeRelayReconnection,
   roles,
-  scale
+  scale,
+  setRelayConnectivity
 } from '@trystero-p2p/core'
 
 export const defaultRelayUrls: string[] = [

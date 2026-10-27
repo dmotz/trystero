@@ -1636,6 +1636,8 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'entries',
     'getConfiguredPlugins',
     'keys',
+    'pauseRelayReconnection',
+    'resumeRelayReconnection',
     'socketGetter',
     'strToNum',
     'toHex',
@@ -1668,8 +1670,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'createUserIdentity',
     'exportUserIdentity',
     'importUserIdentity',
-    'pauseRelayReconnection',
-    'resumeRelayReconnection'
+    'setRelayConnectivity'
   ]) {
     assert.equal(
       typeof (coreExports as Record<string, unknown>)[kept],
@@ -1690,7 +1691,8 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'AuthorityConfig',
     'TopologyConfig',
     'RolesInput',
-    'RoomAuthorityInfo'
+    'RoomAuthorityInfo',
+    'manualReconnection'
   ]) {
     assert.equal(
       indexDts.includes(removedType),
@@ -1705,4 +1707,6 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
   }
   assert.equal(indexDts.includes('RolesConfig'), true)
   assert.equal(indexDts.includes('ScaleConfig'), true)
+  assert.equal(indexDts.includes('RelayConnectivity'), true)
+  assert.equal(indexDts.includes('setRelayConnectivity'), true)
 })

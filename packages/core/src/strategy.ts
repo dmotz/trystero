@@ -38,8 +38,7 @@ import {
   topicPath,
   values,
   warn,
-  warnEphemeralAdmin,
-  watchOnline
+  warnEphemeralAdmin
 } from './utils'
 import type {
   BaseRoomConfig,
@@ -79,7 +78,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
   let didInit = false
   let initPromises: Promise<TRelay>[] = []
-  let cleanupWatchOnline: () => void = noOp
 
   return <
     const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
@@ -426,9 +424,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         Promise.resolve(value)
       )
       didInit = true
-      cleanupWatchOnline = config.relayConfig?.manualReconnection
-        ? noOp
-        : watchOnline()
     }
 
     // Only explicit numeric relay pacing overrides the signaling retry default.
@@ -677,7 +672,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
 
       didInit = false
-      cleanupWatchOnline()
     }
 
     const roomOptions = {
@@ -746,7 +740,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       offerManager.destroy()
       if (!hasActiveRooms()) {
         didInit = false
-        cleanupWatchOnline()
       }
       throw err
     }

@@ -449,10 +449,9 @@ export {
   definePlugin,
   exportUserIdentity,
   importUserIdentity,
-  pauseRelayReconnection,
-  resumeRelayReconnection,
   roles,
-  scale
+  scale,
+  setRelayConnectivity
 } from '@trystero-p2p/core'
 
 export const defaultRelayUrls: string[] = [
