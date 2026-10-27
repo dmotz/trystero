@@ -1436,10 +1436,10 @@ the same namespace will return the same room instance.
     [Troubleshooting connection issues](#troubleshooting-connection-issues)).
     Each item in the list should correspond to an
     [ICE server config object](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection#iceservers).
-    When passing a TURN config like this, Trystero's default STUN servers will
-    also be used. To override this and use both custom STUN and TURN servers,
-    instead pass the config via the above `rtcConfig.iceServers` option as a
-    list of both STUN/TURN servers — this won't inherit Trystero's defaults.
+    When passing a TURN config like this, its servers are appended to
+    `rtcConfig.iceServers` if provided, or to Trystero's default STUN servers
+    otherwise. To opt out of Trystero's default STUN servers, pass a custom
+    `rtcConfig.iceServers` list (or `[]` for TURN-only).
 
   - `rtcPolyfill` - **(optional)** Use this to pass a custom
     [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection)-compatible

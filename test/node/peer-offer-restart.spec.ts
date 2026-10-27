@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import {MockRTCPeerConnection} from './peer-harness.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
-import initPeer from '../../packages/core/src/peer.ts'
+import initPeer, {defaultIceServers} from '../../packages/core/src/peer.ts'
 
 void test('a prewarmed offer does not replay when signal handler is attached', async t => {
   const peer = initPeer(true, {
@@ -432,3 +432,62 @@ for (const exit of ['timeout', 'destroy', 'complete'] as const) {
     await offering
   })
 }
+
+void test('merges turnConfig into rtcConfig.iceServers across all configuration combinations', () => {
+  const myStun = {urls: 'stun:custom.stun.test:3478'}
+  const turn = {
+    urls: 'turn:relay.test:3478',
+    username: 'u',
+    credential: 'p'
+  }
+
+  class ConfigCapturingRTCPeerConnection extends MockRTCPeerConnection {
+    rtcConfig: RTCConfiguration
+
+    constructor(rtcConfig: RTCConfiguration) {
+      super()
+      this.rtcConfig = rtcConfig
+    }
+  }
+
+  const cases = [
+    {
+      config: {},
+      expected: {iceServers: defaultIceServers}
+    },
+    {
+      config: {turnConfig: [turn]},
+      expected: {iceServers: [...defaultIceServers, turn]}
+    },
+    {
+      config: {rtcConfig: {iceServers: [myStun]}},
+      expected: {iceServers: [myStun]}
+    },
+    {
+      config: {rtcConfig: {iceServers: [myStun]}, turnConfig: [turn]},
+      expected: {iceServers: [myStun, turn]}
+    },
+    {
+      config: {
+        rtcConfig: {iceServers: [], iceTransportPolicy: 'relay' as const},
+        turnConfig: [turn]
+      },
+      expected: {iceServers: [turn], iceTransportPolicy: 'relay'}
+    },
+    {
+      config: {turnConfig: []},
+      expected: {iceServers: defaultIceServers}
+    }
+  ]
+
+  for (const {config, expected} of cases) {
+    const peer = initPeer(true, {
+      appId: 'ice-config-merge',
+      rtcPolyfill: ConfigCapturingRTCPeerConnection as never,
+      ...config
+    })
+    const pc = peer.connection as unknown as ConfigCapturingRTCPeerConnection
+    assert.deepEqual(pc.rtcConfig, expected)
+    peer.destroy()
+  }
+})

@@ -34,9 +34,13 @@ const rewriteMdnsCandidatesToLoopback = (sdp: string): string =>
 
 export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   const {trickleIce, rtcConfig, rtcPolyfill, turnConfig} = config
+  const iceServers = [
+    ...(rtcConfig?.iceServers ?? defaultIceServers),
+    ...(turnConfig ?? [])
+  ]
   const pc = new (rtcPolyfill ?? RTCPeerConnection)({
-    iceServers: defaultIceServers.concat(turnConfig ?? []),
-    ...rtcConfig
+    ...rtcConfig,
+    iceServers
   })
 
   const handlers: PeerHandlers = {}
@@ -308,10 +312,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     }
   }
 
-  const configuredIceServers =
-    rtcConfig?.iceServers ?? defaultIceServers.concat(turnConfig ?? [])
   const hasServerUrlPattern = (pattern: RegExp): boolean =>
-    configuredIceServers.some(({urls}) =>
+    iceServers.some(({urls}) =>
       (Array.isArray(urls) ? urls : [urls]).some(url => pattern.test(url))
     )
   const expectsTurnCandidate = hasServerUrlPattern(/^turns?:/i)
