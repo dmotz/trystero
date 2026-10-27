@@ -2,11 +2,11 @@ import {
   entries,
   fromEntries,
   getConfiguredPlugins,
+  internalActionPrefix,
   isBrowser,
   keys,
   logErr,
   mkErr,
-  noActivePeerMsg,
   noOp,
   peerBannedErr,
   peerBannedMsg,
@@ -117,11 +117,6 @@ type RoomOptions = {
   onHandshakeError?: (peerId: string, error: string) => void
   handshakeTimeoutMs?: number
   onBeforeLeave?: () => void
-}
-
-type PendingPongWaiter = {
-  resolve: () => void
-  reject: (error: Error) => void
 }
 
 type MediaControlMessage =
@@ -321,7 +316,6 @@ export default <
   const getPeerRoles = (id = localSelfId): string[] =>
     rolesProvider?.getPeerRoles(id) ?? []
 
-  const pendingPongs: Record<string, PendingPongWaiter[] | undefined> = {}
   const pendingOverlayFrames = new Map<string, ArrayBuffer[]>()
   const promotedFromVirtual = new Set<string>()
   const suppressVirtualJoin = new Set<string>()
@@ -589,8 +583,6 @@ export default <
     delete peerMap[id]
     delete activePeerMap[id]
     actionManager.clearPeer(id, err)
-    pendingPongs[id]?.splice(0).forEach(waiter => waiter.reject(err))
-    delete pendingPongs[id]
     mediaManager.clearPeer(id)
 
     if (recheckCapacity && effectiveLimit !== undefined && !leavePromise) {
@@ -682,8 +674,10 @@ export default <
       }
     })())
 
-  const pingAction = makeActionInternal<string>('ping')
-  const pongAction = makeActionInternal<string>('pong')
+  const pingAction = makeAction<string, string>(`${internalActionPrefix}ping`, {
+    kind: 'request',
+    onRequest: () => ''
+  })
   const signalAction = makeActionInternal('signal')
   const streamMetaAction = makeActionInternal<InternalMediaMeta>('stream', {
     maxPayloadBytes: 64 * 1024
@@ -1155,21 +1149,6 @@ export default <
     }
   })
 
-  pingAction.onMessage((_, id) => {
-    void pongAction.send('', id).catch(noOp)
-  })
-
-  pongAction.onMessage((_, id) => {
-    const queue = pendingPongs[id]
-    const waiter = queue?.shift()
-
-    waiter?.resolve()
-
-    if (queue && !queue.length) {
-      delete pendingPongs[id]
-    }
-  })
-
   signalAction.onMessage((sdp, id) => {
     void activePeerMap[id]?.signal(sdp as never)
   })
@@ -1327,52 +1306,9 @@ export default <
 
     leave,
 
-    ping: async id => {
-      const targetId = resolveRequestTarget(id) ?? id
-      if (!activePeerMap[targetId]) {
-        throw mkErr(noActivePeerMsg(id))
-      }
-
+    ping: async target => {
       const start = Date.now()
-
-      await new Promise<void>((resolve, reject) => {
-        const queue = (pendingPongs[targetId] ??= [])
-
-        const clearFromQueue = (): void => {
-          const currentQueue = pendingPongs[targetId]
-
-          if (!currentQueue) {
-            return
-          }
-
-          const i = currentQueue.indexOf(waiter)
-
-          if (i > -1) {
-            currentQueue.splice(i, 1)
-          }
-
-          if (!currentQueue.length) {
-            delete pendingPongs[targetId]
-          }
-        }
-
-        const waiter: PendingPongWaiter = {
-          resolve: () => {
-            clearFromQueue()
-            resolve()
-          },
-          reject: reason => {
-            clearFromQueue()
-            reject(reason)
-          }
-        }
-
-        queue.push(waiter)
-        void pingAction
-          .send('', targetId)
-          .catch(err => waiter.reject(toError(err, peerDisconnectedMsg)))
-      })
-
+      await pingAction.request('', {target})
       return Date.now() - start
     },
 

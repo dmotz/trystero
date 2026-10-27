@@ -3,6 +3,10 @@ import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
+import {internalActionPrefix} from '../../packages/core/src/utils.ts'
+
+export {internalActionPrefix}
 
 type PeerHandlers = Record<string, (...args: any[]) => void>
 type TestMediaTrack = {id: string}
@@ -44,7 +48,10 @@ export const withTimeout = (promise, ms = 500) =>
   ])
 
 export const encodeInternalAction = type => {
-  const typeBytes = encoder.encode(type)
+  const wireType = type.startsWith(internalActionPrefix)
+    ? type
+    : `${internalActionPrefix}${type}`
+  const typeBytes = encoder.encode(wireType)
   assert.ok(typeBytes.byteLength <= internalTypeByteLimit)
 
   const packet = new Uint8Array(36)

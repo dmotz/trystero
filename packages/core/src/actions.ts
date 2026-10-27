@@ -5,6 +5,7 @@ import {
   entries,
   genId,
   insufficientAuthPrefix,
+  internalActionPrefix,
   logActionHandlerErr,
   mkErr,
   noActivePeerMsg,
@@ -218,7 +219,12 @@ export const createActionManager = ({
     type: string,
     options?: Partial<ActionOptions>
   ): InternalAction<T> =>
-    makeWireAction(type.startsWith('@_') ? type : `@_${type}`, options)
+    makeWireAction(
+      type.startsWith(internalActionPrefix)
+        ? type
+        : `${internalActionPrefix}${type}`,
+      options
+    )
   const handleData = wire.handleData
 
   const clearPendingRequestWaiter = (requestId: string): void => {

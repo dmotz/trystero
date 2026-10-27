@@ -32,11 +32,11 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
   registerPeer(peer, 'remote-peer')
 
   await tick()
-  peer.handlers.data?.(encodeInternalAction('@_hsready') as any)
+  peer.handlers.data?.(encodeInternalAction('hsready') as any)
 
   assert.equal(await joinPromise, 'remote-peer')
 
-  peer.handlers.data?.(encodeInternalAction('@_leave') as any)
+  peer.handlers.data?.(encodeInternalAction('leave') as any)
   await tick()
 
   assert.equal(peer.destroyCount, 1)
@@ -161,7 +161,7 @@ void test('Trystero: room callback properties replace and clear handlers', async
 
     registerPeer(peer, 'remote-peer')
     await tick()
-    peer.handlers.data?.(encodeInternalAction('@_hsready') as any)
+    peer.handlers.data?.(encodeInternalAction('hsready') as any)
     await tick()
 
     assert.deepEqual(joined, ['second:remote-peer'])

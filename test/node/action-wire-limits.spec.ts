@@ -9,6 +9,8 @@ import {
 import {createActionWireManager} from '../../packages/core/src/action-wire.ts'
 // @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionManager} from '../../packages/core/src/actions.ts'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
+import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 
 const encoder = new TextEncoder()
 const chunkSize = 16 * 1024 - 14
@@ -857,7 +859,7 @@ for (const saturation of ['policies', 'transfers'] as const) {
       manager.handleData(
         'honest',
         start(0, 2, {
-          type: '@_response',
+          type: `${internalActionPrefix}response`,
           metadata,
           payload: encoder.encode('ok'),
           format: 0

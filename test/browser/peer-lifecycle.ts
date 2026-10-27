@@ -1,4 +1,6 @@
 import {expect} from '@playwright/test'
+// @ts-expect-error Internal source import crosses a referenced package boundary.
+import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 import {sleep, withStrategyBrowserPair} from './harness'
 import {
   joinEagerRoom,
@@ -24,10 +26,12 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
       const [peer2Data, peer1Data] = values
       const [peer2Id, peer1Id] = [peer2Data[1], peer1Data[1]]
 
-      const disableAutoPong = roomId => {
-        const pingAction = window[roomId].makeAction('@_ping')
+      const disableAutoPong = ([roomId, prefix]) => {
+        const pingAction = window[roomId].makeAction(`${prefix}ping`, {
+          kind: 'request'
+        })
 
-        pingAction.onMessage = () => {}
+        pingAction.onRequest = () => new Promise(() => {})
       }
 
       const pendingPing = ([roomId, id]) =>
@@ -39,7 +43,7 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
           })
         )
 
-      await page2.evaluate(disableAutoPong, roomNs)
+      await page2.evaluate(disableAutoPong, [roomNs, internalActionPrefix])
 
       const disconnectedPing = page.evaluate(pendingPing, [roomNs, peer2Id])
 

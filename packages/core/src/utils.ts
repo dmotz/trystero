@@ -39,6 +39,7 @@ export {
 }
 
 export const authMetaKey: string = `__${libId}Auth`
+export const internalActionPrefix = '@_'
 
 export const warn = (msg: string): void => console.warn(`${libName}: ${msg}`)
 

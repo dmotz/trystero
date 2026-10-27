@@ -5,6 +5,7 @@ import {
   MockPeer,
   actionStartFrame,
   encodeInternalAction,
+  internalActionPrefix,
   linkPeers,
   turn,
   waitFor
@@ -36,7 +37,7 @@ for (const fault of ['wire', 'stream']) {
     t.after(async () => {
       await room.leave()
     })
-    peer.handlers.data(encodeInternalAction('@_hsready'))
+    peer.handlers.data(encodeInternalAction('hsready'))
     await waitFor(() => 'peer' in room.getPeers())
     let leaves = 0
     room.onPeerLeave = () => {
@@ -50,7 +51,7 @@ for (const fault of ['wire', 'stream']) {
     const malformed = new Uint8Array(36).buffer
     for (let i = 0; i < (fault === 'wire' ? 1 : 65); i++) {
       peer.handlers.data(
-        fault === 'wire' ? malformed : metadataAction(`@_${fault}`, String(i))
+        fault === 'wire' ? malformed : metadataAction(fault, String(i))
       )
     }
     assert.deepEqual(room.getPeers(), {})
@@ -79,7 +80,7 @@ for (const saturation of ['policies', 'transfers']) {
     const peer = new MockPeer()
     t.after(() => room.leave())
     connect(peer, 'peer')
-    peer.handlers.data(encodeInternalAction('@_hsready'))
+    peer.handlers.data(encodeInternalAction('hsready'))
     await waitFor(() => 'peer' in room.getPeers())
     const approvals: ((allow: boolean) => void)[] = []
     t.after(() => approvals.forEach(resolve => resolve(false)))
@@ -96,7 +97,7 @@ for (const saturation of ['policies', 'transfers']) {
     room.onPeerStream = () => streams++
     const track = {id: 'track'}
     const stream = {id: 'stream', getTracks: () => [track]}
-    peer.handlers.data(metadataAction('@_stream', 's'))
+    peer.handlers.data(metadataAction('stream', 's'))
     peer.handlers.stream(stream)
     assert.equal(streams, 1)
     const controls: number[] = []
@@ -105,7 +106,7 @@ for (const saturation of ['policies', 'transfers']) {
         controls.push(bytes[1] & 15)
       }
     }
-    peer.handlers.data(fileOffer(100, '@_stream', 65_537))
+    peer.handlers.data(fileOffer(100, `${internalActionPrefix}stream`, 65_537))
     assert.deepEqual(controls, [4])
     assert.ok('peer' in room.getPeers())
   })
@@ -137,8 +138,8 @@ void test('application policy saturation does not block new peer handshakes', as
   const join = id => {
     const peer = new MockPeer()
     connect(peer, id)
-    peer.handlers.data(encodeInternalAction('@_hsdata'))
-    peer.handlers.data(encodeInternalAction('@_hsready'))
+    peer.handlers.data(encodeInternalAction('hsdata'))
+    peer.handlers.data(encodeInternalAction('hsready'))
     return peer
   }
   const peers = Array.from({length: 16}, (_, index) => join(`peer-${index}`))

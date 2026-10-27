@@ -26,7 +26,7 @@ void test('local leave completes without receipts from a connected peer', async 
   )
   const peer = new MockPeer()
   acceptPeer(peer, 'peer')
-  peer.handlers.data(encodeInternalAction('@_hsready'))
+  peer.handlers.data(encodeInternalAction('hsready'))
   await turn()
   const leaving = room.leave()
   t.mock.timers.tick(100)
