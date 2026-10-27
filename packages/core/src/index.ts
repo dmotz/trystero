@@ -1,6 +1,6 @@
 export {default as createStrategy} from './strategy'
 export {default as createTopicStrategy} from './topic-strategy'
-export {sha1} from './crypto'
+export {libName, sha1} from './crypto'
 export {
   createRelayManager,
   decodeBytes,

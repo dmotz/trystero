@@ -1553,7 +1553,6 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'entries',
     'getConfiguredPlugins',
     'keys',
-    'libName',
     'socketGetter',
     'strToNum',
     'toHex',
@@ -1565,6 +1564,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       `"${pruned}" must not be exported from @trystero-p2p/core`
     )
   }
+  assert.equal(coreExports.libName, 'Trystero')
 
   for (const kept of [
     'createStrategy',

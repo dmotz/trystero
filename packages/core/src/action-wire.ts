@@ -13,15 +13,21 @@ import {
   transferTimeoutMs
 } from './data-limits'
 import {
+  actionRedefinedErr,
   all,
   decodeBytes,
   encodeBytes,
   fromJson,
-  libName,
+  invalidActionMsg,
   mkErr,
   noOp,
+  operationAbortedMsg,
+  peerDisconnectedMsg,
+  posSafeIntErr,
   resetTimer,
-  toJson
+  toJson,
+  warn,
+  warnNoPeer
 } from './utils'
 import type {DataPayload, JsonValue, PeerHandle, TargetPeers} from './types'
 
@@ -66,7 +72,7 @@ export const makeActionError = (
 
 export const throwIfAborted = (signal?: AbortSignal): void => {
   if (signal?.aborted) {
-    throw makeActionError('aborted', 'operation aborted')
+    throw makeActionError('aborted', operationAbortedMsg)
   }
 }
 
@@ -196,12 +202,15 @@ export const createActionWireManager = ({
   clearPeer: (id: string) => void
 } => {
   if (!Number.isSafeInteger(maxReceiveBytes) || maxReceiveBytes <= 0) {
-    throw mkErr('maxReceiveBytes must be a positive safe integer')
+    throw posSafeIntErr('maxReceiveBytes')
   }
   const actions = new Map<string, WireAction>()
   const outgoing = new Map<string, Map<number, Outgoing>>()
   const failedPeers = new WeakSet<PeerHandle>()
   let nextId = 0
+  const disconnectedTransferErr = (): ActionError =>
+    transferError('disconnected', peerDisconnectedMsg)
+  const invalidFrameMsg = invalidActionMsg('frame')
   const receiver = createActionReceiver({
     fail: (peerId, reason) => failPeer(peerId, reason),
     accept: (peerId, id) => control(peerId, id, accepted),
@@ -211,7 +220,7 @@ export const createActionWireManager = ({
   })
   const clearPeer = (peerId: string): void => {
     for (const state of outgoing.get(peerId)?.values() ?? []) {
-      state.fail(transferError('disconnected', 'peer disconnected'))
+      state.fail(disconnectedTransferErr())
     }
     outgoing.delete(peerId)
     receiver.clearPeer(peerId)
@@ -220,7 +229,7 @@ export const createActionWireManager = ({
     const peer = getPeer(peerId, true)
     if (peer && !failedPeers.has(peer)) {
       failedPeers.add(peer)
-      console.warn(`${libName}: ${reason}; disconnecting peer ${peerId}`)
+      warn(`${reason}; disconnecting peer ${peerId}`)
       onPeerError(peerId, mkErr(reason))
     }
   }
@@ -267,15 +276,13 @@ export const createActionWireManager = ({
         cached.options.receiveScope !== normalizedOptions.receiveScope ||
         cached.options.maxPayloadBytes !== normalizedOptions.maxPayloadBytes
       ) {
-        throw mkErr(`action type "${type}" cannot be redefined`)
+        throw actionRedefinedErr(type)
       }
       return cached.action as unknown as InternalAction<T>
     }
     const typeBytes = encodeBytes(type)
     if (!type || type.includes('\0') || typeBytes.length > 32) {
-      throw mkErr(
-        'action type must contain 1–32 UTF-8 bytes and no null characters'
-      )
+      throw mkErr('action type must be 1–32 non-null UTF-8 bytes')
     }
     const action: WireAction = {
       options: normalizedOptions,
@@ -361,7 +368,7 @@ export const createActionWireManager = ({
             [...new Set(ids)].map(async peerId => {
               const peer = getPeer(peerId, normalizedOptions.sendToPending)
               if (!peer) {
-                console.warn(`${libName}: no peer with id ${peerId} found`)
+                warnNoPeer(peerId)
                 return
               }
               let failure: Error | null = null
@@ -374,7 +381,7 @@ export const createActionWireManager = ({
                   getPeer(peerId, normalizedOptions.sendToPending) !== peer ||
                   peer.channel?.readyState === 'closed'
                 ) {
-                  throw transferError('disconnected', 'peer disconnected')
+                  throw disconnectedTransferErr()
                 }
               }
               const sendFrame = async (bytes: Uint8Array): Promise<void> => {
@@ -397,7 +404,7 @@ export const createActionWireManager = ({
                 try {
                   peer.sendData(bytes)
                 } catch {
-                  throw transferError('disconnected', 'peer disconnected')
+                  throw disconnectedTransferErr()
                 }
               }
               if (small) {
@@ -418,7 +425,7 @@ export const createActionWireManager = ({
               const transfers =
                 outgoing.get(peerId) ?? new Map<number, Outgoing>()
               if (transfers.has(id)) {
-                throw mkErr('action transmission id is still in use')
+                throw mkErr('action transfer id in use')
               }
               outgoing.set(peerId, transfers)
               let timer: ReturnType<typeof setTimeout> | null = null
@@ -523,7 +530,7 @@ export const createActionWireManager = ({
 
   const handleData = (peerId: string, data: ArrayBuffer): void => {
     if (data.byteLength < 2 || data.byteLength > maxFrameBytes) {
-      failPeer(peerId, 'invalid action frame')
+      failPeer(peerId, invalidFrameMsg)
       return
     }
     const bytes = new Uint8Array(data)
@@ -539,7 +546,7 @@ export const createActionWireManager = ({
       format > binaryFormat ||
       (kind > offer && format !== textFormat)
     ) {
-      failPeer(peerId, 'invalid action frame')
+      failPeer(peerId, invalidFrameMsg)
       return
     }
     if (kind >= chunk) {
@@ -549,7 +556,7 @@ export const createActionWireManager = ({
           bytes.length !== controlHeaderSize) ||
         (kind === rejected && bytes.length > controlHeaderSize + 200)
       ) {
-        failPeer(peerId, 'invalid action control')
+        failPeer(peerId, invalidActionMsg('control'))
         return
       }
       const id = view.getUint32(2)
@@ -591,7 +598,7 @@ export const createActionWireManager = ({
     }
     const headerSize = kind === inline ? inlineHeaderSize : offerHeaderSize
     if (bytes.length < headerSize) {
-      failPeer(peerId, 'invalid action header')
+      failPeer(peerId, invalidActionMsg('header'))
       return
     }
     const type = decodeBytes(bytes.subarray(2, 34)).replaceAll('\0', '')
@@ -613,7 +620,7 @@ export const createActionWireManager = ({
       size < 0 ||
       (kind === offer && (size === 0 || payloadIndex !== bytes.length))
     ) {
-      failPeer(peerId, 'invalid action proposal')
+      failPeer(peerId, invalidActionMsg('proposal'))
       return
     }
     let metadata: JsonValue | undefined
@@ -624,7 +631,7 @@ export const createActionWireManager = ({
         )
       }
     } catch {
-      failPeer(peerId, 'invalid action metadata')
+      failPeer(peerId, invalidActionMsg('metadata'))
       return
     }
     const message: Message = {

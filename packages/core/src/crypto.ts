@@ -2,6 +2,7 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
 export const libName = 'Trystero'
+export const libId = libName.toLowerCase()
 
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 

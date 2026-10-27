@@ -29,11 +29,16 @@ import {
   log,
   mkErr,
   noOp,
+  posSafeIntErr,
+  requiredErr,
   resetTimer,
   selfCertifyingRoomRegex,
+  selfCertRoomRolesErr,
   toErrorMessage,
   topicPath,
   values,
+  warn,
+  warnEphemeralAdmin,
   watchOnline
 } from './utils'
 import type {
@@ -85,22 +90,22 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     callbacks?: JoinRoomCallbacks
   ): RoomWithPlugins<TPlugins> => {
     if (!config) {
-      throw mkErr('requires a config map as the first argument')
+      throw mkErr('config map required')
     }
 
     if (callbacks && typeof callbacks !== 'object') {
-      throw mkErr('third argument must be a callbacks object')
+      throw mkErr('callbacks must be an object')
     }
 
     const {appId} = config
     const onJoinError = callbacks?.onJoinError
 
     if (!appId) {
-      throw mkErr('config map is missing appId field')
+      throw requiredErr('appId')
     }
 
     if (!roomId) {
-      throw mkErr('roomId argument required')
+      throw requiredErr('roomId')
     }
 
     if (
@@ -108,14 +113,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       (!Number.isSafeInteger(config.maxReceiveBytes) ||
         config.maxReceiveBytes <= 0)
     ) {
-      throw mkErr('maxReceiveBytes must be a positive safe integer')
+      throw posSafeIntErr('maxReceiveBytes')
     }
 
     if (
       config.limit !== undefined &&
       (!Number.isSafeInteger(config.limit) || config.limit < 1)
     ) {
-      throw mkErr('limit must be a positive safe integer')
+      throw posSafeIntErr('limit')
     }
 
     validateIdentityConfig(config)
@@ -123,7 +128,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const plugins = getConfiguredPlugins(config.use)
     const hasRolesPlugin = plugins.some(p => p.name === 'roles')
     if (!hasRolesPlugin && selfCertifyingRoomRegex.test(roomId)) {
-      throw mkErr('self-certifying room ID requires roles() in joinRoom config')
+      throw selfCertRoomRolesErr
     }
     if (
       plugins.some(isSelfAsAdminPlugin) &&
@@ -131,9 +136,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         config.identity === 'session' ||
         config.identity === 'none')
     ) {
-      console.warn(
-        `${libName}: roles({selfAsAdmin: true}) with an ephemeral identity will orphan the room when the session closes; pass identity: 'local' or an imported UserIdentity to persist admin authority`
-      )
+      warnEphemeralAdmin()
     }
 
     let forcedPeerId: string | undefined
@@ -485,9 +488,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             errorStreak === 0 &&
             config.relayConfig?.warnOnRelayFailure !== false
           ) {
-            console.warn(
-              `${libName}: announce failed - ${toErrorMessage(error, '')}`
-            )
+            warn(`announce failed - ${toErrorMessage(error, '')}`)
           }
 
           announceErrorStreaks[i] = errorStreak + 1

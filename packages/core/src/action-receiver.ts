@@ -1,5 +1,13 @@
 import {transferTimeoutMs} from './data-limits'
-import {decodeBytes, fromJson, libName, noOp, resetTimer} from './utils'
+import {
+  decodeBytes,
+  fromJson,
+  invalidActionMsg,
+  logActionHandlerErr,
+  logErr,
+  noOp,
+  resetTimer
+} from './utils'
 import type {ActionReceiveContext, DataPayload, JsonValue} from './types'
 
 const maxPendingTransfers = 1024
@@ -7,6 +15,8 @@ const maxPendingPerPeer = 64
 const maxDecisions = 128
 const maxDecisionsPerPeer = 8
 const emptyBytes = new Uint8Array()
+const sizeLimitMsg = 'payload exceeds receiver size limit'
+const invalidPayloadMsg = invalidActionMsg('payload')
 
 export const textFormat = 0
 export const jsonFormat = 1
@@ -116,7 +126,7 @@ const progress = (
   try {
     action.progress(value, peerId, metadata)
   } catch (error) {
-    console.error(`${libName} progress handler error:`, error)
+    logErr('progress handler', error)
   }
 }
 const deliverPayload = (
@@ -129,7 +139,7 @@ const deliverPayload = (
   try {
     action.receiver?.(data, peerId, metadata)
   } catch (error) {
-    console.error(`${libName} action handler error:`, error)
+    logActionHandlerErr(error)
   }
 }
 
@@ -235,7 +245,7 @@ export const createActionReceiver = ({
     }
     // Recheck when a previously unknown action is registered with a size cap.
     if (state.size > payloadLimit(action)) {
-      reject(state, 'payload exceeds receiver size limit')
+      reject(state, sizeLimitMsg)
       return false
     }
     const receive = state.scope ? state.scope.receive : action.receive
@@ -303,7 +313,7 @@ export const createActionReceiver = ({
       payload = decodePayload(bytes, state.format, state.kind === 'inline')
     } catch {
       release(state)
-      fail(state.peerId, 'invalid action payload')
+      fail(state.peerId, invalidPayloadMsg)
       return
     }
     release(state)
@@ -449,12 +459,7 @@ export const createActionReceiver = ({
       return null
     }
     if (message.size > payloadLimit(action)) {
-      notifyRejected(
-        message,
-        'payload exceeds receiver size limit',
-        scope,
-        bulkId
-      )
+      notifyRejected(message, sizeLimitMsg, scope, bulkId)
       return null
     }
     return {action, scope}
@@ -511,7 +516,7 @@ export const createActionReceiver = ({
         try {
           payload = decodePayload(data, message.format, true)
         } catch {
-          fail(message.peerId, 'invalid action payload')
+          fail(message.peerId, invalidPayloadMsg)
           return
         }
         deliverPayload(action, payload, message.peerId, message.metadata)
@@ -565,7 +570,7 @@ export const createActionReceiver = ({
         !data.length ||
         data.length !== Math.min(chunkSize, state.size - state.offset)
       ) {
-        fail(peerId, 'invalid action chunk offset or length')
+        fail(peerId, invalidActionMsg('chunk'))
         return
       }
       try {

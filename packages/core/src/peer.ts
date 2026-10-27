@@ -3,7 +3,7 @@ import {
   maxQueuedDataFrames,
   pendingDataTimeoutMs
 } from './data-limits'
-import {all, alloc, candidateType, libName, resetTimer, toError} from './utils'
+import {all, alloc, candidateType, resetTimer, toError, warn} from './utils'
 import type {
   BaseRoomConfig,
   PeerHandle,
@@ -261,9 +261,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     channel.binaryType = 'arraybuffer'
     channel.bufferedAmountLowThreshold = 0xffff
     const failData = (): void => {
-      console.warn(
-        `${libName}: invalid or excessive data before handler registration; disconnecting peer`
-      )
+      warn('excessive pre-handler data; disconnecting peer')
       channel.close()
       pc.close()
       emitClose()

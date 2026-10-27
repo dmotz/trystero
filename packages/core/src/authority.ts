@@ -19,12 +19,18 @@ import {
   verifyWithP256
 } from './identity'
 import {
+  authMetaKey,
   createBoundedSet,
   definePlugin,
   encodeBytes,
   genId,
+  insufficientAuthPrefix,
+  invalidP256KeyErr,
+  libId,
   mkErr,
   noOp,
+  peerBannedErr,
+  requiredErr,
   selfCertifyingRoomRegex,
   toHex,
   toJson
@@ -93,6 +99,19 @@ const isValidDelegatedUserEndpoint = async (params: {
     }))
   )
 
+const rolesConfigPrefix = 'roles config'
+const insufficientAuthErr = (to: string): Error =>
+  mkErr(`${insufficientAuthPrefix} to ${to}`)
+const revokeRoleAuthErr = insufficientAuthErr('revoke role')
+const adminOnlyBanErr = mkErr('only an admin can ban a peer')
+const requireTargetId = (id: string, action: string): void => {
+  if (!id || typeof id !== 'string') {
+    throw mkErr(`peerId or userId is required to ${action}`)
+  }
+}
+const rootAdminProtectErr = (who: string, verb: string): Error =>
+  mkErr(`delegated ${who} cannot ${verb} a root admin`)
+
 export const computePublicKeyFingerprint = async (
   pubKeyOrJwk: JsonWebKey | string
 ): Promise<string> => {
@@ -101,7 +120,7 @@ export const computePublicKeyFingerprint = async (
   }
   const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
   if (!rec) {
-    throw mkErr('invalid ECDSA P-256 public key')
+    throw invalidP256KeyErr
   }
   return rec.fingerprint
 }
@@ -121,7 +140,7 @@ export const formatSelfCertifyingRoomId = (
   fingerprint: string
 ): string => {
   if (!fingerprintRegex.test(fingerprint)) {
-    throw mkErr('fingerprint must be a 16-character Base62 string')
+    throw mkErr('fingerprint must be 16 Base62 chars')
   }
   const parsed = parseSelfCertifyingRoomId(baseRoomId)
   if (parsed.fingerprint === fingerprint) {
@@ -144,10 +163,10 @@ export const createAdminRoom = async (
   identity: UserIdentity
 }> => {
   if (!appId || typeof appId !== 'string') {
-    throw mkErr('appId is required')
+    throw requiredErr('appId')
   }
   if (!baseRoomId || typeof baseRoomId !== 'string') {
-    throw mkErr('baseRoomId is required')
+    throw requiredErr('baseRoomId')
   }
   const parsed = parseSelfCertifyingRoomId(baseRoomId)
   const cleanBase = parsed.baseRoomId
@@ -213,26 +232,26 @@ export const normalizeRolesConfig = (
     return undefined
   }
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw mkErr('roles config must be an object ({selfAsAdmin?, admins?})')
+    throw mkErr(`${rolesConfigPrefix} must be an object`)
   }
   const raw = input as Record<string, unknown>
   for (const key of Object.keys(raw)) {
     if (!allowedRolesConfigKeys.has(key)) {
-      throw mkErr(`Unknown roles config option "${key}"`)
+      throw mkErr(`Unknown ${rolesConfigPrefix} option "${key}"`)
     }
   }
   if (
     raw['selfAsAdmin'] !== undefined &&
     typeof raw['selfAsAdmin'] !== 'boolean'
   ) {
-    throw mkErr('roles config "selfAsAdmin" must be a boolean')
+    throw mkErr(`${rolesConfigPrefix} "selfAsAdmin" must be a boolean`)
   }
   if (
     raw['admins'] !== undefined &&
     (!Array.isArray(raw['admins']) ||
       raw['admins'].some(item => typeof item !== 'string'))
   ) {
-    throw mkErr('roles config "admins" must be an array of strings')
+    throw mkErr(`${rolesConfigPrefix} "admins" must be a string[]`)
   }
   return {
     ...(raw['selfAsAdmin'] ? {selfAsAdmin: true} : {}),
@@ -304,7 +323,7 @@ export const resolveRoomAuthority = async (
 
 const roleCertCanonicalPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
   toJson([
-    'trystero-role-cert-v1',
+    `${libId}-role-cert-v1`,
     cert.v,
     cert.certId,
     cert.issuerPubKey,
@@ -539,7 +558,7 @@ export const revocationCanonicalPayload = (
   rev: Omit<RoleRevocationRecord, 'sig'>
 ): string =>
   toJson([
-    'trystero-role-revoke-v1',
+    `${libId}-role-revoke-v1`,
     rev.v,
     rev.appId,
     rev.roomId,
@@ -705,7 +724,7 @@ export const verifyRoleRevocation = async (
 
 export const banCanonicalPayload = (ban: Omit<PeerBanRecord, 'sig'>): string =>
   toJson([
-    'trystero-peer-ban-v1',
+    `${libId}-peer-ban-v1`,
     ban.v,
     ban.appId,
     ban.roomId,
@@ -978,7 +997,7 @@ const actionAuthCanonicalPayload = (params: {
   certSig: string
 }): string =>
   toJson([
-    'trystero-action-auth-v1',
+    `${libId}-action-auth-v1`,
     1,
     params.appId,
     params.roomId,
@@ -1119,7 +1138,7 @@ export const stateRecordCanonicalPayload = <T = JsonValue>(
   rec: Omit<AuthoritativeStateRecord<T>, 'sig' | 'hash'>
 ): string =>
   toJson([
-    'trystero-state-record-v1',
+    `${libId}-state-record-v1`,
     rec.v,
     rec.appId,
     rec.roomId,
@@ -2042,11 +2061,11 @@ export const createRoomAuthority = ({
         !wireMetadata ||
         typeof wireMetadata !== 'object' ||
         Array.isArray(wireMetadata) ||
-        !('__trysteroAuth' in wireMetadata)
+        !(authMetaKey in wireMetadata)
       ) {
         return null
       }
-      const env = (wireMetadata as {__trysteroAuth?: unknown}).__trysteroAuth
+      const env = (wireMetadata as Record<string, unknown>)[authMetaKey]
       if (!validateActionAuthShape(env)) {
         return null
       }
@@ -2135,7 +2154,7 @@ export const createRoomAuthority = ({
       await ready
       const myRoles = getPeerRoles(localSelfId)
       if (!hasRequiredRole(myRoles, requiredRoles) || !localCert) {
-        throw mkErr(`insufficient authority to send on action "${namespace}"`)
+        throw insufficientAuthErr(`send on action "${namespace}"`)
       }
       const cryptoId = await getLocalCryptoIdentity()
       const userProofFields = await buildLocalUserDelegationProof(
@@ -2152,7 +2171,7 @@ export const createRoomAuthority = ({
         ...(userMetadata === undefined ? {} : {userMetadata})
       })
       return {
-        __trysteroAuth: env as unknown as JsonValue,
+        [authMetaKey]: env as unknown as JsonValue,
         ...(userMetadata === undefined ? {} : {m: userMetadata})
       }
     },
@@ -2275,7 +2294,7 @@ export const createRoomAuthority = ({
       ) => Promise<void>
     ): AuthoritativeState<T> => {
       if (!namespace || typeof namespace !== 'string') {
-        throw mkErr('state namespace is required')
+        throw requiredErr('state namespace')
       }
       const rawAuth = config?.roles ?? 'admin'
       const requiredRoles = (
@@ -2322,9 +2341,7 @@ export const createRoomAuthority = ({
             await ready
             const myRoles = getPeerRoles(localSelfId)
             if (!hasRequiredRole(myRoles, entry.requiredRoles) || !localCert) {
-              throw mkErr(
-                `insufficient authority to update state "${namespace}"`
-              )
+              throw insufficientAuthErr(`update state "${namespace}"`)
             }
             const prevValue = entry.value
             const nextValue =
@@ -2421,9 +2438,7 @@ export const createRoomAuthority = ({
       options: {canDelegate?: boolean} | undefined,
       requestWhois: () => void
     ): Promise<RoleCertificate> => {
-      if (!peerOrUserId || typeof peerOrUserId !== 'string') {
-        throw mkErr('peerId or userId is required to grant a role')
-      }
+      requireTargetId(peerOrUserId, 'grant a role')
       await ready
       const myRoles = getPeerRoles(localSelfId)
       const requestedRoles = (Array.isArray(role) ? role : [role]).filter(
@@ -2439,7 +2454,7 @@ export const createRoomAuthority = ({
           (myRoles.includes('admin') ||
             requestedRoles.every(r => myRoles.includes(r))))
       if (!canGrant) {
-        throw mkErr('insufficient authority to grant role')
+        throw insufficientAuthErr('grant role')
       }
 
       const {peerId, userId: subUserId} = resolveTargetIds(peerOrUserId)
@@ -2492,13 +2507,11 @@ export const createRoomAuthority = ({
       peerOrUserId: string,
       role?: string
     ): Promise<RoleRevocationRecord> => {
-      if (!peerOrUserId || typeof peerOrUserId !== 'string') {
-        throw mkErr('peerId or userId is required to revoke a role')
-      }
+      requireTargetId(peerOrUserId, 'revoke a role')
       await ready
       const myRoles = getPeerRoles(localSelfId)
       if (!myRoles.includes('admin') && !localCert?.canDelegate) {
-        throw mkErr('insufficient authority to revoke role')
+        throw revokeRoleAuthErr
       }
       const {peerId, userId: targetUserId} = resolveTargetIds(peerOrUserId)
       const targetCert =
@@ -2508,10 +2521,10 @@ export const createRoomAuthority = ({
         !localCert?.isRoot &&
         isTargetRootAuthority(peerId, targetUserId, targetCert)
       ) {
-        throw mkErr('delegated authority cannot revoke a root admin')
+        throw rootAdminProtectErr('authority', 'revoke')
       }
       if (!localCert || !canRevokeRoles(localCert, targetCert, role)) {
-        throw mkErr('insufficient authority to revoke role')
+        throw revokeRoleAuthErr
       }
       const cryptoId = await getLocalCryptoIdentity()
       const userProofFields = await buildLocalUserDelegationProof(
@@ -2536,7 +2549,7 @@ export const createRoomAuthority = ({
         }
       )
       if (!(await verifyAndApplyRevocation(revocation))) {
-        throw mkErr('insufficient authority to revoke role')
+        throw revokeRoleAuthErr
       }
       return revocation
     },
@@ -2545,13 +2558,11 @@ export const createRoomAuthority = ({
       peerOrUserId: string,
       options?: {reason?: string}
     ): Promise<PeerBanRecord> => {
-      if (!peerOrUserId || typeof peerOrUserId !== 'string') {
-        throw mkErr('peerId or userId is required to ban a peer')
-      }
+      requireTargetId(peerOrUserId, 'ban a peer')
       await ready
       const myRoles = getPeerRoles(localSelfId)
       if (!myRoles.includes('admin') || !localCert) {
-        throw mkErr('only an admin can ban a peer')
+        throw adminOnlyBanErr
       }
       const {peerId, userId: targetUserId} = resolveTargetIds(peerOrUserId)
       const targetCert =
@@ -2561,7 +2572,7 @@ export const createRoomAuthority = ({
         !localCert.isRoot &&
         isTargetRootAuthority(peerId, targetUserId, targetCert)
       ) {
-        throw mkErr('delegated admin cannot ban a root admin')
+        throw rootAdminProtectErr('admin', 'ban')
       }
       const cryptoId = await getLocalCryptoIdentity()
       const userProofFields = await buildLocalUserDelegationProof(
@@ -2578,7 +2589,7 @@ export const createRoomAuthority = ({
         ...userProofFields
       })
       if (!(await verifyAndApplyBan(ban))) {
-        throw mkErr('only an admin can ban a peer')
+        throw adminOnlyBanErr
       }
       return ban
     }
@@ -2664,7 +2675,7 @@ export const roles = (
           const sp = kernel.getScaleProvider()
           sp?.markPeerBanned(peerId)
           if (peerId !== kernel.selfId && kernel.getPeerHandle(peerId, true)) {
-            kernel.kickPeer(peerId, mkErr('peer banned'))
+            kernel.kickPeer(peerId, peerBannedErr)
           }
           if (targetUserId) {
             for (const pid of kernel.getAllPeerIds()) {
@@ -2673,7 +2684,7 @@ export const roles = (
                 kernel.getPeerUserId(pid) === targetUserId
               ) {
                 sp?.markPeerBanned(pid)
-                kernel.kickPeer(pid, mkErr('peer banned'))
+                kernel.kickPeer(pid, peerBannedErr)
               }
             }
           }

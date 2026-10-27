@@ -1,5 +1,5 @@
 import {maxQueuedDataFrames} from './data-limits'
-import {genId, libName, mkErr} from './utils'
+import {genId, mkErr, warn} from './utils'
 import type {
   AddMediaOptions,
   JsonValue,
@@ -244,7 +244,7 @@ export const createMediaManager = ({
     const queue = (metas[id] ??= [])
 
     if (queue.length >= maxQueuedDataFrames) {
-      console.warn(`${libName}: too many pending ${kind} metadata messages`)
+      warn(`too many pending ${kind} metadata messages`)
       onPeerError(id, mkErr('too many pending media metadata messages'))
       return
     }

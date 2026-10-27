@@ -1,10 +1,16 @@
 import {
+  actionRedefinedErr,
   all,
+  authMetaKey,
   entries,
   genId,
-  libName,
+  insufficientAuthPrefix,
+  logActionHandlerErr,
   mkErr,
+  noActivePeerMsg,
   noOp,
+  operationAbortedMsg,
+  peerDisconnectedMsg,
   resetTimer,
   toError,
   toErrorMessage
@@ -150,6 +156,8 @@ const withMetadata = <T extends {peerId: string}>(
 ): T & {metadata?: JsonValue} =>
   metadata === undefined ? context : {...context, metadata}
 
+const requestFailedMsg = 'request failed'
+
 const unwrapAuthUserMetadata = (
   wireMeta: JsonValue | undefined,
   _hasAuthority?: boolean
@@ -158,7 +166,7 @@ const unwrapAuthUserMetadata = (
     wireMeta &&
     typeof wireMeta === 'object' &&
     !Array.isArray(wireMeta) &&
-    '__trysteroAuth' in wireMeta
+    authMetaKey in wireMeta
   ) {
     return Object.hasOwn(wireMeta, 'm')
       ? (wireMeta as {m?: JsonValue}).m
@@ -252,7 +260,7 @@ export const createActionManager = ({
       id,
       makeActionError(
         'disconnected',
-        toErrorMessage(error, 'peer disconnected')
+        toErrorMessage(error, peerDisconnectedMsg)
       )
     )
   }
@@ -349,7 +357,7 @@ export const createActionManager = ({
 
     if (existingState) {
       if (existingState.kind !== kind) {
-        throw mkErr(`action type "${type}" cannot be redefined`)
+        throw actionRedefinedErr(type)
       }
       if (hasAuthority && existingState.requiredRoles.length === 0) {
         existingState.requiredRoles = requiredRoles
@@ -511,7 +519,7 @@ export const createActionManager = ({
             }
             await handler(payload as T, ctx)
           })
-          .catch(err => console.error(`${libName} action handler error:`, err))
+          .catch(logActionHandlerErr)
       }
 
       const action = {
@@ -612,7 +620,7 @@ export const createActionManager = ({
             )
             if (!verified.valid) {
               onUnauthorizedAction?.(type, peerId)
-              throw mkErr('insufficient authority for request')
+              throw mkErr(`${insufficientAuthPrefix} for request`)
             }
             userMeta = verified.userMetadata
             roles = verified.roles
@@ -633,7 +641,7 @@ export const createActionManager = ({
           error =>
             responseAction.send(null, peerId, {
               r: parsed.r,
-              e: toErrorMessage(error, 'request failed').slice(0, 512)
+              e: toErrorMessage(error, requestFailedMsg).slice(0, 512)
             })
         )
         .catch(noOp)
@@ -657,10 +665,7 @@ export const createActionManager = ({
         : target
 
       if (!getPeer(resolvedTarget, false)) {
-        throw makeActionError(
-          'disconnected',
-          `no active peer with id ${target}`
-        )
+        throw makeActionError('disconnected', noActivePeerMsg(target))
       }
 
       const innerMeta =
@@ -684,7 +689,7 @@ export const createActionManager = ({
 
         const rejectAsAborted = (): void => {
           clearPendingRequestWaiter(requestId)
-          reject(makeActionError('aborted', 'operation aborted'))
+          reject(makeActionError('aborted', operationAbortedMsg))
         }
 
         if (signal) {
@@ -746,7 +751,7 @@ export const createActionManager = ({
               onResult?.(result)
               return result
             } catch (err) {
-              const error = toError(err, 'request failed') as ActionError
+              const error = toError(err, requestFailedMsg) as ActionError
 
               if (error.kind === 'aborted' || !error.kind) {
                 throw error

@@ -6,6 +6,7 @@ import {
   fromBase64,
   fromBase64Url,
   fromJson,
+  libId,
   libName,
   mkErr,
   toBase64,
@@ -28,6 +29,7 @@ export {
   fromBase64,
   fromBase64Url,
   fromJson,
+  libId,
   libName,
   mkErr,
   toBase64,
@@ -35,6 +37,56 @@ export {
   toHex,
   toJson
 }
+
+export const authMetaKey = `__${libId}Auth`
+
+export const warn = (msg: string): void => console.warn(`${libName}: ${msg}`)
+
+export const warnNoPeer = (id: string): void =>
+  warn(`no peer with id ${id} found`)
+
+export const warnEphemeralAdmin = (): void =>
+  warn(
+    "roles({selfAsAdmin: true}) with an ephemeral identity orphans the room on close; use identity: 'local' or an imported UserIdentity"
+  )
+
+export const logErr = (kind: string, err: unknown): void =>
+  console.error(`${libName} ${kind} error:`, err)
+
+export const logActionHandlerErr = (err: unknown): void =>
+  logErr('action handler', err)
+
+export const peerDisconnectedMsg = 'peer disconnected'
+export const peerDisconnectedErr = mkErr(peerDisconnectedMsg)
+export const peerBannedMsg = 'peer banned'
+export const peerBannedErr = mkErr(peerBannedMsg)
+export const peerLeftRoomErr = mkErr('peer left room')
+export const roomLeftErr = mkErr('room left')
+export const roomFullMsg = 'room full'
+export const roomFullErr = mkErr(roomFullMsg)
+export const operationAbortedMsg = 'operation aborted'
+export const insufficientAuthPrefix = 'insufficient authority'
+export const invalidP256KeyErr = mkErr('invalid ECDSA P-256 public key')
+
+export const posSafeIntErr = (name: string): Error =>
+  mkErr(`${name} must be a positive safe integer`)
+
+export const requiresRolesErr = (feature: string): Error =>
+  mkErr(`${feature} requires roles() in joinRoom config`)
+
+export const selfCertRoomRolesErr = requiresRolesErr('self-certifying room ID')
+
+export const actionRedefinedErr = (type: string): Error =>
+  mkErr(`action type "${type}" cannot be redefined`)
+
+export const invalidActionMsg = (what: string): string =>
+  `invalid action ${what}`
+
+export const noActivePeerMsg = (id: string): string =>
+  `no active peer with id ${id}`
+
+export const requiredErr = (field: string): Error =>
+  mkErr(`${field} is required`)
 
 const {floor, min, sin} = Math
 
@@ -251,7 +303,7 @@ export const createRelayManager = <TRelay extends object>(
     const key = keysByRelay.get(relay)
 
     if (!key) {
-      throw mkErr('relay bookkeeping missing registration for relay client')
+      throw mkErr('unregistered relay client')
     }
 
     return key
@@ -338,6 +390,9 @@ export const reservedRoomPropertyNames = new Set([
   'onPeerTrack'
 ])
 
+const reservedPluginNameErr = (name: string): Error =>
+  mkErr(`plugin name "${name}" is a reserved room property`)
+
 export const definePlugin = <
   TName extends string = string,
   TApi extends Record<string, unknown> = Record<string, never>
@@ -361,7 +416,7 @@ export const definePlugin = <
     throw mkErr('plugin name must be a non-empty string')
   }
   if (reservedRoomPropertyNames.has(name)) {
-    throw mkErr(`plugin name "${name}" is a reserved room property`)
+    throw reservedPluginNameErr(name)
   }
   if (!spec || typeof spec.setup !== 'function') {
     throw mkErr(`plugin "${name}" must provide a setup(kernel) function`)
@@ -391,12 +446,10 @@ export const getConfiguredPlugins = (
       !item.name ||
       typeof item.setup !== 'function'
     ) {
-      throw mkErr(
-        'invalid plugin in use[]; expected a plugin created with definePlugin()'
-      )
+      throw mkErr('invalid plugin in use[]; use definePlugin()')
     }
     if (reservedRoomPropertyNames.has(item.name)) {
-      throw mkErr(`plugin name "${item.name}" is a reserved room property`)
+      throw reservedPluginNameErr(item.name)
     }
     if (byName.has(item.name)) {
       throw mkErr(`duplicate plugin "${item.name}" in use[]`)

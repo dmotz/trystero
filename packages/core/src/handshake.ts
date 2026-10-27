@@ -12,6 +12,7 @@ import {
   encodeBytes,
   genId,
   keys,
+  libId,
   mkErr,
   resetTimer,
   toError,
@@ -30,6 +31,9 @@ import type {
 } from './types'
 
 const peerIdentityErr = mkErr('peer identity verification failed')
+const handshakeDisconnectErr = mkErr('peer disconnected during handshake')
+const hsStepKey = `__${libId}_id`
+const hsDomain = `${libId}-id-hs:v1`
 
 export type HandshakeReadyPayload =
   | string
@@ -44,8 +48,7 @@ export type VerifiedPeerIdentity = {
   userPubKey: JsonWebKey
 }
 
-type IdentityHandshakeStepMessage = {
-  __trystero_id?: unknown
+type IdentityHandshakeStepMessage = Record<string, unknown> & {
   n?: unknown
   dtls?: unknown
   uid?: unknown
@@ -75,7 +78,7 @@ const parseAndVerifyPeerIdentityClaims = async (
   }
   const msg = raw as IdentityHandshakeStepMessage
   if (
-    msg.__trystero_id !== expectedStep ||
+    msg[hsStepKey] !== expectedStep ||
     typeof msg.n !== 'string' ||
     msg.n.length < 16 ||
     !Array.isArray(msg.dtls) ||
@@ -96,7 +99,7 @@ const parseAndVerifyPeerIdentityClaims = async (
       expectedRemoteDtls.join(',') !== dtls.join(',')) ||
     (localDtls.length > 0 && dtls.length === 0)
   ) {
-    throw mkErr('DTLS fingerprint mismatch during identity handshake')
+    throw mkErr('DTLS fingerprint mismatch')
   }
 
   const peerPubJwk = msg.pk as JsonWebKey
@@ -192,7 +195,7 @@ export const createIdentityHandshake = (params: {
     if (isInitiator) {
       const initNonce = genId(32)
       await send({
-        __trystero_id: 1,
+        [hsStepKey]: 1,
         n: initNonce,
         dtls: localDtls,
         uid: localUser.userId,
@@ -211,7 +214,7 @@ export const createIdentityHandshake = (params: {
 
       const transcriptBytes = encodeBytes(
         toJson([
-          'trystero-id-hs:v1',
+          hsDomain,
           params.appId,
           resolvedRoomId,
           effectiveSelfId,
@@ -245,7 +248,7 @@ export const createIdentityHandshake = (params: {
       } catch (err) {
         if (err instanceof Error && /peer banned/.test(err.message)) {
           await send({
-            __trystero_id: 3,
+            [hsStepKey]: 3,
             ...sigs
           })
         }
@@ -253,7 +256,7 @@ export const createIdentityHandshake = (params: {
       }
 
       await send({
-        __trystero_id: 3,
+        [hsStepKey]: 3,
         ...sigs
       })
 
@@ -272,7 +275,7 @@ export const createIdentityHandshake = (params: {
     const respNonce = genId(32)
     const transcriptBytes = encodeBytes(
       toJson([
-        'trystero-id-hs:v1',
+        hsDomain,
         params.appId,
         resolvedRoomId,
         remotePeerId,
@@ -289,7 +292,7 @@ export const createIdentityHandshake = (params: {
     const sigs = await signTranscript(transcriptBytes, localUser)
 
     await send({
-      __trystero_id: 2,
+      [hsStepKey]: 2,
       n: respNonce,
       dtls: localDtls,
       uid: localUser.userId,
@@ -302,13 +305,12 @@ export const createIdentityHandshake = (params: {
     if (!step3 || typeof step3 !== 'object') {
       throw peerIdentityErr
     }
-    const msg3 = step3 as {
-      __trystero_id?: unknown
+    const msg3 = step3 as Record<string, unknown> & {
       ps?: unknown
       us?: unknown
     }
     if (
-      msg3.__trystero_id !== 3 ||
+      msg3[hsStepKey] !== 3 ||
       typeof msg3.ps !== 'string' ||
       typeof msg3.us !== 'string'
     ) {
@@ -467,10 +469,7 @@ export const createHandshakeManager = ({
         id,
         peer,
         mkErr(
-          `failed sending handshake readiness: ${toErrorMessage(
-            err,
-            'unknown send failure'
-          )}`
+          `handshake ready send failed: ${toErrorMessage(err, 'send failed')}`
         )
       )
     )
@@ -537,7 +536,7 @@ export const createHandshakeManager = ({
       const sendHandshake: HandshakeSender = async (data, metadata) => {
         const current = peerStates[id]
         if (!current || current.peer !== peer) {
-          throw mkErr('peer disconnected during handshake')
+          throw handshakeDisconnectErr
         }
         await sendHandshakeData(data, id, metadata)
       }
@@ -547,7 +546,7 @@ export const createHandshakeManager = ({
           const current = peerStates[id]
 
           if (!current || current.peer !== peer) {
-            reject(mkErr('peer disconnected during handshake'))
+            reject(handshakeDisconnectErr)
             return
           }
 

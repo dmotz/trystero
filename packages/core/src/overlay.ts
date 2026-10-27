@@ -13,6 +13,7 @@ import {
 } from './identity'
 import {
   all,
+  authMetaKey,
   createBoundedCache,
   createBoundedSet,
   decodeBytes,
@@ -22,8 +23,12 @@ import {
   fromJson,
   genId,
   keys,
+  libId,
   mkErr,
   noOp,
+  peerBannedErr,
+  peerDisconnectedErr,
+  peerLeftRoomErr,
   resetTimer,
   toBase64,
   toHex,
@@ -128,6 +133,12 @@ type UnicastEnvelopeHeader = {
 
 const validModes = new Set<TopologyMode>(['mesh', 'auto', 'gossip'])
 
+const checkScaleInt = (name: string, val: number): void => {
+  if (!Number.isSafeInteger(val) || val < 2) {
+    throw mkErr(`scale.${name} must be an integer >= 2`)
+  }
+}
+
 export const normalizeTopologyConfig = (
   topology?: TopologyMode | ScaleConfig
 ): ResolvedTopologyConfig => {
@@ -149,19 +160,13 @@ export const normalizeTopologyConfig = (
   }
 
   const fanout = raw.fanout ?? defaultFanout
-  if (!Number.isSafeInteger(fanout) || fanout < 2) {
-    throw mkErr('scale.fanout must be an integer >= 2')
-  }
+  checkScaleInt('fanout', fanout)
 
   const maxConnections = raw.maxConnections ?? defaultMaxConnections
-  if (!Number.isSafeInteger(maxConnections) || maxConnections < 2) {
-    throw mkErr('scale.maxConnections must be an integer >= 2')
-  }
+  checkScaleInt('maxConnections', maxConnections)
 
   const autoThreshold = raw.autoThreshold ?? defaultAutoThreshold
-  if (!Number.isSafeInteger(autoThreshold) || autoThreshold < 2) {
-    throw mkErr('scale.autoThreshold must be an integer >= 2')
-  }
+  checkScaleInt('autoThreshold', autoThreshold)
 
   return {
     mode,
@@ -593,17 +598,19 @@ const isValidOverlayMsgId = (msgId: string): boolean => {
   return true
 }
 
+const leaveDomain = `${libId}-leave-v1`
+
 export const canonicalBroadcastHeader = (
   origin: string,
   msgId: string
-): string => toJson(['trystero-broadcast-v1', origin, msgId])
+): string => toJson([`${libId}-broadcast-v1`, origin, msgId])
 
 export const canonicalUnicastHeader = (
   origin: string,
   dest: string,
   msgId: string,
   ivB64: string
-): string => toJson(['trystero-unicast-v1', origin, dest, msgId, ivB64])
+): string => toJson([`${libId}-unicast-v1`, origin, dest, msgId, ivB64])
 
 export const canonicalLeaveHeader = (
   leavingId: string,
@@ -612,8 +619,8 @@ export const canonicalLeaveHeader = (
   roomId?: string
 ): string =>
   appId !== undefined || roomId !== undefined
-    ? toJson(['trystero-leave-v1', leavingId, seq, appId ?? '', roomId ?? ''])
-    : toJson(['trystero-leave-v1', leavingId, seq])
+    ? toJson([leaveDomain, leavingId, seq, appId ?? '', roomId ?? ''])
+    : toJson([leaveDomain, leavingId, seq])
 
 export const buildOverlaySignedBytes = (
   canonicalHeader: string,
@@ -651,7 +658,7 @@ const computeRoomAuthToken = async (
 ): Promise<string> =>
   toHex(
     await sha256(
-      `trystero-ov-auth:${password}:${appId}:${roomId}:${peerId}:${seq}`
+      `${libId}-ov-auth:${password}:${appId}:${roomId}:${peerId}:${seq}`
     )
   )
 
@@ -1219,7 +1226,7 @@ export const createOverlayManager = ({
           virtualPeers.get(peerId)?.destroy()
           virtualPeers.delete(peerId)
           purgePeerFromGraph(peerId)
-          onVirtualPeerLeave(peerId, mkErr('peer left room'))
+          onVirtualPeerLeave(peerId, peerLeftRoomErr)
         } else if (!unreachableTimers.has(peerId)) {
           unreachableTimers.set(
             peerId,
@@ -1229,7 +1236,7 @@ export const createOverlayManager = ({
                 virtualPeers.get(peerId)?.destroy()
                 virtualPeers.delete(peerId)
                 purgePeerFromGraph(peerId)
-                onVirtualPeerLeave(peerId, mkErr('peer disconnected'))
+                onVirtualPeerLeave(peerId, peerDisconnectedErr)
               }
             }, unreachableGraceMs)
           )
@@ -1648,7 +1655,7 @@ export const createOverlayManager = ({
             ? `${selfId}:${remotePeerId}`
             : `${remotePeerId}:${selfId}`
         const contextBytes = encodeBytes(
-          `trystero-e2e-v1:${appId}:${roomId}:${sortedPair}`
+          `${libId}-e2e-v1:${appId}:${roomId}:${sortedPair}`
         )
         const combined = new Uint8Array(
           rawBits.byteLength + contextBytes.byteLength
@@ -2320,7 +2327,7 @@ export const createOverlayManager = ({
             wireHeader.metadata && typeof wireHeader.metadata === 'object'
               ? (wireHeader.metadata as Record<string, unknown>)
               : undefined
-          const authEnv = metaObj?.['__trysteroAuth'] as
+          const authEnv = metaObj?.[authMetaKey] as
             | {cert?: RoleCertificate}
             | undefined
           const inlineCert = authEnv?.cert
@@ -3027,7 +3034,7 @@ export const createOverlayManager = ({
       if (virtualPeers.has(peerId)) {
         virtualPeers.get(peerId)?.destroy()
         virtualPeers.delete(peerId)
-        onVirtualPeerLeave(peerId, mkErr('peer banned'))
+        onVirtualPeerLeave(peerId, peerBannedErr)
       }
       recomputeTopologyAndRoutes()
       if (isOverlayActive()) {

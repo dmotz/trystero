@@ -184,9 +184,12 @@ const getSdpExchangeConnectionError = (
 ): string =>
   `could not connect to peer ${peerId} after exchanging SDP; ${
     hasTurnServer(config)
-      ? 'check that your TURN server URLs and credentials are reachable by both peers'
-      : 'configure TURN servers with turnConfig or rtcConfig.iceServers'
+      ? 'verify TURN server URLs and credentials'
+      : 'configure TURN via turnConfig or rtcConfig.iceServers'
   }`
+
+const badPasswordMsg = (kind: string): string =>
+  `incorrect password decrypting ${kind}`
 
 const reportSdpExchangeConnectionFailure = (
   ctx: SignalContext,
@@ -707,7 +710,7 @@ const handleOffer = async (
   } catch {
     clearAnswering(state, answerPeer)
     ctx.onJoinError?.({
-      error: 'incorrect room password when decrypting offer',
+      error: badPasswordMsg('offer'),
       appId: ctx.appId,
       peerId,
       roomId: ctx.roomId
@@ -863,7 +866,7 @@ const handleAnswer = async (
     }
 
     ctx.onJoinError?.({
-      error: 'incorrect room password when decrypting answer',
+      error: badPasswordMsg('answer'),
       appId: ctx.appId,
       peerId,
       roomId: ctx.roomId

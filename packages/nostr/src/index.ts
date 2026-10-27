@@ -6,6 +6,7 @@ import {
   fromJson,
   genId,
   getRelays,
+  libName,
   makeSocket,
   toJson,
   type JoinRoom,
@@ -394,7 +395,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
               >(data)
 
             if (msgType !== eventMsgType) {
-              const prefix = `Trystero: relay failure from ${client.url} - `
+              const prefix = `${libName}: relay failure from ${client.url} - `
               const rejectionReason =
                 msgType === 'CLOSED' && typeof payload === 'string'
                   ? payload

@@ -8,11 +8,13 @@ import {
   encodeBytes,
   fromBase64Url,
   fromJson,
+  libId,
   mkErr,
   sha256,
   toBase64Url,
   toJson
 } from './crypto'
+import {invalidP256KeyErr, toErrorMessage} from './utils'
 import type {
   UserIdentity,
   UserIdentityConfig,
@@ -32,10 +34,34 @@ export const fingerprintLength = 16
 const peerIdRegex = /^[0-9A-Za-z]{20}$/
 const userIdRegex = /^[A-Za-z0-9_-]{43}$/
 
-export const userKeyPrefix = 'trystero_uk_'
-const storagePrefix = 'trystero:user_identity:v1:'
-const idbDbName = 'trystero_identity_v1'
+export const userKeyPrefix = `${libId}_uk_`
+const storagePrefix = `${libId}:user_identity:v1:`
+const idbDbName = `${libId}_identity_v1`
 const idbStoreName = 'identities'
+const testUidPrefix = `${libId}-test-uid:`
+const invalidKeyMaterialErr = mkErr(
+  'invalid user identity key material; expected exported userKey or P-256 JWK'
+)
+const userIdMismatchErr = mkErr(
+  'invalid custom user identity; userId does not match signPubJwk'
+)
+const invalidCustomIdentityErr = mkErr(
+  'invalid custom user identity; use "none", "session", "local", loader, or importUserIdentity()'
+)
+const noSessionStorageErr = mkErr('sessionStorage is not available')
+const noLocalStorageErr = mkErr(
+  'persistent local storage is not available; use a custom identity loader'
+)
+const persistIdentityErr = (
+  label: string,
+  appId: string,
+  err: unknown
+): Error =>
+  mkErr(
+    `failed to persist ${label} identity for "${appId}": ${toErrorMessage(err, '')}`
+  )
+const idbErr = (op: string): Error => mkErr(`IndexedDB ${op} failed`)
+const idbGetErr = idbErr('get')
 
 export const bytesToBigInt = (bytes: Uint8Array): bigint => {
   let res = 0n
@@ -209,7 +235,7 @@ export const derivePeerId = async (
 ): Promise<string> => {
   const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
   if (!rec) {
-    throw mkErr('invalid ECDSA P-256 public key for peerId derivation')
+    throw invalidP256KeyErr
   }
   return rec.peerId
 }
@@ -219,7 +245,7 @@ export const deriveUserId = async (
 ): Promise<string> => {
   const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
   if (!rec) {
-    throw mkErr('invalid ECDSA P-256 public key for userId derivation')
+    throw invalidP256KeyErr
   }
   return rec.userId
 }
@@ -231,12 +257,9 @@ export const isValidUserId = (id: string): boolean =>
   typeof id === 'string' && userIdRegex.test(id)
 
 export const computeUserIdFingerprint = (userId: string): string => {
-  if (!isValidUserId(userId)) {
-    throw mkErr('invalid userId for fingerprint derivation')
-  }
-  const digest = fromBase64Url(userId)
-  if (digest.byteLength !== 32) {
-    throw mkErr('invalid userId digest length')
+  const digest = isValidUserId(userId) ? fromBase64Url(userId) : null
+  if (!digest || digest.byteLength !== 32) {
+    throw mkErr('invalid userId')
   }
   return encodeBase62(digest.subarray(0, 16), fingerprintLength)
 }
@@ -449,7 +472,7 @@ const buildUserIdentityFromKeys = async (
   }
   const rec = await getVerifiedPubKeyRecord(signPubJwk, publicKey)
   if (!rec) {
-    throw mkErr('invalid P-256 public key for user identity')
+    throw invalidP256KeyErr
   }
   const userId = rec.userId
   const encodedPub = encodePublicKey(signPubJwk)
@@ -574,9 +597,7 @@ export const importUserIdentity = async (
 ): Promise<UserIdentity> => {
   const parsed = tryParsePrivateJwk(keyOrJwk)
   if (!parsed) {
-    throw mkErr(
-      'invalid user identity key material; expected an exported userKey or valid P-256 private JWK'
-    )
+    throw invalidKeyMaterialErr
   }
   const cacheKey = `${parsed.d}:${parsed.x}:${parsed.y}`
   const existing = importedUserIdentityCache.get(cacheKey)
@@ -610,7 +631,7 @@ export const importUserIdentity = async (
         })
       ])
       if (!rec) {
-        throw new Error('invalid public point')
+        throw invalidKeyMaterialErr
       }
       const testSig = await ecdsaSign(privateKey, keyPairTestPayload)
       const validPair = await ecdsaVerify(
@@ -619,14 +640,12 @@ export const importUserIdentity = async (
         keyPairTestPayload
       )
       if (!validPair) {
-        throw new Error('keypair mismatch')
+        throw invalidKeyMaterialErr
       }
       return buildUserIdentityFromKeys(privateKey, rec.verifyKey, parsed)
     } catch {
       importedUserIdentityCache.delete(cacheKey)
-      throw mkErr(
-        'invalid user identity key material; expected an exported userKey or valid P-256 private JWK'
-      )
+      throw invalidKeyMaterialErr
     }
   })()
 
@@ -660,13 +679,9 @@ const coerceCustomUserIdentity = async (
     if (await verifyUserIdKey(val.userId, val.signPubJwk)) {
       return val
     }
-    throw mkErr(
-      'invalid custom user identity; userId does not match signPubJwk'
-    )
+    throw userIdMismatchErr
   }
-  throw mkErr(
-    'invalid custom user identity; expected a UserIdentity (use importUserIdentity() for raw keys or JWKs)'
-  )
+  throw invalidCustomIdentityErr
 }
 
 const canUseWebStorage = (
@@ -716,17 +731,13 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   }
   if (raw === 'session') {
     if (!getSessionStorage()) {
-      throw mkErr(
-        'sessionStorage is not available for "session" identity persistence'
-      )
+      throw noSessionStorageErr
     }
     return
   }
   if (raw === 'local') {
     if (!hasIndexedDB() && !getLocalStorage()) {
-      throw mkErr(
-        'persistent local storage (IndexedDB / localStorage) is not available in this environment; provide a custom identity loader instead'
-      )
+      throw noLocalStorageErr
     }
     return
   }
@@ -736,21 +747,17 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   if (isUserIdentityObjectStructural(raw)) {
     const cached = getCachedPubKeyRecord(raw.signPubJwk)
     if (cached && cached.userId !== raw.userId) {
-      throw mkErr(
-        'invalid custom user identity; userId does not match signPubJwk'
-      )
+      throw userIdMismatchErr
     }
     return
   }
-  throw mkErr(
-    'invalid custom user identity; expected "none", "session", "local", a UserIdentity (use importUserIdentity() for raw keys or JWKs), or a loader function'
-  )
+  throw invalidCustomIdentityErr
 }
 
 let defaultUserIdentityPromise: Promise<UserIdentity> | null = null
 let resolvedDefaultUserId = ''
 DEV: {
-  const slug = toBase64Url(encodeBytes('trystero-test-uid:__default__'))
+  const slug = toBase64Url(encodeBytes(`${testUidPrefix}__default__`))
   resolvedDefaultUserId = slug.padEnd(43, '0').slice(0, 43)
 }
 
@@ -810,7 +817,7 @@ export const getDefaultTestUserIdentityUserIdSync = (
     return resolved.userId
   }
   void getDefaultTestUserIdentity(peerId)
-  const slug = toBase64Url(encodeBytes(`trystero-test-uid:${peerId}`))
+  const slug = toBase64Url(encodeBytes(`${testUidPrefix}${peerId}`))
   return slug.padEnd(43, '0').slice(0, 43)
 }
 
@@ -860,11 +867,7 @@ const loadOrCreateFromWebStorage = (
       }
       return stripExportableSecret(created)
     } catch (err) {
-      throw mkErr(
-        `failed to persist ${label} user identity for app "${appId}": ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      )
+      throw persistIdentityErr(label, appId, err)
     } finally {
       mutexMap?.delete(appId)
     }
@@ -933,8 +936,7 @@ const openIdentityDb = (): Promise<IDBDatabase> =>
       }
     }
     req.onsuccess = () => resolve(req.result)
-    req.onerror = () =>
-      reject(req.error ?? new Error('failed to open IndexedDB'))
+    req.onerror = () => reject(req.error ?? idbErr('open'))
   })
 
 const idbGetRecord = (
@@ -947,7 +949,7 @@ const idbGetRecord = (
     const req = store.get(appId)
     req.onsuccess = () =>
       resolve(req.result as StoredIdbIdentityRecord | undefined)
-    req.onerror = () => reject(req.error ?? new Error('IndexedDB get failed'))
+    req.onerror = () => reject(req.error ?? idbGetErr)
   })
 
 const idbAddOrGetRecord = (
@@ -979,13 +981,12 @@ const idbAddOrGetRecord = (
           if (winner) {
             resolve(winner)
           } else {
-            reject(addReq.error ?? new Error('IndexedDB atomic add failed'))
+            reject(addReq.error ?? idbErr('add'))
           }
         }, reject)
       }
     }
-    getReq.onerror = () =>
-      reject(getReq.error ?? new Error('IndexedDB get failed'))
+    getReq.onerror = () => reject(getReq.error ?? idbGetErr)
   })
 
 const withNavigatorLock = async <T>(
@@ -1106,11 +1107,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
         }
       } catch (err) {
         if (!localStore) {
-          throw mkErr(
-            `failed to persist local user identity in IndexedDB for app "${appId}": ${
-              err instanceof Error ? err.message : String(err)
-            }`
-          )
+          throw persistIdentityErr('local', appId, err)
         }
       }
     }
@@ -1119,9 +1116,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
       return loadOrCreateFromWebStorage(localStore, appId, 'local')
     }
 
-    throw mkErr(
-      'persistent local storage (IndexedDB / localStorage) is not available in this environment; provide a custom identity loader instead'
-    )
+    throw noLocalStorageErr
   }).finally(() => {
     localMutexByApp.delete(appId)
   })
@@ -1187,9 +1182,7 @@ export const resolveUserIdentity = async (
     const sessionStore = getSessionStorage()
     if (!sessionStore) {
       if (raw === 'session') {
-        throw mkErr(
-          'sessionStorage is not available for "session" identity persistence'
-        )
+        throw noSessionStorageErr
       }
       return getOrCreateRuntimeUserIdentity(appId)
     }
@@ -1215,7 +1208,7 @@ export const userEndpointProofPayload = (params: {
 }): Uint8Array =>
   encodeBytes(
     toJson([
-      'trystero-user-proof-v1',
+      `${libId}-user-proof-v1`,
       params.appId,
       params.roomId,
       params.peerId,

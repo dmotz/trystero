@@ -12,12 +12,14 @@ import type {
 } from './types'
 
 const defaultSteadyAnnounceIntervalMs = 60_000
+const topicMissingErr = (what: string): Error =>
+  mkErr(`topic strategy missing ${what}`)
 
 const requireContext = <TConfig extends BaseRoomConfig>(
   context?: StrategyContext<TConfig>
 ): StrategyContext<TConfig> => {
   if (!context) {
-    throw mkErr('topic strategy missing room context')
+    throw topicMissingErr('room context')
   }
 
   return context
@@ -27,7 +29,7 @@ const requirePeerId = <TConfig extends BaseRoomConfig>(
   context: StrategyContext<TConfig>
 ): string => {
   if (!context.peerId) {
-    throw mkErr('topic strategy missing resolved peerId')
+    throw topicMissingErr('resolved peerId')
   }
 
   return context.peerId

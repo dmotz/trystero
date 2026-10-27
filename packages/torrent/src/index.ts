@@ -4,6 +4,7 @@ import {
   fromJson,
   genId,
   getRelays,
+  libName,
   makeSocket,
   sha1,
   toJson,
@@ -96,7 +97,7 @@ const send = async (
 
 const warn = (url: string, msg: string, didFail = false): void =>
   console.warn(
-    `Trystero: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
+    `${libName}: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
   )
 
 const getRoomOutstandingOffers = (
