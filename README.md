@@ -559,6 +559,11 @@ aren't able to connect directly to one another.
    conditions (e.g. user with ISP X cannot connect to a user with ISP Y). If
    other user pairings are working (like those between two browsers on the same
    machine), this likely confirms that Trystero is working correctly.
+   To see where a connection fails, open `chrome://webrtc-internals` (or
+   `about:webrtc` in Firefox) while peers connect: it lists the ICE candidates
+   each side gathered and which candidate pairs failed.
+   [rtcstats-js](https://rtcstats.com/open-source) can record the same data from
+   your users' browsers in production.
 2. Sign up for a TURN service or host your own. There are various hosted TURN
    services you can find online like
    [Cloudflare](https://developers.cloudflare.com/calls/turn/) (which offers a
