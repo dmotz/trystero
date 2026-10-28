@@ -41,5 +41,8 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
     "@trystero-p2p/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

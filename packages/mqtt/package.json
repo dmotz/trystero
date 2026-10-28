@@ -41,5 +41,8 @@
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
     "mqtt": "^5.16.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

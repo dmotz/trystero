@@ -46,5 +46,8 @@
   },
   "dependencies": {
     "@trystero-p2p/nostr": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

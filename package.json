@@ -86,6 +86,13 @@
     "werift": "^0.24.4",
     "ws": "^8.22.0"
   },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=26",
+      "onFail": "error"
+    }
+  },
   "engines": {
     "node": ">=26"
   },

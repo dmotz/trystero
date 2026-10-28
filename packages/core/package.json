@@ -42,5 +42,8 @@
   "exports": {
     ".": "./dist/index.mjs",
     "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

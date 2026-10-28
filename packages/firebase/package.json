@@ -41,5 +41,8 @@
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
     "firebase": "^12.19.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

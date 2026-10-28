@@ -41,5 +41,8 @@
   "dependencies": {
     "@noble/secp256k1": "^3.2.0",
     "@trystero-p2p/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

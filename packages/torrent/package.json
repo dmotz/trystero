@@ -42,5 +42,8 @@
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
