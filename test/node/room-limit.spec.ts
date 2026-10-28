@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {createTopicStrategy, scale} from '../../packages/core/src/index.ts'
@@ -216,7 +215,7 @@ class InMemoryRTCPeerConnection {
 const createMemorySignalBus = () => {
   const topicHandlers = new Map<
     string,
-    Set<(topic: string, data: string) => void>
+    Set<(topic: string, data: any) => void>
   >()
 
   const makeJoinRoom = () =>

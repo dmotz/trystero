@@ -124,8 +124,10 @@ export const noOp = (): void => {}
 
 export const candidateType = 'candidate'
 
-export const resetTimer = (timer: number | null | undefined): null => {
-  if (timer !== null) {
+export const resetTimer = (
+  timer: ReturnType<typeof setTimeout> | null | undefined
+): null => {
+  if (timer !== null && timer !== undefined) {
     clearTimeout(timer)
   }
 

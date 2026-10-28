@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {createTopicStrategy} from '../../packages/core/src/index.ts'
@@ -124,7 +123,7 @@ void test(
     const room = joinRoom(
       {
         appId: `topic-custom-announce-interval-${Date.now()}`,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -156,10 +155,14 @@ for (const reannounce of [true, false]) {
             announceCount++
             return {nextAnnounceMs: 60_000}
           }
+          return undefined
         }
       })
       const appId = `topic-reannounce-on-disconnect-${Date.now()}`
-      const room = joinRoom({appId, rtcPolyfill: MockRTCPeerConnection}, 'room')
+      const room = joinRoom(
+        {appId, rtcPolyfill: MockRTCPeerConnection as any},
+        'room'
+      )
 
       try {
         await waitFor(
@@ -210,13 +213,20 @@ void test(
         return () => {}
       },
       publishTopic: (_relay, _topic, message, {kind}) => {
-        if (kind === 'signal' && JSON.parse(message).offer) {
+        if (
+          kind === 'signal' &&
+          typeof message === 'string' &&
+          JSON.parse(message).offer
+        ) {
           offers++
         }
       }
     })
     const room = joinRoom(
-      {appId: `prompt-retry-${Date.now()}`, rtcPolyfill: MockRTCPeerConnection},
+      {
+        appId: `prompt-retry-${Date.now()}`,
+        rtcPolyfill: MockRTCPeerConnection as any
+      },
       'room'
     )
     try {
@@ -248,7 +258,7 @@ void test(
       {
         appId: `topic-passive-lazy-${Date.now()}`,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -292,7 +302,7 @@ void test(
     const room = joinRoom(
       {
         appId: `topic-active-order-${Date.now()}`,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -342,7 +352,7 @@ void test(
     const room = joinRoom(
       {
         appId: `topic-active-direct-sdp-${Date.now()}`,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -395,7 +405,7 @@ void test(
       {
         appId: `topic-passive-await-self-${Date.now()}`,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -451,7 +461,7 @@ void test(
       {
         appId: `topic-passive-ignore-${Date.now()}`,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -493,7 +503,7 @@ void test(
     })
     const config = {
       appId: `topic-sync-rejoin-${Date.now()}`,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const firstRoom = joinRoom(config, 'room')

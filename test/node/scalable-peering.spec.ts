@@ -1,6 +1,11 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import type {
+  RolesPluginApi,
+  Room,
+  ScalePluginApi,
+  TopologyRoute
+} from '../../packages/core/src/index.ts'
 import {
   compareStateRecords,
   computePayloadDigest,
@@ -84,11 +89,8 @@ const createOverlayCluster = async ({
   const resolvedTopology =
     typeof topology === 'string' ? {mode: topology} : {...topology}
 
-  const registerCallbacks = new Map<
-    string,
-    (peer: LinkedPeer, id: string) => void
-  >()
-  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const registerCallbacks = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
   const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
   const joinedByPeer = new Map<string, Set<string>>()
   const leftByPeer = new Map<string, Set<string>>()
@@ -206,7 +208,7 @@ const createOverlayCluster = async ({
       left.add(peerId)
     }
 
-    rooms.set(id, room)
+    rooms.set(id, room as any)
   }
 
   const norm = normalizeTopologyConfig(resolvedTopology)
@@ -361,7 +363,7 @@ void test('Topology algorithms: symmetric gossip neighbor selection & shortest-p
     )
 
     // Verify full connectivity and logarithmic diameter from peer-0000
-    const routes = computeShortestPathRoutes(
+    const routes: Record<string, TopologyRoute> = computeShortestPathRoutes(
       peerIds[0],
       adjacency,
       adjacency.get(peerIds[0])!
@@ -1238,8 +1240,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     password: 'shared-room-secret',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      maxHops: 4
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1253,8 +1254,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     password: 'shared-room-secret',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      maxHops: 4
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1268,8 +1268,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     password: 'shared-room-secret',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      maxHops: 4
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1347,7 +1346,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
       'SHA-256',
       encodeBytes(
         'trystero-ov-auth:shared-room-secret:adv-app:adv-room:alice:999'
-      )
+      ) as BufferSource
     )
   )
   const validRoomAuthForHijack = Array.from(authDigest, b =>
@@ -1365,7 +1364,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   const hijackSigBuf = await crypto.subtle.sign(
     {name: 'ECDSA', hash: 'SHA-256'},
     mallorySignPair.privateKey,
-    encodeBytes(hijackCanonical)
+    encodeBytes(hijackCanonical) as BufferSource
   )
   const hijackSigB64 = btoa(
     String.fromCharCode(...new Uint8Array(hijackSigBuf))
@@ -1476,8 +1475,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     password: 'shared-room-secret',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      maxHops: 4
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1553,8 +1551,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     password: 'shared-room-secret',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      maxHops: 4
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1654,8 +1651,7 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     roomId: 'byz-room',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      redundancy: 2
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1668,8 +1664,7 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     roomId: 'byz-room',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      redundancy: 2
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1682,8 +1677,7 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     roomId: 'byz-room',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      redundancy: 2
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -1696,8 +1690,7 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     roomId: 'byz-room',
     topology: {
       mode: 'gossip',
-      maxConnections: 2,
-      redundancy: 2
+      maxConnections: 2
     },
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
@@ -2043,8 +2036,8 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
   // Set up a 4-peer multi-hop chain in small-world overlay:
   // admin <-> bob <-> carol <-> mallory
   const peers = ['admin', 'bob', 'carol', 'mallory'] as const
-  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
-  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const regMap = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
 
   for (const id of peers) {
     const peerIdentity =
@@ -2061,7 +2054,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
         identity: peerIdentity
       }
     )
-    rooms.set(id, room)
+    rooms.set(id, room as any)
   }
 
   try {
@@ -2225,8 +2218,11 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   const appId = 'state-test-app'
   const coAdmins = [adminUser1.userId, adminUser2.userId]
 
-  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
-  const makePeerRoom = (id: string, identity: typeof adminUser1) =>
+  const regMap = new Map<string, (peer: any, id: string) => void>()
+  const makePeerRoom = (
+    id: string,
+    identity: typeof adminUser1
+  ): Room & RolesPluginApi =>
     createRoom(
       f => regMap.set(id, f),
       () => {},
@@ -2451,8 +2447,8 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
   const roomId = provisioned.roomId
   const appId = 'ban-test-app'
 
-  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
-  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const regMap = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
   const peerIds = ['admin', 'honest', 'mallory']
 
   for (const id of peerIds) {
@@ -2470,7 +2466,7 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
         identity: peerIdentity
       }
     )
-    rooms.set(id, room)
+    rooms.set(id, room as any)
   }
 
   const directHandles = new Map<string, LinkedPeer>()
@@ -2621,8 +2617,8 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
   const roomId = provisioned.roomId
   const appId = 'audit-app'
   const peerIds = ['admin', 'bob', 'carol', 'mallory']
-  const regMap = new Map<string, (peer: LinkedPeer, id: string) => void>()
-  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const regMap = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
 
   for (const id of peerIds) {
     const peerIdentity =
@@ -2639,7 +2635,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
         identity: peerIdentity
       }
     )
-    rooms.set(id, room)
+    rooms.set(id, room as any)
   }
 
   const directHandles = new Map<string, LinkedPeer>()
@@ -2942,8 +2938,11 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
     }
     for (const target of [direct, remote]) {
       streams.length = 0
-      const camera = {id: `camera-${target}`}
-      const stream = {id: `private-${target}`, getTracks: () => [camera]}
+      const camera = {id: `camera-${target}`} as unknown as MediaStreamTrack
+      const stream = {
+        id: `private-${target}`,
+        getTracks: () => [camera]
+      } as unknown as MediaStream
       await source.addStream(stream, {target})
       await wait(100)
       assert.deepEqual(
@@ -2966,8 +2965,11 @@ void test('Removing a broadcast stream prevents replay after topology healing', 
   })
   try {
     const source = cluster.rooms.get('peer-0000')!
-    const track = {id: 'removed-camera'}
-    const stream = {id: 'removed-stream', getTracks: () => [track]}
+    const track = {id: 'removed-camera'} as unknown as MediaStreamTrack
+    const stream = {
+      id: 'removed-stream',
+      getTracks: () => [track]
+    } as unknown as MediaStream
     await source.addStream(stream)
     await wait(100)
     assert.ok(cluster.addedTracks.length >= 7)
@@ -2996,17 +2998,19 @@ void test('Removing and replacing tracks updates broadcast streams before topolo
     })
     try {
       const source = cluster.rooms.get('peer-0000')!
-      const camera = {id: 'camera'}
-      const audio = {id: 'audio'}
+      const camera = {id: 'camera'} as unknown as MediaStreamTrack
+      const audio = {id: 'audio'} as unknown as MediaStreamTrack
       let currentTracks = [camera, audio]
       const stream = {
         id: 'two-track-stream',
         getTracks: () => [...currentTracks]
-      }
+      } as unknown as MediaStream
       await source.addStream(stream)
       await wait(100)
       if (replace) {
-        const replacementCamera = {id: 'replacement-camera'}
+        const replacementCamera = {
+          id: 'replacement-camera'
+        } as unknown as MediaStreamTrack
         await source.replaceTrack(camera, replacementCamera)
         await wait(100)
       }
@@ -3186,11 +3190,8 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
     {length: peerCount},
     (_, i) => `c1-peer-${String(i).padStart(2, '0')}`
   )
-  const registerCallbacks = new Map<
-    string,
-    (peer: LinkedPeer, id: string) => void
-  >()
-  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const registerCallbacks = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
   const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
 
   class StrictWebRTCPeer extends LinkedPeer {
@@ -3270,7 +3271,7 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
         identity: peerIdentity
       }
     )
-    rooms.set(id, room)
+    rooms.set(id, room as any)
   }
 
   try {
@@ -3332,11 +3333,8 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
 void test('C2 regression: relay boundary-shifting bytes between msgId and payload fails signature verification and never evicts origin', async () => {
   // Set up a line topology: alice <-> relay <-> bob <-> carol
   const peerIds = ['alice', 'relay', 'bob', 'carol']
-  const registerCallbacks = new Map<
-    string,
-    (peer: LinkedPeer, id: string) => void
-  >()
-  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const registerCallbacks = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
   const receivedByBob: Array<{data: string; peerId: string}> = []
   const receivedByCarol: Array<{data: string; peerId: string}> = []
   const senders = new Map<string, (data: string) => Promise<void>>()
@@ -3372,7 +3370,7 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
       }
     })
     senders.set(id, chatAction.send)
-    rooms.set(id, room)
+    rooms.set(id, room as any)
   }
 
   try {
@@ -3522,11 +3520,8 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
     'mod-peer': modUser,
     'attacker-peer': attackerUser
   }
-  const registerCallbacks = new Map<
-    string,
-    (peer: LinkedPeer, id: string) => void
-  >()
-  const rooms = new Map<string, ReturnType<typeof createRoom>>()
+  const registerCallbacks = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
   const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
   const capturedAuthFrames: Uint8Array[] = []
 
@@ -3565,7 +3560,7 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
         identity: usersByPeer[id]!
       }
     )
-    rooms.set(id, room)
+    rooms.set(id, room as any)
   }
 
   try {
@@ -3707,7 +3702,7 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     selfId: 'alice',
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 6, minConnections: 2},
+    topology: {mode: 'gossip', maxConnections: 6},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -3716,7 +3711,7 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     selfId: 'relay',
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 6, minConnections: 2},
+    topology: {mode: 'gossip', maxConnections: 6},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -3728,8 +3723,7 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     topology: {
       mode: 'auto',
       autoThreshold: 12,
-      maxConnections: 6,
-      minConnections: 2
+      maxConnections: 6
     },
     onVirtualPeerJoin: pid => virtualJoinsAtBob.push(pid),
     onVirtualPeerLeave: pid => virtualLeavesAtBob.push(pid),
@@ -3740,7 +3734,7 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     selfId: 'mallory',
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 6, minConnections: 2},
+    topology: {mode: 'gossip', maxConnections: 6},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -3750,8 +3744,9 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     // Link alice <-> relay <-> bob, and mallory <-> bob
     alice.addDirectPeer('relay', {
       connection: {} as RTCPeerConnection,
-      createdAt: Date.now(),
-      isInitiator: true,
+      channel: null,
+      isDead: false,
+      getOffer: async () => {},
       sendData: d => relay.handleOverlayFrame('alice', d.slice().buffer),
       signal: async () => {},
       addStream: () => {},
@@ -3764,8 +3759,9 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     })
     relay.addDirectPeer('alice', {
       connection: {} as RTCPeerConnection,
-      createdAt: Date.now(),
-      isInitiator: false,
+      channel: null,
+      isDead: false,
+      getOffer: async () => {},
       sendData: d => alice.handleOverlayFrame('relay', d.slice().buffer),
       signal: async () => {},
       addStream: () => {},
@@ -3778,8 +3774,9 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     })
     relay.addDirectPeer('bob', {
       connection: {} as RTCPeerConnection,
-      createdAt: Date.now(),
-      isInitiator: true,
+      channel: null,
+      isDead: false,
+      getOffer: async () => {},
       sendData: d => {
         sentFromRelayToBob.push(d.slice())
         bob.handleOverlayFrame('relay', d.slice().buffer)
@@ -3795,8 +3792,9 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     })
     bob.addDirectPeer('relay', {
       connection: {} as RTCPeerConnection,
-      createdAt: Date.now(),
-      isInitiator: false,
+      channel: null,
+      isDead: false,
+      getOffer: async () => {},
       sendData: d => relay.handleOverlayFrame('bob', d.slice().buffer),
       signal: async () => {},
       addStream: () => {},
@@ -3809,8 +3807,9 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     })
     mallory.addDirectPeer('bob', {
       connection: {} as RTCPeerConnection,
-      createdAt: Date.now(),
-      isInitiator: true,
+      channel: null,
+      isDead: false,
+      getOffer: async () => {},
       sendData: d => bob.handleOverlayFrame('mallory', d.slice().buffer),
       signal: async () => {},
       addStream: () => {},
@@ -3823,8 +3822,9 @@ void test('Overlay & room hardening: unauthorized down-with-descriptor eviction,
     })
     bob.addDirectPeer('mallory', {
       connection: {} as RTCPeerConnection,
-      createdAt: Date.now(),
-      isInitiator: false,
+      channel: null,
+      isDead: false,
+      getOffer: async () => {},
       sendData: d => mallory.handleOverlayFrame('bob', d.slice().buffer),
       signal: async () => {},
       addStream: () => {},

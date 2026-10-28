@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {joinRoom} from '../../packages/nostr/src/index.ts'
@@ -131,11 +130,11 @@ void test(
     // makeSocket has no injection seam for WebSocket or its retry timer; the
     // setTimeout shim queues every timer so the jittered reconnect and batched
     // flushBatch (scheduled with setTimeout(0)) can be fired on demand.
-    globalThis.WebSocket = ControlledSocket
-    globalThis.setTimeout = fn => {
+    globalThis.WebSocket = ControlledSocket as any
+    globalThis.setTimeout = (fn => {
       stubbedTimers.push(fn)
       return stubbedTimers.length - 1
-    }
+    }) as any
 
     const drainTimers = (limit = 100) => {
       let count = 0
@@ -163,7 +162,7 @@ void test(
           appId: `trystero-nostr-resubscribe-${Date.now()}`,
           password: 'resubscribe-test',
           relayConfig: {urls: [`ws://test-nostr-${Date.now()}`], redundancy: 1},
-          rtcPolyfill: MockRTCPeerConnection
+          rtcPolyfill: MockRTCPeerConnection as any
         },
         'r'
       )

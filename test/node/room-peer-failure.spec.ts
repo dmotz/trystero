@@ -10,7 +10,6 @@ import {
   turn,
   waitFor
 } from './peer-harness.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
 
 const metadataAction = (type: string, key: string) => {

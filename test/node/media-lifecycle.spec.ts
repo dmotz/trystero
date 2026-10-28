@@ -3,11 +3,8 @@ import test from './test.ts'
 import {
   createMediaIdentityCache,
   createMediaManager
-  // @ts-expect-error Internal source import crosses a referenced package boundary.
 } from '../../packages/core/src/media.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import initPeer from '../../packages/core/src/peer.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
 import {LinkedMediaPeer, MockPeer, linkPeers, turn} from './peer-harness.ts'
 

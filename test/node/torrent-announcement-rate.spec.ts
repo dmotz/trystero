@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {joinRoom} from '../../packages/torrent/src/index.ts'
@@ -49,13 +48,13 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
 
     const room = joinRoom(
       {
         appId: `torrent-announcement-rate-${Date.now()}`,
         relayConfig: {urls: [`wss://torrent-rate-${Date.now()}.test`]},
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -98,14 +97,14 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
 
     const room = joinRoom(
       {
         appId: `torrent-passive-rate-${Date.now()}`,
         passive: true,
         relayConfig: {urls: [`wss://torrent-passive-${Date.now()}.test`]},
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )

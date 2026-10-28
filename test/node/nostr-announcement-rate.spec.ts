@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {joinRoom} from '../../packages/nostr/src/index.ts'
@@ -76,6 +75,10 @@ class MockRTCPeerConnection {
 }
 
 class MockWebSocket {
+  static CONNECTING = 0 as const
+  static OPEN = 1 as const
+  static CLOSING = 2 as const
+  static CLOSED = 3 as const
   static sockets = []
   static rateLimitAnnouncements = false
   static rejectAnnouncements = false
@@ -136,7 +139,8 @@ class MockWebSocket {
   }
 }
 
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+const wait = (ms: number) =>
+  new Promise<void>(resolve => setTimeout(resolve, ms))
 
 const waitFor = async (
   check: () => boolean,
@@ -172,14 +176,14 @@ const joinTestRoom = (url: string) =>
     {
       appId: `nostr-announcement-rate-${Date.now()}-${Math.random()}`,
       relayConfig: {urls: [url], warnOnRelayFailure: false},
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     },
     'room'
   )
 
 void test('Nostr late EOSE replays discovery once without blocking startup', async () => {
   const previous = globalThis.WebSocket
-  globalThis.WebSocket = MockWebSocket
+  globalThis.WebSocket = MockWebSocket as any
   const room = joinTestRoom(`wss://late-eose-${Date.now()}.test`)
   try {
     const socket = MockWebSocket.sockets.at(-1)
@@ -205,7 +209,7 @@ void test(
     const previousSocket = globalThis.WebSocket
     const previousNow = Date.now
     const frozen = Date.now()
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
     Date.now = () => frozen
     const room = joinTestRoom(`wss://unique-announcement-${frozen}.test`)
     try {
@@ -229,7 +233,7 @@ void test(
   {timeout: 8000},
   async () => {
     const previous = globalThis.WebSocket
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
     const room = joinTestRoom(`wss://closed-retry-${Date.now()}.test`)
     try {
       const socket = MockWebSocket.sockets.at(-1)
@@ -261,7 +265,7 @@ for (const recovered of [false, true]) {
     {timeout: 8000},
     async () => {
       const previous = globalThis.WebSocket
-      globalThis.WebSocket = MockWebSocket
+      globalThis.WebSocket = MockWebSocket as any
       const room = joinTestRoom(
         `wss://pending-retry-${recovered}-${Date.now()}.test`
       )
@@ -290,7 +294,7 @@ for (const recovered of [false, true]) {
 
 void test('Nostr temporary event errors do not retire the relay or cancel discovery', async () => {
   const previous = globalThis.WebSocket
-  globalThis.WebSocket = MockWebSocket
+  globalThis.WebSocket = MockWebSocket as any
   const room = joinTestRoom(`wss://temporary-error-${Date.now()}.test`)
   try {
     const socket = MockWebSocket.sockets.at(-1)
@@ -314,7 +318,7 @@ void test('Nostr temporary event errors do not retire the relay or cancel discov
 
 void test('Nostr successful late ACKs cannot cancel an active rate-limit cooldown', async () => {
   const previous = globalThis.WebSocket
-  globalThis.WebSocket = MockWebSocket
+  globalThis.WebSocket = MockWebSocket as any
   const room = joinTestRoom(`wss://cooldown-ack-${Date.now()}.test`)
   try {
     const socket = MockWebSocket.sockets.at(-1)
@@ -339,20 +343,20 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     const originalSetTimeout = globalThis.setTimeout
     const heldZeroDelayTimers = []
-    const nativeWait = ms =>
-      new Promise(resolve => originalSetTimeout(resolve, ms))
+    const nativeWait = (ms: number) =>
+      new Promise<void>(resolve => originalSetTimeout(resolve, ms))
 
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
-    globalThis.WebSocket = MockWebSocket
-    globalThis.setTimeout = (fn, delay, ...args) => {
+    globalThis.WebSocket = MockWebSocket as any
+    globalThis.setTimeout = ((fn, delay, ...args) => {
       if (delay === 0) {
         heldZeroDelayTimers.push(() => fn(...args))
         return {heldZeroDelayTimer: heldZeroDelayTimers.length}
       }
 
       return originalSetTimeout(fn, delay, ...args)
-    }
+    }) as any
 
     const room = joinTestRoom(
       `wss://nostr-subscription-order-${Date.now()}.test`
@@ -409,7 +413,7 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
 
     const room = joinTestRoom(`wss://nostr-healthy-${Date.now()}.test`)
 
@@ -449,7 +453,7 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = true
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
 
     const room = joinTestRoom(`wss://nostr-rate-limited-${Date.now()}.test`)
 
@@ -481,7 +485,7 @@ void test(
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
     MockWebSocket.rejectAnnouncements = true
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
 
     const room = joinTestRoom(`wss://nostr-rejecting-${Date.now()}.test`)
 
@@ -513,7 +517,7 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
 
     const url = `wss://nostr-missing-ack-${Date.now()}.test`
     const firstRoom = joinTestRoom(url)
@@ -543,7 +547,7 @@ void test(
   {timeout: 5_000},
   async () => {
     const previous = globalThis.WebSocket
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
     const room = joinTestRoom(`wss://closed-terminal-${Date.now()}.test`)
 
     try {

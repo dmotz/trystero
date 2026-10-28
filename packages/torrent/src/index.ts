@@ -119,7 +119,7 @@ const takeOutstandingOffer = (
   const offer = outstandingOffers?.[offerId]
 
   if (!offer) {
-    return
+    return undefined
   }
 
   delete outstandingOffers[offerId]

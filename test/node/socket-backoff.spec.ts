@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
@@ -47,12 +46,12 @@ void test(
     try {
       // makeSocket has no injection seam for WebSocket or its retry timer.
       Math.random = () => 1
-      globalThis.setTimeout = (fn, delay) => {
+      globalThis.setTimeout = ((fn, delay) => {
         scheduledDelays.push(delay)
         pendingInit = fn
         return 0
-      }
-      globalThis.WebSocket = FailingSocket
+      }) as any
+      globalThis.WebSocket = FailingSocket as any
 
       const client = makeSocket(`ws://test-backoff-${Date.now()}`, () => {})
 
@@ -124,11 +123,11 @@ void test(
 
     let client
     try {
-      globalThis.setTimeout = fn => {
+      globalThis.setTimeout = (fn => {
         pendingInit = fn
         return 0
-      }
-      globalThis.WebSocket = ControlledSocket
+      }) as any
+      globalThis.WebSocket = ControlledSocket as any
 
       client = makeSocket(`ws://test-ready-${Date.now()}`, () => {})
       const firstReady = client.ready
@@ -228,16 +227,16 @@ void test(
     let clientB
     try {
       Math.random = () => 1
-      globalThis.setTimeout = (fn, delay) => {
+      globalThis.setTimeout = ((fn, delay) => {
         const id = nextTimerId++
         timers.set(id, fn)
         scheduledDelays.push(delay)
         return id
-      }
+      }) as any
       globalThis.clearTimeout = id => {
         timers.delete(id)
       }
-      globalThis.WebSocket = ControlledSocket
+      globalThis.WebSocket = ControlledSocket as any
       globalThis.addEventListener = (type, listener, options) => {
         const set = windowListeners.get(type) ?? new Set()
         set.add(listener)
@@ -373,6 +372,7 @@ void test(
       sockets[8].open()
 
       assert.throws(
+        // @ts-expect-error invalid connectivity mode is rejected at runtime
         () => setRelayConnectivity('invalid'),
         /invalid relay connectivity mode/
       )

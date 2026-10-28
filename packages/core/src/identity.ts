@@ -1019,7 +1019,8 @@ export const resolveUserIdentity = async (
           ? 'session'
           : 'none'
 
-  const mode: UserIdentityPersistence = raw ?? defaultMode
+  const mode: UserIdentityPersistence =
+    (raw as UserIdentityPersistence | undefined) ?? defaultMode
 
   const fallbackToNone = (shouldWarn?: boolean): Promise<UserIdentity> => {
     if (shouldWarn) {

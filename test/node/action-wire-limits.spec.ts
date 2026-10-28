@@ -5,11 +5,8 @@ import {
   linkedActions as linked,
   turn
 } from './peer-harness.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionWireManager} from '../../packages/core/src/action-wire.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionManager} from '../../packages/core/src/actions.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 
 const encoder = new TextEncoder()

@@ -52,7 +52,8 @@ import type {
   StateConfig,
   TargetPeers,
   UserIdentity,
-  UserIdentityConfig
+  UserIdentityConfig,
+  Widen
 } from './types'
 
 export {
@@ -1413,14 +1414,14 @@ export type RoomAuthority = {
     bans?: PeerBanRecord[]
     states?: AuthoritativeStateRecord[]
   } | null>
-  makeState: <T = JsonValue>(
+  makeState: <T extends JsonValue>(
     namespace: string,
-    initialValue: T extends JsonValue ? T : never,
-    config: StateConfig<T> | undefined,
+    initialValue: T,
+    config: StateConfig<Widen<T>> | undefined,
     broadcastRecord: (
       record: AuthoritativeStateRecord<JsonValue>
     ) => Promise<void>
-  ) => AuthoritativeState<T>
+  ) => AuthoritativeState<Widen<T>>
   getAuthorityInfo: () => Promise<Omit<SelfInfo, 'peerId'>>
   issueRoleCertificate: (
     peerOrUserId: string,
@@ -2354,14 +2355,15 @@ export const createRoomAuthority = ({
       }
     },
 
-    makeState: <T = JsonValue>(
+    makeState: <T extends JsonValue>(
       namespace: string,
-      initialValue: T extends JsonValue ? T : never,
-      config: StateConfig<T> | undefined,
+      initialValue: T,
+      config: StateConfig<Widen<T>> | undefined,
       broadcastRecord: (
         record: AuthoritativeStateRecord<JsonValue>
       ) => Promise<void>
-    ): AuthoritativeState<T> => {
+    ): AuthoritativeState<Widen<T>> => {
+      type W = Widen<T>
       if (!namespace || typeof namespace !== 'string') {
         throw requiredErr('state namespace')
       }
@@ -2371,12 +2373,12 @@ export const createRoomAuthority = ({
       ).filter(Boolean)
 
       let entry = stateInstances.get(namespace) as
-        | StateInstanceEntry<T>
+        | StateInstanceEntry<W>
         | undefined
       if (!entry) {
         entry = {
           namespace,
-          value: initialValue,
+          value: initialValue as W,
           record: null,
           meta: null,
           requiredRoles: requiredRoles.length > 0 ? requiredRoles : ['admin'],
@@ -2390,7 +2392,7 @@ export const createRoomAuthority = ({
         )
 
         const cachedRecord = latestStateRecords.get(namespace) as
-          | AuthoritativeStateRecord<T>
+          | AuthoritativeStateRecord<W>
           | undefined
         if (cachedRecord) {
           latestStateRecords.delete(namespace)
@@ -2405,7 +2407,7 @@ export const createRoomAuthority = ({
 
         set: async nextOrUpdater => {
           const runMutation = async (): Promise<
-            AuthoritativeStateRecord<T>
+            AuthoritativeStateRecord<W>
           > => {
             await ready
             const myRoles = getPeerRoles(localSelfId)
@@ -2415,7 +2417,7 @@ export const createRoomAuthority = ({
             const prevValue = entry.value
             const nextValue =
               typeof nextOrUpdater === 'function'
-                ? (nextOrUpdater as (prev: T) => T)(prevValue)
+                ? (nextOrUpdater as (prev: W) => W)(prevValue)
                 : nextOrUpdater
             const nextSeq = entry.record ? entry.record.seq + 1 : 1
             const prevHash =
@@ -2425,7 +2427,7 @@ export const createRoomAuthority = ({
             const {userPubKey, userProof} = await buildLocalUserDelegationProof(
               cryptoId.signPubJwk
             )
-            const record = await signStateRecord<T>(
+            const record = await signStateRecord<W>(
               cryptoId.signPrivateKey,
               cryptoId.signPubJwk,
               localCert,
@@ -2482,7 +2484,7 @@ export const createRoomAuthority = ({
         set onChange(handler) {
           entry.onChange = handler
           if (handler && entry.record && entry.meta) {
-            handler(entry.value, initialValue, entry.meta)
+            handler(entry.value, initialValue as W, entry.meta)
           }
         }
       }
@@ -2947,11 +2949,11 @@ export const roles = (
       })
 
       return {
-        makeState: <T = JsonValue>(
+        makeState: <T extends JsonValue>(
           namespace: string,
-          initialValue: T extends JsonValue ? T : never,
-          stateConfig?: StateConfig<T>
-        ): AuthoritativeState<T> =>
+          initialValue: T,
+          stateConfig?: StateConfig<Widen<T>>
+        ): AuthoritativeState<Widen<T>> =>
           authority.makeState(
             namespace,
             initialValue,

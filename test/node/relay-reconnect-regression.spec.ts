@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import createStrategy from '../../packages/core/src/strategy.ts'
@@ -133,7 +132,7 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
 
-    globalThis.WebSocket = AutoOpenWebSocket
+    globalThis.WebSocket = AutoOpenWebSocket as any
     AutoOpenWebSocket.sockets.length = 0
 
     const room = joinRoom(
@@ -197,7 +196,7 @@ void test(
     const room = joinRoom(
       {
         appId: `announce-supervision-${Date.now()}`,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )
@@ -232,7 +231,7 @@ void test(
     const room = joinRoom(
       {
         appId: `announce-stop-${Date.now()}`,
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )

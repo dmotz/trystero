@@ -15,15 +15,5 @@
     "noImplicitOverride": false,
     "types": ["node"]
   },
-  "include": ["playwright.config.ts", "test/**/*.ts"],
-  "references": [
-    {"path": "./packages/core"},
-    {"path": "./packages/nostr"},
-    {"path": "./packages/trystero"},
-    {"path": "./packages/torrent"},
-    {"path": "./packages/mqtt"},
-    {"path": "./packages/firebase"},
-    {"path": "./packages/supabase"},
-    {"path": "./packages/ws-relay"}
-  ]
+  "include": ["playwright.config.ts", "test/**/*.ts"]
 }

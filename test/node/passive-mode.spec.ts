@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
@@ -37,7 +36,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -81,7 +80,7 @@ void test(
     const appId = `active-announce-${Date.now()}`
     const config = {
       appId,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -120,7 +119,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -171,7 +170,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -224,7 +223,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -282,7 +281,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -368,7 +367,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -414,7 +413,7 @@ void test(
     const appId = `active-no-flag-${Date.now()}`
     const config = {
       appId,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -452,7 +451,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const roomA = joinRoom(config, 'test-room')
@@ -506,7 +505,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -590,7 +589,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -648,7 +647,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -709,7 +708,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -768,7 +767,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -858,7 +857,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -896,7 +895,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -956,7 +955,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -1041,7 +1040,7 @@ void test(
       appId,
       _test_only_forcedPeerId: 'passive-peer',
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
 
     const room = joinRoom(config, 'test-room')
@@ -1078,7 +1077,7 @@ void test(
         {
           appId,
           _test_only_forcedPeerId: 'active-peer',
-          rtcPolyfill: MockRTCPeerConnection
+          rtcPolyfill: MockRTCPeerConnection as any
         },
         'test-room'
       )

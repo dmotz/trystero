@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {createTopicStrategy} from '../../packages/core/src/index.ts'
@@ -27,7 +26,7 @@ for (const channelState of ['closed', 'connecting']) {
     })
     const config = {
       appId: `leave-rejoin-${channelState}-${Date.now()}`,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as any
     }
     const room = joinRoom(config, 'room')
     const peer = new MockPeer()

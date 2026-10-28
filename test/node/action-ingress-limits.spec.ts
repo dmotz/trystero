@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createPeer from '../../packages/core/src/peer.ts'
 import {
   MockPeer,

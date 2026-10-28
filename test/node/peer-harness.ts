@@ -1,9 +1,6 @@
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 
 export {internalActionPrefix}

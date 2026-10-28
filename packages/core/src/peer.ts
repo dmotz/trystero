@@ -56,7 +56,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
   let dataChannel: RTCDataChannel | null = null
-  let disconnectedCloseTimer: number | null = null
+  let disconnectedCloseTimer: ReturnType<typeof setTimeout> | null = null
   let didEmitClose = false
 
   const settleInitialOffer = (signal?: Signal): void => {

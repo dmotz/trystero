@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import {once} from 'node:events'
 import {WebSocketServer} from 'ws'
 import test from './test.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {joinRoom} from '../../packages/supabase/src/index.ts'
 import {waitFor} from './peer-harness.ts'
 

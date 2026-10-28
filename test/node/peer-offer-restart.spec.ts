@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {MockRTCPeerConnection} from './peer-harness.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import initPeer, {defaultIceServers} from '../../packages/core/src/peer.ts'
 
 void test('a prewarmed offer does not replay when signal handler is attached', async t => {

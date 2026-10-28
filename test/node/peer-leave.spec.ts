@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import room from '../../packages/core/src/room.ts'
 import {
   createJoinedRooms,

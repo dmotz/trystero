@@ -177,14 +177,26 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )
 
-      return typeof result === 'number' ||
-        (result !== undefined && 'stopAnnouncing' in result)
-        ? result
-        : {
-            nextAnnounceMs: result?.nextAnnounceMs ?? steadyAnnounceIntervalMs,
-            reannounceOnDisconnect:
-              result?.reannounceOnDisconnect ?? reannounceOnDisconnect
-          }
+      if (typeof result === 'number') {
+        return result
+      }
+
+      if (typeof result === 'object' && result !== null) {
+        if ('stopAnnouncing' in result) {
+          return result
+        }
+
+        return {
+          nextAnnounceMs: result.nextAnnounceMs ?? steadyAnnounceIntervalMs,
+          reannounceOnDisconnect:
+            result.reannounceOnDisconnect ?? reannounceOnDisconnect
+        }
+      }
+
+      return {
+        nextAnnounceMs: steadyAnnounceIntervalMs,
+        reannounceOnDisconnect
+      }
     },
 
     ...(unpublishTopic

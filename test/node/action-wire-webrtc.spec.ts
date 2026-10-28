@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import {waitFor} from './peer-harness.ts'
 import {RTCPeerConnection} from 'werift'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionManager} from '../../packages/core/src/actions.ts'
 
 void test(

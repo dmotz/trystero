@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {OfferManager} from '../../packages/core/src/offer-manager.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 void test(

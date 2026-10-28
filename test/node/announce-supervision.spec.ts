@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import createStrategy from '../../packages/core/src/strategy.ts'
@@ -118,7 +117,7 @@ void test(
       {
         appId: `trystero-announce-supervision-${Date.now()}-${Math.random()}`,
         password: 'announce-supervision-test',
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'r'
     )
@@ -167,7 +166,7 @@ void test(
         appId: `trystero-disabled-relay-warnings-${Date.now()}-${Math.random()}`,
         password: 'disabled-relay-warnings-test',
         relayConfig: {warnOnRelayFailure: false},
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'r'
     )

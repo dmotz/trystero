@@ -586,12 +586,24 @@ export type SelfInfo = {
   roles: string[]
 }
 
+export type Widen<T> = T extends string
+  ? string
+  : T extends number
+    ? number
+    : T extends boolean
+      ? boolean
+      : T extends readonly (infer U)[]
+        ? Widen<U>[]
+        : T extends object
+          ? {[K in keyof T]: Widen<T[K]>}
+          : T
+
 export type RolesPluginApi = {
-  makeState: <T = JsonValue>(
+  makeState: <T extends JsonValue>(
     namespace: string,
-    initialValue: T extends JsonValue ? T : never,
-    config?: StateConfig<T>
-  ) => AuthoritativeState<T>
+    initialValue: T,
+    config?: StateConfig<Widen<T>>
+  ) => AuthoritativeState<Widen<T>>
   grantRole: (
     targetId: string,
     role: string | string[],

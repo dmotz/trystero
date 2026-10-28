@@ -19,13 +19,11 @@ import {
   validateRoleCertificateShape,
   validateRoleRevocationShape,
   validateStateRecordShape
-  // @ts-expect-error Internal source import crosses a referenced package boundary.
 } from '../../packages/core/src/authority.ts'
 import {
   createUserIdentity,
   getOrCreateEndpointIdentity,
   signUserEndpointProof
-  // @ts-expect-error Internal source import crosses a referenced package boundary.
 } from '../../packages/core/src/identity.ts'
 
 const setup = async () => {

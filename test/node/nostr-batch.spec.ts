@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {joinRoom} from '../../packages/nostr/src/index.ts'
@@ -60,7 +59,7 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
 
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
     MockWebSocket.sockets.length = 0
 
     const appId = `nostr-batch-${Date.now()}`
@@ -130,7 +129,7 @@ void test(
 void test('Trystero: late Nostr subscription cleanup preserves a replacement room', async t => {
   const originalTimer = globalThis.setTimeout
   const originalSocket = globalThis.WebSocket
-  globalThis.WebSocket = MockWebSocket
+  globalThis.WebSocket = MockWebSocket as any
   t.after(() => {
     globalThis.WebSocket = originalSocket
   })

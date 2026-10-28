@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-// @ts-expect-error
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
-// @ts-expect-error
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {MockRTCPeerConnection, waitFor} from './peer-harness.ts'
 

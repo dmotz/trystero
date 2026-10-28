@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
@@ -39,11 +38,11 @@ const fixture = t => {
       }
     }
   })
-  const ctx = {
+  const ctx: any = {
     appId: 'recovery-test',
     roomId: 'room',
     config: {},
-    peerStates: {},
+    peerStates: {} as Record<string, any>,
     rootTopicPlaintext: 'root',
     rootTopicP: Promise.resolve('root'),
     selfTopicP: Promise.resolve('self'),
@@ -145,7 +144,10 @@ void test('offer candidates gathered before signaling handlers attach are publis
     })
 
   const manager = new OfferManager(() => {
-    offerPeer = initPeer(true, {rtcPolyfill: MockRTCPeerConnection})
+    offerPeer = initPeer(true, {
+      appId: 'recovery-test',
+      rtcPolyfill: MockRTCPeerConnection as any
+    })
     emitCandidate(10001)
     return offerPeer
   })
@@ -218,7 +220,7 @@ void test('a pending retry does not prematurely deactivate a passive room', asyn
   f.ctx.isPassive = true
   f.ctx.checkDeactivate = () => {
     if (
-      !Object.values(f.ctx.peerStates).some(state =>
+      !Object.values<any>(f.ctx.peerStates).some(state =>
         state.offerRelays.some(Boolean)
       )
     ) {

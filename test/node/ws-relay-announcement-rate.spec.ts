@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {joinRoom} from '../../packages/ws-relay/src/index.ts'
@@ -49,14 +48,14 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     const originalRandom = Math.random
     MockWebSocket.sockets.length = 0
-    globalThis.WebSocket = MockWebSocket
+    globalThis.WebSocket = MockWebSocket as any
     Math.random = () => 0
 
     const room = joinRoom(
       {
         appId: `ws-relay-announcement-rate-${Date.now()}`,
         relayConfig: {urls: [`wss://ws-relay-rate-${Date.now()}.test`]},
-        rtcPolyfill: MockRTCPeerConnection
+        rtcPolyfill: MockRTCPeerConnection as any
       },
       'room'
     )

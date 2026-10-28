@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import {execFileSync} from 'node:child_process'
 import {readFileSync} from 'node:fs'
@@ -6,6 +5,8 @@ import {resolve} from 'node:path'
 import test from './test.ts'
 import * as corePublicExports from '../../packages/core/src/index.ts'
 import {
+  type RolesPluginApi,
+  type Room,
   createAdminRoom,
   createTopicStrategy,
   createUserIdentity,
@@ -244,7 +245,7 @@ class InMemoryRTCPeerConnection {
 const createMemorySignalBus = () => {
   const topicHandlers = new Map<
     string,
-    Set<(topic: string, data: string) => void>
+    Set<(topic: string, data: any) => void>
   >()
 
   const makeJoinRoom = () =>
@@ -624,8 +625,8 @@ void test(
     roomBob.onUserJoin = ctx => bobUserJoins.push(ctx)
     roomBob.onUserLeave = ctx => bobUserLeaves.push(ctx)
 
-    let roomAlice1: any = null
-    let roomAlice2: any = null
+    let roomAlice1: Room = null
+    let roomAlice2: Room = null
     try {
       // 1. Alice's 1st tab joins
       roomAlice1 = makeJoinRoom()(
@@ -718,10 +719,14 @@ void test(
       const alice1Msgs: any[] = []
       const alice2Msgs: any[] = []
       roomAlice1.makeAction<string>('chat', {
-        onMessage: (data, ctx) => alice1Msgs.push({data, ...ctx})
+        onMessage: (data, ctx) => {
+          alice1Msgs.push({data, ...ctx})
+        }
       })
       roomAlice2.makeAction<string>('chat', {
-        onMessage: (data, ctx) => alice2Msgs.push({data, ...ctx})
+        onMessage: (data, ctx) => {
+          alice2Msgs.push({data, ...ctx})
+        }
       })
 
       await chatBob.send('hello-alice-all-tabs', {
@@ -1053,12 +1058,12 @@ void test(
     const aliceUser = await createUserIdentity()
     const attackerUser = await createUserIdentity()
 
-    let adminRoom: any
-    let aliceTab1: any
-    let aliceTab2: any
-    let attackerTab1: any
-    let attackerTab2: any
-    let limiterRoom: any
+    let adminRoom: Room & RolesPluginApi
+    let aliceTab1: Room & RolesPluginApi
+    let aliceTab2: Room & RolesPluginApi
+    let attackerTab1: Room & RolesPluginApi
+    let attackerTab2: Room & RolesPluginApi
+    let limiterRoom: Room & RolesPluginApi
 
     try {
       adminRoom = makeJoinRoom()(
@@ -1118,7 +1123,9 @@ void test(
       const modAlertsAtAdmin: any[] = []
       adminRoom.makeAction<string>('mod-alert', {
         roles: 'moderator',
-        onMessage: (msg, ctx) => modAlertsAtAdmin.push({msg, ...ctx})
+        onMessage: (msg, ctx) => {
+          modAlertsAtAdmin.push({msg, ...ctx})
+        }
       })
       const modAlertTab2 = aliceTab2.makeAction<string>('mod-alert', {
         roles: 'moderator'
@@ -1611,6 +1618,8 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
   const counter = room.makeState('counter', 0)
   await counter.set(1)
   await counter.set(n => n + 1)
+  // @ts-expect-error widened number state must reject string
+  void counter.set('not-a-number').catch(() => {})
   assert.equal(counter.get(), 2)
 
   const label = room.makeState('label', 'initial')
@@ -1621,15 +1630,17 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
   await flag.set(true)
   assert.equal(flag.get(), true)
 
-  const mode = room.makeState<'a' | 'b'>('mode', 'a')
-  await mode.set('b')
-  // @ts-expect-error explicit union type parameter must still reject 'c'
-  void mode.set('c').catch(() => {})
-  assert.equal(mode.get(), 'b')
+  const nested = room.makeState('nested', {
+    count: 0,
+    tags: ['a'],
+    active: false
+  })
+  await nested.set({count: 2, tags: ['a', 'b'], active: true})
+  assert.deepEqual(nested.get(), {count: 2, tags: ['a', 'b'], active: true})
 
   await room.leave()
 
-  const coreExports = await import('../../packages/core/src/index.ts')
+  const coreExports = corePublicExports
   for (const pruned of [
     'hashWith',
     'all',

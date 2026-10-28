@@ -1,5 +1,4 @@
 import {expect} from '@playwright/test'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 import {sleep, withStrategyBrowserPair} from './harness'
 import {

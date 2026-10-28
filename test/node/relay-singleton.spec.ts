@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {createRelayManager, makeSocket} from '../../packages/core/src/utils.ts'
@@ -106,11 +105,11 @@ void test(
     }
 
     try {
-      globalThis.WebSocket = ManualSocket
-      globalThis.setTimeout = fn => {
+      globalThis.WebSocket = ManualSocket as any
+      globalThis.setTimeout = (fn => {
         pendingReconnects.push(fn)
         return {}
-      }
+      }) as any
 
       makeSocket(`ws://socket-singleton-${Date.now()}`, () => {})
 
@@ -151,7 +150,7 @@ const runRelayReuseTests = (
     async () => {
       const realWebSocket = globalThis.WebSocket
 
-      globalThis.WebSocket = AutoOpenWebSocket
+      globalThis.WebSocket = AutoOpenWebSocket as any
       AutoOpenWebSocket.sockets.length = 0
 
       const config = makeConfig('cycles')
