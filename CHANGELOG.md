@@ -56,9 +56,10 @@
   with optional custom `validate` rules. Existing peers automatically sync the
   latest signed state snapshot to late joiners even after the admin has left the
   room.
-- 🚪 **Room size limits** - added `limit` to room config to cap the maximum
-  number of unique users in a room (including the local user). When a room is at
-  capacity, additional joiners are rejected on that peer link during handshake
+- 🚪 **Room size limits** - added `limit` to room config for a best-effort,
+  advisory per-peer cap on the number of unique users in a peer's room view
+  (including the local user). When a peer's view is at capacity, additional
+  joiners with a new `userId` are rejected on that peer link during handshake
   before triggering `onPeerJoin` on existing members and receive
   `error: 'room full'` via `onJoinError`.
 - 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every

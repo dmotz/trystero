@@ -410,10 +410,7 @@ export default <
 
   let unregisterBeforeUnloadCleanup: () => void = noOp
   let leavePromise: Promise<void> | null = null
-  const effectiveLimit: number | undefined = limit
-  let isEstablished = false
-  let didRejectSelfAsFull = false
-  const rejectedAsFullByPeers = new Set<string>()
+  let didReportRoomFull = false
 
   const iterate = (
     targets: TargetPeers,
@@ -573,8 +570,7 @@ export default <
 
   const clearPeerState = (
     id: string,
-    reason: Error = peerDisconnectedErr,
-    recheckCapacity = true
+    reason: Error = peerDisconnectedErr
   ): void => {
     const err = toError(reason, peerDisconnectedMsg)
     pendingMediaPeers.get(id)?.reject(err)
@@ -584,18 +580,9 @@ export default <
     delete activePeerMap[id]
     actionManager.clearPeer(id, err)
     mediaManager.clearPeer(id)
-
-    if (recheckCapacity && effectiveLimit !== undefined && !leavePromise) {
-      evaluateCapacityAdmissions()
-    }
   }
 
-  const exitPeer = (
-    id: string,
-    peer?: PeerHandle,
-    reason?: Error,
-    recheckCapacity = true
-  ): void => {
+  const exitPeer = (id: string, peer?: PeerHandle, reason?: Error): void => {
     const current = peerMap[id]
 
     if (!current) {
@@ -611,7 +598,7 @@ export default <
     const wasVirtual = isVirtualPeer(id)
     const wasDirect = isDirectPeer(id)
 
-    clearPeerState(id, reason, recheckCapacity)
+    clearPeerState(id, reason)
     current.destroy()
 
     if (scaleProvider) {
@@ -653,16 +640,14 @@ export default <
       void leaveAction
         .send('', undefined, undefined, undefined, controller.signal)
         .catch(noOp)
-      if (!didRejectSelfAsFull) {
-        await new Promise<void>(res => setTimeout(res, 99))
-      }
+      await new Promise<void>(res => setTimeout(res, 99))
       controller.abort()
 
       try {
         scaleProvider?.destroy()
         entries(peerMap).forEach(([id, peer]) => {
           peer.destroy()
-          clearPeerState(id, roomLeftErr, false)
+          clearPeerState(id, roomLeftErr)
         })
         activeUserPeers.clear()
       } finally {
@@ -792,7 +777,7 @@ export default <
       leaveListeners.push(cb)
     },
     activateVirtualPeer: (peerId, vPeer) => {
-      if (isPeerBanned(peerId)) {
+      if (isPeerBanned(peerId) || isAlreadyFullForPeer(peerId)) {
         vPeer.destroy()
         return
       }
@@ -923,19 +908,14 @@ export default <
 
   const isAlreadyFullForPeer = (id: string): boolean => {
     if (
-      effectiveLimit === undefined ||
+      limit === undefined ||
       activePeerMap[id] ||
       promotedFromVirtual.has(id)
     ) {
       return false
     }
     const activeUsers = getActiveUniqueUsers()
-    if (activeUsers.has(getPeerUserId(id))) {
-      return false
-    }
-    return effectiveLimit === 1
-      ? isEstablished
-      : activeUsers.size >= effectiveLimit
+    return !activeUsers.has(getPeerUserId(id)) && activeUsers.size >= limit
   }
 
   const rejectPeer = (
@@ -954,101 +934,14 @@ export default <
       .finally(() =>
         err === peerBannedMsg
           ? kickPeer(id, peer, errObj)
-          : exitPeer(id, peer, errObj, false)
+          : exitPeer(id, peer, errObj)
       )
-  }
-
-  const handleSelfRejectedAsFull = (byPeerId: string): void => {
-    if (leavePromise) {
-      return
-    }
-    rejectedAsFullByPeers.add(byPeerId)
-    handshakeManager.clearPeer(byPeerId, roomFullErr)
-    if (peerMap[byPeerId]) {
-      exitPeer(byPeerId, peerMap[byPeerId], roomFullErr, false)
-    }
-    if (!didRejectSelfAsFull) {
-      didRejectSelfAsFull = true
-      onHandshakeError?.(byPeerId, roomFullMsg)
-    }
-    if (effectiveLimit !== undefined && !isEstablished) {
-      evaluateCapacityAdmissions()
-    }
-  }
-
-  const evaluateCapacityAdmissions = (): void => {
-    if (effectiveLimit === undefined || leavePromise) {
-      return
-    }
-    const readyIds = handshakeManager.getReadyPendingIds()
-    if (readyIds.length === 0) {
-      return
-    }
-    if (!isEstablished && didRejectSelfAsFull) {
-      for (const id of readyIds) {
-        exitPeer(id, peerMap[id], roomFullErr, false)
-      }
-      return
-    }
-    if (isEstablished || keys(activePeerMap).length > 0) {
-      isEstablished = true
-      for (const id of readyIds.sort()) {
-        const peer = peerMap[id]
-        if (!peer) {
-          continue
-        }
-        if (isAlreadyFullForPeer(id)) {
-          rejectPeer(id, peer, roomFullMsg)
-        } else {
-          handshakeManager.activate(id)
-        }
-      }
-      return
-    }
-    if (handshakeManager.getPendingIds().length > readyIds.length) {
-      return
-    }
-    const sorted = [
-      ...new Set([localSelfId, ...readyIds, ...rejectedAsFullByPeers])
-    ].sort()
-    const winningUsers = new Set<string>()
-    const winners = new Set<string>()
-    for (const cid of sorted) {
-      const uid = getPeerUserId(cid)
-      if (winningUsers.has(uid) || winningUsers.size < effectiveLimit) {
-        winningUsers.add(uid)
-        winners.add(cid)
-      }
-    }
-    if (!winners.has(localSelfId)) {
-      const winnerPeerId =
-        sorted.find(cid => cid !== localSelfId && winners.has(cid)) ??
-        readyIds[0] ??
-        localSelfId
-      for (const id of readyIds) {
-        exitPeer(id, peerMap[id], roomFullErr, false)
-      }
-      handleSelfRejectedAsFull(winnerPeerId)
-      return
-    }
-    isEstablished = true
-    for (const id of readyIds) {
-      const peer = peerMap[id]
-      if (!peer) {
-        continue
-      }
-      if (winners.has(id) && !isAlreadyFullForPeer(id)) {
-        handshakeManager.activate(id)
-      } else {
-        rejectPeer(id, peer, roomFullMsg)
-      }
-    }
   }
 
   let effectiveOnPeerHandshake = onPeerHandshake
   DEV: if (
     !verifyPeerIdentity &&
-    (effectiveLimit !== undefined ||
+    (limit !== undefined ||
       identity !== undefined ||
       userIdentityP !== undefined)
   ) {
@@ -1072,9 +965,6 @@ export default <
     handshakeTimeoutMs,
     sendHandshakeData: handshakeDataAction.send,
     sendHandshakeReady: handshakeReadyAction.send,
-    canAcceptBeforeHandshake: id =>
-      Boolean(password) || verifyPeerIdentity || !isAlreadyFullForPeer(id),
-    onRejectFull: (id, peer) => rejectPeer(id, peer, roomFullMsg),
     onLocalHandshakePassed: (id, peer) => {
       if (isAlreadyFullForPeer(id)) {
         rejectPeer(id, peer, roomFullMsg)
@@ -1082,19 +972,15 @@ export default <
       }
       return true
     },
-    onRemoteHandshakeReady: () => {
-      if (effectiveLimit !== undefined) {
-        evaluateCapacityAdmissions()
-        return true
-      }
-      return false
-    },
     onActivate: (id, peer) => {
       if (isPeerBanned(id)) {
         kickPeer(id, peer, peerBannedErr)
         return
       }
-      isEstablished = true
+      if (isAlreadyFullForPeer(id)) {
+        rejectPeer(id, peer, roomFullMsg)
+        return
+      }
       const alreadyJoined = promotedFromVirtual.delete(id)
       activePeerMap[id] = peer
       scaleProvider?.addDirectPeer(id, peer)
@@ -1109,10 +995,7 @@ export default <
       for (const cb of peerActivatedListeners) {
         cb(id, peer)
       }
-      if (
-        effectiveLimit !== undefined &&
-        getActiveUniqueUsers().size >= effectiveLimit
-      ) {
+      if (limit !== undefined && getActiveUniqueUsers().size >= limit) {
         for (const pendingId of handshakeManager.getPendingIds()) {
           if (
             !activePeerMap[pendingId] &&
@@ -1215,7 +1098,18 @@ export default <
     if (!leavePromise) {
       if (data && typeof data === 'object' && !data.ok) {
         if (data.err === roomFullMsg) {
-          handleSelfRejectedAsFull(id)
+          if (!handshakeManager.getPeer(id) || activePeerMap[id]) {
+            return
+          }
+          handshakeManager.clearPeer(id, roomFullErr)
+          if (
+            !didReportRoomFull &&
+            !(keys(activePeerMap).length > 0 && isAlreadyFullForPeer(id))
+          ) {
+            didReportRoomFull = true
+            onHandshakeError?.(id, roomFullMsg)
+          }
+          exitPeer(id, peerMap[id], roomFullErr)
           return
         }
         if (data.err === peerBannedMsg) {
@@ -1233,7 +1127,7 @@ export default <
     if (leavePromise) {
       return
     }
-    if (isPeerBanned(id) || rejectedAsFullByPeers.has(id)) {
+    if (isPeerBanned(id) || (peerUserIds.has(id) && isAlreadyFullForPeer(id))) {
       peer.destroy()
       return
     }
@@ -1519,7 +1413,8 @@ export default <
       scaleProvider?.setOnTargetsChanged(cb)
     },
     canConnectPeer: peerId =>
-      !isPeerBanned(peerId) && !rejectedAsFullByPeers.has(peerId),
+      !isPeerBanned(peerId) &&
+      !(peerUserIds.has(peerId) && isAlreadyFullForPeer(peerId)),
     onPeerIdentityVerified: (peerId, verified) => {
       peerUserIds.set(peerId, verified.userId)
       if (isPeerBanned(peerId) || isPeerBanned(verified.userId)) {
