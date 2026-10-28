@@ -4,6 +4,7 @@ import {createRelayManager, makeSocket} from '../../packages/core/src/utils.ts'
 import {joinRoom as joinNostrRoom} from '../../packages/nostr/src/index.ts'
 import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
 import {joinRoom as joinWsRelayRoom} from '../../packages/ws-relay/src/index.ts'
+import {MockRTCPeerConnection} from './peer-harness.ts'
 
 const wait = (ms: number) => new Promise(res => setTimeout(res, ms))
 
@@ -140,7 +141,7 @@ const runRelayReuseTests = (
 ): void => {
   const makeConfig = (suffix: string) => ({
     appId: `relay-singleton-${strategy}-${suffix}-${Date.now()}`,
-    passive: true,
+    rtcPolyfill: MockRTCPeerConnection as any,
     relayConfig: {urls: [`wss://relay-singleton-${strategy}-${suffix}.test`]}
   })
 

@@ -1352,11 +1352,11 @@ the same namespace will return the same room instance.
     files or lower it to reduce memory use.
 
   - `passive` - **(optional)** Boolean for backup or relay peers that should
-    listen for active peers without announcing themselves while a room is
-    dormant. Passive peers activate only after hearing a non-passive peer and
-    include a passive flag in their signaling so passive peers do not connect to
-    each other. For BitTorrent, dormant passive rooms announce as seeders
-    (`left: 0`) without offers, which avoids passive-to-passive discovery while
+    listen for active peers without broadcasting room presence announcements.
+    Passive peers respond directly to active peers that announce or send offers,
+    so passive peers never discover or connect to each other. For BitTorrent,
+    passive rooms register with trackers as seeders (`left: 0`) without
+    generating outgoing offers, which avoids passive-to-passive discovery while
     keeping tracker load low.
 
   - `identity` - **(optional)** Controls how the local user's `userId` is loaded

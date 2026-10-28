@@ -501,7 +501,7 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
       }
     }
 
-    // Active rooms add the self topic before the root topic. Waiting only on
+    // Rooms add the self topic before the root topic. Waiting only on
     // the root keeps both topics in one batch while guaranteeing the REQ is
     // written before createStrategy starts announcing.
     return context.kind === 'root'
@@ -515,10 +515,6 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
       announcementMessages.forRelay(client)[topic] = payload
     }
     return publishMessage(client, topic, payload, kind === 'announce')
-  },
-
-  unpublishTopic: (client, topic) => {
-    delete announcementMessages.forRelay(client)[topic]
   }
 })
 

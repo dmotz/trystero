@@ -32,7 +32,10 @@ void test('Supabase shares identical clients and isolates project URLs and keys'
       connections[index].push(
         new URL(request.url!, 'http://local').searchParams.get('apikey')!
       )
-      socket.on('message', bytes => {
+      socket.on('message', (bytes, isBinary) => {
+        if (isBinary) {
+          return
+        }
         const [joinRef, ref, topic, event] = JSON.parse(
           new TextDecoder().decode(bytes as Uint8Array)
         )
@@ -63,7 +66,6 @@ void test('Supabase shares identical clients and isolates project URLs and keys'
     assert.ok(address && typeof address !== 'string')
     return {
       appId: `http://127.0.0.1:${address.port}`,
-      passive: true,
       relayConfig: {supabaseKey: 'key-one'}
     }
   })
@@ -84,7 +86,7 @@ void test('Supabase shares identical clients and isolates project URLs and keys'
       () =>
         connections[0].length >= 2 &&
         connections[1].length >= 1 &&
-        subscriptions === 4
+        subscriptions === 8
     )
     assert.deepEqual(connections[0].sort(), ['key-one', 'key-two'])
     assert.deepEqual(connections[1], ['key-one'])

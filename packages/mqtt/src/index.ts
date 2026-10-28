@@ -145,16 +145,14 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
       }
     }
 
-    // Active rooms subscribe to self before root; waiting on root batches
+    // Rooms subscribe to self before root; waiting on root batches
     // all concurrent room SUBSCRIBEs into a single packet before announcing.
     return context.kind === 'root'
       ? Promise.all([
           ensureSubscribed(client, states, context.selfTopic),
           ensureSubscribed(client, states, topic)
         ]).then(() => cleanup)
-      : states[context.rootTopic]
-        ? ensureSubscribed(client, states, topic).then(() => cleanup)
-        : cleanup
+      : cleanup
   },
 
   publishTopic: (client, topic, msg, {kind}) => {
@@ -168,10 +166,6 @@ export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
     if (client.connected) {
       client.publish(topic, payload)
     }
-  },
-
-  unpublishTopic: (client, topic) => {
-    delete topicStates.forRelay(client)[topic]?.announcement
   }
 })
 

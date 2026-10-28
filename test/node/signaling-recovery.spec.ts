@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   createSignalHandler,
+  prunePeerStates,
   resetOfferState
 } from '../../packages/core/src/signal-handler.ts'
 import initPeer from '../../packages/core/src/peer.ts'
@@ -49,15 +50,12 @@ const fixture = t => {
     toPlain: async signal => signal,
     toCipher: async signal => signal,
     isLeaving: () => leaving,
-    isPassive: false,
-    isActive: true,
     offerManager: {
       checkout: async () => [{peer: peer(), offer: 'offer'}],
       claimLeased() {},
       reclaimLeased() {}
     },
     initPeer: peer,
-    checkDeactivate() {},
     connectPeer() {},
     disconnectPeer() {},
     announceIntervals: [],
@@ -215,23 +213,19 @@ void test('numeric relay pacing is not shortened by the prompt topic retry', asy
   assert.equal(f.messages.filter(msg => msg.offer).length, 2)
 })
 
-void test('a pending retry does not prematurely deactivate a passive room', async t => {
+void test('a pending retry prevents prunePeerStates from deleting the peer state until retries finish', async t => {
   const f = fixture(t)
-  f.ctx.isPassive = true
-  f.ctx.checkDeactivate = () => {
-    if (
-      !Object.values<any>(f.ctx.peerStates).some(state =>
-        state.offerRelays.some(Boolean)
-      )
-    ) {
-      f.ctx.isActive = false
-    }
-  }
-  await f.receive({peerId: selfId + 'z'})
+  const peerId = selfId + 'z'
+  await f.receive({peerId})
   t.mock.timers.tick(4800)
   await settle()
-  assert.equal(f.ctx.isActive, true)
+  prunePeerStates(f.ctx.peerStates)
+  assert.equal(peerId in f.ctx.peerStates, true)
   assert.equal(f.messages.filter(msg => msg.offer).length, 2)
+
+  resetOfferState(f.ctx.peerStates[peerId])
+  prunePeerStates(f.ctx.peerStates)
+  assert.equal(peerId in f.ctx.peerStates, false)
 })
 
 void test('a matching repeated offer replays its answer and candidates, not a new peer', async t => {

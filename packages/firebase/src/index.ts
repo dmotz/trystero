@@ -210,18 +210,6 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
     void onDisconnect(signalRef).remove()
     void set(signalRef, msg)
     return undefined
-  },
-
-  unpublishTopic: (rootRef, _topic, {rootTopic, selfTopic}) => {
-    const key = roomKey(rootTopic, selfTopic)
-
-    if (presenceRefs[key]) {
-      presenceCleanups[key]?.()
-      void remove(presenceRefs[key])
-      delete presenceRefs[key]
-      delete presenceMessages[key]
-      delete presenceCleanups[key]
-    }
   }
 })
 

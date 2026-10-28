@@ -138,7 +138,6 @@ void test(
     const room = joinRoom(
       {
         appId: `nostr-resubscribe-${Date.now()}`,
-        passive: true,
         relayConfig: {urls: ['wss://nostr-resubscribe.test']}
       },
       'room'
