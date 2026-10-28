@@ -588,24 +588,24 @@ means.
 
 ### Room size limits
 
-Sometimes your app has a strict maximum number of seats per room. For example,
-you might be building:
+Sometimes you want a best-effort cap on how many users each peer accepts into a
+room. For example, you might be building:
 
 - **A 2-player board game** (like chess or Battleship) where a third person
   opening the invite link shouldn't be able to barge into an active match.
-- **A 4-player co-op lobby** that locks once all four party slots are taken.
-- **A private 1-on-1 video call** where only two people can be in the room at a
-  time.
+- **A 4-player co-op lobby** that stops accepting new players once all four
+  party slots are taken.
+- **A private 1-on-1 video call** where only two people connect at a time.
 
-To cap how many unique users (`userId`s, including the local user) can be in a
-room at once, pass `limit` in your `joinRoom()` config and listen for
-`'room full'` in `onJoinError`:
+To set an advisory per-peer limit on how many unique users (`userId`s, including
+the local user) can be in a peer's room view at once, pass `limit` in your
+`joinRoom()` config and listen for `'room full'` in `onJoinError`:
 
 ```js
 const room = joinRoom(
   {
     appId: 'chess-club',
-    limit: 2 // max 2 players in the room (you + 1 opponent)
+    limit: 2 // advisory cap of 2 unique users in this peer's view (you + 1 opponent)
   },
   'match-42',
   {
@@ -618,10 +618,11 @@ const room = joinRoom(
 )
 ```
 
-When a room is already at capacity:
+When a peer's room view is already at capacity:
 
-- Any extra user who tries to join receives `error: 'room full'` in
-  `onJoinError` and that peer connection is closed before activation.
+- Any extra user (`userId`) who tries to connect is refused by that peer before
+  activation, receives `error: 'room full'` in `onJoinError`, and has that peer
+  link closed.
 - Because `limit` counts unique `userId`s rather than raw tabs, an admitted
   player who refreshes the page shares their existing seat. Use `'local'`
   identity or an explicitly shared identity to share that seat across tabs.
@@ -633,21 +634,23 @@ When a room is already at capacity:
 <details>
   <summary>How it works behind the scenes</summary>
 
-- **Pre-activation admission control**: Capacity checks run during the internal
-  admission handshake (after `userId` verification) before a peer is ever added
-  to `getPeers()` or triggers `onPeerJoin`. If the room is already full for a
-  new `userId`, existing members immediately send a `'room full'` rejection and
-  close that pending peer connection.
+- **Best-effort advisory per-peer check**: Without a central server or room
+  admin, capacity is enforced locally by each peer on its own view. When a
+  peer's active unique `userId` count (including itself) reaches `limit`, it
+  refuses new `userId`s during the admission handshake before they are added to
+  `getPeers()` or trigger `onPeerJoin`.
+- **No self-eviction or unverified `'room full'` propagation**: A peer never
+  evicts itself and never drops connections to other peers just because a remote
+  peer claims `'room full'`. A `'room full'` response only closes that single
+  peer link and reports `onJoinError` for that peer. For authoritative roster
+  enforcement backed by a cryptographic trust root, use
+  [`roles()`](#room-admins-roles-and-authoritative-state).
 - **Password privacy**: In password-protected rooms (`config.password`),
   Trystero verifies the password proof _before_ checking room capacity. Users
   with the wrong password receive a password error rather than `'room full'`, so
   outsiders cannot probe whether a private room is full.
-- **Concurrent joins on an empty room**: When multiple peers join an empty room
-  at the same time, seats are admitted in `peerId` order and excess joiners are
-  turned away with `'room full'`. Once a room is established and at capacity,
-  existing members immediately reject new arrivals.
-- **Multi-hop rooms**: When `scale()` is enabled, capacity checks also account
-  for verified multi-hop overlay peers.
+- **Multi-hop rooms**: When `scale()` is enabled, local capacity checks also
+  account for verified multi-hop overlay peers.
 
 </details>
 
@@ -1339,11 +1342,11 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
-  - `limit` - **(optional)** Positive integer capping the maximum total number
-    of unique users (`userId`s) allowed in the room at once (including the local
-    user). When the room is full, additional joiners with a new `userId` are
-    rejected on that peer link before activation and receive
-    `error: 'room full'` via `onJoinError`. See
+  - `limit` - **(optional)** Positive integer setting a best-effort, advisory
+    per-peer cap on the number of unique users (`userId`s) in the peer's room
+    view at once (including the local user). When a peer's view is at capacity,
+    additional joiners with a new `userId` are rejected on that peer link before
+    activation and receive `error: 'room full'` via `onJoinError`. See
     [room size limits](#room-size-limits) for more details.
 
   - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
