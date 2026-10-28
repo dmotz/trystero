@@ -931,8 +931,6 @@ config object:
 - `'gossip'` – Always uses the bounded-degree gossip relay network, even in
   small rooms. Useful when building a massive multiplayer world or public town
   square where you want every user's connection count capped from the start.
-- `'mesh'` – Everyone always connects directly to everyone else (the default
-  when `scale()` is omitted).
 
 You can also fine-tune connection limits by passing an object to `scale()`:
 
@@ -1803,10 +1801,10 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 
 Creates the opt-in multi-hop scaling plugin
 (`RoomPlugin<'scale', ScalePluginApi>`) for `joinRoom()`. Pass in
-`use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`,
-`'mesh'`, or a `ScaleConfig` object:
+`use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`, or a
+`ScaleConfig` object:
 
-- `mode` - `'auto' | 'mesh' | 'gossip'` (default: `'auto'`).
+- `mode` - `'auto' | 'gossip'` (default: `'auto'`).
 - `maxConnections` - Maximum target direct WebRTC connections per browser in
   scalable modes (default: `6`).
 - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to

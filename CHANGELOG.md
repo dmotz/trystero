@@ -8,10 +8,10 @@
   plugin for `joinRoom({appId, use: [scale()]})`, connecting peers directly in
   small groups (`<= 12` peers) and automatically switching to a bounded-degree
   `'gossip'` relay overlay (`maxConnections: 6` by default) as rooms grow to
-  dozens or hundreds of peers. You can also opt into `'mesh'` or `'gossip'`, or
-  pass a `ScaleConfig` object (`{mode, maxConnections, autoThreshold, fanout}`)
-  to customize connection limits. Apps that do not import `scale()` tree-shake
-  the entire overlay plugin out of their bundle.
+  dozens or hundreds of peers. You can also opt into `'gossip'`, or pass a
+  `ScaleConfig` object (`{mode, maxConnections, autoThreshold, fanout}`) to
+  customize connection limits. Apps that do not import `scale()` tree-shake the
+  entire overlay plugin out of their bundle.
 - All room APIs (`makeAction`, `makeState`, `addStream`, `replaceTrack`, `ping`,
   `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work transparently across both
   direct and multi-hop peers. Broadcast media in scalable topologies routes

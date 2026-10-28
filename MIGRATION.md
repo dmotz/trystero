@@ -32,10 +32,9 @@ boilerplate—and eliminates subtle security and topology footguns.
    the core protocol and tree-shaken when `roles()` is not imported.
 4. **Scalable Multi-Hop Topologies**: Rooms are no longer restricted to
    full-mesh WebRTC (`O(N²)` connections). By opting in with `scale()` (supports
-   `'auto'`, `'gossip'`, or `'mesh'`), rooms can scale to hundreds of
-   participants using multi-hop overlay routing with end-to-end cryptographic
-   sender verification, while apps that don't import `scale()` pay zero bundle
-   overhead.
+   `'auto'` or `'gossip'`), rooms can scale to hundreds of participants using
+   multi-hop overlay routing with end-to-end cryptographic sender verification,
+   while apps that don't import `scale()` pay zero bundle overhead.
 5. **Prebuilt `.min.js` Bundles Removed**: Prebuilt `dist/trystero-*.min.js`
    release bundles have been removed in favor of tree-shaking bundlers (or ESM
    CDNs like `esm.run`) so optional plugins like `roles()` and `scale()` are

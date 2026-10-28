@@ -1117,9 +1117,12 @@ void test('Elegant API & automatic configuration: joinRoom with scale "auto" tra
 
   // Verify normalizeTopologyConfig supports both string shorthand and full config object
   assert.equal(normalizeTopologyConfig().mode, 'auto')
-  assert.equal(normalizeTopologyConfig('mesh').mode, 'mesh')
   assert.equal(normalizeTopologyConfig('gossip').mode, 'gossip')
   assert.equal(normalizeTopologyConfig('auto').mode, 'auto')
+  assert.throws(
+    () => normalizeTopologyConfig('mesh' as any),
+    /invalid topology mode/
+  )
   assert.throws(
     () => normalizeTopologyConfig('broadcast' as any),
     /invalid topology mode/
@@ -3556,7 +3559,7 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
         selfId: id,
         appId,
         roomId,
-        use: [scale({mode: 'mesh'}), roles()],
+        use: [scale(), roles()],
         identity: usersByPeer[id]!
       }
     )

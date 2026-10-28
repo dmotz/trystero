@@ -121,7 +121,7 @@ type UnicastEnvelopeHeader = {
   s?: string
 }
 
-const validModes = new Set<TopologyMode>(['mesh', 'auto', 'gossip'])
+const validModes = new Set<TopologyMode>(['auto', 'gossip'])
 
 const checkScaleInt = (name: string, val: number): void => {
   if (!Number.isSafeInteger(val) || val < 2) {
@@ -893,10 +893,6 @@ export const createOverlayManager = ({
   }
 
   const updateActiveMode = (): void => {
-    if (config.mode === 'mesh') {
-      currentActiveMode = 'mesh'
-      return
-    }
     if (config.mode === 'gossip') {
       currentActiveMode = 'gossip'
       return
@@ -919,9 +915,6 @@ export const createOverlayManager = ({
 
   const isOverlayActive = (): boolean => {
     updateActiveMode()
-    if (config.mode === 'mesh') {
-      return false
-    }
     if (config.mode !== 'auto') {
       return true
     }
