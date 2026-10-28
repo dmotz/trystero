@@ -459,7 +459,7 @@ void test(
     }
     const appBConfig = {
       appId: `app-b-${Date.now()}`,
-      relayConfig: {urls: ['wss://ignored-for-second-app.example']},
+      relayConfig: {urls: ['wss://relay-for-second-app.example']},
       rtcPolyfill: MockRTCPeerConnection as any
     }
 
@@ -474,8 +474,8 @@ void test(
 
       assert.equal(
         initCount,
-        1,
-        'strategy init should run once for a shared createStrategy instance'
+        2,
+        'strategy init should run for each newly joined room'
       )
       assert.notEqual(
         appARoom,

@@ -709,6 +709,10 @@ const room = joinRoom(
 )
 ```
 
+The `init` hook runs for every newly joined room with that room's config. Cache
+signaling clients by their connection settings inside your adapter to share
+connections between rooms.
+
 `createTopicStrategy` uses a short startup announcement burst followed by a
 60-second steady interval and repeats the burst after a peer drops. Set
 `reannounceOnDisconnect: false` when the signaling backend stores peer presence
