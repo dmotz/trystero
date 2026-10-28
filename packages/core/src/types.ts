@@ -63,7 +63,7 @@ export type RelayConfig = BaseRelayConfig & {
   redundancy?: number
 }
 
-export type TopologyMode = 'mesh' | 'auto' | 'gossip'
+export type TopologyMode = 'auto' | 'gossip'
 
 export type ScaleConfig = {
   mode?: TopologyMode

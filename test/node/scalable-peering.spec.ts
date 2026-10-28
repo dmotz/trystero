@@ -6,6 +6,7 @@ import type {
   ScalePluginApi,
   TopologyRoute
 } from '../../packages/core/src/index.ts'
+import type {PeerHandle} from '../../packages/core/src/types.ts'
 import {
   compareStateRecords,
   computePayloadDigest,
@@ -62,6 +63,7 @@ import {
   encodeBytes
 } from '../../packages/core/src/utils.ts'
 import {
+  encodeInternalAction,
   LinkedMediaPeer,
   LinkedPeer,
   linkPeers,
@@ -390,9 +392,13 @@ const createOverlayCluster = async ({
   }
 
   const cleanup = async () => {
+    activeSet.clear()
+    registerCallbacks.clear()
     for (const pair of directLinks.values()) {
-      pair.peerA.destroy()
-      pair.peerB.destroy()
+      pair.peerA.isDead = true
+      pair.peerA.handlers = {}
+      pair.peerB.isDead = true
+      pair.peerB.handlers = {}
     }
     directLinks.clear()
     await Promise.all([...rooms.values()].map(room => room.leave()))
@@ -1186,9 +1192,12 @@ void test('Elegant API & automatic configuration: joinRoom with scale "auto" tra
 
   // Verify normalizeTopologyConfig supports both string shorthand and full config object
   assert.equal(normalizeTopologyConfig().mode, 'auto')
-  assert.equal(normalizeTopologyConfig('mesh').mode, 'mesh')
   assert.equal(normalizeTopologyConfig('gossip').mode, 'gossip')
   assert.equal(normalizeTopologyConfig('auto').mode, 'auto')
+  assert.throws(
+    () => normalizeTopologyConfig('mesh' as any),
+    /invalid topology mode/
+  )
   assert.throws(
     () => normalizeTopologyConfig('broadcast' as any),
     /invalid topology mode/
@@ -3620,7 +3629,7 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
         selfId: id,
         appId,
         roomId,
-        use: [scale({mode: 'mesh'}), roles()],
+        use: [scale(), roles()],
         identity: usersByPeer[id]!
       }
     )
@@ -5025,4 +5034,413 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     targetsRoom2,
     'room-salted ring placement must produce different neighbor sets across different rooms'
   )
+})
+
+void test('Bug A regression: virtual peer survives a failed direct dial or handshake without dropping from getPeers()', async () => {
+  const peerIds = ['alice', 'relay', 'bob']
+  const registerCallbacks = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & ScalePluginApi>()
+
+  for (const id of peerIds) {
+    const r = createRoom(
+      peerRegister => {
+        registerCallbacks.set(id, peerRegister)
+      },
+      () => {},
+      () => {},
+      {
+        selfId: id,
+        appId: 'bug-a-app',
+        roomId: 'bug-a-room',
+        use: [scale({mode: 'gossip', maxConnections: 4})]
+      }
+    )
+    rooms.set(id, r as Room & ScalePluginApi)
+  }
+
+  const connectDirect = (idA: string, idB: string) => {
+    const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+    registerCallbacks.get(idA)!(peerA, idB)
+    registerCallbacks.get(idB)!(peerB, idA)
+  }
+
+  try {
+    // Connect alice <-> relay <-> bob (alice and bob are 2-hop virtual peers)
+    connectDirect('alice', 'relay')
+    connectDirect('relay', 'bob')
+
+    const aliceRoom = rooms.get('alice')!
+    const bobRoom = rooms.get('bob')!
+
+    await waitFor(
+      () =>
+        Boolean(aliceRoom.getPeers()['bob']) &&
+        aliceRoom.getPeers()['bob']?.direct === false &&
+        Boolean(bobRoom.getPeers()['alice']),
+      3_000
+    )
+
+    const aliceLeftPeers: string[] = []
+    aliceRoom.onPeerLeave = ({peerId}) => {
+      aliceLeftPeers.push(peerId)
+    }
+
+    const aliceReceived: string[] = []
+    for (const id of peerIds) {
+      rooms.get(id)!.makeAction<string>('chat', {
+        onMessage: msg => {
+          if (id === 'alice') {
+            aliceReceived.push(msg)
+          }
+        }
+      })
+    }
+    const bobChat = bobRoom.makeAction<string>('chat')
+
+    // Inject a direct WebRTC handle for 'bob' at 'alice' whose handshake/ICE fails and closes before activating
+    let closeDirectAttempt: (() => void) | undefined
+    let dead = false
+    const failingDirectHandle: PeerHandle = {
+      get isDead() {
+        return dead
+      },
+      connection: {
+        connectionState: 'connecting',
+        iceConnectionState: 'checking',
+        signalingState: 'stable',
+        getSenders: () => []
+      } as unknown as RTCPeerConnection,
+      channel: null,
+      getOffer: async () => undefined,
+      signal: async () => undefined,
+      sendData: () => {},
+      destroy: () => {
+        dead = true
+      },
+      setHandlers: h => {
+        if (h.close) {
+          closeDirectAttempt = h.close
+        }
+      },
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => ({}) as never,
+      removeTrack: () => {},
+      replaceTrack: async () => {}
+    }
+
+    registerCallbacks.get('alice')!(failingDirectHandle, 'bob')
+    assert.ok(closeDirectAttempt, 'direct handle close handler must be set')
+
+    // Simulate ICE / handshake failure on the direct dial attempt
+    closeDirectAttempt()
+    await wait(30)
+
+    assert.deepEqual(
+      aliceLeftPeers,
+      [],
+      'failed direct dial must not emit onPeerLeave for an active virtual peer'
+    )
+    assert.ok(
+      aliceRoom.getPeers()['bob'],
+      'bob must remain in aliceRoom.getPeers() as a virtual peer after failed direct dial'
+    )
+    assert.equal(aliceRoom.getPeers()['bob']?.direct, false)
+
+    // Verify bob's multi-hop broadcasts and unicasts still deliver to alice
+    await bobChat.send('broadcast-after-failed-dial')
+    await waitFor(
+      () => aliceReceived.includes('broadcast-after-failed-dial'),
+      2_000
+    )
+
+    await bobChat.send('unicast-after-failed-dial', {target: 'alice'})
+    await waitFor(
+      () => aliceReceived.includes('unicast-after-failed-dial'),
+      2_000
+    )
+
+    // Verify virtual-peer departure ordering: when data-plane leave arrives before control leave,
+    // alice must fire onPeerLeave exactly once and 0 spurious onPeerJoin events
+    const aliceJoinedAfterLeave: string[] = []
+    aliceRoom.onPeerJoin = ({peerId}) => {
+      if (aliceLeftPeers.length > 0) {
+        aliceJoinedAfterLeave.push(peerId)
+      }
+    }
+    await getRoomSignalingBridge(bobRoom)
+      ?.getScaleProvider()
+      ?.broadcastInline(new Uint8Array(encodeInternalAction('leave')))
+    await waitFor(() => aliceLeftPeers.includes('bob'), 2_000)
+    await bobRoom.leave()
+    await wait(60)
+    assert.deepEqual(
+      aliceLeftPeers,
+      ['bob'],
+      'virtual peer departure must emit onPeerLeave exactly once'
+    )
+    assert.deepEqual(
+      aliceJoinedAfterLeave,
+      [],
+      'virtual peer departure must not emit a spurious onPeerJoin when data-plane leave arrives before control leave'
+    )
+  } finally {
+    await Promise.all(
+      [...rooms.values()].map(r => r.leave().catch(() => undefined))
+    )
+  }
+})
+
+void test('Bug B regression: leave() + rejoin with same peerId delivers broadcasts and re-learns descriptors across non-neighbors', async () => {
+  const appId = 'rejoin-test-app'
+  const roomId = 'rejoin-test-room'
+  const bobGot: string[] = []
+  const carolVirtualJoins: string[] = []
+  const carolLeaves: string[] = []
+
+  const makeManager = (
+    selfId: string,
+    onDeliver: (from: string, s: string) => void = () => {},
+    onJoin: (id: string) => void = () => {},
+    onLeave: (id: string) => void = () => {}
+  ) =>
+    createOverlayManager({
+      selfId,
+      appId,
+      roomId,
+      topology: {mode: 'gossip', maxConnections: 4},
+      onVirtualPeerJoin: id => onJoin(id),
+      onVirtualPeerLeave: id => onLeave(id),
+      onDeliverData: (from, data) =>
+        onDeliver(from, decodeBytes(new Uint8Array(data)))
+    })
+
+  const makePipe = (
+    fromId: string,
+    to: ReturnType<typeof createOverlayManager>,
+    alive = {ok: true}
+  ): PeerHandle => ({
+    get isDead() {
+      return !alive.ok
+    },
+    connection: {} as unknown as RTCPeerConnection,
+    channel: {readyState: 'open'} as unknown as RTCDataChannel,
+    getOffer: async () => undefined,
+    signal: async () => undefined,
+    sendData: (d: Uint8Array) => {
+      if (alive.ok) {
+        to.handleOverlayFrame(fromId, d.slice().buffer)
+      }
+    },
+    destroy: () => {
+      alive.ok = false
+    },
+    setHandlers: () => {},
+    addStream: () => {},
+    removeStream: () => {},
+    addTrack: () => ({}) as never,
+    removeTrack: () => {},
+    replaceTrack: async () => {}
+  })
+
+  const bob = makeManager('bob', (_from, s) => bobGot.push(s))
+  const carol = makeManager(
+    'carol',
+    () => {},
+    id => carolVirtualJoins.push(id),
+    id => carolLeaves.push(id)
+  )
+  let alice = makeManager('alice')
+
+  try {
+    const bc = {ok: true}
+    bob.addDirectPeer('carol', makePipe('bob', carol, bc))
+    carol.addDirectPeer('bob', makePipe('carol', bob, bc))
+
+    // Session 1: alice <-> bob <-> carol; alice sends 300 broadcasts and bumps descriptor seq
+    const a1 = {ok: true}
+    alice.addDirectPeer('bob', makePipe('alice', bob, a1))
+    bob.addDirectPeer('alice', makePipe('bob', alice, a1))
+
+    await waitFor(() => carolVirtualJoins.includes('alice'), 3_000)
+    for (let i = 1; i <= 300; i++) {
+      await alice.broadcastInline(encodeBytes(`s1-${i}`))
+    }
+    await waitFor(() => bobGot.length === 300, 3_000)
+
+    // Alice leaves cleanly with signed leave
+    alice.announceLeave()
+    await wait(60)
+    alice.destroy()
+    a1.ok = false
+    bob.removeDirectPeer('alice')
+    await waitFor(() => carolLeaves.includes('alice'), 3_000)
+
+    // Session 2: new manager with the SAME selfId ('alice') rejoins
+    carolVirtualJoins.length = 0
+    bobGot.length = 0
+    alice = makeManager('alice')
+    const a2 = {ok: true}
+    alice.addDirectPeer('bob', makePipe('alice', bob, a2))
+    bob.addDirectPeer('alice', makePipe('bob', alice, a2))
+
+    await waitFor(() => carolVirtualJoins.includes('alice'), 3_000)
+    for (let i = 1; i <= 10; i++) {
+      await alice.broadcastInline(encodeBytes(`s2-${i}`))
+    }
+    await waitFor(() => bobGot.length === 10, 3_000)
+    assert.equal(bobGot.length, 10)
+  } finally {
+    alice.destroy()
+    bob.destroy()
+    carol.destroy()
+  }
+})
+
+void test('Liveness refresh on verified packets and descriptor seq-bump flood throttling', async () => {
+  const appId = 'liveness-throttle-app'
+  const roomId = 'liveness-throttle-room'
+  const bobLeaves: string[] = []
+  const bobDelivered: string[] = []
+
+  const alice = createOverlayManager({
+    selfId: 'alice',
+    appId,
+    roomId,
+    topology: {mode: 'gossip', maxConnections: 4},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+  const relay = createOverlayManager({
+    selfId: 'relay',
+    appId,
+    roomId,
+    topology: {mode: 'gossip', maxConnections: 4},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+  // Configure Bob with a short 350ms descriptorTtlMs, but block Alice's subsequent descriptor heartbeats at relay
+  let blockAliceDescriptorsToBob = false
+  let bobAcceptedAliceDescriptors = 0
+  const bob = createOverlayManager({
+    selfId: 'bob',
+    appId,
+    roomId,
+    descriptorTtlMs: 350,
+    topology: {mode: 'gossip', maxConnections: 4},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: id => bobLeaves.push(id),
+    onDeliverData: (_from, data) =>
+      bobDelivered.push(decodeBytes(new Uint8Array(data))),
+    onPeerDescriptorCert: pid => {
+      if (pid === 'alice') {
+        bobAcceptedAliceDescriptors++
+      }
+    }
+  })
+
+  const makePipe = (
+    fromId: string,
+    to: ReturnType<typeof createOverlayManager>,
+    filter?: (d: Uint8Array) => boolean
+  ): PeerHandle => ({
+    isDead: false,
+    connection: {} as unknown as RTCPeerConnection,
+    channel: {readyState: 'open'} as unknown as RTCDataChannel,
+    getOffer: async () => undefined,
+    signal: async () => undefined,
+    sendData: (d: Uint8Array) => {
+      if (filter && !filter(d)) {
+        return
+      }
+      to.handleOverlayFrame(fromId, d.slice().buffer)
+    },
+    destroy: () => {},
+    setHandlers: () => {},
+    addStream: () => {},
+    removeStream: () => {},
+    addTrack: () => ({}) as never,
+    removeTrack: () => {},
+    replaceTrack: async () => {}
+  })
+
+  try {
+    alice.addDirectPeer('relay', makePipe('alice', relay))
+    relay.addDirectPeer('alice', makePipe('relay', alice))
+    relay.addDirectPeer(
+      'bob',
+      makePipe('relay', bob, d => {
+        if (blockAliceDescriptorsToBob && d[1] === 1) {
+          try {
+            const msg = JSON.parse(decodeBytes(d.subarray(2)))
+            if (
+              msg.t === 'gossip' &&
+              Array.isArray(msg.descriptors) &&
+              msg.descriptors.some((desc: any) => desc.peerId === 'alice')
+            ) {
+              return false
+            }
+          } catch {}
+        }
+        return true
+      })
+    )
+    bob.addDirectPeer('relay', makePipe('bob', relay))
+
+    await waitFor(() => bob.getSnapshot().roomPeerIds.includes('alice'), 2_000)
+
+    // Block further descriptor heartbeats from Alice to Bob, but keep sending verified broadcasts from Alice every 100ms for 600ms (> 350ms TTL)
+    blockAliceDescriptorsToBob = true
+    for (let i = 1; i <= 5; i++) {
+      await wait(110)
+      await alice.broadcastInline(encodeBytes(`keepalive-${i}`))
+    }
+    await waitFor(() => bobDelivered.includes('keepalive-5'), 1_000)
+    assert.ok(
+      bob.getSnapshot().roomPeerIds.includes('alice') &&
+        !bobLeaves.includes('alice'),
+      'verified data packets from origin must refresh descriptorReceivedAt liveness so active peers are not evicted by TTL'
+    )
+
+    // Now test content-agnostic descriptor flood throttling:
+    // Flood 40 validly-signed descriptor updates for Alice alternating neighbor lists at >100/s;
+    // at most the burst cap (8) are verified and accepted, while excess updates (>= 30) are throttled before verification and counted in signatureFailures.
+    blockAliceDescriptorsToBob = false
+    bobAcceptedAliceDescriptors = 0
+    const aliceId = await alice.getLocalCryptoIdentity()
+    for (let s = 500; s < 540; s++) {
+      const d: any = {
+        peerId: 'alice',
+        seq: s,
+        neighbors: s % 2 === 0 ? ['relay'] : ['relay', 'alt-neighbor'],
+        signPubKey: aliceId.signPubJwk,
+        encPubKey: aliceId.encPubJwk
+      }
+      const canonical = encodeBytes(
+        descriptorCanonicalPayload(d, appId, roomId)
+      )
+      d.sig = Buffer.from(
+        await ecdsaSign(aliceId.signPrivateKey, canonical as BufferSource)
+      ).toString('base64')
+      bob.handleOverlayFrame(
+        'relay',
+        packOverlayControl({t: 'gossip', descriptors: [d]}).slice().buffer
+      )
+    }
+    await wait(80)
+    assert.ok(
+      bobAcceptedAliceDescriptors <= 17,
+      `expected content-agnostic descriptor flood to verify and accept at most the burst cap, got ${bobAcceptedAliceDescriptors}`
+    )
+    assert.ok(
+      bob.getSnapshot().stats.signatureFailures >= 23,
+      `expected excess descriptor updates to be throttled before verification and counted as signatureFailures, got ${bob.getSnapshot().stats.signatureFailures}`
+    )
+  } finally {
+    alice.destroy()
+    relay.destroy()
+    bob.destroy()
+  }
 })

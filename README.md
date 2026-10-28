@@ -21,7 +21,8 @@ on top of WebRTC:
 - 🔐📝 Session data encryption
 - 🪪🔑 Self-certifying peer & user identities with multi-tab presence
 - 🚪🎟️ Room size limits for 1v1 matches and capped lobbies
-- 🕸️🚀 Automatic scaling for large rooms with dozens or hundreds of peers
+- 🕸️🚀 Experimental multi-hop scaling (`scale()`) for larger rooms with dozens
+  of peers
 - 👑🛡️ Room admins, custom roles, peer banning, and shared state
 - 🏭⚡ Can run peers server-side on Node, Bun, and Deno
 - ⚛️🪝 React hooks
@@ -889,7 +890,7 @@ grows past a dozen people—like a busy game lobby, a collaborative canvas with 
 cursors, or a live watch party—maintaining that many connections at once can
 slow down or overwhelm a user's browser.
 
-**Opt into automatic scaling with `scale()`:**
+**Opt into automatic scaling with `scale()` _(experimental)_:**
 
 ```js
 import {joinRoom, scale} from 'trystero'
@@ -897,14 +898,19 @@ import {joinRoom, scale} from 'trystero'
 const room = joinRoom({appId: 'massive-canvas', use: [scale()]}, 'lobby-1')
 ```
 
+> [!NOTE] `scale()` is **experimental** and designed for cooperative rooms with
+> dozens of peers (tested up to 48 concurrent browser instances and 250+
+> simulated peers).
+
 When you include `use: [scale()]` (which defaults to `'auto'` mode):
 
 - When a room is small (`12` peers or fewer), everyone connects directly to
   everyone else for the lowest possible latency.
-- If more people join, Trystero automatically switches the room to a scalable
-  `'gossip'` relay network where each browser only maintains a handful of direct
-  connections (`maxConnections: 6` by default, minimum `4`) and routes messages
-  across the room.
+- If more people join, Trystero automatically switches the room to a `'gossip'`
+  relay network targeting `maxConnections` direct connections per browser (`6`
+  by default, minimum `4`; actual direct connection counts are a target and can
+  temporarily reach ~2–3× under burst joins due to inbound soft ceilings and
+  minimum-degree fallbacks) and routes small messages across hops.
 
 All of your code (`makeAction`, `makeState`, `addStream`, `replaceTrack`,
 `ping`, `onUserJoin`, `onUserLeave`, and `getUsers()`) works the exact same way
@@ -914,10 +920,10 @@ directly or through other peers.
 Media streams (`addStream` and `replaceTrack`) and large binary transfers (> 16
 KiB) automatically promote the target peer(s) to a direct 1-hop WebRTC
 connection on demand so relays never decode or forward audio/video tracks or
-bulk chunks. These promoted connections can exceed the overlay's
-`maxConnections` target and remain available until the peer or room disconnects.
-Await the promise returned by `addStream` or `replaceTrack` to handle connection
-failures.
+bulk chunks. Because media and bulk transfers use direct connections, they scale
+as a 1-to-N mesh for the sender, and promoted connections can exceed the
+overlay's `maxConnections` target. Await the promise returned by `addStream` or
+`replaceTrack` to handle connection failures.
 
 You can customize how `scale()` connects peers by passing a mode string or
 config object:
@@ -927,10 +933,7 @@ config object:
   automatically switches to `'gossip'` when a room exceeds `autoThreshold`
   (default: `12` peers).
 - `'gossip'` – Always uses the bounded-degree gossip relay network, even in
-  small rooms. Useful when building a massive multiplayer world or public town
-  square where you want every user's connection count capped from the start.
-- `'mesh'` – Everyone always connects directly to everyone else (the default
-  when `scale()` is omitted).
+  small rooms. Useful when you want multi-hop routing active from the start.
 
 You can also fine-tune connection limits by passing an object to `scale()`:
 
@@ -961,23 +964,27 @@ relays, and how data routes are organized.
   bounded-degree circulant ring with deterministic multi-scale chords, and
   derive packet hop limits dynamically from the verified room roster size.
   Routing tables require mutual neighbor confirmation in signed link-state
-  descriptors (refreshed as periodic heartbeats with TTL expiry) before using an
-  edge. Broadcasts propagate across neighbor links with per-origin sliding
-  replay windows and message-ID deduplication, while small point-to-point
-  messages (`target`) route along shortest paths with disjoint backup next-hops
-  for instant failover.
+  descriptors (refreshed by heartbeats and verified data traffic with a 180 s
+  TTL) before using an edge. Broadcasts propagate across neighbor links with
+  per-origin sliding replay windows and message-ID deduplication, while small
+  point-to-point messages (`target`) route along shortest paths with disjoint
+  backup next-hops for instant failover.
 - **Direct WebRTC promotion for media & bulk transfers**: Calling `addStream()`
   or sending a multi-chunk payload (> 16 KiB) to a multi-hop peer automatically
   establishes a direct 1-hop WebRTC connection to that peer so media and bulk
-  transfers flow peer-to-peer without burdening intermediate relays.
-- **End-to-end data security across hops**: For data channels, every peer
-  automatically generates an ephemeral WebCrypto signing keypair (ECDSA P-256)
-  and encryption keypair (ECDH P-256). Link-state descriptors, leave notices,
-  broadcasts, and unicast headers are cryptographically bound to `appId`,
-  `roomId`, and a per-origin monotonic sequence counter (`seq`) and verified
-  against self-certifying `peerId` keys so intermediate relays cannot forge,
-  replay, or cross-post messages across rooms. Targeted data messages (`target`)
-  are end-to-end encrypted with AES-GCM so intermediate relays cannot read them.
+  transfers flow peer-to-peer without burdening intermediate relays (scaling as
+  mesh for the sender).
+- **Threat model & end-to-end data security**: Every peer generates an ephemeral
+  WebCrypto signing keypair (ECDSA P-256) and encryption keypair (ECDH P-256).
+  Link-state descriptors, leave notices, broadcasts, and unicast headers are
+  cryptographically bound to `appId`, `roomId`, and a per-origin monotonic
+  sequence counter (`seq`) and verified against self-certifying `peerId` keys,
+  and targeted data messages (`target`) are end-to-end encrypted with AES-GCM
+  (with canonical header AAD). Cryptographic integrity, replay protection, and
+  unicast confidentiality hold against untrusted signaling relays and multi-hop
+  forwarders; however, because peers route through one another in a cooperative
+  overlay, a malicious authenticated room member can still drop forwarded
+  packets or inflate the roster up to the configured per-user and room caps.
 
 </details>
 
@@ -1795,18 +1802,17 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 
 ### `scale([config])`
 
-Creates the opt-in multi-hop scaling plugin
+Creates the experimental opt-in multi-hop scaling plugin
 (`RoomPlugin<'scale', ScalePluginApi>`) for `joinRoom()`. Pass in
-`use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`,
-`'mesh'`, or a `ScaleConfig` object:
+`use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`, or a
+`ScaleConfig` object:
 
-- `mode` - `'auto' | 'mesh' | 'gossip'` (default: `'auto'`).
-- `maxConnections` - Maximum target direct WebRTC connections per browser in
-  scalable modes (default: `6`).
+- `mode` - `'auto' | 'gossip'` (default: `'auto'`).
+- `maxConnections` - Target direct WebRTC connections per browser in scalable
+  modes (default: `6`, minimum: `4`; may temporarily reach ~2–3× under burst
+  joins).
 - `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
   `'gossip'` (default: `12`).
-- `fanout` - Number of downstream peers each node forwards to in media broadcast
-  trees (default: `3`).
 
 ### `definePlugin(name, spec)`
 

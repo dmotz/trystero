@@ -1,5 +1,5 @@
 import {inspectActionWireHeader} from './action-wire'
-import {ecdsaSign, sha1, sha256} from './crypto'
+import {ecdsaSign, sha256} from './crypto'
 import {maxActionFrameBytes, maxOverlayHeaderBytes} from './data-limits'
 import {
   getCachedPubKeyRecord,
@@ -62,10 +62,14 @@ const defaultMinConnections = 3
 export const defaultAutoThreshold = 12
 export const maxAllowedHops = 64
 export const defaultMaxHops = 16
-const defaultDescriptorTtlMs = 60_000
+const defaultDescriptorTtlMs = 180_000
 const unreachableGraceMs = 80
 const maxDiscoveredCandidates = 512
 const maxTrackedOrigins = 2_048
+const maxVerifiedDescriptors = 2_048
+const maxPeersPerUser = 16
+const descriptorUpdateRatePerSec = 8
+const descriptorUpdateBurstCap = 16
 const replayWindowBits = 256n
 const replayWindowMask = (1n << replayWindowBits) - 1n
 
@@ -133,7 +137,7 @@ type OriginReplayState = {
   lastSeenAt: number
 }
 
-const validModes = new Set<TopologyMode>(['mesh', 'auto', 'gossip'])
+const validModes = new Set<TopologyMode>(['auto', 'gossip'])
 
 export const normalizeTopologyConfig = (
   topology?: TopologyMode | ScaleConfig
@@ -603,6 +607,11 @@ type CryptoIdentity = {
 
 const identityCache = new Map<string, Promise<CryptoIdentity>>()
 const verifiedSigBytes = createBoundedCache<string, Uint8Array>(4_096)
+const inFlightSigVerifies = new Map<string, Promise<boolean>>()
+const lastLocalSeqByRoomPeer = createBoundedCache<
+  string,
+  {descSeq: number; pktSeq: number}
+>(4_096)
 
 const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
   if (a.byteLength !== b.byteLength) {
@@ -691,8 +700,6 @@ export type OverlayManager = {
   isDirectPeer: (peerId: string) => boolean
   isVirtualPeer: (peerId: string) => boolean
   getRoute: (peerId: string) => TopologyRoute | undefined
-  hasReachableRoute: (peerId: string) => boolean
-  createVirtualPeer: (peerId: string) => PeerHandle
   broadcastInline: (
     frame: Uint8Array,
     onProgress?: (peerId: string) => void
@@ -735,13 +742,6 @@ export const createOverlayManager = ({
   onPeerDescriptorCert
 }: OverlayManagerDeps): OverlayManager => {
   let selfId = initialSelfId ?? ''
-  void getOrCreateEndpointIdentity(initialSelfId).then(ep => {
-    if (!initialSelfId && ep.peerId !== selfId) {
-      knownRoster.delete(selfId)
-      selfId = ep.peerId
-      knownRoster.add(selfId)
-    }
-  })
   let roomId = initialRoomId
   const config = normalizeTopologyConfig(topology)
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
@@ -770,6 +770,10 @@ export const createOverlayManager = ({
   let localRoleCert: RoleCertificate | null = null
   const descriptors = new Map<string, PeerDescriptor>()
   const descriptorReceivedAt = new Map<string, number>()
+  const descUpdateBuckets = new Map<
+    string,
+    {tokens: number; lastRefillAt: number}
+  >()
   const adjacency = new Map<string, Set<string>>()
   const pinnedSignKeys = new Map<string, string>()
   const derivedPairwiseKeys = new Map<string, Promise<CryptoKey>>()
@@ -784,6 +788,51 @@ export const createOverlayManager = ({
 
   let localDescriptorSeq = 0
   let localPacketSeq = 0
+  let didInitSessionSeqFloor = false
+
+  const syncSessionSeqFloor = (id: string): void => {
+    if (!id) {
+      return
+    }
+    const key = `${appId}\0${roomId}\0${id}`
+    const prev = lastLocalSeqByRoomPeer.get(key)
+    if (!didInitSessionSeqFloor) {
+      didInitSessionSeqFloor = true
+      if (prev) {
+        localDescriptorSeq = Math.max(localDescriptorSeq, prev.descSeq + 1_024)
+        localPacketSeq = Math.max(localPacketSeq, prev.pktSeq + 1_024)
+      }
+    }
+    lastLocalSeqByRoomPeer.set(key, {
+      descSeq: Math.max(localDescriptorSeq, prev?.descSeq ?? 0),
+      pktSeq: Math.max(localPacketSeq, prev?.pktSeq ?? 0)
+    })
+  }
+
+  const recordLocalSeqProgress = (): void => {
+    if (!selfId) {
+      return
+    }
+    const key = `${appId}\0${roomId}\0${selfId}`
+    const prev = lastLocalSeqByRoomPeer.get(key)
+    lastLocalSeqByRoomPeer.set(key, {
+      descSeq: Math.max(localDescriptorSeq, prev?.descSeq ?? 0),
+      pktSeq: Math.max(localPacketSeq, prev?.pktSeq ?? 0)
+    })
+  }
+
+  if (selfId) {
+    syncSessionSeqFloor(selfId)
+  }
+
+  void getOrCreateEndpointIdentity(initialSelfId).then(ep => {
+    if (!initialSelfId && ep.peerId !== selfId) {
+      knownRoster.delete(selfId)
+      selfId = ep.peerId
+      knownRoster.add(selfId)
+    }
+    syncSessionSeqFloor(selfId)
+  })
   let isDestroyed = false
   let currentActiveMode: 'mesh' | 'gossip' =
     config.mode === 'auto' ? 'mesh' : config.mode
@@ -882,22 +931,16 @@ export const createOverlayManager = ({
     return true
   }
 
-  if (config.mode === 'gossip') {
-    void getOrCreateCryptoIdentity(selfId).then(id => {
-      if (!isDestroyed) {
-        identityReady = id
-        if (directPeers.size > 0) {
-          void publishLocalDescriptor()
-        }
+  void getOrCreateCryptoIdentity(selfId).then(id => {
+    if (!isDestroyed) {
+      identityReady = id
+      if (config.mode === 'gossip' && directPeers.size > 0) {
+        void publishLocalDescriptor()
       }
-    })
-  }
+    }
+  })
 
   const updateActiveMode = (): void => {
-    if (config.mode === 'mesh') {
-      currentActiveMode = 'mesh'
-      return
-    }
     if (config.mode === 'gossip') {
       currentActiveMode = 'gossip'
       return
@@ -922,9 +965,6 @@ export const createOverlayManager = ({
 
   const isOverlayActive = (): boolean => {
     updateActiveMode()
-    if (config.mode === 'mesh') {
-      return false
-    }
     if (config.mode !== 'auto') {
       return true
     }
@@ -1021,6 +1061,7 @@ export const createOverlayManager = ({
   const purgePeerFromGraph = (peerId: string): void => {
     descriptors.delete(peerId)
     descriptorReceivedAt.delete(peerId)
+    descUpdateBuckets.delete(peerId)
     adjacency.delete(peerId)
     knownRoster.delete(peerId)
     discoveredCandidates.delete(peerId)
@@ -1168,11 +1209,7 @@ export const createOverlayManager = ({
         unreachableTimers.delete(peerId)
       }
 
-      if (
-        !directPeers.has(peerId) &&
-        !virtualPeers.has(peerId) &&
-        descriptors.has(peerId)
-      ) {
+      if (!directPeers.has(peerId) && descriptors.has(peerId)) {
         const vPeer = createVirtualPeer(peerId)
         onVirtualPeerJoin(peerId, vPeer)
       }
@@ -1273,6 +1310,46 @@ export const createOverlayManager = ({
   }, heartbeatIntervalMs)
   ;(heartbeatTimer as {unref?: () => void}).unref?.()
 
+  const verifySigWithCache = async (
+    sigCacheKey: string | undefined,
+    sig: string,
+    signedBytes: Uint8Array,
+    pubJwk: JsonWebKey
+  ): Promise<boolean> => {
+    if (sigCacheKey) {
+      const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
+      if (cachedVerifiedBytes && bytesMatch(cachedVerifiedBytes, signedBytes)) {
+        return true
+      }
+      const inFlight = inFlightSigVerifies.get(sigCacheKey)
+      if (inFlight) {
+        return inFlight
+      }
+    }
+    const verifyPromise = (async () => {
+      try {
+        const ok = await verifyWithP256(fromBase64(sig), signedBytes, pubJwk)
+        if (ok && sigCacheKey) {
+          rememberVerifiedSig(sigCacheKey, signedBytes)
+        }
+        return ok
+      } catch {
+        return false
+      } finally {
+        if (sigCacheKey) {
+          inFlightSigVerifies.delete(sigCacheKey)
+        }
+      }
+    })()
+    if (sigCacheKey) {
+      inFlightSigVerifies.set(sigCacheKey, verifyPromise)
+    }
+    return verifyPromise
+  }
+
+  const maxDescriptorNeighbors = Math.max(16, config.maxConnections * 3)
+  const maxGossipEntriesPerFrame = 64
+
   const buildLocalDescriptor = async (): Promise<PeerDescriptor> => {
     const id = identityReady ?? (await getOrCreateCryptoIdentity(selfId))
     identityReady = id
@@ -1280,15 +1357,32 @@ export const createOverlayManager = ({
       ? await getLocalUserIdentity()
       : null
 
-    publishDirty = false
-    const seq = ++localDescriptorSeq
-    const neighbors = [...directPeers.keys()].sort()
-
     if (!initialSelfId && id.peerId !== selfId) {
       knownRoster.delete(selfId)
       selfId = id.peerId
       knownRoster.add(selfId)
     }
+    syncSessionSeqFloor(selfId)
+
+    publishDirty = false
+    const seq = ++localDescriptorSeq
+    recordLocalSeqProgress()
+    const allDirect = [...directPeers.keys()]
+    const targets =
+      allDirect.length <= maxDescriptorNeighbors
+        ? null
+        : computeEffectiveTargets()
+    const neighbors = (
+      !targets
+        ? allDirect
+        : allDirect
+            .sort(
+              (a, b) =>
+                Number(targets.has(b)) - Number(targets.has(a)) ||
+                a.localeCompare(b)
+            )
+            .slice(0, maxDescriptorNeighbors)
+    ).sort()
 
     const descriptor: PeerDescriptor = {
       peerId: selfId,
@@ -1332,9 +1426,6 @@ export const createOverlayManager = ({
     return descriptor
   }
 
-  const maxDescriptorNeighbors = Math.max(16, config.maxConnections * 3)
-  const maxGossipEntriesPerFrame = 64
-
   const isValidDescriptorNeighbors = (
     peerId: string,
     neighbors: unknown
@@ -1353,67 +1444,29 @@ export const createOverlayManager = ({
     return true
   }
 
-  const tryVerifyDescriptorCached = (d: PeerDescriptor): boolean => {
-    if (
-      password ||
-      !d ||
-      !isValidSignalPeerId(d.peerId) ||
-      typeof d.seq !== 'number' ||
-      !Number.isSafeInteger(d.seq) ||
-      d.seq <= 0 ||
-      !isValidDescriptorNeighbors(d.peerId, d.neighbors) ||
-      bannedPeers.has(d.peerId) ||
-      !d.signPubKey ||
-      typeof d.sig !== 'string' ||
-      !d.sig ||
-      !isPeerIdKeyCachedValid(d.peerId, d.signPubKey)
-    ) {
-      return false
-    }
-
-    if (
-      Boolean(getLocalUserIdentity) ||
-      d.userId !== undefined ||
-      d.userPubKey !== undefined ||
-      d.userProof !== undefined
-    ) {
-      if (
-        !d.userId ||
-        !d.userPubKey ||
-        !d.userProof ||
-        !isUserEndpointProofCachedValid({
-          appId,
-          roomId,
-          peerId: d.peerId,
-          peerPubJwk: d.signPubKey,
-          userId: d.userId,
-          userPubJwk: d.userPubKey,
-          proof: d.userProof,
-          seq: d.seq
-        })
-      ) {
-        return false
-      }
-    }
-
-    const keyThumbprint = toJson(d.signPubKey)
-    const pinned = pinnedSignKeys.get(d.peerId)
-    if (pinned && pinned !== keyThumbprint) {
-      return false
-    }
-
-    const canonicalBytes = encodeBytes(
-      descriptorCanonicalPayload(d, appId, roomId)
+  const hasValidDescriptorShape = (
+    d: PeerDescriptor
+  ): d is PeerDescriptor & {signPubKey: JsonWebKey; sig: string} =>
+    Boolean(
+      d &&
+      isValidSignalPeerId(d.peerId) &&
+      typeof d.seq === 'number' &&
+      Number.isSafeInteger(d.seq) &&
+      d.seq > 0 &&
+      isValidDescriptorNeighbors(d.peerId, d.neighbors) &&
+      !bannedPeers.has(d.peerId)
     )
-    const sigCacheKey = `desc:${keyThumbprint}:${d.sig}`
-    const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
-    if (
-      !cachedVerifiedBytes ||
-      !bytesMatch(cachedVerifiedBytes, canonicalBytes)
-    ) {
-      return false
-    }
 
+  const needsUserProof = (d: PeerDescriptor): boolean =>
+    Boolean(getLocalUserIdentity) ||
+    d.userId !== undefined ||
+    d.userPubKey !== undefined ||
+    d.userProof !== undefined
+
+  const commitVerifiedDescriptor = (
+    d: PeerDescriptor & {signPubKey: JsonWebKey; sig: string},
+    keyThumbprint: string
+  ): true => {
     pinnedSignKeys.set(d.peerId, keyThumbprint)
     peerSignPubKeys.set(d.peerId, d.signPubKey)
     onPeerDescriptorCert?.(
@@ -1426,20 +1479,61 @@ export const createOverlayManager = ({
     return true
   }
 
-  const verifyDescriptor = async (d: PeerDescriptor): Promise<boolean> => {
+  const tryVerifyDescriptorCached = (d: PeerDescriptor): boolean => {
     if (
-      !d ||
-      !isValidSignalPeerId(d.peerId) ||
-      typeof d.seq !== 'number' ||
-      !Number.isSafeInteger(d.seq) ||
-      d.seq <= 0 ||
-      !isValidDescriptorNeighbors(d.peerId, d.neighbors)
+      password ||
+      !hasValidDescriptorShape(d) ||
+      !d.signPubKey ||
+      typeof d.sig !== 'string' ||
+      !d.sig ||
+      !isPeerIdKeyCachedValid(d.peerId, d.signPubKey)
     ) {
-      stats.signatureFailures++
       return false
     }
 
-    if (bannedPeers.has(d.peerId)) {
+    if (
+      needsUserProof(d) &&
+      (!d.userId ||
+        !d.userPubKey ||
+        !d.userProof ||
+        !isUserEndpointProofCachedValid({
+          appId,
+          roomId,
+          peerId: d.peerId,
+          peerPubJwk: d.signPubKey,
+          userId: d.userId,
+          userPubJwk: d.userPubKey,
+          proof: d.userProof,
+          seq: d.seq
+        }))
+    ) {
+      return false
+    }
+
+    const keyThumbprint = toJson(d.signPubKey)
+    const pinned = pinnedSignKeys.get(d.peerId)
+    if (pinned && pinned !== keyThumbprint) {
+      return false
+    }
+
+    const canonicalBytes = encodeBytes(
+      descriptorCanonicalPayload(d, appId, roomId)
+    )
+    const cachedVerifiedBytes = verifiedSigBytes.get(
+      `desc:${keyThumbprint}:${d.sig}`
+    )
+    if (
+      !cachedVerifiedBytes ||
+      !bytesMatch(cachedVerifiedBytes, canonicalBytes)
+    ) {
+      return false
+    }
+
+    return commitVerifiedDescriptor(d, keyThumbprint)
+  }
+
+  const verifyDescriptor = async (d: PeerDescriptor): Promise<boolean> => {
+    if (!hasValidDescriptorShape(d)) {
       stats.signatureFailures++
       return false
     }
@@ -1462,24 +1556,19 @@ export const createOverlayManager = ({
       }
     }
 
-    if (!d.signPubKey || typeof d.sig !== 'string' || !d.sig) {
-      stats.signatureFailures++
-      return false
-    }
-
-    if (!(await verifyPeerIdKey(d.peerId, d.signPubKey))) {
+    if (
+      !d.signPubKey ||
+      typeof d.sig !== 'string' ||
+      !d.sig ||
+      !(await verifyPeerIdKey(d.peerId, d.signPubKey))
+    ) {
       stats.signatureFailures++
       return false
     }
 
     if (
-      Boolean(getLocalUserIdentity) ||
-      d.userId !== undefined ||
-      d.userPubKey !== undefined ||
-      d.userProof !== undefined
-    ) {
-      if (
-        !d.userId ||
+      needsUserProof(d) &&
+      (!d.userId ||
         !d.userPubKey ||
         !d.userProof ||
         !(await verifyUserEndpointProof({
@@ -1491,11 +1580,10 @@ export const createOverlayManager = ({
           userPubJwk: d.userPubKey,
           proof: d.userProof,
           seq: d.seq
-        }))
-      ) {
-        stats.signatureFailures++
-        return false
-      }
+        })))
+    ) {
+      stats.signatureFailures++
+      return false
     }
 
     const keyThumbprint = toJson(d.signPubKey)
@@ -1509,48 +1597,17 @@ export const createOverlayManager = ({
       descriptorCanonicalPayload(d, appId, roomId)
     )
     const sigCacheKey = `desc:${keyThumbprint}:${d.sig}`
-    const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
-    if (
-      cachedVerifiedBytes &&
-      bytesMatch(cachedVerifiedBytes, canonicalBytes)
-    ) {
-      pinnedSignKeys.set(d.peerId, keyThumbprint)
-      peerSignPubKeys.set(d.peerId, d.signPubKey)
-      onPeerDescriptorCert?.(
-        d.peerId,
-        d.signPubKey,
-        d.cert,
-        d.userId,
-        d.userPubKey
-      )
-      return true
-    }
-
-    try {
-      const isValid = await verifyWithP256(
-        fromBase64(d.sig),
-        canonicalBytes,
-        d.signPubKey
-      )
-      if (!isValid) {
-        stats.signatureFailures++
-        return false
-      }
-      rememberVerifiedSig(sigCacheKey, canonicalBytes)
-      pinnedSignKeys.set(d.peerId, keyThumbprint)
-      peerSignPubKeys.set(d.peerId, d.signPubKey)
-      onPeerDescriptorCert?.(
-        d.peerId,
-        d.signPubKey,
-        d.cert,
-        d.userId,
-        d.userPubKey
-      )
-      return true
-    } catch {
+    const ok = await verifySigWithCache(
+      sigCacheKey,
+      d.sig,
+      canonicalBytes,
+      d.signPubKey
+    )
+    if (!ok) {
       stats.signatureFailures++
       return false
     }
+    return commitVerifiedDescriptor(d, keyThumbprint)
   }
 
   const sendGossipToNeighbors = (
@@ -1662,6 +1719,7 @@ export const createOverlayManager = ({
       selfId = id.peerId
       knownRoster.add(selfId)
     }
+    syncSessionSeqFloor(selfId)
     const combined = buildOverlaySignedBytes(canonicalHeader, payload)
     const sig = toBase64(
       await ecdsaSign(id.signPrivateKey, combined as BufferSource)
@@ -1692,29 +1750,15 @@ export const createOverlayManager = ({
     }
 
     const combined = buildOverlaySignedBytes(canonicalHeader, payload)
-
-    if (pinnedThumbprint) {
-      const sigCacheKey = `pkt:${pinnedThumbprint}:${sig}`
-      const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
-      if (cachedVerifiedBytes && bytesMatch(cachedVerifiedBytes, combined)) {
-        return true
-      }
-    }
-
-    try {
-      const ok = await verifyWithP256(fromBase64(sig), combined, signPubJwk)
-      if (!ok) {
-        stats.signatureFailures++
-        return false
-      }
-      if (pinnedThumbprint) {
-        rememberVerifiedSig(`pkt:${pinnedThumbprint}:${sig}`, combined)
-      }
-      return true
-    } catch {
+    const sigCacheKey = pinnedThumbprint
+      ? `pkt:${pinnedThumbprint}:${sig}`
+      : undefined
+    const ok = await verifySigWithCache(sigCacheKey, sig, combined, signPubJwk)
+    if (!ok) {
       stats.signatureFailures++
       return false
     }
+    return true
   }
 
   const forwardBroadcastPacket = (
@@ -1747,6 +1791,7 @@ export const createOverlayManager = ({
     }
 
     const seq = ++localPacketSeq
+    recordLocalSeqProgress()
     const msgId = `${selfId}:${seq}:${genId(8)}`
     recordOriginSeq(selfId, seq)
     seenMsgIds.add(msgId)
@@ -1864,6 +1909,7 @@ export const createOverlayManager = ({
     }
 
     const seq = ++localPacketSeq
+    recordLocalSeqProgress()
     const msgId = `${selfId}:${seq}:${genId(8)}`
     recordOriginSeq(selfId, seq)
     seenMsgIds.add(msgId)
@@ -2051,6 +2097,29 @@ export const createOverlayManager = ({
           continue
         }
 
+        if (existing) {
+          const now = Date.now()
+          let bucket = descUpdateBuckets.get(d.peerId)
+          if (!bucket) {
+            bucket = {tokens: descriptorUpdateBurstCap, lastRefillAt: now}
+            descUpdateBuckets.set(d.peerId, bucket)
+          } else {
+            const elapsedSec = Math.max(0, (now - bucket.lastRefillAt) / 1_000)
+            if (elapsedSec > 0) {
+              bucket.tokens = Math.min(
+                descriptorUpdateBurstCap,
+                bucket.tokens + elapsedSec * descriptorUpdateRatePerSec
+              )
+              bucket.lastRefillAt = now
+            }
+          }
+          if (bucket.tokens < 1) {
+            stats.signatureFailures++
+            continue
+          }
+          bucket.tokens -= 1
+        }
+
         const isValid =
           tryVerifyDescriptorCached(d) || (await verifyDescriptor(d))
         if (!isValid || isDestroyed) {
@@ -2062,6 +2131,60 @@ export const createOverlayManager = ({
           continue
         }
 
+        if (!latest) {
+          const now = Date.now()
+          if (d.userId) {
+            let userPeerCount = 0
+            let oldestUserPeerId: string | null = null
+            let oldestUserTime = Infinity
+            for (const existingDesc of descriptors.values()) {
+              if (
+                existingDesc.peerId !== d.peerId &&
+                existingDesc.userId === d.userId
+              ) {
+                userPeerCount++
+                if (
+                  existingDesc.peerId !== selfId &&
+                  !directPeers.has(existingDesc.peerId)
+                ) {
+                  const t = descriptorReceivedAt.get(existingDesc.peerId) ?? 0
+                  if (t < oldestUserTime) {
+                    oldestUserTime = t
+                    oldestUserPeerId = existingDesc.peerId
+                  }
+                }
+              }
+            }
+            if (userPeerCount >= maxPeersPerUser) {
+              if (
+                !oldestUserPeerId ||
+                now - oldestUserTime <= descriptorTtlMs
+              ) {
+                continue
+              }
+              evictVirtualPeerNow(oldestUserPeerId, peerDisconnectedErr)
+            }
+          }
+
+          if (descriptors.size >= maxVerifiedDescriptors) {
+            let oldestPeerId: string | null = null
+            let oldestTime = Infinity
+            for (const existingId of descriptors.keys()) {
+              if (existingId !== selfId && !directPeers.has(existingId)) {
+                const t = descriptorReceivedAt.get(existingId) ?? 0
+                if (t < oldestTime) {
+                  oldestTime = t
+                  oldestPeerId = existingId
+                }
+              }
+            }
+            if (!oldestPeerId || now - oldestTime <= descriptorTtlMs) {
+              continue
+            }
+            evictVirtualPeerNow(oldestPeerId, peerDisconnectedErr)
+          }
+        }
+
         if (
           latest?.encPubKey &&
           d.encPubKey &&
@@ -2069,7 +2192,9 @@ export const createOverlayManager = ({
         ) {
           derivedPairwiseKeys.delete(d.peerId)
         }
-        leftPeersSeq.delete(d.peerId)
+        if (leftPeersSeq.delete(d.peerId)) {
+          originReplay.delete(d.peerId)
+        }
         knownRoster.add(d.peerId)
         descriptors.set(d.peerId, d)
         descriptorReceivedAt.set(d.peerId, Date.now())
@@ -2111,6 +2236,9 @@ export const createOverlayManager = ({
     fromPeerId: string,
     bytes: Uint8Array
   ): Promise<void> => {
+    if (isDestroyed) {
+      return
+    }
     const parsed = unpackOverlayBinary(bytes)
     if (!parsed) {
       return
@@ -2192,6 +2320,9 @@ export const createOverlayManager = ({
         return
       }
 
+      if (descriptors.has(origin)) {
+        descriptorReceivedAt.set(origin, Date.now())
+      }
       ensureOriginVirtualPeer(origin, fromPeerId)
 
       stats.messagesReceived++
@@ -2285,6 +2416,9 @@ export const createOverlayManager = ({
           stats.duplicatesDropped++
           return
         }
+        if (descriptors.has(origin)) {
+          descriptorReceivedAt.set(origin, Date.now())
+        }
         stats.messagesForwarded++
         const forwarded = packOverlayBinary(
           overlayUnicastKind,
@@ -2325,18 +2459,8 @@ export const createOverlayManager = ({
         )
         plainPayload = new Uint8Array(decrypted)
       } catch {
-        try {
-          const aesKey = await pairwiseKeyP
-          const decrypted = await crypto.subtle.decrypt(
-            {name: 'AES-GCM', iv: fromBase64(ivB64) as BufferSource},
-            aesKey,
-            payload as BufferSource
-          )
-          plainPayload = new Uint8Array(decrypted)
-        } catch {
-          stats.signatureFailures++
-          return
-        }
+        stats.signatureFailures++
+        return
       }
 
       if (!recordOriginSeq(origin, seq) || !seenMsgIds.add(msgId)) {
@@ -2344,6 +2468,9 @@ export const createOverlayManager = ({
         return
       }
 
+      if (descriptors.has(origin)) {
+        descriptorReceivedAt.set(origin, Date.now())
+      }
       ensureOriginVirtualPeer(origin, fromPeerId)
 
       stats.messagesReceived++
@@ -2369,14 +2496,22 @@ export const createOverlayManager = ({
     }
     const kind = bytes[1]!
     if (kind === overlayControlKind) {
+      let parsed: OverlayControlMessage
       try {
-        const parsed = fromJson<OverlayControlMessage>(
-          decodeBytes(bytes.subarray(2))
-        )
-        void handleControlFrame(fromPeerId, parsed)
+        parsed = fromJson<OverlayControlMessage>(decodeBytes(bytes.subarray(2)))
       } catch {
-        /* Ignore malformed control frame */
+        return
       }
+      const prev = inboundOriginQueues.get(fromPeerId) ?? Promise.resolve()
+      const next = prev
+        .then(() => handleControlFrame(fromPeerId, parsed))
+        .catch(noOp)
+        .finally(() => {
+          if (inboundOriginQueues.get(fromPeerId) === next) {
+            inboundOriginQueues.delete(fromPeerId)
+          }
+        })
+      inboundOriginQueues.set(fromPeerId, next)
       return
     }
     if (kind === overlayBroadcastKind || kind === overlayUnicastKind) {
@@ -2438,6 +2573,7 @@ export const createOverlayManager = ({
       }
 
       leftPeersSeq.delete(peerId)
+      originReplay.delete(peerId)
       knownRoster.add(peerId)
 
       const timer = unreachableTimers.get(peerId)
@@ -2488,18 +2624,28 @@ export const createOverlayManager = ({
       }
     },
 
-    removeDirectPeer: (peerId: string, peer?: PeerHandle): void => {
+    removeDirectPeer: (
+      peerId: string,
+      peer?: PeerHandle,
+      reason?: Error
+    ): void => {
       const current = directPeers.get(peerId)
       if (!current || (peer && current !== peer)) {
         if (!current) {
           pendingFramesByPeer.delete(peerId)
-        }
-        if (
-          !current &&
-          !virtualPeers.has(peerId) &&
-          knownRoster.delete(peerId)
-        ) {
-          recomputeTopologyAndRoutes()
+          const existingVPeer = virtualPeers.get(peerId)
+          if (existingVPeer && routes[peerId]) {
+            onVirtualPeerJoin(peerId, existingVPeer)
+            return
+          }
+          if (!existingVPeer) {
+            const lastSeq = descriptors.get(peerId)?.seq ?? 0
+            if (lastSeq > 0 || reason?.message === peerLeftRoomErr.message) {
+              recordLeftPeer(peerId, lastSeq)
+            }
+            purgePeerFromGraph(peerId)
+            recomputeTopologyAndRoutes()
+          }
         }
         return
       }
@@ -2526,11 +2672,6 @@ export const createOverlayManager = ({
     isVirtualPeer: (peerId: string): boolean => virtualPeers.has(peerId),
 
     getRoute: (peerId: string): TopologyRoute | undefined => routes[peerId],
-
-    hasReachableRoute: (peerId: string): boolean =>
-      directPeers.has(peerId) || Boolean(routes[peerId]),
-
-    createVirtualPeer,
 
     broadcastInline,
 
@@ -2674,6 +2815,8 @@ export const createOverlayManager = ({
     setRoomId: (effectiveRoomId: string): void => {
       if (effectiveRoomId && effectiveRoomId !== roomId) {
         roomId = effectiveRoomId
+        didInitSessionSeqFloor = false
+        syncSessionSeqFloor(selfId)
         derivedPairwiseKeys.clear()
         if (isOverlayActive()) {
           void publishLocalDescriptor()
@@ -2686,6 +2829,7 @@ export const createOverlayManager = ({
         return
       }
       const seq = ++localDescriptorSeq
+      recordLocalSeqProgress()
       void signUnicastOrBroadcast(
         canonicalLeaveHeader(selfId, seq, appId, roomId),
         new Uint8Array()
@@ -2709,6 +2853,8 @@ export const createOverlayManager = ({
       isDestroyed = true
       resetTimer(heartbeatTimer)
       pendingFramesByPeer.clear()
+      inboundOriginQueues.clear()
+      outboundUnicastQueues.clear()
       requiredDirectPeers.clear()
       for (const timer of unreachableTimers.values()) {
         resetTimer(timer)
@@ -2810,7 +2956,7 @@ export const scale = (
         if (reason) {
           pendingMediaPeers.get(peerId)?.reject(reason)
         }
-        origRemoveDirectPeer(peerId, peer)
+        origRemoveDirectPeer(peerId, peer, reason)
       }
 
       overlay.prepareMediaPeer = (id: string, peer: PeerHandle) => {
@@ -2861,6 +3007,5 @@ export {
   overlayUnicastKind,
   packOverlayBinary,
   packOverlayControl,
-  sha1,
   unpackOverlayBinary
 }

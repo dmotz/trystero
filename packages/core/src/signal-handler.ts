@@ -276,6 +276,10 @@ const counterAnnounceTimestamps = new WeakMap<
   PeerState,
   Array<number | undefined>
 >()
+const dialBackoffByState = new WeakMap<
+  PeerState,
+  {attempts: number; nextAllowedAt: number}
+>()
 
 export const resetAnsweringState = (state: PeerState): void => {
   counterAnnounceTimestamps.delete(state)
@@ -306,6 +310,7 @@ export const markPeerConnected = (
     state.answeringPeer.destroy()
   }
 
+  dialBackoffByState.delete(state)
   resetAnsweringState(state)
   state.connectedPeer = physical
   state.connectedPeerUnhealthySinceMs = null
@@ -1037,10 +1042,21 @@ export const createSignalHandler = (ctx: SignalContext) => {
         state.connectedPeer ||
         state.answeringPeer ||
         state.offerAnswered ||
-        state.offerPeer
+        state.offerPeer ||
+        !relaySignalPeers.some(Boolean)
       ) {
         return
       }
+      const now = Date.now()
+      const backoff = dialBackoffByState.get(state)
+      if (backoff && now < backoff.nextAllowedAt) {
+        return
+      }
+      const attempts = (backoff?.attempts ?? 0) + 1
+      dialBackoffByState.set(state, {
+        attempts,
+        nextAllowedAt: now + Math.min(60_000, 2_000 * 2 ** (attempts - 1))
+      })
       relaySignalPeers.forEach((signalPeer, relayId) => {
         if (!signalPeer) {
           return

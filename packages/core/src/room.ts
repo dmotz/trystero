@@ -537,6 +537,23 @@ export default <
 
     const err = toError(reason, peerDisconnectedMsg)
     const wasVirtual = isVirtualPeer(id)
+    const existingVirtual =
+      wasVirtual && activePeerMap[id] && activePeerMap[id] !== current
+        ? activePeerMap[id]
+        : undefined
+
+    if (existingVirtual && err.message !== peerBannedMsg) {
+      handshakeManager.clearPeer(id, err)
+      peerMap[id] = existingVirtual
+      current.destroy()
+      scaleProvider?.removeDirectPeer(id, current, err)
+      onPeerLeave(id)
+      if (recheckCapacity && effectiveLimit !== undefined && !leavePromise) {
+        evaluateCapacityAdmissions()
+      }
+      return
+    }
+
     const wasActive = Boolean(activePeerMap[id]) || wasVirtual
 
     clearPeerState(id, err, recheckCapacity)
@@ -562,10 +579,15 @@ export default <
         cb()
       }
       scaleProvider?.announceLeave()
+      const leaveTargets = scaleProvider
+        ? keys(peerMap).filter(id => !virtualPeerIds.has(id))
+        : undefined
       const controller = new AbortController()
-      void leaveAction
-        .send('', undefined, undefined, undefined, controller.signal)
-        .catch(noOp)
+      if (!leaveTargets || leaveTargets.length > 0) {
+        void leaveAction
+          .send('', leaveTargets, undefined, undefined, controller.signal)
+          .catch(noOp)
+      }
       if (!didRejectSelfAsFull) {
         await new Promise<void>(res => setTimeout(res, 99))
       }
@@ -708,6 +730,9 @@ export default <
         vPeer.destroy()
         return
       }
+      if (activePeerMap[peerId] && !virtualPeerIds.has(peerId)) {
+        return
+      }
       const alreadyActive = Boolean(activePeerMap[peerId])
       if (!handshakeManager.getPeer(peerId)) {
         peerMap[peerId] = vPeer
@@ -723,7 +748,15 @@ export default <
       if (!current || isDirectPeer(peerId)) {
         return
       }
-      const wasActive = Boolean(activePeerMap[peerId])
+      const activeVirtual = activePeerMap[peerId]
+      if (activeVirtual && activeVirtual !== current) {
+        virtualPeerIds.delete(peerId)
+        delete activePeerMap[peerId]
+        activeVirtual.destroy()
+        notifyPeerDeactivated(peerId)
+        return
+      }
+      const wasActive = Boolean(activeVirtual)
       clearPeerState(peerId, reason)
       current.destroy()
       if (wasActive) {
