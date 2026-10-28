@@ -63,8 +63,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   const hasActiveRooms = (): boolean =>
     values(occupiedRooms).some(rooms => keys(rooms).length > 0)
 
-  let didInit = false
-  let initPromises: Promise<TRelay>[] = []
+  let didWatchOnline = false
   let cleanupWatchOnline: () => void = noOp
 
   return (config: TConfig, roomId: string, callbacks?: JoinRoomCallbacks) => {
@@ -251,12 +250,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const handleMessage = createSignalHandler(ctx)
 
-    if (!didInit) {
-      const initRes = init(config)
-      initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(value =>
-        Promise.resolve(value)
-      )
-      didInit = true
+    // Each room selects its relays; adapters own any shared connections.
+    const initRes = init(config)
+    const initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(
+      value => Promise.resolve(value)
+    )
+
+    if (!didWatchOnline) {
+      didWatchOnline = true
       cleanupWatchOnline = config.relayConfig?.manualReconnection
         ? noOp
         : watchOnline()
@@ -487,7 +488,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         return
       }
 
-      didInit = false
+      didWatchOnline = false
       cleanupWatchOnline()
     }
 

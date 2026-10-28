@@ -146,6 +146,56 @@ const runRelayReuseTests = (
   })
 
   void test(
+    `Trystero: ${strategy} shares overlapping relay sockets across concurrent rooms`,
+    {timeout: 10_000},
+    async () => {
+      const realWebSocket = globalThis.WebSocket
+      const rooms = []
+
+      globalThis.WebSocket = AutoOpenWebSocket
+      AutoOpenWebSocket.sockets.length = 0
+
+      const config = makeConfig('concurrent')
+      const firstUrl = config.relayConfig.urls[0]
+      const secondUrl = `${firstUrl}/second`
+
+      try {
+        rooms.push(joinRoom(config, 'first'))
+        rooms.push(
+          joinRoom(
+            {...config, relayConfig: {urls: [firstUrl, secondUrl]}},
+            'second'
+          )
+        )
+        rooms.push(
+          joinRoom({...config, relayConfig: {urls: [secondUrl]}}, 'third')
+        )
+
+        await waitFor(() => AutoOpenWebSocket.sockets.length >= 2)
+
+        assert.deepEqual(
+          AutoOpenWebSocket.sockets
+            .map(socket => socket.url)
+            .sort((a, b) => a.localeCompare(b)),
+          [firstUrl, secondUrl].sort((a, b) => a.localeCompare(b)),
+          'each configured relay should have exactly one socket'
+        )
+
+        await rooms[0].leave()
+
+        assert.equal(
+          openSockets().length,
+          2,
+          'leaving one room should preserve the relays used by other rooms'
+        )
+      } finally {
+        await Promise.all(rooms.map(room => room.leave()))
+        globalThis.WebSocket = realWebSocket
+      }
+    }
+  )
+
+  void test(
     `Trystero: ${strategy} reuses relay sockets across join/leave cycles`,
     {timeout: 10_000},
     async () => {

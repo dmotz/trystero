@@ -171,9 +171,12 @@ const removeUnusedChannels = (client: SupabaseClient): void => {
   })
 }
 
-const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
-  createTopicStrategy({
-    init: config => createClient(config.appId, config.relayConfig.supabaseKey),
+const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> => {
+  let client: SupabaseClient
+
+  return createTopicStrategy({
+    init: config =>
+      (client ??= createClient(config.appId, config.relayConfig.supabaseKey)),
 
     subscribeTopic: async (client, topic, onMessage, {kind}) => {
       const entry = getOrCreateChannel(client, topic)
@@ -213,6 +216,7 @@ const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
       })
     }
   })
+}
 
 const joins = new Map<string, JoinRoom<SupabaseRoomConfig>>()
 

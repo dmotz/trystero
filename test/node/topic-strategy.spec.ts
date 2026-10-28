@@ -107,6 +107,91 @@ const waitFor = async (
 }
 
 void test(
+  'Trystero: concurrent rooms keep their own relay initialization and subscriptions',
+  {timeout: 5_000},
+  async () => {
+    const relays = [{url: 'first'}, {url: 'second'}]
+    const resolveRelays = []
+    const ready = relays.map(
+      (_, i) => new Promise(resolve => (resolveRelays[i] = resolve))
+    )
+    const initConfigs = []
+    const subscriptions = new Map()
+    const announcements = []
+    const joinRoom = createTopicStrategy({
+      init: config => {
+        initConfigs.push(config)
+        return ready[config.relayConfig.urls[0] === 'first' ? 0 : 1]
+      },
+      subscribeTopic: (relay, topic, _onMessage, {roomId}) => {
+        subscriptions.set(topic, {relay, roomId})
+        return () => subscriptions.delete(topic)
+      },
+      publishTopic: (relay, _topic, _msg, {kind, roomId}) => {
+        if (kind === 'announce') {
+          announcements.push({relay, roomId})
+        }
+      }
+    })
+    const appId = `topic-room-relays-${Date.now()}`
+    const configs = relays.map(relay => ({
+      appId,
+      relayConfig: {urls: [relay.url]},
+      rtcPolyfill: MockRTCPeerConnection
+    }))
+    const rooms = configs.map((config, i) => joinRoom(config, `room-${i}`))
+
+    try {
+      assert.equal(joinRoom(configs[0], 'room-0'), rooms[0])
+      assert.deepEqual(initConfigs, configs)
+
+      // The second room may become ready while the first is still connecting.
+      resolveRelays[1](relays[1])
+      await waitFor(() => announcements.length > 0)
+      assert.deepEqual(
+        [...subscriptions.values()],
+        [
+          {relay: relays[1], roomId: 'room-1'},
+          {relay: relays[1], roomId: 'room-1'}
+        ]
+      )
+
+      resolveRelays[0](relays[0])
+      await waitFor(() => announcements.some(msg => msg.roomId === 'room-0'))
+      assert.equal(subscriptions.size, 4)
+
+      await rooms[0].leave()
+      await waitFor(() => subscriptions.size === 2)
+
+      const countBeforeLeave = announcements.length
+      await waitFor(() => announcements.length > countBeforeLeave)
+      assert.ok(
+        announcements
+          .slice(countBeforeLeave)
+          .every(msg => msg.roomId === 'room-1'),
+        'the remaining room should keep announcing after the first leaves'
+      )
+      assert.ok(
+        announcements.every(
+          msg => msg.relay === relays[msg.roomId === 'room-0' ? 0 : 1]
+        ),
+        'each room should announce on its own relay'
+      )
+      assert.ok(
+        [...subscriptions.values()].every(
+          sub => sub.roomId === 'room-1' && sub.relay === relays[1]
+        )
+      )
+    } finally {
+      resolveRelays.forEach((resolve, i) => resolve(relays[i]))
+      await Promise.all(rooms.map(room => room.leave()))
+    }
+
+    await waitFor(() => subscriptions.size === 0)
+  }
+)
+
+void test(
   'Trystero: createTopicStrategy accepts a custom steady announce interval',
   {timeout: 5_000},
   async () => {
