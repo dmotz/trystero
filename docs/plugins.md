@@ -131,7 +131,7 @@ plugin needs to:
 
 - Transform or validate the room ID before topic subscription (for example,
   `roles({selfAsAdmin: true})` appends a 16-character self-certifying
-  fingerprint `<roomId>.~<fingerprint>`).
+  fingerprint `<roomId>~<fingerprint>`).
 - Pre-compute asynchronous state from `userIdentityP` before peer handshakes
   begin.
 

@@ -487,7 +487,7 @@ export const createRelayManager = <TRelay extends object>(
 
 export const log = (...args: unknown[]): void => console.log(...args)
 
-export const selfCertifyingRoomRegex: RegExp = /^(.*)\.~([0-9A-Za-z]{16})$/
+export const selfCertifyingRoomRegex: RegExp = /^(.+)~([0-9A-Za-z]{16})$/
 
 export const reservedRoomPropertyNames: Set<string> = new Set([
   'ready',

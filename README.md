@@ -694,18 +694,18 @@ const hostRoom = joinRoom(
 )
 const {roomId} = await hostRoom.getSelf()
 
-// Share `roomId` (e.g. "friday-quiz.~9fX2kLm8pQr7vBn3") in an invite link for friends!
+// Share `roomId` (e.g. "friday-quiz~9fX2kLm8pQr7vBn3") in an invite link for friends!
 ```
 
-When you pass `roles({selfAsAdmin: true})`, Trystero attaches a `.~` separator
+When you pass `roles({selfAsAdmin: true})`, Trystero attaches a `~` separator
 and a 16-character Base62 suffix to your room name (like
-`'friday-quiz.~9fX2kLm8pQr7vBn3'`) derived from the host's `userId`. Think of
+`'friday-quiz~9fX2kLm8pQr7vBn3'`) derived from the host's `userId`. Think of
 that suffix as a built-in digital ID badge for the host.
 
 When friends join using that self-certifying `roomId`, they simply include
 `use: [roles()]` in `joinRoom()`—their browsers automatically check the suffix
 and recognize the host's `userId` as the true admin (joining a fingerprinted
-`<roomId>.~<fingerprint>` without `roles()` throws an error so misconfigured
+`<roomId>~<fingerprint>` without `roles()` throws an error so misconfigured
 clients fail fast):
 
 ```js
@@ -727,7 +727,7 @@ const guestRoom = joinRoom({appId: 'trivia-night', use: [roles()]}, roomId)
 #### 2. Specifying admin `userId`s (fixed room names or co-admins)
 
 What if you want a permanent, memorable room name like `'main-stage'` without a
-`.~<fingerprint>` suffix at the end—or want to designate additional co-admins?
+`~<fingerprint>` suffix at the end—or want to designate additional co-admins?
 
 Pass `admins: [...]` with the trusted admin `userId`s to `roles()`. When an
 admin joins with their matching `identity`, they are automatically recognized as
@@ -851,10 +851,10 @@ admin certificates.
   peer before being accepted.
 - **Self-certifying room IDs**: Both a user's 43-character Base64url `userId`
   and a self-certifying room's 16-character Base62 suffix
-  (`<baseRoomId>.~<16-char-base62>`) are derived from the exact same SHA-256
+  (`<baseRoomId>~<16-char-base62>`) are derived from the exact same SHA-256
   thumbprint of the user's P-256 public key. When you create a room with
   `roles({selfAsAdmin: true})`, Trystero encodes the first 96 bits of your
-  `userId` digest into the room ID suffix after `.~`. When peers connect—or when
+  `userId` digest into the room ID suffix after `~`. When peers connect—or when
   the host rejoins with the same persistent identity—everyone can mathematically
   verify from the `userId` alone who owns the room.
 - **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
@@ -1471,7 +1471,7 @@ Returns an object with the following properties and methods:
   room:
   - `peerId` - The 20-character Base62 endpoint ID.
   - `userId` - The local user's 43-character Base64url user identity thumbprint.
-  - `roomId` - The full room ID (including the `.~<16-char-base62-fingerprint>`
+  - `roomId` - The full room ID (including the `~<16-char-base62-fingerprint>`
     suffix when created with `roles({selfAsAdmin: true})`).
   - `baseRoomId` - The base room name without the fingerprint suffix.
   - `fingerprint` - The 16-character Base62 admin fingerprint from the room ID,
@@ -1789,9 +1789,9 @@ Creates the opt-in room authority plugin (`RoomPlugin<'roles', RolesPluginApi>`)
 for `joinRoom()`. Pass in `use: [roles(config)]`:
 
 - `roles()` - Enables role and state verification for a participant joining a
-  room (required when joining a self-certifying `<roomId>.~<fingerprint>`).
+  room (required when joining a self-certifying `<roomId>~<fingerprint>`).
 - `roles({selfAsAdmin: true})` - Makes the local user (`userId`) a root room
-  admin and appends `.~<16-char-base62-fingerprint>` to `roomId`. Pair with
+  admin and appends `~<16-char-base62-fingerprint>` to `roomId`. Pair with
   `identity: 'local'` or a persistent `UserIdentity`.
 - `roles({admins: [userId1, userId2]})` - Trusts the specified `userId`s (or
   16-character Base62 fingerprints) as root room admins on either a fixed room
@@ -1844,8 +1844,8 @@ browser storage (`'session'` or `'local'`).
 
 Resolves a `UserIdentity` for `appId` (from `options.identity`, defaulting to
 `'local'` when persistent browser storage is available) and formats a
-self-certifying room ID (`<baseRoomId>.~<fingerprint>`), returning a promise
-that resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
+self-certifying room ID (`<baseRoomId>~<fingerprint>`), returning a promise that
+resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
 
 ### `getRelaySockets()`
 

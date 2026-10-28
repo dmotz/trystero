@@ -29,9 +29,9 @@
   `joinRoom({appId, use: [roles(...)]})` (`roles()`,
   `roles({selfAsAdmin: true})`, and `roles({admins: [...]})`) for zero-trust
   public-key room administration unified with user identity (`userId`). Passing
-  `roles({selfAsAdmin: true})` appends a `.~` separator and 16-character Base62
+  `roles({selfAsAdmin: true})` appends a `~` separator and 16-character Base62
   fingerprint suffix derived from the host's `userId` to the room ID
-  (`<roomId>.~<fingerprint>`) so guests automatically verify the room creator
+  (`<roomId>~<fingerprint>`) so guests automatically verify the room creator
   from the invite room ID alone (when joining with `use: [roles()]`), and the
   host automatically regains admin authority when rejoining with the same
   persistent `userId`. Joining a fingerprinted room ID without `roles()` throws
