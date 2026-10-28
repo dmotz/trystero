@@ -93,7 +93,6 @@ export type {
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext,
-  TopologyMediaTree,
   TopologyMode,
   TopologyRoute,
   TopologySnapshot,

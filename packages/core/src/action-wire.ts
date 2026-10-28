@@ -366,19 +366,36 @@ export const createActionWireManager = ({
             : getPeerIds(normalizedOptions.sendToPending)
           await all(
             [...new Set(ids)].map(async peerId => {
-              const peer = getPeer(peerId, normalizedOptions.sendToPending)
-              if (!peer) {
+              const initialPeer = getPeer(
+                peerId,
+                normalizedOptions.sendToPending
+              )
+              if (!initialPeer) {
                 warnNoPeer(peerId)
                 return
               }
+              let peer = initialPeer
               let failure: Error | null = null
+              let isRegisteredTransfer = false
               const check = (): void => {
                 if (failure) {
                   throw failure
                 }
                 checkAborted(signal)
+                const currentPeer = getPeer(
+                  peerId,
+                  normalizedOptions.sendToPending
+                )
                 if (
-                  getPeer(peerId, normalizedOptions.sendToPending) !== peer ||
+                  isRegisteredTransfer &&
+                  currentPeer &&
+                  currentPeer !== peer &&
+                  !currentPeer.isDead
+                ) {
+                  peer = currentPeer
+                }
+                if (
+                  currentPeer !== peer ||
                   peer.channel?.readyState === 'closed'
                 ) {
                   throw disconnectedTransferErr()
@@ -452,6 +469,7 @@ export const createActionWireManager = ({
                 }
               }
               transfers.set(id, state)
+              isRegisteredTransfer = true
               const expire = (): void => {
                 const remaining = transferTimeoutMs - (Date.now() - lastSeen)
                 if (remaining > 0) {

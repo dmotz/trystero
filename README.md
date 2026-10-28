@@ -903,17 +903,18 @@ When you include `use: [scale()]` (which defaults to `'auto'` mode):
   everyone else for the lowest possible latency.
 - If more people join, Trystero automatically switches the room to a scalable
   `'gossip'` relay network where each browser only maintains a handful of direct
-  connections (`maxConnections: 6` by default) and passes messages and media
-  streams along to the rest of the room.
+  connections (`maxConnections: 6` by default, minimum `4`) and routes messages
+  across the room.
 
 All of your code (`makeAction`, `makeState`, `addStream`, `replaceTrack`,
 `ping`, `onUserJoin`, `onUserLeave`, and `getUsers()`) works the exact same way
 no matter how many people are in the room or whether two users are connected
 directly or through other peers.
 
-Broadcast media travels through the relay tree. Targeted media establishes a
-direct WebRTC connection to each selected endpoint, so other participants do not
-receive or relay its audio/video. These connections can exceed the overlay's
+Media streams (`addStream` and `replaceTrack`) and large binary transfers (> 16
+KiB) automatically promote the target peer(s) to a direct 1-hop WebRTC
+connection on demand so relays never decode or forward audio/video tracks or
+bulk chunks. These promoted connections can exceed the overlay's
 `maxConnections` target and remain available until the peer or room disconnects.
 Await the promise returned by `addStream` or `replaceTrack` to handle connection
 failures.
@@ -941,8 +942,7 @@ const room = joinRoom(
       scale({
         mode: 'auto',
         autoThreshold: 12, // switch to 'gossip' above 12 peers
-        maxConnections: 6, // target direct WebRTC connections per peer
-        fanout: 3 // downstream children per node in media broadcast trees
+        maxConnections: 6 // target direct WebRTC connections per peer (>= 4)
       })
     ]
   },
@@ -952,35 +952,32 @@ const room = joinRoom(
 
 Once `await room.ready` resolves, you can call `room.getTopology()` at any time
 to see which mode is active, which peers are connected directly vs. through
-relays, and how data and media streams are being routed.
+relays, and how data routes are organized.
 
 <details>
   <summary>How it works behind the scenes</summary>
 
-- **Gossip overlay (`'gossip'`)**: Peers arrange themselves by ID on a
-  bounded-degree circulant ring with deterministic multi-scale logarithmic
-  chords, keeping the network diameter to $O(\log N)$ hops even as rooms grow to
-  hundreds of peers. Routing tables require mutual neighbor confirmation in
-  signed link-state descriptors before using an edge. Broadcasts propagate
-  across neighbor links with message-ID deduplication so messages reach every
-  peer reliably along the fastest available paths. Point-to-point messages
-  (`target`) route along shortest paths with disjoint backup next-hops for
-  instant failover.
-- **Media broadcast trees**: Whenever any peer calls `addStream()` without
-  `target` in `'gossip'` mode, Trystero builds a deterministic $k$-ary
-  application-layer multicast (ALM) tree rooted at the broadcaster. Each
-  internal peer decodes the incoming stream and forwards the `MediaStreamTrack`s
-  to its downstream children (`fanout: 3` by default), so a broadcaster can
-  stream audio or video to dozens of viewers while only uploading to 3 peers.
-  Targeted media (`addStream` with `target`) establishes a direct 1-hop WebRTC
-  connection to each selected peer instead of traversing relays.
+- **Gossip overlay (`'gossip'`)**: Peers arrange themselves on a room-salted,
+  bounded-degree circulant ring with deterministic multi-scale chords, and
+  derive packet hop limits dynamically from the verified room roster size.
+  Routing tables require mutual neighbor confirmation in signed link-state
+  descriptors (refreshed as periodic heartbeats with TTL expiry) before using an
+  edge. Broadcasts propagate across neighbor links with per-origin sliding
+  replay windows and message-ID deduplication, while small point-to-point
+  messages (`target`) route along shortest paths with disjoint backup next-hops
+  for instant failover.
+- **Direct WebRTC promotion for media & bulk transfers**: Calling `addStream()`
+  or sending a multi-chunk payload (> 16 KiB) to a multi-hop peer automatically
+  establishes a direct 1-hop WebRTC connection to that peer so media and bulk
+  transfers flow peer-to-peer without burdening intermediate relays.
 - **End-to-end data security across hops**: For data channels, every peer
   automatically generates an ephemeral WebCrypto signing keypair (ECDSA P-256)
-  and encryption keypair (ECDH P-256). Link-state descriptors and data
-  broadcasts are digitally signed and verified against self-certifying `peerId`
-  keys so intermediate relays cannot forge or alter messages, and targeted data
-  messages (`target`) are end-to-end encrypted with AES-GCM so intermediate
-  relays cannot read them.
+  and encryption keypair (ECDH P-256). Link-state descriptors, leave notices,
+  broadcasts, and unicast headers are cryptographically bound to `appId`,
+  `roomId`, and a per-origin monotonic sequence counter (`seq`) and verified
+  against self-certifying `peerId` keys so intermediate relays cannot forge,
+  replay, or cross-post messages across rooms. Targeted data messages (`target`)
+  are end-to-end encrypted with AES-GCM so intermediate relays cannot read them.
 
 </details>
 

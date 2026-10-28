@@ -11,6 +11,7 @@ import {
   verifyUserEndpointProof,
   verifyWithP256
 } from './identity'
+import {isValidSignalPeerId} from './signal-handler'
 import {
   all,
   authMetaKey,
@@ -31,11 +32,11 @@ import {
   peerLeftRoomErr,
   resetTimer,
   toBase64,
+  toError,
   toHex,
   toJson
 } from './utils'
 import type {
-  JsonValue,
   PeerHandle,
   PeerHandlers,
   RoleCertificate,
@@ -43,7 +44,6 @@ import type {
   ScaleConfig,
   ScalePluginApi,
   Signal,
-  TopologyMediaTree,
   TopologyMode,
   TopologyRoute,
   TopologySnapshot,
@@ -57,33 +57,38 @@ const overlayControlKind = 1
 const overlayBroadcastKind = 2
 const overlayUnicastKind = 3
 
-const defaultMaxConnections = 6
+export const defaultMaxConnections = 6
 const defaultMinConnections = 3
-const defaultAutoThreshold = 12
-const defaultFanout = 3
-const defaultMaxHops = 8
-const maxSeenMessages = 4_096
+export const defaultAutoThreshold = 12
+export const maxAllowedHops = 64
+export const defaultMaxHops = 16
+const defaultDescriptorTtlMs = 60_000
 const unreachableGraceMs = 80
+const maxDiscoveredCandidates = 512
+const maxTrackedOrigins = 2_048
+const replayWindowBits = 256n
+const replayWindowMask = (1n << replayWindowBits) - 1n
+
+export const deriveMaxHops = (
+  rosterSize: number,
+  maxConnections: number = defaultMaxConnections
+): number => {
+  const n = Math.max(2, rosterSize)
+  const dims = Math.max(2, Math.floor(maxConnections / 2))
+  const theoreticalDiameter = Math.ceil(dims * Math.pow(n, 1 / dims))
+  return Math.min(maxAllowedHops, Math.max(12, theoreticalDiameter * 2))
+}
 
 export type ResolvedTopologyConfig = {
   mode: TopologyMode
   maxConnections: number
   autoThreshold: number
-  fanout: number
-}
-
-export type OverlayStreamInfo = {
-  key: string
-  streamId: string
-  trackIds: string[]
-  metadata?: JsonValue
 }
 
 export type PeerDescriptor = {
   peerId: string
   seq: number
   neighbors: string[]
-  streams?: OverlayStreamInfo[]
   signPubKey?: JsonWebKey
   encPubKey?: JsonWebKey
   userId?: string
@@ -98,7 +103,6 @@ type OverlayControlMessage =
   | {
       t: 'gossip'
       descriptors: PeerDescriptor[]
-      down?: string[]
     }
   | {
       t: 'leave'
@@ -109,6 +113,7 @@ type OverlayControlMessage =
 
 type BroadcastEnvelopeHeader = {
   o: string
+  q: number
   m: string
   s?: string
 }
@@ -116,18 +121,19 @@ type BroadcastEnvelopeHeader = {
 type UnicastEnvelopeHeader = {
   o: string
   d: string
+  q: number
   m: string
   iv?: string
   s?: string
 }
 
-const validModes = new Set<TopologyMode>(['mesh', 'auto', 'gossip'])
-
-const checkScaleInt = (name: string, val: number): void => {
-  if (!Number.isSafeInteger(val) || val < 2) {
-    throw mkErr(`scale.${name} must be an integer >= 2`)
-  }
+type OriginReplayState = {
+  maxSeq: number
+  windowBits: bigint
+  lastSeenAt: number
 }
+
+const validModes = new Set<TopologyMode>(['mesh', 'auto', 'gossip'])
 
 export const normalizeTopologyConfig = (
   topology?: TopologyMode | ScaleConfig
@@ -136,8 +142,7 @@ export const normalizeTopologyConfig = (
     return {
       mode: 'auto',
       maxConnections: defaultMaxConnections,
-      autoThreshold: defaultAutoThreshold,
-      fanout: defaultFanout
+      autoThreshold: defaultAutoThreshold
     }
   }
 
@@ -149,32 +154,61 @@ export const normalizeTopologyConfig = (
     throw mkErr(`invalid topology mode "${String(mode)}"`)
   }
 
-  const fanout = raw.fanout ?? defaultFanout
-  checkScaleInt('fanout', fanout)
-
   const maxConnections = raw.maxConnections ?? defaultMaxConnections
-  checkScaleInt('maxConnections', maxConnections)
+  if (!Number.isSafeInteger(maxConnections) || maxConnections < 4) {
+    throw mkErr('scale.maxConnections must be an integer >= 4')
+  }
 
   const autoThreshold = raw.autoThreshold ?? defaultAutoThreshold
-  checkScaleInt('autoThreshold', autoThreshold)
+  if (!Number.isSafeInteger(autoThreshold) || autoThreshold < 2) {
+    throw mkErr('scale.autoThreshold must be an integer >= 2')
+  }
 
   return {
     mode,
     maxConnections,
-    autoThreshold,
-    fanout
+    autoThreshold
   }
+}
+
+const ringKeyCache = createBoundedCache<string, string>(8_192)
+
+const hashRingKey = (roomSalt: string, peerId: string): string => {
+  if (!roomSalt) {
+    return peerId
+  }
+  const input = `${roomSalt}\0${peerId}`
+  const cached = ringKeyCache.get(input)
+  if (cached !== undefined) {
+    return cached
+  }
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i)
+    h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0
+    h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b) >>> 0
+  }
+  const res = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}:${peerId}`
+  ringKeyCache.set(input, res)
+  return res
 }
 
 export const computeTargetNeighbors = (
   localPeerId: string,
   rosterIds: Iterable<string>,
   activeMode: 'mesh' | 'gossip',
-  maxConnections: number
+  maxConnections: number,
+  roomSalt: string = ''
 ): Set<string> => {
   const unique = new Set<string>(rosterIds)
   unique.add(localPeerId)
-  const sorted = [...unique].sort()
+  const sorted = roomSalt
+    ? [...unique]
+        .map(id => ({id, key: hashRingKey(roomSalt, id)}))
+        .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+        .map(entry => entry.id)
+    : [...unique].sort()
   const total = sorted.length
   const selfIdx = sorted.indexOf(localPeerId)
   const targets = new Set<string>()
@@ -192,7 +226,6 @@ export const computeTargetNeighbors = (
     return targets
   }
 
-  // 'gossip': Circulant ring + symmetric multi-scale logarithmic/halving chords.
   const addSymmetricOffset = (offset: number): void => {
     const norm = ((offset % total) + total) % total
     if (norm === 0) {
@@ -214,17 +247,16 @@ export const computeTargetNeighbors = (
     }
   }
 
-  // 1. Ring neighbors guarantee a single connected Hamiltonian cycle.
+  // 1. Ring neighbors guarantee a connected Hamiltonian cycle.
   addSymmetricOffset(1)
 
-  // 2. Geometric multi-scale chords across [2, floor(total / 3)] yield O(log N) diameter.
+  // 2. Multi-scale chords divide the ring across d = floor(maxConnections / 2) dimensions.
   const numChordPairs = Math.max(0, Math.floor(maxConnections / 2) - 1)
-  const maxChordSpan = Math.max(2, Math.floor(total / 3))
+  const dims = numChordPairs + 1
   const candidateOffsets: number[] = []
 
   for (let i = 1; i <= numChordPairs; i++) {
-    const ratio = i / numChordPairs
-    const geomOffset = Math.max(2, Math.round(Math.pow(maxChordSpan, ratio)))
+    const geomOffset = Math.max(2, Math.round(Math.pow(total, i / dims)))
     candidateOffsets.push(geomOffset)
   }
 
@@ -256,7 +288,7 @@ const buildUndirectedGraph = (
   adjacency: Map<string, Set<string>>,
   localPeerId?: string,
   directSet?: Iterable<string>
-): Map<string, Set<string>> => {
+): Map<string, string[]> => {
   const graph = new Map<string, Set<string>>()
   const ensureNode = (u: string): Set<string> => {
     let set = graph.get(u)
@@ -283,7 +315,11 @@ const buildUndirectedGraph = (
     }
   }
 
-  return graph
+  const sortedGraph = new Map<string, string[]>()
+  for (const [u, set] of graph.entries()) {
+    sortedGraph.set(u, [...set].sort())
+  }
+  return sortedGraph
 }
 
 export const computeShortestPathRoutes = (
@@ -308,7 +344,10 @@ export const computeShortestPathRoutes = (
   let head = 0
   while (head < queue.length) {
     const {node, nextHop, hops} = queue[head++]!
-    const neighbors = [...(graph.get(node) ?? [])].sort()
+    const neighbors = graph.get(node)
+    if (!neighbors) {
+      continue
+    }
 
     for (const neighbor of neighbors) {
       if (neighbor === localPeerId) {
@@ -338,79 +377,6 @@ export const computeShortestPathRoutes = (
   }
 
   return routes
-}
-
-export const computeMediaTreeChildren = (
-  broadcasterId: string,
-  localPeerId: string,
-  adjacency: Map<string, Set<string>>,
-  fanout: number,
-  directPeerIds?: Iterable<string>
-): {parentId: string | null; childrenIds: string[]} => {
-  const graph = buildUndirectedGraph(adjacency, localPeerId, directPeerIds)
-
-  const parentMap = new Map<string, string | null>([[broadcasterId, null]])
-  const childrenMap = new Map<string, string[]>()
-  const queue: string[] = [broadcasterId]
-
-  const runBfsQueue = (): void => {
-    let head = 0
-    while (head < queue.length) {
-      const u = queue[head++]!
-      const currentChildren = childrenMap.get(u) ?? []
-      const availableSlots = Math.max(0, fanout - currentChildren.length)
-      if (availableSlots <= 0) {
-        continue
-      }
-
-      const unvisited = [...(graph.get(u) ?? [])]
-        .filter(v => !parentMap.has(v))
-        .sort()
-
-      if (unvisited.length === 0) {
-        continue
-      }
-
-      const slice = unvisited.slice(0, availableSlots)
-      for (const v of slice) {
-        parentMap.set(v, u)
-        currentChildren.push(v)
-        queue.push(v)
-      }
-
-      childrenMap.set(u, currentChildren)
-    }
-  }
-
-  runBfsQueue()
-
-  // Fallback pass only if a 1-connected bridge left any reachable node unvisited
-  let attachedBridge = true
-  while (attachedBridge) {
-    attachedBridge = false
-    for (const u of parentMap.keys()) {
-      const unvisited = [...(graph.get(u) ?? [])]
-        .filter(v => !parentMap.has(v))
-        .sort()
-      if (unvisited.length > 0) {
-        const v = unvisited[0]!
-        const currentChildren = childrenMap.get(u) ?? []
-        parentMap.set(v, u)
-        currentChildren.push(v)
-        childrenMap.set(u, currentChildren)
-        queue.length = 0
-        queue.push(v)
-        runBfsQueue()
-        attachedBridge = true
-        break
-      }
-    }
-  }
-
-  return {
-    parentId: parentMap.get(localPeerId) ?? null,
-    childrenIds: childrenMap.get(localPeerId) ?? []
-  }
 }
 
 const packOverlayBinary = (
@@ -480,14 +446,13 @@ const packOverlayControl = (msg: OverlayControlMessage): Uint8Array => {
 }
 
 const gossipEnvelopeOverheadBytes = 32
+const descByteLengthCache = new WeakMap<PeerDescriptor, number>()
 
 export const packGossipControlFrames = (
   descriptors: PeerDescriptor[],
-  downPeers?: string[],
   maxFrameBytes: number = maxActionFrameBytes
 ): Uint8Array[] => {
-  const hasDown = Boolean(downPeers && downPeers.length > 0)
-  if (descriptors.length === 0 && !hasDown) {
+  if (descriptors.length === 0) {
     return []
   }
 
@@ -496,7 +461,11 @@ export const packGossipControlFrames = (
   let currentBytes = gossipEnvelopeOverheadBytes
 
   for (const desc of descriptors) {
-    const descBytes = encodeBytes(toJson(desc)).byteLength
+    let descBytes = descByteLengthCache.get(desc)
+    if (descBytes === undefined) {
+      descBytes = encodeBytes(toJson(desc)).byteLength
+      descByteLengthCache.set(desc, descBytes)
+    }
     const addedBytes = (currentDescs.length > 0 ? 1 : 0) + descBytes
     if (currentDescs.length > 0 && currentBytes + addedBytes > maxFrameBytes) {
       frames.push(
@@ -513,61 +482,13 @@ export const packGossipControlFrames = (
     }
   }
 
-  const remainingDown = hasDown ? [...downPeers!] : []
   if (currentDescs.length > 0) {
-    if (remainingDown.length > 0) {
-      const withAllDown = packOverlayControl({
-        t: 'gossip',
-        descriptors: currentDescs,
-        down: remainingDown
-      })
-      if (withAllDown.byteLength <= maxFrameBytes) {
-        frames.push(withAllDown)
-        return frames
-      }
-    }
     frames.push(
       packOverlayControl({
         t: 'gossip',
         descriptors: currentDescs
       })
     )
-  }
-
-  if (remainingDown.length > 0) {
-    const downEnvelopeOverheadBytes = gossipEnvelopeOverheadBytes + 9
-    let currentDown: string[] = []
-    let currentDownBytes = downEnvelopeOverheadBytes
-    for (const peerId of remainingDown) {
-      const peerIdBytes = encodeBytes(toJson(peerId)).byteLength
-      const addedBytes = (currentDown.length > 0 ? 1 : 0) + peerIdBytes
-      if (
-        currentDown.length > 0 &&
-        currentDownBytes + addedBytes > maxFrameBytes
-      ) {
-        frames.push(
-          packOverlayControl({
-            t: 'gossip',
-            descriptors: [],
-            down: currentDown
-          })
-        )
-        currentDown = [peerId]
-        currentDownBytes = downEnvelopeOverheadBytes + peerIdBytes
-      } else {
-        currentDown.push(peerId)
-        currentDownBytes += addedBytes
-      }
-    }
-    if (currentDown.length > 0) {
-      frames.push(
-        packOverlayControl({
-          t: 'gossip',
-          descriptors: [],
-          down: currentDown
-        })
-      )
-    }
   }
 
   return frames
@@ -588,29 +509,41 @@ const isValidOverlayMsgId = (msgId: string): boolean => {
   return true
 }
 
-const leaveDomain = `${libId}-leave-v1`
-
 export const canonicalBroadcastHeader = (
   origin: string,
-  msgId: string
-): string => toJson([`${libId}-broadcast-v1`, origin, msgId])
+  msgId: string,
+  seq: number = 1,
+  appId: string = '',
+  roomId: string = ''
+): string =>
+  toJson([`${libId}-broadcast-v2`, appId, roomId, origin, seq, msgId])
 
 export const canonicalUnicastHeader = (
   origin: string,
   dest: string,
   msgId: string,
-  ivB64: string
-): string => toJson([`${libId}-unicast-v1`, origin, dest, msgId, ivB64])
+  ivB64: string,
+  seq: number = 1,
+  appId: string = '',
+  roomId: string = ''
+): string =>
+  toJson([
+    `${libId}-unicast-v2`,
+    appId,
+    roomId,
+    origin,
+    dest,
+    seq,
+    msgId,
+    ivB64
+  ])
 
 export const canonicalLeaveHeader = (
   leavingId: string,
   seq: number,
-  appId?: string,
-  roomId?: string
-): string =>
-  appId !== undefined || roomId !== undefined
-    ? toJson([leaveDomain, leavingId, seq, appId ?? '', roomId ?? ''])
-    : toJson([leaveDomain, leavingId, seq])
+  appId: string = '',
+  roomId: string = ''
+): string => toJson([`${libId}-leave-v2`, appId, roomId, leavingId, seq])
 
 export const buildOverlaySignedBytes = (
   canonicalHeader: string,
@@ -626,12 +559,18 @@ export const buildOverlaySignedBytes = (
   return combined
 }
 
-const descriptorCanonicalPayload = (d: PeerDescriptor): string =>
+export const descriptorCanonicalPayload = (
+  d: PeerDescriptor,
+  appId: string = '',
+  roomId: string = ''
+): string =>
   toJson([
+    `${libId}-desc-v2`,
+    appId,
+    roomId,
     d.peerId,
     d.seq,
     d.neighbors,
-    d.streams ?? [],
     d.signPubKey ?? null,
     d.encPubKey ?? null,
     d.roomAuth ?? null,
@@ -720,6 +659,7 @@ export type OverlayManagerDeps = {
   roomId?: string
   password?: string
   topology?: TopologyMode | ScaleConfig
+  descriptorTtlMs?: number
   getLocalUserIdentity?: () => Promise<UserIdentity> | UserIdentity
   onVirtualPeerJoin: (peerId: string, virtualPeer: PeerHandle) => void
   onVirtualPeerLeave: (peerId: string, reason?: Error) => void
@@ -736,14 +676,6 @@ export type OverlayManagerDeps = {
     userId?: string,
     userPubKey?: JsonWebKey
   ) => void
-  onRelayMediaStream?: (
-    broadcasterId: string,
-    stream: MediaStream,
-    metadata: JsonValue | undefined,
-    targetPeerIds: string[],
-    streamKey: string,
-    tracks?: MediaStreamTrack[]
-  ) => void
 }
 
 export type OverlayManager = {
@@ -752,8 +684,10 @@ export type OverlayManager = {
   getActiveMode: () => 'mesh' | 'gossip'
   isOverlayFrame: (data: ArrayBuffer) => boolean
   handleOverlayFrame: (fromPeerId: string, data: ArrayBuffer) => void
+  handleFrame: (fromPeerId: string, data: ArrayBuffer) => boolean
   addDirectPeer: (peerId: string, peer: PeerHandle) => void
-  removeDirectPeer: (peerId: string, peer?: PeerHandle) => boolean
+  removeDirectPeer: (peerId: string, peer?: PeerHandle, reason?: Error) => void
+  prepareMediaPeer?: (peerId: string, peer: PeerHandle) => Promise<PeerHandle>
   isDirectPeer: (peerId: string) => boolean
   isVirtualPeer: (peerId: string) => boolean
   getRoute: (peerId: string) => TopologyRoute | undefined
@@ -764,26 +698,6 @@ export type OverlayManager = {
     onProgress?: (peerId: string) => void
   ) => Promise<boolean>
   sendUnicast: (targetPeerId: string, frame: Uint8Array) => void
-  getMediaTargets: (broadcasterId?: string) => string[]
-  isExpectedMediaRelayParent: (
-    broadcasterId: string,
-    fromPeerId: string
-  ) => boolean
-  registerBroadcastStream: (
-    broadcasterId: string,
-    streamKey: string,
-    stream: MediaStream,
-    metadata?: JsonValue,
-    tracks?: MediaStreamTrack[]
-  ) => void
-  unregisterBroadcastStream: (
-    broadcasterId: string,
-    stream: MediaStream
-  ) => string[]
-  unregisterBroadcastStreamById: (
-    broadcasterId: string,
-    streamId: string
-  ) => {stream: MediaStream; targets: string[]} | null
   requireDirectPeer: (peerId: string) => void
   notePeerDiscovered: (peerId: string) => void
   shouldConnectPeer: (
@@ -812,13 +726,13 @@ export const createOverlayManager = ({
   roomId: initialRoomId = '',
   password = '',
   topology,
+  descriptorTtlMs = defaultDescriptorTtlMs,
   getLocalUserIdentity,
   onVirtualPeerJoin,
   onVirtualPeerLeave,
   onDeliverData,
   canPeerSendAction,
-  onPeerDescriptorCert,
-  onRelayMediaStream
+  onPeerDescriptorCert
 }: OverlayManagerDeps): OverlayManager => {
   let selfId = initialSelfId ?? ''
   void getOrCreateEndpointIdentity(initialSelfId).then(ep => {
@@ -832,40 +746,44 @@ export const createOverlayManager = ({
   const config = normalizeTopologyConfig(topology)
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
   const directPeers = new Map<string, PeerHandle>()
+  const pendingFramesByPeer = new Map<string, ArrayBuffer[]>()
   const requiredDirectPeers = new Set<string>()
   const virtualPeers = new Map<string, PeerHandle>()
+  // Verified roster only: selfId + connected directPeers + verified descriptors.
   const knownRoster = new Set<string>(selfId ? [selfId] : [])
+  // Bounded unverified signaling candidates (never admitted to knownRoster until verified).
+  const discoveredCandidates = new Set<string>()
+  const addDiscoveredCandidate = (peerId: string): void => {
+    if (discoveredCandidates.has(peerId)) {
+      discoveredCandidates.delete(peerId)
+    } else if (discoveredCandidates.size >= maxDiscoveredCandidates) {
+      const oldest = discoveredCandidates.values().next().value
+      if (oldest !== undefined) {
+        discoveredCandidates.delete(oldest)
+      }
+    }
+    discoveredCandidates.add(peerId)
+  }
   const bannedPeers = new Set<string>()
   const peerSignPubKeys = new Map<string, JsonWebKey>()
   const actionAuthorities = new Map<string, string[]>()
   let localRoleCert: RoleCertificate | null = null
   const descriptors = new Map<string, PeerDescriptor>()
+  const descriptorReceivedAt = new Map<string, number>()
   const adjacency = new Map<string, Set<string>>()
   const pinnedSignKeys = new Map<string, string>()
   const derivedPairwiseKeys = new Map<string, Promise<CryptoKey>>()
-  const departedPeers = new Set<string>()
-  const downPeersSeq = new Map<string, number>()
-  const pendingDownCandidates = new Set<string>()
+  const leftPeersSeq = new Map<string, number>()
+  const hadRoutePeers = new Set<string>()
+  const everConfirmedNeighbors = new Map<string, Set<string>>()
   const unreachableTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  // Seen-message deduplication cache
-  const seenMessages = createBoundedSet<string>(maxSeenMessages)
+  // Per-origin monotonic sequence & 256-bit sliding replay window (cannot be flushed by traffic volume)
+  const originReplay = new Map<string, OriginReplayState>()
+  const seenMsgIds = createBoundedSet<string>(4_096)
 
-  // Active broadcast streams (both local and relayed) for automatic tree distribution & healing
-  const activeStreams = new Map<
-    string,
-    {
-      broadcasterId: string
-      streamKey: string
-      stream: MediaStream
-      tracks?: MediaStreamTrack[]
-      metadata?: JsonValue
-      forwardedTo: Set<string>
-      currentParentId: string | null
-    }
-  >()
-
-  let localSeq = 0
+  let localDescriptorSeq = 0
+  let localPacketSeq = 0
   let isDestroyed = false
   let currentActiveMode: 'mesh' | 'gossip' =
     config.mode === 'auto' ? 'mesh' : config.mode
@@ -877,8 +795,91 @@ export const createOverlayManager = ({
     messagesReceived: 0,
     messagesForwarded: 0,
     duplicatesDropped: 0,
-    signatureFailures: 0,
-    treeReparents: 0
+    signatureFailures: 0
+  }
+
+  const getRoomSalt = (): string =>
+    appId || roomId ? `${appId}\0${roomId}` : ''
+
+  const currentMaxHops = (): number =>
+    deriveMaxHops(
+      Math.max(knownRoster.size, descriptors.size + 1, directPeers.size + 1),
+      config.maxConnections
+    )
+
+  const isOriginSeqReplay = (origin: string, seq: number): boolean => {
+    const state = originReplay.get(origin)
+    if (!state) {
+      return false
+    }
+    if (seq > state.maxSeq) {
+      return false
+    }
+    if (seq === state.maxSeq) {
+      return true
+    }
+    const offset = BigInt(state.maxSeq - seq)
+    if (offset >= replayWindowBits) {
+      return true
+    }
+    return (state.windowBits & (1n << offset)) !== 0n
+  }
+
+  const recordOriginSeq = (origin: string, seq: number): boolean => {
+    const now = Date.now()
+    const state = originReplay.get(origin)
+    if (!state) {
+      if (originReplay.size >= maxTrackedOrigins) {
+        let oldestOrigin: string | null = null
+        let oldestTime = Infinity
+        for (const [k, v] of originReplay.entries()) {
+          if (
+            !directPeers.has(k) &&
+            !descriptors.has(k) &&
+            v.lastSeenAt < oldestTime
+          ) {
+            oldestTime = v.lastSeenAt
+            oldestOrigin = k
+          }
+        }
+        if (oldestOrigin) {
+          originReplay.delete(oldestOrigin)
+        }
+      }
+      originReplay.set(origin, {
+        maxSeq: seq,
+        windowBits: 1n,
+        lastSeenAt: now
+      })
+      return true
+    }
+
+    if (seq > state.maxSeq) {
+      const shift = BigInt(seq - state.maxSeq)
+      state.windowBits =
+        shift >= replayWindowBits
+          ? 1n
+          : ((state.windowBits << shift) | 1n) & replayWindowMask
+      state.maxSeq = seq
+      state.lastSeenAt = now
+      return true
+    }
+
+    if (seq === state.maxSeq) {
+      return false
+    }
+
+    const offset = BigInt(state.maxSeq - seq)
+    if (offset >= replayWindowBits) {
+      return false
+    }
+    const bit = 1n << offset
+    if ((state.windowBits & bit) !== 0n) {
+      return false
+    }
+    state.windowBits |= bit
+    state.lastSeenAt = now
+    return true
   }
 
   if (config.mode === 'gossip') {
@@ -901,17 +902,19 @@ export const createOverlayManager = ({
       currentActiveMode = 'gossip'
       return
     }
-    // 'auto' mode with hysteresis
-    const totalKnown = Math.max(
+    const verifiedCount = Math.max(
       knownRoster.size,
       descriptors.size + 1,
       directPeers.size + 1
     )
-    if (currentActiveMode === 'mesh' && totalKnown > config.autoThreshold) {
+    const effectiveCount =
+      verifiedCount > 1 ? verifiedCount : 1 + discoveredCandidates.size
+    if (currentActiveMode === 'mesh' && effectiveCount > config.autoThreshold) {
       currentActiveMode = 'gossip'
     } else if (
       currentActiveMode !== 'mesh' &&
-      totalKnown <= Math.max(2, Math.floor(config.autoThreshold * 0.75))
+      verifiedCount > 1 &&
+      verifiedCount <= Math.max(2, Math.floor(config.autoThreshold * 0.75))
     ) {
       currentActiveMode = 'mesh'
     }
@@ -932,9 +935,6 @@ export const createOverlayManager = ({
       descriptors.size > 0
     )
   }
-
-  const rememberSeenMessage = (msgId: string): boolean =>
-    seenMessages.add(msgId)
 
   const sendToDirectNeighbor = (peerId: string, frame: Uint8Array): boolean => {
     const peer = directPeers.get(peerId)
@@ -988,6 +988,11 @@ export const createOverlayManager = ({
       getOffer: async () => undefined,
       signal: async (_sdp: Signal) => undefined,
       sendData: (data: Uint8Array) => {
+        const direct = directPeers.get(peerId)
+        if (direct && !direct.isDead) {
+          direct.sendData(data)
+          return
+        }
         if (!dead) {
           sendUnicast(peerId, data)
         }
@@ -1013,76 +1018,115 @@ export const createOverlayManager = ({
     return handle
   }
 
-  const mediaTreeCache = new Map<
-    string,
-    {parentId: string | null; childrenIds: string[]}
-  >()
-
-  const getCachedTreeChildren = (
-    broadcasterId: string,
-    fanout: number
-  ): {parentId: string | null; childrenIds: string[]} => {
-    const cacheKey = `${broadcasterId}:${fanout}`
-    let cached = mediaTreeCache.get(cacheKey)
-    if (!cached) {
-      cached = computeMediaTreeChildren(
-        broadcasterId,
-        selfId,
-        adjacency,
-        fanout,
-        directPeers.keys()
-      )
-      mediaTreeCache.set(cacheKey, cached)
-    }
-    return cached
-  }
-
-  const syncMediaTrees = (): void => {
-    if (isDestroyed || !isOverlayActive()) {
-      return
-    }
-
-    for (const entry of activeStreams.values()) {
-      const {parentId, childrenIds} = getCachedTreeChildren(
-        entry.broadcasterId,
-        config.fanout
-      )
-
-      if (
-        entry.broadcasterId !== selfId &&
-        entry.currentParentId !== null &&
-        parentId !== null &&
-        entry.currentParentId !== parentId
-      ) {
-        stats.treeReparents++
-      }
-      entry.currentParentId = parentId
-
-      const newTargets = childrenIds.filter(
-        childId => directPeers.has(childId) && !entry.forwardedTo.has(childId)
-      )
-
-      if (newTargets.length > 0) {
-        newTargets.forEach(id => entry.forwardedTo.add(id))
-        onRelayMediaStream?.(
-          entry.broadcasterId,
-          entry.stream,
-          entry.metadata,
-          newTargets,
-          entry.streamKey,
-          entry.tracks
-        )
-      }
-    }
-  }
-
   const purgePeerFromGraph = (peerId: string): void => {
     descriptors.delete(peerId)
+    descriptorReceivedAt.delete(peerId)
     adjacency.delete(peerId)
     knownRoster.delete(peerId)
+    discoveredCandidates.delete(peerId)
+    hadRoutePeers.delete(peerId)
+    everConfirmedNeighbors.delete(peerId)
     for (const set of adjacency.values()) {
       set.delete(peerId)
     }
+    for (const set of everConfirmedNeighbors.values()) {
+      set.delete(peerId)
+    }
+  }
+
+  const recordLeftPeer = (peerId: string, seq: number): void => {
+    if (leftPeersSeq.has(peerId)) {
+      leftPeersSeq.delete(peerId)
+    } else if (leftPeersSeq.size >= 1_024) {
+      const oldest = leftPeersSeq.keys().next().value
+      if (oldest !== undefined) {
+        leftPeersSeq.delete(oldest)
+      }
+    }
+    leftPeersSeq.set(peerId, seq)
+  }
+
+  const deactivateVirtualPeerNow = (peerId: string, reason: Error): void => {
+    const timer = unreachableTimers.get(peerId)
+    if (timer) {
+      resetTimer(timer)
+      unreachableTimers.delete(peerId)
+    }
+    hadRoutePeers.delete(peerId)
+    const hadVirtual = virtualPeers.has(peerId)
+    if (hadVirtual) {
+      virtualPeers.get(peerId)?.destroy()
+      virtualPeers.delete(peerId)
+      onVirtualPeerLeave(peerId, reason)
+    }
+  }
+
+  const evictVirtualPeerNow = (peerId: string, reason: Error): void => {
+    const timer = unreachableTimers.get(peerId)
+    if (timer) {
+      resetTimer(timer)
+      unreachableTimers.delete(peerId)
+    }
+    const hadVirtual = virtualPeers.has(peerId)
+    if (hadVirtual) {
+      virtualPeers.get(peerId)?.destroy()
+      virtualPeers.delete(peerId)
+    }
+    purgePeerFromGraph(peerId)
+    if (hadVirtual) {
+      onVirtualPeerLeave(peerId, reason)
+    }
+  }
+
+  const computeEffectiveTargets = (): Set<string> => {
+    updateActiveMode()
+    const rosterForRing =
+      currentActiveMode === 'mesh' && knownRoster.size > 1
+        ? knownRoster
+        : new Set<string>([...knownRoster, ...discoveredCandidates.values()])
+    const targets = computeTargetNeighbors(
+      selfId,
+      rosterForRing,
+      currentActiveMode,
+      config.maxConnections,
+      getRoomSalt()
+    )
+    for (const reqId of requiredDirectPeers) {
+      targets.add(reqId)
+    }
+    return targets
+  }
+
+  let targetsNotifyScheduled = false
+  const scheduleTargetsNotification = (): void => {
+    if (targetsNotifyScheduled || isDestroyed || !targetsChangedCallback) {
+      return
+    }
+    targetsNotifyScheduled = true
+    queueMicrotask(() => {
+      targetsNotifyScheduled = false
+      if (isDestroyed || !targetsChangedCallback) {
+        return
+      }
+      updateActiveMode()
+      if (currentActiveMode === 'mesh') {
+        return
+      }
+      if (directPeers.size >= config.maxConnections) {
+        const missingReq = [...requiredDirectPeers].filter(
+          id => !directPeers.has(id)
+        )
+        if (missingReq.length > 0) {
+          targetsChangedCallback(missingReq)
+        }
+        return
+      }
+      const targets = computeEffectiveTargets()
+      const missing = [...targets].filter(id => !directPeers.has(id))
+      if (missing.length > 0) {
+        targetsChangedCallback(missing)
+      }
+    })
   }
 
   const recomputeTopologyAndRoutes = (): void => {
@@ -1090,15 +1134,21 @@ export const createOverlayManager = ({
       return
     }
 
-    for (const downId of departedPeers) {
-      if (!directPeers.has(downId)) {
-        purgePeerFromGraph(downId)
-      }
-    }
-
     updateActiveMode()
     adjacency.set(selfId, new Set(directPeers.keys()))
-    mediaTreeCache.clear()
+
+    for (const [u, uNeighbors] of adjacency.entries()) {
+      for (const v of uNeighbors) {
+        if (adjacency.get(v)?.has(u)) {
+          let uSet = everConfirmedNeighbors.get(u)
+          if (!uSet) {
+            uSet = new Set<string>()
+            everConfirmedNeighbors.set(u, uSet)
+          }
+          uSet.add(v)
+        }
+      }
+    }
 
     routes = computeShortestPathRoutes(selfId, adjacency, directPeers.keys())
 
@@ -1106,11 +1156,11 @@ export const createOverlayManager = ({
       return
     }
 
-    // Activate virtual peers for any newly reachable multi-hop room members
     for (const peerId of keys(routes)) {
-      if (peerId === selfId || departedPeers.has(peerId)) {
+      if (peerId === selfId) {
         continue
       }
+      hadRoutePeers.add(peerId)
 
       const timer = unreachableTimers.get(peerId)
       if (timer) {
@@ -1128,77 +1178,124 @@ export const createOverlayManager = ({
       }
     }
 
-    // Check if any virtual peer is no longer reachable in the graph
-    for (const [peerId] of virtualPeers.entries()) {
-      if (directPeers.has(peerId)) {
+    // Check if any known non-direct peer has lost all mutually-confirmed routes
+    const nonDirectCandidates = new Set<string>([
+      ...virtualPeers.keys(),
+      ...hadRoutePeers
+    ])
+    for (const peerId of nonDirectCandidates) {
+      if (peerId === selfId || directPeers.has(peerId) || routes[peerId]) {
         continue
       }
-      if (!routes[peerId] || departedPeers.has(peerId)) {
-        if (departedPeers.has(peerId)) {
-          const timer = unreachableTimers.get(peerId)
-          if (timer) {
-            resetTimer(timer)
-            unreachableTimers.delete(peerId)
+      const desc = descriptors.get(peerId)
+      const confirmedSet = everConfirmedNeighbors.get(peerId)
+      let anyConfirmedNeighborDropped = false
+      const allKnownNeighborsDropped = Boolean(
+        desc &&
+        desc.neighbors.length > 0 &&
+        confirmedSet &&
+        confirmedSet.size > 0 &&
+        desc.neighbors.every(n => {
+          if (!confirmedSet.has(n)) {
+            return false
           }
-          virtualPeers.get(peerId)?.destroy()
-          virtualPeers.delete(peerId)
-          purgePeerFromGraph(peerId)
-          onVirtualPeerLeave(peerId, peerLeftRoomErr)
-        } else if (!unreachableTimers.has(peerId)) {
-          unreachableTimers.set(
-            peerId,
-            setTimeout(() => {
-              unreachableTimers.delete(peerId)
-              if (!isDestroyed && !directPeers.has(peerId) && !routes[peerId]) {
-                virtualPeers.get(peerId)?.destroy()
-                virtualPeers.delete(peerId)
-                purgePeerFromGraph(peerId)
-                onVirtualPeerLeave(peerId, peerDisconnectedErr)
-              }
-            }, unreachableGraceMs)
-          )
+          if (n === selfId) {
+            if (!directPeers.has(peerId)) {
+              anyConfirmedNeighborDropped = true
+              return true
+            }
+            return false
+          }
+          const nDesc = descriptors.get(n)
+          if (nDesc && !nDesc.neighbors.includes(peerId)) {
+            anyConfirmedNeighborDropped = true
+            return true
+          }
+          return !directPeers.has(n) && !routes[n]
+        }) &&
+        anyConfirmedNeighborDropped
+      )
+
+      if (allKnownNeighborsDropped) {
+        if (desc) {
+          recordLeftPeer(peerId, desc.seq)
         }
+        evictVirtualPeerNow(peerId, peerDisconnectedErr)
+      } else if (!unreachableTimers.has(peerId)) {
+        unreachableTimers.set(
+          peerId,
+          setTimeout(() => {
+            unreachableTimers.delete(peerId)
+            if (!isDestroyed && !directPeers.has(peerId) && !routes[peerId]) {
+              deactivateVirtualPeerNow(peerId, peerDisconnectedErr)
+            }
+          }, unreachableGraceMs)
+        )
       }
     }
 
-    syncMediaTrees()
-
     if (targetsChangedCallback && currentActiveMode !== 'mesh') {
-      const targets = computeTargetNeighbors(
-        selfId,
-        knownRoster,
-        currentActiveMode,
-        config.maxConnections
-      )
-      requiredDirectPeers.forEach(id => targets.add(id))
-      const missing = [...targets].filter(id => !directPeers.has(id))
-      if (missing.length > 0) {
-        targetsChangedCallback(missing)
-      }
+      scheduleTargetsNotification()
     }
   }
 
-  const buildLocalDescriptor = async (): Promise<PeerDescriptor> => {
-    const seq = ++localSeq
-    const neighbors = [...directPeers.keys()].sort()
-    const streams: OverlayStreamInfo[] = []
-
-    for (const entry of activeStreams.values()) {
-      if (entry.broadcasterId === selfId) {
-        streams.push({
-          key: entry.streamKey,
-          streamId: entry.stream.id,
-          trackIds: entry.stream.getTracks?.().map(t => t.id) ?? [],
-          ...(entry.metadata === undefined ? {} : {metadata: entry.metadata})
-        })
+  // Periodic descriptor heartbeat & TTL expiry sweep
+  const heartbeatIntervalMs = Math.max(
+    200,
+    Math.min(15_000, Math.floor(descriptorTtlMs / 3))
+  )
+  const heartbeatTimer = setInterval(() => {
+    if (isDestroyed) {
+      return
+    }
+    const now = Date.now()
+    let expiredAny = false
+    for (const [peerId, receivedAt] of descriptorReceivedAt.entries()) {
+      if (
+        peerId !== selfId &&
+        !directPeers.has(peerId) &&
+        now - receivedAt > descriptorTtlMs
+      ) {
+        const desc = descriptors.get(peerId)
+        if (desc) {
+          recordLeftPeer(peerId, desc.seq)
+        }
+        evictVirtualPeerNow(peerId, peerDisconnectedErr)
+        expiredAny = true
       }
+    }
+    if (expiredAny) {
+      recomputeTopologyAndRoutes()
+    }
+    if (isOverlayActive() && directPeers.size > 0) {
+      void publishLocalDescriptor()
+    }
+  }, heartbeatIntervalMs)
+  ;(heartbeatTimer as {unref?: () => void}).unref?.()
+
+  const buildLocalDescriptor = async (): Promise<PeerDescriptor> => {
+    const id = identityReady ?? (await getOrCreateCryptoIdentity(selfId))
+    identityReady = id
+    const userIdentity = getLocalUserIdentity
+      ? await getLocalUserIdentity()
+      : null
+
+    publishDirty = false
+    const seq = ++localDescriptorSeq
+    const neighbors = [...directPeers.keys()].sort()
+
+    if (!initialSelfId && id.peerId !== selfId) {
+      knownRoster.delete(selfId)
+      selfId = id.peerId
+      knownRoster.add(selfId)
     }
 
     const descriptor: PeerDescriptor = {
       peerId: selfId,
       seq,
       neighbors,
-      ...(streams.length > 0 ? {streams} : {}),
+      signPubKey: id.signPubJwk,
+      encPubKey: id.encPubJwk,
       ...(localRoleCert ? {cert: localRoleCert} : {})
     }
 
@@ -1212,18 +1309,7 @@ export const createOverlayManager = ({
       )
     }
 
-    const id = identityReady ?? (await getOrCreateCryptoIdentity(selfId))
-    identityReady = id
-    if (!initialSelfId && id.peerId !== selfId) {
-      knownRoster.delete(selfId)
-      selfId = id.peerId
-      knownRoster.add(selfId)
-      descriptor.peerId = selfId
-    }
-    descriptor.signPubKey = id.signPubJwk
-    descriptor.encPubKey = id.encPubJwk
-    if (getLocalUserIdentity) {
-      const userIdentity = await getLocalUserIdentity()
+    if (userIdentity) {
       descriptor.userId = userIdentity.userId
       descriptor.userPubKey = userIdentity.signPubJwk
       descriptor.userProof = await signUserEndpointProof(userIdentity, {
@@ -1234,7 +1320,9 @@ export const createOverlayManager = ({
         seq
       })
     }
-    const canonicalBytes = encodeBytes(descriptorCanonicalPayload(descriptor))
+    const canonicalBytes = encodeBytes(
+      descriptorCanonicalPayload(descriptor, appId, roomId)
+    )
     const sig = toBase64(
       await ecdsaSign(id.signPrivateKey, canonicalBytes as BufferSource)
     )
@@ -1244,8 +1332,7 @@ export const createOverlayManager = ({
     return descriptor
   }
 
-  const maxDescriptorNeighbors = Math.max(32, config.maxConnections * 4)
-  const maxDepartedPeers = 1_024
+  const maxDescriptorNeighbors = Math.max(16, config.maxConnections * 3)
   const maxGossipEntriesPerFrame = 64
 
   const isValidDescriptorNeighbors = (
@@ -1259,38 +1346,18 @@ export const createOverlayManager = ({
       return false
     }
     for (const n of neighbors) {
-      if (
-        typeof n !== 'string' ||
-        n.length === 0 ||
-        n.length > 128 ||
-        n === peerId
-      ) {
+      if (!isValidSignalPeerId(n) || n === peerId) {
         return false
       }
     }
     return true
   }
 
-  const recordDepartedPeer = (peerId: string, seq: number): void => {
-    if (departedPeers.has(peerId)) {
-      departedPeers.delete(peerId)
-    } else if (departedPeers.size >= maxDepartedPeers) {
-      const oldest = departedPeers.values().next().value
-      if (oldest !== undefined) {
-        departedPeers.delete(oldest)
-        downPeersSeq.delete(oldest)
-      }
-    }
-    departedPeers.add(peerId)
-    downPeersSeq.set(peerId, seq)
-  }
-
   const tryVerifyDescriptorCached = (d: PeerDescriptor): boolean => {
     if (
       password ||
       !d ||
-      typeof d.peerId !== 'string' ||
-      !d.peerId ||
+      !isValidSignalPeerId(d.peerId) ||
       typeof d.seq !== 'number' ||
       !Number.isSafeInteger(d.seq) ||
       d.seq <= 0 ||
@@ -1335,7 +1402,9 @@ export const createOverlayManager = ({
       return false
     }
 
-    const canonicalBytes = encodeBytes(descriptorCanonicalPayload(d))
+    const canonicalBytes = encodeBytes(
+      descriptorCanonicalPayload(d, appId, roomId)
+    )
     const sigCacheKey = `desc:${keyThumbprint}:${d.sig}`
     const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
     if (
@@ -1360,8 +1429,7 @@ export const createOverlayManager = ({
   const verifyDescriptor = async (d: PeerDescriptor): Promise<boolean> => {
     if (
       !d ||
-      typeof d.peerId !== 'string' ||
-      !d.peerId ||
+      !isValidSignalPeerId(d.peerId) ||
       typeof d.seq !== 'number' ||
       !Number.isSafeInteger(d.seq) ||
       d.seq <= 0 ||
@@ -1437,7 +1505,9 @@ export const createOverlayManager = ({
       return false
     }
 
-    const canonicalBytes = encodeBytes(descriptorCanonicalPayload(d))
+    const canonicalBytes = encodeBytes(
+      descriptorCanonicalPayload(d, appId, roomId)
+    )
     const sigCacheKey = `desc:${keyThumbprint}:${d.sig}`
     const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
     if (
@@ -1485,10 +1555,9 @@ export const createOverlayManager = ({
 
   const sendGossipToNeighbors = (
     list: PeerDescriptor[],
-    excludePeerId?: string,
-    downPeers?: string[]
+    excludePeerId?: string
   ): void => {
-    const packets = packGossipControlFrames(list, downPeers)
+    const packets = packGossipControlFrames(list)
     if (packets.length === 0) {
       return
     }
@@ -1503,35 +1572,27 @@ export const createOverlayManager = ({
 
   let pendingPublishPromise: Promise<void> | null = null
   let publishDirty = false
-  const pendingDownSet = new Set<string>()
 
-  const publishLocalDescriptor = (downPeers?: string[]): Promise<void> => {
+  const publishLocalDescriptor = (): Promise<void> => {
     if (isDestroyed || !isOverlayActive()) {
       return Promise.resolve()
-    }
-    if (downPeers) {
-      for (const id of downPeers) {
-        pendingDownSet.add(id)
-      }
     }
     publishDirty = true
     if (!pendingPublishPromise) {
       pendingPublishPromise = new Promise<void>(resolve => {
         queueMicrotask(async () => {
           while (publishDirty && !isDestroyed && isOverlayActive()) {
-            publishDirty = false
-            const downBatch =
-              pendingDownSet.size > 0 ? [...pendingDownSet] : undefined
-            pendingDownSet.clear()
-
             const signedDescriptor = await buildLocalDescriptor()
             if (isDestroyed) {
               break
             }
             descriptors.set(selfId, signedDescriptor)
+            descriptorReceivedAt.set(selfId, Date.now())
             adjacency.set(selfId, new Set(signedDescriptor.neighbors))
             recomputeTopologyAndRoutes()
-            sendGossipToNeighbors([signedDescriptor], undefined, downBatch)
+            if (!publishDirty) {
+              sendGossipToNeighbors([signedDescriptor])
+            }
           }
           pendingPublishPromise = null
           resolve()
@@ -1685,21 +1746,28 @@ export const createOverlayManager = ({
       return false
     }
 
-    // If every known peer in the room is already a direct neighbor and redundancy == 1,
-    // we can still use direct or overlay broadcast; using overlay broadcast ensures multi-hop reach.
-    const msgId = `${selfId}:${genId(12)}`
-    rememberSeenMessage(msgId)
+    const seq = ++localPacketSeq
+    const msgId = `${selfId}:${seq}:${genId(8)}`
+    recordOriginSeq(selfId, seq)
+    seenMsgIds.add(msgId)
     stats.messagesSent++
 
-    const canonical = canonicalBroadcastHeader(selfId, msgId)
+    const canonical = canonicalBroadcastHeader(
+      selfId,
+      msgId,
+      seq,
+      appId,
+      roomId
+    )
     const sig = await signUnicastOrBroadcast(canonical, frame)
     const header: BroadcastEnvelopeHeader = {
       o: selfId,
+      q: seq,
       m: msgId,
       ...(sig ? {s: sig} : {})
     }
 
-    forwardBroadcastPacket(selfId, defaultMaxHops, header, frame)
+    forwardBroadcastPacket(selfId, currentMaxHops(), header, frame)
 
     if (onProgress) {
       const allRoomPeers = new Set([...directPeers.keys(), ...keys(routes)])
@@ -1733,7 +1801,6 @@ export const createOverlayManager = ({
       }
     }
 
-    // Only allow fallback forwarding when destination is a known room peer
     if (
       knownRoster.has(destPeerId) ||
       descriptors.has(destPeerId) ||
@@ -1750,6 +1817,31 @@ export const createOverlayManager = ({
   const outboundUnicastQueues = new Map<string, Promise<void>>()
   const inboundOriginQueues = new Map<string, Promise<void>>()
 
+  const requireDirectPeer = (peerId: string): void => {
+    if (
+      isDestroyed ||
+      !isValidSignalPeerId(peerId) ||
+      peerId === selfId ||
+      bannedPeers.has(peerId)
+    ) {
+      return
+    }
+    const maxRequired = Math.max(8, config.maxConnections * 2)
+    if (
+      !requiredDirectPeers.has(peerId) &&
+      requiredDirectPeers.size >= maxRequired
+    ) {
+      const oldest = requiredDirectPeers.values().next().value
+      if (oldest !== undefined) {
+        requiredDirectPeers.delete(oldest)
+      }
+    }
+    requiredDirectPeers.add(peerId)
+    if (!directPeers.has(peerId)) {
+      targetsChangedCallback?.([peerId])
+    }
+  }
+
   const sendUnicast = (targetPeerId: string, frame: Uint8Array): void => {
     if (isDestroyed) {
       return
@@ -1762,8 +1854,19 @@ export const createOverlayManager = ({
       }
     }
 
-    const msgId = `${selfId}:${genId(12)}`
-    rememberSeenMessage(msgId)
+    // Promote to a direct WebRTC connection when initiating a multi-chunk (>16 KiB) transfer
+    if (
+      frame.byteLength >= 2 &&
+      frame[0] === 2 &&
+      ((frame[1]! & 0xf) === 1 || (frame[1]! & 0xf) === 2)
+    ) {
+      requireDirectPeer(targetPeerId)
+    }
+
+    const seq = ++localPacketSeq
+    const msgId = `${selfId}:${seq}:${genId(8)}`
+    recordOriginSeq(selfId, seq)
+    seenMsgIds.add(msgId)
     stats.messagesSent++
 
     const frameCopy = frame.slice()
@@ -1786,7 +1889,15 @@ export const createOverlayManager = ({
           const aesKey = await pairwiseKeyP
           const iv = crypto.getRandomValues(new Uint8Array(12))
           ivB64 = toBase64(iv)
-          canonical = canonicalUnicastHeader(selfId, targetPeerId, msgId, ivB64)
+          canonical = canonicalUnicastHeader(
+            selfId,
+            targetPeerId,
+            msgId,
+            ivB64,
+            seq,
+            appId,
+            roomId
+          )
           const encrypted = await crypto.subtle.encrypt(
             {
               name: 'AES-GCM',
@@ -1808,13 +1919,14 @@ export const createOverlayManager = ({
         const header: UnicastEnvelopeHeader = {
           o: selfId,
           d: targetPeerId,
+          q: seq,
           m: msgId,
           iv: ivB64,
           s: sig
         }
         const packet = packOverlayBinary(
           overlayUnicastKind,
-          defaultMaxHops,
+          currentMaxHops(),
           header,
           payloadToSend
         )
@@ -1830,13 +1942,25 @@ export const createOverlayManager = ({
   }
 
   const pendingGossipDescriptors = new Map<string, PeerDescriptor>()
-  const pendingGossipDown = new Set<string>()
   const pendingGossipSources = new Set<string>()
   let gossipFlushScheduled = false
 
+  const flushPendingGossip = (): void => {
+    gossipFlushScheduled = false
+    if (isDestroyed) {
+      return
+    }
+    const batch = [...pendingGossipDescriptors.values()]
+    const excludeId =
+      pendingGossipSources.size === 1 ? [...pendingGossipSources][0] : undefined
+    pendingGossipDescriptors.clear()
+    pendingGossipSources.clear()
+    recomputeTopologyAndRoutes()
+    sendGossipToNeighbors(batch, excludeId)
+  }
+
   const scheduleGossipFlush = (
     newlyUpdated: PeerDescriptor[],
-    newDown: string[],
     fromPeerId: string
   ): void => {
     for (const d of newlyUpdated) {
@@ -1845,31 +1969,15 @@ export const createOverlayManager = ({
         pendingGossipDescriptors.set(d.peerId, d)
       }
     }
-    for (const downId of newDown) {
-      pendingGossipDown.add(downId)
-      pendingGossipDescriptors.delete(downId)
-    }
     pendingGossipSources.add(fromPeerId)
 
     if (!gossipFlushScheduled) {
       gossipFlushScheduled = true
-      queueMicrotask(() => {
-        gossipFlushScheduled = false
-        if (isDestroyed) {
-          return
-        }
-        const batch = [...pendingGossipDescriptors.values()]
-        const downBatch = [...pendingGossipDown]
-        const excludeId =
-          pendingGossipSources.size === 1
-            ? [...pendingGossipSources][0]
-            : undefined
-        pendingGossipDescriptors.clear()
-        pendingGossipDown.clear()
-        pendingGossipSources.clear()
-        recomputeTopologyAndRoutes()
-        sendGossipToNeighbors(batch, excludeId, downBatch)
-      })
+      if (descriptors.size > 32 || discoveredCandidates.size > 32) {
+        setTimeout(flushPendingGossip, 2)
+      } else {
+        queueMicrotask(flushPendingGossip)
+      }
     }
   }
 
@@ -1883,7 +1991,7 @@ export const createOverlayManager = ({
 
     if (msg.t === 'leave') {
       const leavingId = msg.peerId
-      if (!leavingId || leavingId === selfId) {
+      if (!isValidSignalPeerId(leavingId) || leavingId === selfId) {
         return
       }
       if (
@@ -1897,33 +2005,31 @@ export const createOverlayManager = ({
         return
       }
       const existingDesc = descriptors.get(leavingId)
-      const prevDownSeq = downPeersSeq.get(leavingId)
+      const prevLeftSeq = leftPeersSeq.get(leavingId)
       if (
         (existingDesc && msg.seq < existingDesc.seq) ||
-        (prevDownSeq !== undefined && msg.seq <= prevDownSeq)
+        (prevLeftSeq !== undefined && msg.seq <= prevLeftSeq)
       ) {
         return
       }
       const valid = await verifyUnicastOrBroadcast(
         leavingId,
-        canonicalLeaveHeader(leavingId, msg.seq),
+        canonicalLeaveHeader(leavingId, msg.seq, appId, roomId),
         new Uint8Array(),
         msg.sig
       )
-      if (!valid) {
+      if (!valid || isDestroyed) {
         return
       }
 
-      if (!departedPeers.has(leavingId)) {
-        const lastSeq = Math.max(msg.seq, descriptors.get(leavingId)?.seq ?? 0)
-        recordDepartedPeer(leavingId, lastSeq)
-        purgePeerFromGraph(leavingId)
-        recomputeTopologyAndRoutes()
-        const fwd = packOverlayControl(msg)
-        for (const neighborId of directPeers.keys()) {
-          if (neighborId !== fromPeerId && neighborId !== leavingId) {
-            sendToDirectNeighbor(neighborId, fwd)
-          }
+      const lastSeq = Math.max(msg.seq, descriptors.get(leavingId)?.seq ?? 0)
+      recordLeftPeer(leavingId, lastSeq)
+      evictVirtualPeerNow(leavingId, peerLeftRoomErr)
+      recomputeTopologyAndRoutes()
+      const fwd = packOverlayControl(msg)
+      for (const neighborId of directPeers.keys()) {
+        if (neighborId !== fromPeerId && neighborId !== leavingId) {
+          sendToDirectNeighbor(neighborId, fwd)
         }
       }
       return
@@ -1931,17 +2037,14 @@ export const createOverlayManager = ({
 
     if (msg.t === 'gossip' && Array.isArray(msg.descriptors)) {
       const newlyUpdated: PeerDescriptor[] = []
-      const newDown: string[] = []
 
       for (const d of msg.descriptors.slice(0, maxGossipEntriesPerFrame)) {
         if (!d || d.peerId === selfId) {
           continue
         }
-        if (departedPeers.has(d.peerId)) {
-          const downSeq = downPeersSeq.get(d.peerId) ?? 0
-          if (d.seq <= downSeq) {
-            continue
-          }
+        const leftSeq = leftPeersSeq.get(d.peerId)
+        if (leftSeq !== undefined && d.seq <= leftSeq) {
+          continue
         }
         const existing = descriptors.get(d.peerId)
         if (existing && existing.seq >= d.seq) {
@@ -1966,102 +2069,26 @@ export const createOverlayManager = ({
         ) {
           derivedPairwiseKeys.delete(d.peerId)
         }
-        departedPeers.delete(d.peerId)
-        downPeersSeq.delete(d.peerId)
-        pendingDownCandidates.delete(d.peerId)
+        leftPeersSeq.delete(d.peerId)
         knownRoster.add(d.peerId)
         descriptors.set(d.peerId, d)
+        descriptorReceivedAt.set(d.peerId, Date.now())
         adjacency.set(
           d.peerId,
           new Set(
             d.neighbors.filter(
               n =>
-                !departedPeers.has(n) &&
+                !leftPeersSeq.has(n) &&
                 !bannedPeers.has(n) &&
                 (n !== selfId || directPeers.has(d.peerId))
             )
           )
         )
-        for (const n of d.neighbors) {
-          if (
-            !departedPeers.has(n) &&
-            !bannedPeers.has(n) &&
-            (descriptors.has(n) || directPeers.has(n))
-          ) {
-            knownRoster.add(n)
-          }
-        }
         newlyUpdated.push(d)
       }
 
-      const explicitDownClaims = new Set<string>(
-        Array.isArray(msg.down)
-          ? msg.down
-              .slice(0, maxGossipEntriesPerFrame)
-              .filter((id): id is string => typeof id === 'string')
-          : []
-      )
-      const candidatesToEvaluate = new Set<string>([
-        ...explicitDownClaims,
-        ...pendingDownCandidates
-      ])
-
-      for (const downId of candidatesToEvaluate) {
-        if (
-          downId === selfId ||
-          directPeers.has(downId) ||
-          departedPeers.has(downId) ||
-          (!descriptors.has(downId) &&
-            !knownRoster.has(downId) &&
-            !virtualPeers.has(downId))
-        ) {
-          pendingDownCandidates.delete(downId)
-          continue
-        }
-
-        if (pinnedSignKeys.has(downId)) {
-          const targetDesc = descriptors.get(downId)
-          if (targetDesc && targetDesc.neighbors.length > 0) {
-            const knownNeighbors = targetDesc.neighbors.filter(
-              n => n !== selfId && !departedPeers.has(n) && descriptors.has(n)
-            )
-            const droppedCount = knownNeighbors.filter(n => {
-              const nDesc = descriptors.get(n)
-              return Boolean(nDesc && !nDesc.neighbors.includes(downId))
-            }).length
-            const anyDepartedNeighbor = targetDesc.neighbors.some(n =>
-              departedPeers.has(n)
-            )
-
-            if (droppedCount === 0 && !anyDepartedNeighbor) {
-              if (explicitDownClaims.has(downId)) {
-                stats.signatureFailures++
-              }
-              continue
-            }
-
-            const requiredConfirmations = Math.min(2, knownNeighbors.length)
-            if (
-              knownNeighbors.length > 0 &&
-              droppedCount < requiredConfirmations
-            ) {
-              if (pendingDownCandidates.size < maxDepartedPeers) {
-                pendingDownCandidates.add(downId)
-              }
-              continue
-            }
-          }
-        }
-
-        pendingDownCandidates.delete(downId)
-        const lastSeq = descriptors.get(downId)?.seq ?? 0
-        recordDepartedPeer(downId, lastSeq)
-        purgePeerFromGraph(downId)
-        newDown.push(downId)
-      }
-
-      if (newlyUpdated.length > 0 || newDown.length > 0) {
-        scheduleGossipFlush(newlyUpdated, newDown, fromPeerId)
+      if (newlyUpdated.length > 0) {
+        scheduleGossipFlush(newlyUpdated, fromPeerId)
       }
     }
   }
@@ -2090,18 +2117,28 @@ export const createOverlayManager = ({
     }
 
     const {kind, ttl: rawTtl, header, payload} = parsed
-    const ttl = Math.min(rawTtl, defaultMaxHops)
+    const ttl = Math.min(rawTtl, maxAllowedHops)
 
     if (kind === overlayBroadcastKind) {
       const origin = typeof header['o'] === 'string' ? header['o'] : ''
+      const seq = typeof header['q'] === 'number' ? header['q'] : 1
       const msgId = typeof header['m'] === 'string' ? header['m'] : ''
       const sig = typeof header['s'] === 'string' ? header['s'] : undefined
 
-      if (!origin || !msgId || origin === selfId || departedPeers.has(origin)) {
+      if (
+        !isValidSignalPeerId(origin) ||
+        !msgId ||
+        origin === selfId ||
+        leftPeersSeq.has(origin)
+      ) {
         return
       }
 
-      if (!isValidOverlayMsgId(msgId)) {
+      if (
+        !isValidOverlayMsgId(msgId) ||
+        !Number.isSafeInteger(seq) ||
+        seq < 1
+      ) {
         stats.signatureFailures++
         return
       }
@@ -2111,22 +2148,21 @@ export const createOverlayManager = ({
         return
       }
 
-      if (seenMessages.has(msgId)) {
+      if (isOriginSeqReplay(origin, seq) || seenMsgIds.has(msgId)) {
         stats.duplicatesDropped++
         return
       }
 
       const valid = await verifyUnicastOrBroadcast(
         origin,
-        canonicalBroadcastHeader(origin, msgId),
+        canonicalBroadcastHeader(origin, msgId, seq, appId, roomId),
         payload,
         sig
       )
-      if (!valid || isDestroyed || departedPeers.has(origin)) {
+      if (!valid || isDestroyed || leftPeersSeq.has(origin)) {
         return
       }
 
-      // Hop-1 / intermediate relay filtering for privileged action namespaces
       const wireHeader = inspectActionWireHeader(payload)
       if (wireHeader) {
         const requiredRoles = actionAuthorities.get(wireHeader.type)
@@ -2151,24 +2187,22 @@ export const createOverlayManager = ({
         }
       }
 
-      if (!rememberSeenMessage(msgId)) {
+      if (!recordOriginSeq(origin, seq) || !seenMsgIds.add(msgId)) {
         stats.duplicatesDropped++
         return
       }
 
-      // Ensure origin is registered as a virtual peer if not already known
       ensureOriginVirtualPeer(origin, fromPeerId)
 
       stats.messagesReceived++
-      const copy = payload.slice().buffer
-      onDeliverData(origin, copy)
+      onDeliverData(origin, payload.slice().buffer)
 
       if (ttl > 1) {
         stats.messagesForwarded++
         forwardBroadcastPacket(
           origin,
           ttl - 1,
-          {o: origin, m: msgId, ...(sig ? {s: sig} : {})},
+          {o: origin, q: seq, m: msgId, ...(sig ? {s: sig} : {})},
           payload,
           fromPeerId
         )
@@ -2179,22 +2213,28 @@ export const createOverlayManager = ({
     if (kind === overlayUnicastKind) {
       const origin = typeof header['o'] === 'string' ? header['o'] : ''
       const dest = typeof header['d'] === 'string' ? header['d'] : ''
+      const seq = typeof header['q'] === 'number' ? header['q'] : 1
       const msgId = typeof header['m'] === 'string' ? header['m'] : ''
       const ivB64 = typeof header['iv'] === 'string' ? header['iv'] : undefined
       const sig = typeof header['s'] === 'string' ? header['s'] : undefined
 
       if (
-        !origin ||
-        !dest ||
+        !isValidSignalPeerId(origin) ||
+        !isValidSignalPeerId(dest) ||
         !msgId ||
         origin === selfId ||
-        departedPeers.has(origin) ||
-        departedPeers.has(dest)
+        leftPeersSeq.has(origin) ||
+        leftPeersSeq.has(dest)
       ) {
         return
       }
 
-      if (!isValidOverlayMsgId(msgId) || !ivB64) {
+      if (
+        !isValidOverlayMsgId(msgId) ||
+        !ivB64 ||
+        !Number.isSafeInteger(seq) ||
+        seq < 1
+      ) {
         stats.signatureFailures++
         return
       }
@@ -2208,12 +2248,20 @@ export const createOverlayManager = ({
         return
       }
 
-      if (seenMessages.has(msgId)) {
+      if (isOriginSeqReplay(origin, seq) || seenMsgIds.has(msgId)) {
         stats.duplicatesDropped++
         return
       }
 
-      const canonical = canonicalUnicastHeader(origin, dest, msgId, ivB64)
+      const canonical = canonicalUnicastHeader(
+        origin,
+        dest,
+        msgId,
+        ivB64,
+        seq,
+        appId,
+        roomId
+      )
 
       if (dest !== selfId) {
         if (ttl <= 1) {
@@ -2228,12 +2276,12 @@ export const createOverlayManager = ({
         if (
           !validRelaySig ||
           isDestroyed ||
-          departedPeers.has(origin) ||
-          departedPeers.has(dest)
+          leftPeersSeq.has(origin) ||
+          leftPeersSeq.has(dest)
         ) {
           return
         }
-        if (!rememberSeenMessage(msgId)) {
+        if (!recordOriginSeq(origin, seq) || !seenMsgIds.add(msgId)) {
           stats.duplicatesDropped++
           return
         }
@@ -2248,21 +2296,16 @@ export const createOverlayManager = ({
         return
       }
 
-      // Destination is selfId!
       const valid = await verifyUnicastOrBroadcast(
         origin,
         canonical,
         payload,
         sig
       )
-      if (!valid || isDestroyed || departedPeers.has(origin)) {
+      if (!valid || isDestroyed || leftPeersSeq.has(origin)) {
         return
       }
 
-      if (!ivB64) {
-        stats.signatureFailures++
-        return
-      }
       const pairwiseKeyP = getPairwiseKey(origin)
       if (!pairwiseKeyP) {
         stats.signatureFailures++
@@ -2296,7 +2339,7 @@ export const createOverlayManager = ({
         }
       }
 
-      if (!rememberSeenMessage(msgId)) {
+      if (!recordOriginSeq(origin, seq) || !seenMsgIds.add(msgId)) {
         stats.duplicatesDropped++
         return
       }
@@ -2305,6 +2348,49 @@ export const createOverlayManager = ({
 
       stats.messagesReceived++
       onDeliverData(origin, plainPayload.slice().buffer)
+    }
+  }
+
+  const isOverlayFrame = (data: ArrayBuffer): boolean => {
+    if (data.byteLength < 2) {
+      return false
+    }
+    return new Uint8Array(data, 0, 1)[0] === overlayFrameVersion
+  }
+
+  const handleOverlayFrame = (fromPeerId: string, data: ArrayBuffer): void => {
+    if (bannedPeers.has(fromPeerId)) {
+      stats.signatureFailures++
+      return
+    }
+    const bytes = new Uint8Array(data)
+    if (bytes.byteLength < 2 || bytes[0] !== overlayFrameVersion) {
+      return
+    }
+    const kind = bytes[1]!
+    if (kind === overlayControlKind) {
+      try {
+        const parsed = fromJson<OverlayControlMessage>(
+          decodeBytes(bytes.subarray(2))
+        )
+        void handleControlFrame(fromPeerId, parsed)
+      } catch {
+        /* Ignore malformed control frame */
+      }
+      return
+    }
+    if (kind === overlayBroadcastKind || kind === overlayUnicastKind) {
+      const copy = bytes.slice()
+      const prev = inboundOriginQueues.get(fromPeerId) ?? Promise.resolve()
+      const next = prev
+        .then(() => handleOverlayBinary(fromPeerId, copy))
+        .catch(noOp)
+        .finally(() => {
+          if (inboundOriginQueues.get(fromPeerId) === next) {
+            inboundOriginQueues.delete(fromPeerId)
+          }
+        })
+      inboundOriginQueues.set(fromPeerId, next)
     }
   }
 
@@ -2318,56 +2404,40 @@ export const createOverlayManager = ({
       return currentActiveMode
     },
 
-    isOverlayFrame: (data: ArrayBuffer): boolean => {
-      if (data.byteLength < 2) {
+    isOverlayFrame,
+
+    handleOverlayFrame,
+
+    handleFrame: (fromPeerId: string, data: ArrayBuffer): boolean => {
+      if (!isOverlayFrame(data)) {
         return false
       }
-      return new Uint8Array(data, 0, 1)[0] === overlayFrameVersion
-    },
-
-    handleOverlayFrame: (fromPeerId: string, data: ArrayBuffer): void => {
-      if (bannedPeers.has(fromPeerId)) {
-        stats.signatureFailures++
-        return
-      }
-      const bytes = new Uint8Array(data)
-      if (bytes.byteLength < 2 || bytes[0] !== overlayFrameVersion) {
-        return
-      }
-      const kind = bytes[1]!
-      if (kind === overlayControlKind) {
-        try {
-          const parsed = fromJson<OverlayControlMessage>(
-            decodeBytes(bytes.subarray(2))
-          )
-          void handleControlFrame(fromPeerId, parsed)
-        } catch {
-          /* Ignore malformed control frame */
+      if (!directPeers.has(fromPeerId)) {
+        let q = pendingFramesByPeer.get(fromPeerId)
+        if (!q) {
+          q = []
+          pendingFramesByPeer.set(fromPeerId, q)
         }
-        return
+        if (q.length < 32) {
+          q.push(data.slice(0))
+        }
+        return true
       }
-      if (kind === overlayBroadcastKind || kind === overlayUnicastKind) {
-        const copy = bytes.slice()
-        const prev = inboundOriginQueues.get(fromPeerId) ?? Promise.resolve()
-        const next = prev
-          .then(() => handleOverlayBinary(fromPeerId, copy))
-          .catch(noOp)
-          .finally(() => {
-            if (inboundOriginQueues.get(fromPeerId) === next) {
-              inboundOriginQueues.delete(fromPeerId)
-            }
-          })
-        inboundOriginQueues.set(fromPeerId, next)
-      }
+      handleOverlayFrame(fromPeerId, data)
+      return true
     },
 
     addDirectPeer: (peerId: string, peer: PeerHandle): void => {
-      if (isDestroyed || peerId === selfId || bannedPeers.has(peerId)) {
+      if (
+        isDestroyed ||
+        !isValidSignalPeerId(peerId) ||
+        peerId === selfId ||
+        bannedPeers.has(peerId)
+      ) {
         return
       }
 
-      departedPeers.delete(peerId)
-      downPeersSeq.delete(peerId)
+      leftPeersSeq.delete(peerId)
       knownRoster.add(peerId)
 
       const timer = unreachableTimers.get(peerId)
@@ -2376,7 +2446,6 @@ export const createOverlayManager = ({
         unreachableTimers.delete(peerId)
       }
 
-      // If peerId was previously a virtual peer, retire the virtual wrapper seamlessly
       const existingVirtual = virtualPeers.get(peerId)
       if (existingVirtual) {
         existingVirtual.destroy()
@@ -2386,23 +2455,45 @@ export const createOverlayManager = ({
       directPeers.set(peerId, peer)
       recomputeTopologyAndRoutes()
 
+      const queued = pendingFramesByPeer.get(peerId)
+      if (queued) {
+        pendingFramesByPeer.delete(peerId)
+        for (const frame of queued) {
+          handleOverlayFrame(peerId, frame)
+        }
+      }
+
       if (isOverlayActive()) {
-        // Send our full known descriptor table to the new neighbor and broadcast our updated link state
+        const initialKnownIds = new Set<string>()
+        for (const d of descriptors.values()) {
+          if (d.peerId !== selfId && d.peerId !== peerId) {
+            initialKnownIds.add(d.peerId)
+          }
+        }
         void publishLocalDescriptor().then(() => {
-          const allKnown = [...descriptors.values()].filter(
-            d => d.peerId !== selfId && d.peerId !== peerId
-          )
-          const downList = [...departedPeers]
-          for (const packet of packGossipControlFrames(allKnown, downList)) {
+          if (initialKnownIds.size === 0) {
+            return
+          }
+          const initialKnown: PeerDescriptor[] = []
+          for (const knownId of initialKnownIds) {
+            const d = descriptors.get(knownId)
+            if (d) {
+              initialKnown.push(d)
+            }
+          }
+          for (const packet of packGossipControlFrames(initialKnown)) {
             sendToDirectNeighbor(peerId, packet)
           }
         })
       }
     },
 
-    removeDirectPeer: (peerId: string, peer?: PeerHandle): boolean => {
+    removeDirectPeer: (peerId: string, peer?: PeerHandle): void => {
       const current = directPeers.get(peerId)
       if (!current || (peer && current !== peer)) {
+        if (!current) {
+          pendingFramesByPeer.delete(peerId)
+        }
         if (
           !current &&
           !virtualPeers.has(peerId) &&
@@ -2410,34 +2501,24 @@ export const createOverlayManager = ({
         ) {
           recomputeTopologyAndRoutes()
         }
-        return false
+        return
       }
 
+      pendingFramesByPeer.delete(peerId)
       directPeers.delete(peerId)
 
-      // Clear forwardedTo state for this peer on active media streams
-      for (const s of activeStreams.values()) {
-        s.forwardedTo.delete(peerId)
-      }
-
       if (!isOverlayActive()) {
-        knownRoster.delete(peerId)
-        descriptors.delete(peerId)
-        adjacency.delete(peerId)
+        purgePeerFromGraph(peerId)
         recomputeTopologyAndRoutes()
-        return false
+        return
       }
 
-      // Peer disconnected unexpectedly or left; mark departed and remove its stale link-state
-      const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
-      downPeersSeq.set(peerId, lastSeq)
-      departedPeers.add(peerId)
+      const lastSeq = descriptors.get(peerId)?.seq ?? 0
+      recordLeftPeer(peerId, lastSeq)
       purgePeerFromGraph(peerId)
 
       recomputeTopologyAndRoutes()
-      void publishLocalDescriptor([peerId])
-
-      return false
+      void publishLocalDescriptor()
     },
 
     isDirectPeer: (peerId: string): boolean => directPeers.has(peerId),
@@ -2455,179 +2536,19 @@ export const createOverlayManager = ({
 
     sendUnicast,
 
-    getMediaTargets: (broadcasterId = selfId): string[] => {
-      if (
-        !isOverlayActive() ||
-        (currentActiveMode === 'mesh' && virtualPeers.size === 0)
-      ) {
-        return [...directPeers.keys()]
-      }
-      for (const entry of activeStreams.values()) {
-        if (
-          entry.broadcasterId === broadcasterId &&
-          entry.forwardedTo.size > 0
-        ) {
-          const activeForwarded = [...entry.forwardedTo].filter(id =>
-            directPeers.has(id)
-          )
-          if (activeForwarded.length > 0) {
-            return activeForwarded
-          }
-        }
-      }
-      const {childrenIds} = getCachedTreeChildren(broadcasterId, config.fanout)
-      const directChildren = childrenIds.filter(id => directPeers.has(id))
-      if (directChildren.length > 0) {
-        return directChildren
-      }
-      return broadcasterId === selfId
-        ? [...directPeers.keys()].slice(0, config.fanout)
-        : []
-    },
-
-    isExpectedMediaRelayParent: (
-      broadcasterId: string,
-      fromPeerId: string
-    ): boolean => {
-      if (
-        !broadcasterId ||
-        broadcasterId === selfId ||
-        bannedPeers.has(broadcasterId) ||
-        departedPeers.has(broadcasterId) ||
-        !directPeers.has(fromPeerId)
-      ) {
-        return false
-      }
-      if (broadcasterId === fromPeerId) {
-        return true
-      }
-      if (!virtualPeers.has(broadcasterId) && !routes[broadcasterId]) {
-        return false
-      }
-      const {parentId} = getCachedTreeChildren(broadcasterId, config.fanout)
-      return parentId === fromPeerId
-    },
-
-    registerBroadcastStream: (
-      broadcasterId: string,
-      streamKey: string,
-      stream: MediaStream,
-      metadata?: JsonValue,
-      tracks?: MediaStreamTrack[]
-    ): void => {
-      const mapKey = `${broadcasterId}:${streamKey}`
-      const {parentId, childrenIds} = getCachedTreeChildren(
-        broadcasterId,
-        config.fanout
-      )
-      const existing = activeStreams.get(mapKey)
-      const nextTracks = tracks ?? stream.getTracks?.()
-      const prevTracks = existing
-        ? (existing.tracks ?? existing.stream.getTracks?.())
-        : undefined
-      const tracksChanged = Boolean(
-        existing &&
-        nextTracks &&
-        prevTracks &&
-        (nextTracks.length !== prevTracks.length ||
-          nextTracks.some((t, i) => t !== prevTracks[i]))
-      )
-      const metaChanged = Boolean(
-        existing &&
-        (metadata === undefined ? '' : toJson(metadata)) !==
-          (existing.metadata === undefined ? '' : toJson(existing.metadata))
-      )
-      const forwardedTo = existing?.forwardedTo ?? new Set<string>()
-      if (tracksChanged || metaChanged) {
-        forwardedTo.clear()
-      }
-
-      if (broadcasterId === selfId) {
-        // Broadcaster initially sends to its getMediaTargets
-        childrenIds
-          .filter(id => directPeers.has(id))
-          .forEach(id => forwardedTo.add(id))
-      }
-
-      activeStreams.set(mapKey, {
-        broadcasterId,
-        streamKey,
-        stream,
-        ...(nextTracks ? {tracks: [...nextTracks]} : {}),
-        ...(metadata === undefined ? {} : {metadata}),
-        forwardedTo,
-        currentParentId: parentId
-      })
-
-      if (broadcasterId !== selfId) {
-        syncMediaTrees()
-      } else if (isOverlayActive()) {
-        void publishLocalDescriptor()
-      }
-    },
-
-    unregisterBroadcastStream: (
-      broadcasterId: string,
-      stream: MediaStream
-    ): string[] => {
-      const targets: string[] = []
-      for (const [key, entry] of activeStreams.entries()) {
-        if (entry.broadcasterId === broadcasterId && entry.stream === stream) {
-          targets.push(...entry.forwardedTo)
-          activeStreams.delete(key)
-        }
-      }
-      return targets
-    },
-
-    unregisterBroadcastStreamById: (
-      broadcasterId: string,
-      streamId: string
-    ): {stream: MediaStream; targets: string[]} | null => {
-      let removed: {stream: MediaStream; targets: string[]} | null = null
-      for (const [key, entry] of activeStreams.entries()) {
-        if (
-          entry.broadcasterId === broadcasterId &&
-          entry.stream.id === streamId
-        ) {
-          const targets = [...entry.forwardedTo]
-          activeStreams.delete(key)
-          removed ??= {stream: entry.stream, targets: []}
-          removed.targets.push(...targets)
-        }
-      }
-      return removed
-    },
-
-    requireDirectPeer: peerId => {
-      if (isDestroyed || peerId === selfId || bannedPeers.has(peerId)) {
-        return
-      }
-      const maxRequired = Math.max(8, config.maxConnections * 2)
-      if (
-        !requiredDirectPeers.has(peerId) &&
-        requiredDirectPeers.size >= maxRequired
-      ) {
-        const oldest = requiredDirectPeers.values().next().value
-        if (oldest !== undefined) {
-          requiredDirectPeers.delete(oldest)
-        }
-      }
-      requiredDirectPeers.add(peerId)
-      if (!directPeers.has(peerId)) {
-        targetsChangedCallback?.([peerId])
-      }
-    },
+    requireDirectPeer,
 
     notePeerDiscovered: (peerId: string): void => {
-      if (!peerId || peerId === selfId || bannedPeers.has(peerId)) {
+      if (
+        !isValidSignalPeerId(peerId) ||
+        peerId === selfId ||
+        bannedPeers.has(peerId)
+      ) {
         return
       }
-      departedPeers.delete(peerId)
-      downPeersSeq.delete(peerId)
-      if (!knownRoster.has(peerId)) {
-        knownRoster.add(peerId)
-        updateActiveMode()
+      addDiscoveredCandidate(peerId)
+      if (descriptors.size <= 1) {
+        scheduleTargetsNotification()
       }
     },
 
@@ -2635,28 +2556,41 @@ export const createOverlayManager = ({
       peerId: string,
       direction: 'outbound' | 'inbound'
     ): boolean => {
-      if (!peerId || peerId === selfId || bannedPeers.has(peerId)) {
+      if (
+        !isValidSignalPeerId(peerId) ||
+        peerId === selfId ||
+        bannedPeers.has(peerId)
+      ) {
         return false
       }
       if (directPeers.has(peerId) || requiredDirectPeers.has(peerId)) {
         return true
       }
 
-      knownRoster.add(peerId)
+      addDiscoveredCandidate(peerId)
       updateActiveMode()
 
       if (currentActiveMode === 'mesh') {
         return true
       }
 
-      const targets = computeTargetNeighbors(
-        selfId,
-        knownRoster,
-        currentActiveMode,
-        config.maxConnections
-      )
+      const targets = computeEffectiveTargets()
 
-      if (targets.has(peerId)) {
+      if (direction === 'outbound') {
+        if (directPeers.size >= config.maxConnections) {
+          return false
+        }
+        if (targets.has(peerId)) {
+          return true
+        }
+        const minDirectPeers = Math.min(
+          defaultMinConnections,
+          config.maxConnections
+        )
+        return directPeers.size < minDirectPeers
+      }
+
+      if (targets.has(peerId) && directPeers.size < config.maxConnections) {
         return true
       }
 
@@ -2668,27 +2602,10 @@ export const createOverlayManager = ({
         return true
       }
 
-      if (direction === 'inbound') {
-        // Accept inbound offers up to a soft ceiling (2x maxConnections) so slightly
-        // out-of-sync rosters during join bursts never reject valid neighbor edges.
-        return directPeers.size < config.maxConnections * 2
-      }
-
-      return false
+      return directPeers.size < config.maxConnections * 2
     },
 
-    getTargetNeighbors: (): Set<string> => {
-      updateActiveMode()
-      return new Set([
-        ...requiredDirectPeers,
-        ...computeTargetNeighbors(
-          selfId,
-          knownRoster,
-          currentActiveMode,
-          config.maxConnections
-        )
-      ])
-    },
+    getTargetNeighbors: (): Set<string> => computeEffectiveTargets(),
 
     setOnTargetsChanged: (cb: (targetPeerIds: string[]) => void): void => {
       targetsChangedCallback = cb
@@ -2704,7 +2621,7 @@ export const createOverlayManager = ({
       peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey,
 
     setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey): void => {
-      if (!peerId || !pubKey) {
+      if (!isValidSignalPeerId(peerId) || !pubKey) {
         return
       }
       const cached = getCachedPubKeyRecord(pubKey)
@@ -2731,23 +2648,12 @@ export const createOverlayManager = ({
     markPeerBanned: (peerId: string): void => {
       bannedPeers.add(peerId)
       requiredDirectPeers.delete(peerId)
-      const lastSeq = descriptors.get(peerId)?.seq ?? Infinity
-      downPeersSeq.set(peerId, lastSeq)
-      departedPeers.add(peerId)
-      purgePeerFromGraph(peerId)
-      const timer = unreachableTimers.get(peerId)
-      if (timer) {
-        resetTimer(timer)
-        unreachableTimers.delete(peerId)
-      }
-      if (virtualPeers.has(peerId)) {
-        virtualPeers.get(peerId)?.destroy()
-        virtualPeers.delete(peerId)
-        onVirtualPeerLeave(peerId, peerBannedErr)
-      }
+      const lastSeq = descriptors.get(peerId)?.seq ?? Number.MAX_SAFE_INTEGER
+      recordLeftPeer(peerId, lastSeq)
+      evictVirtualPeerNow(peerId, peerBannedErr)
       recomputeTopologyAndRoutes()
       if (isOverlayActive()) {
-        void publishLocalDescriptor([peerId])
+        void publishLocalDescriptor()
       }
     },
 
@@ -2779,9 +2685,9 @@ export const createOverlayManager = ({
       if (isDestroyed || !isOverlayActive() || directPeers.size === 0) {
         return
       }
-      const seq = ++localSeq
+      const seq = ++localDescriptorSeq
       void signUnicastOrBroadcast(
-        canonicalLeaveHeader(selfId, seq),
+        canonicalLeaveHeader(selfId, seq, appId, roomId),
         new Uint8Array()
       ).then(sig => {
         if (isDestroyed) {
@@ -2801,6 +2707,8 @@ export const createOverlayManager = ({
 
     destroy: (): void => {
       isDestroyed = true
+      resetTimer(heartbeatTimer)
+      pendingFramesByPeer.clear()
       requiredDirectPeers.clear()
       for (const timer of unreachableTimers.values()) {
         resetTimer(timer)
@@ -2811,7 +2719,6 @@ export const createOverlayManager = ({
       }
       virtualPeers.clear()
       directPeers.clear()
-      activeStreams.clear()
     },
 
     getSnapshot: (): TopologySnapshot => {
@@ -2821,22 +2728,6 @@ export const createOverlayManager = ({
         ...directPeerIds,
         ...virtualPeers.keys()
       ])
-      const mediaTrees: Record<string, TopologyMediaTree> = {}
-      const broadcasters = new Set<string>([selfId])
-      for (const s of activeStreams.values()) {
-        broadcasters.add(s.broadcasterId)
-      }
-      for (const bId of broadcasters) {
-        const {parentId, childrenIds} = getCachedTreeChildren(
-          bId,
-          config.fanout
-        )
-        mediaTrees[bId] = {
-          broadcasterId: bId,
-          parentId,
-          childrenIds
-        }
-      }
 
       return {
         mode: config.mode,
@@ -2845,7 +2736,6 @@ export const createOverlayManager = ({
         directPeerIds,
         roomPeerIds: [...roomPeerSet].sort(),
         routes: {...routes},
-        mediaTrees,
         stats: {...stats}
       }
     }
@@ -2855,11 +2745,22 @@ export const createOverlayManager = ({
 export const scale = (
   topology?: TopologyMode | ScaleConfig
 ): RoomPlugin<'scale', ScalePluginApi> => {
-  // Validate eagerly at call time
   normalizeTopologyConfig(topology)
 
   return definePlugin('scale', {
     setup: kernel => {
+      const pendingMediaPeers = new Map<
+        string,
+        {
+          promise: Promise<PeerHandle>
+          resolve: (peer: PeerHandle) => void
+          reject: (reason: Error) => void
+        }
+      >()
+      const mediaControlAction = kernel.makeInternalAction<{op: 'connect'}>(
+        'mctrl'
+      )
+
       const overlay = createOverlayManager({
         selfId: kernel.selfId,
         appId: kernel.appId,
@@ -2888,24 +2789,61 @@ export const scale = (
           if (rp) {
             rp.onPeerDescriptorCert(peerId, signPubKey, cert, userId)
           }
-        },
-        onRelayMediaStream: (
-          broadcasterId,
-          stream,
-          metadata,
-          targetPeerIds,
-          streamKey,
-          tracks
-        ) =>
-          kernel.relayMediaStream(
-            broadcasterId,
-            stream,
-            metadata,
-            targetPeerIds,
-            streamKey,
-            tracks
-          )
+        }
       })
+
+      mediaControlAction.onMessage((msg, id) => {
+        if (msg?.op === 'connect') {
+          overlay.requireDirectPeer(id)
+        }
+      })
+
+      kernel.onPeerActivated((id, peer) => {
+        pendingMediaPeers.get(id)?.resolve(peer)
+      })
+      kernel.onPeerDeactivated(id => {
+        pendingMediaPeers.get(id)?.reject(peerDisconnectedErr)
+      })
+
+      const origRemoveDirectPeer = overlay.removeDirectPeer
+      overlay.removeDirectPeer = (peerId, peer, reason) => {
+        if (reason) {
+          pendingMediaPeers.get(peerId)?.reject(reason)
+        }
+        origRemoveDirectPeer(peerId, peer)
+      }
+
+      overlay.prepareMediaPeer = (id: string, peer: PeerHandle) => {
+        if (overlay.isDirectPeer(id)) {
+          return Promise.resolve(peer)
+        }
+        const pending = pendingMediaPeers.get(id)
+        if (pending) {
+          return pending.promise
+        }
+        let resolve!: (peer: PeerHandle) => void
+        let reject!: (reason: Error) => void
+        const promise = new Promise<PeerHandle>((res, rej) => {
+          resolve = res
+          reject = rej
+        })
+        const timer = setTimeout(
+          () => reject(mkErr('timed out connecting media peer')),
+          10_000
+        )
+        const settled = promise.finally(() => {
+          clearTimeout(timer)
+          pendingMediaPeers.delete(id)
+        })
+        pendingMediaPeers.set(id, {promise: settled, resolve, reject})
+        void mediaControlAction
+          .send({op: 'connect'}, id)
+          .then(() => {
+            overlay.requireDirectPeer(id)
+          })
+          .catch(err => reject(toError(err, 'failed connecting media peer')))
+        return settled
+      }
 
       kernel.registerScaleProvider(overlay)
       kernel.onRoomIdChanged(rid => overlay.setRoomId(rid))

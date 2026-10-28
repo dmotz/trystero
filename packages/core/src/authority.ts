@@ -2855,9 +2855,7 @@ export const roles = (
               newCerts.length > 0 ||
               newStates.length > 0
             ) {
-              const directIds =
-                kernel.getScaleProvider()?.getSnapshot().directPeerIds ??
-                kernel.getActivePeerIds()
+              const directIds = kernel.getActivePeerIds()
               const directNeighbors = directIds.filter(
                 id => id !== fromPeerId && id !== kernel.selfId
               )

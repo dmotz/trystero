@@ -371,18 +371,11 @@ void test('recycled transceiver sender after removeTrack is not stopped when ori
 })
 
 void test('receiveRemoteStream and receiveStreamMeta emit when receiver transceiver track IDs differ from sender track IDs', () => {
-  const remoteContexts: Array<{
-    tracks?: MediaStreamTrack[]
-    metadata: unknown
-  }> = []
   const emitted: Array<{streamId: string; metadata: unknown}> = []
   const media = createMediaManager({
     iterate: () => [],
     isActive: () => true,
-    onPeerError: () => {},
-    onRemoteStream: (_stream, ctx) => {
-      remoteContexts.push({tracks: ctx.tracks, metadata: ctx.metadata})
-    }
+    onPeerError: () => {}
   })
   media.onPeerStream = (stream, {metadata}) => {
     emitted.push({streamId: stream.id, metadata})
@@ -419,7 +412,6 @@ void test('receiveRemoteStream and receiveStreamMeta emit when receiver transcei
   assert.deepEqual(emitted, [
     {streamId: 'shared-stream-id', metadata: {phase: 'first'}}
   ])
-  assert.equal(remoteContexts[0]?.tracks, undefined)
 
   // Subsequent metadata update on the cached stream emits immediately without waiting for new tracks
   media.receiveStreamMeta(

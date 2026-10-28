@@ -119,14 +119,6 @@ type RoomOptions = {
   onBeforeLeave?: () => void
 }
 
-type MediaControlMessage =
-  | {op: 'connect'}
-  | {
-      op: 'rmStream'
-      o: string
-      id: string
-    }
-
 export default <
   const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
     undefined
@@ -276,6 +268,8 @@ export default <
     return resolved
   }
 
+  const virtualPeerIds = new Set<string>()
+
   const resolveRequestTarget = (
     target: string,
     includePending = false
@@ -294,8 +288,8 @@ export default <
       return undefined
     }
     candidates.sort((a, b) => {
-      const aDirect = !(scaleProvider?.isVirtualPeer(a) ?? false)
-      const bDirect = !(scaleProvider?.isVirtualPeer(b) ?? false)
+      const aDirect = !virtualPeerIds.has(a)
+      const bDirect = !virtualPeerIds.has(b)
       if (aDirect !== bDirect) {
         return aDirect ? -1 : 1
       }
@@ -305,10 +299,9 @@ export default <
   }
 
   const isDirectPeer = (id: string): boolean =>
-    scaleProvider ? scaleProvider.isDirectPeer(id) : Boolean(activePeerMap[id])
+    Boolean(activePeerMap[id]) && !virtualPeerIds.has(id)
 
-  const isVirtualPeer = (id: string): boolean =>
-    scaleProvider?.isVirtualPeer(id) ?? false
+  const isVirtualPeer = (id: string): boolean => virtualPeerIds.has(id)
 
   const isPeerBanned = (id: string): boolean =>
     rolesProvider?.isPeerBanned(id) ?? false
@@ -316,54 +309,6 @@ export default <
   const getPeerRoles = (id = localSelfId): string[] =>
     rolesProvider?.getPeerRoles(id) ?? []
 
-  const pendingOverlayFrames = new Map<string, ArrayBuffer[]>()
-  const promotedFromVirtual = new Set<string>()
-  const suppressVirtualJoin = new Set<string>()
-  const pendingMediaPeers = new Map<
-    string,
-    {
-      promise: Promise<PeerHandle>
-      resolve: (peer: PeerHandle) => void
-      reject: (reason: Error) => void
-    }
-  >()
-
-  const ensureMediaPeer = (
-    id: string,
-    peer: PeerHandle
-  ): Promise<PeerHandle> => {
-    if (isDirectPeer(id)) {
-      return Promise.resolve(peer)
-    }
-    const pending = pendingMediaPeers.get(id)
-    if (pending) {
-      return pending.promise
-    }
-    let resolve!: (peer: PeerHandle) => void
-    let reject!: (reason: Error) => void
-    const promise = new Promise<PeerHandle>((res, rej) => {
-      resolve = res
-      reject = rej
-    })
-    const timer = setTimeout(
-      () => reject(mkErr('timed out connecting media peer')),
-      handshakeTimeoutMs
-    )
-    const settled = promise.finally(() => {
-      clearTimeout(timer)
-      pendingMediaPeers.delete(id)
-    })
-    pendingMediaPeers.set(id, {promise: settled, resolve, reject})
-    void mediaControlAction
-      .send({op: 'connect'}, id)
-      .then(() => {
-        if (!leavePromise) {
-          scaleProvider?.requireDirectPeer(id)
-        }
-      })
-      .catch(err => reject(toError(err, 'failed connecting media peer')))
-    return settled
-  }
   const listeners = {
     onPeerJoin: null as ((context: PeerJoinContext) => void) | null,
     onPeerLeave: null as ((context: PeerLeaveContext) => void) | null,
@@ -455,23 +400,12 @@ export default <
   const mediaManager = createMediaManager({
     onPeerError,
     getPeerUserId,
-    preparePeer: ensureMediaPeer,
+    preparePeer: (id, peer) =>
+      scaleProvider?.prepareMediaPeer
+        ? scaleProvider.prepareMediaPeer(id, peer)
+        : Promise.resolve(peer),
     iterate,
-    isActive: id => Boolean(activePeerMap[id]),
-    onRemoteStream: (
-      stream,
-      {originPeerId, metadata, key, broadcast, tracks}
-    ) => {
-      if (scaleProvider?.isOverlayActive() && broadcast) {
-        scaleProvider.registerBroadcastStream(
-          originPeerId,
-          key,
-          stream,
-          metadata,
-          tracks
-        )
-      }
-    }
+    isActive: id => Boolean(activePeerMap[id])
   })
 
   const actionManager = createActionManager({
@@ -577,9 +511,8 @@ export default <
     recheckCapacity = true
   ): void => {
     const err = toError(reason, peerDisconnectedMsg)
-    pendingMediaPeers.get(id)?.reject(err)
     handshakeManager.clearPeer(id, err)
-    pendingOverlayFrames.delete(id)
+    virtualPeerIds.delete(id)
     delete peerMap[id]
     delete activePeerMap[id]
     actionManager.clearPeer(id, err)
@@ -598,37 +531,17 @@ export default <
   ): void => {
     const current = peerMap[id]
 
-    if (!current) {
+    if (!current || (peer && current !== peer)) {
       return
     }
 
-    if (peer && current !== peer) {
-      return
-    }
-
-    const wasActive =
-      Boolean(activePeerMap[id]) || promotedFromVirtual.delete(id)
+    const err = toError(reason, peerDisconnectedMsg)
     const wasVirtual = isVirtualPeer(id)
-    const wasDirect = isDirectPeer(id)
+    const wasActive = Boolean(activePeerMap[id]) || wasVirtual
 
-    clearPeerState(id, reason, recheckCapacity)
+    clearPeerState(id, err, recheckCapacity)
     current.destroy()
-
-    if (scaleProvider) {
-      if (wasDirect) {
-        if (wasActive) {
-          suppressVirtualJoin.add(id)
-        }
-        const keptAsVirtual = scaleProvider.removeDirectPeer(id, current)
-        suppressVirtualJoin.delete(id)
-        if (keptAsVirtual) {
-          onPeerLeave(id)
-          return
-        }
-      } else if (!wasVirtual) {
-        scaleProvider.removeDirectPeer(id)
-      }
-    }
+    scaleProvider?.removeDirectPeer(id, current, err)
 
     if (wasActive) {
       notifyPeerDeactivated(id)
@@ -682,7 +595,6 @@ export default <
   const streamMetaAction = makeActionInternal<InternalMediaMeta>('stream', {
     maxPayloadBytes: 64 * 1024
   })
-  const mediaControlAction = makeActionInternal<MediaControlMessage>('mctrl')
   const leaveAction = makeActionInternal<string>('leave', {
     sendToPending: true,
     receiveWhilePending: true
@@ -731,13 +643,13 @@ export default <
       }
     },
     getUserPeerIds,
-    getPeerPublicKey: peerId =>
-      peerPubKeys.get(peerId) ?? scaleProvider?.getPeerSignPublicKey(peerId),
+    getPeerPublicKey: peerId => peerPubKeys.get(peerId),
     setPeerPublicKey: (peerId, pubKey) => {
       peerPubKeys.set(peerId, pubKey)
       scaleProvider?.setPeerSignPublicKey(peerId, pubKey)
     },
-    getActivePeerIds: () => keys(activePeerMap),
+    getActivePeerIds: () =>
+      keys(activePeerMap).filter(id => !virtualPeerIds.has(id)),
     getAllPeerIds: () => keys(peerMap),
     isPeerActive: peerId => Boolean(activePeerMap[peerId]),
     getPeerHandle: (peerId, includePending = false) =>
@@ -772,7 +684,7 @@ export default <
         provider.setPeerSignPublicKey(pid, pubKey)
       }
       for (const [id, peer] of entries(activePeerMap)) {
-        if (!provider.isVirtualPeer(id)) {
+        if (!virtualPeerIds.has(id)) {
           provider.addDirectPeer(id, peer)
         }
       }
@@ -796,14 +708,11 @@ export default <
         vPeer.destroy()
         return
       }
-      const alreadyActive =
-        Boolean(activePeerMap[peerId]) || suppressVirtualJoin.has(peerId)
-      if (peerMap[peerId] && peerMap[peerId] !== activePeerMap[peerId]) {
-        // Preserve the physical transport while its room handshake completes.
-        promotedFromVirtual.add(peerId)
-      } else {
+      const alreadyActive = Boolean(activePeerMap[peerId])
+      if (!handshakeManager.getPeer(peerId)) {
         peerMap[peerId] = vPeer
       }
+      virtualPeerIds.add(peerId)
       activePeerMap[peerId] = vPeer
       if (!alreadyActive) {
         notifyPeerActivated(peerId)
@@ -820,26 +729,6 @@ export default <
       if (wasActive) {
         notifyPeerDeactivated(peerId)
       }
-    },
-    relayMediaStream: (
-      broadcasterId,
-      stream,
-      metadata,
-      targetPeerIds,
-      streamKey,
-      tracks
-    ) => {
-      void mediaManager.addStream(
-        stream,
-        {
-          target: targetPeerIds,
-          ...(metadata === undefined ? {} : {metadata})
-        },
-        streamMetaAction.send,
-        broadcasterId,
-        streamKey,
-        tracks
-      )
     }
   }
 
@@ -925,7 +814,7 @@ export default <
     if (
       effectiveLimit === undefined ||
       activePeerMap[id] ||
-      promotedFromVirtual.has(id)
+      virtualPeerIds.has(id)
     ) {
       return false
     }
@@ -1095,17 +984,9 @@ export default <
         return
       }
       isEstablished = true
-      const alreadyJoined = promotedFromVirtual.delete(id)
+      const alreadyJoined = virtualPeerIds.delete(id)
       activePeerMap[id] = peer
       scaleProvider?.addDirectPeer(id, peer)
-      const queuedOverlay = pendingOverlayFrames.get(id)
-      if (queuedOverlay) {
-        pendingOverlayFrames.delete(id)
-        for (const frame of queuedOverlay) {
-          scaleProvider?.handleOverlayFrame(id, frame)
-        }
-      }
-      pendingMediaPeers.get(id)?.resolve(peer)
       for (const cb of peerActivatedListeners) {
         cb(id, peer)
       }
@@ -1153,55 +1034,9 @@ export default <
     void activePeerMap[id]?.signal(sdp as never)
   })
 
-  const sanitizeIncomingMediaMeta = <T extends {o?: string}>(
-    meta: T,
-    fromPeerId: string
-  ): T => {
-    if (
-      meta &&
-      typeof meta === 'object' &&
-      typeof meta.o === 'string' &&
-      meta.o !== fromPeerId
-    ) {
-      const isValidRelayOrigin = Boolean(
-        scaleProvider?.isOverlayActive() &&
-        meta.o !== localSelfId &&
-        !isPeerBanned(meta.o) &&
-        scaleProvider.isExpectedMediaRelayParent(meta.o, fromPeerId)
-      )
-      if (!isValidRelayOrigin) {
-        const {o: _ignored, ...rest} = meta
-        return rest as T
-      }
-    }
-    return meta
-  }
-
   streamMetaAction.onMessage((meta, id) =>
-    mediaManager.receiveStreamMeta(sanitizeIncomingMediaMeta(meta, id), id)
+    mediaManager.receiveStreamMeta(meta, id)
   )
-
-  mediaControlAction.onMessage((msg, id) => {
-    if (!msg || typeof msg !== 'object') {
-      return
-    }
-    if (msg.op === 'connect') {
-      scaleProvider?.requireDirectPeer(id)
-      return
-    }
-    if (msg.o !== id || typeof msg.id !== 'string') {
-      return
-    }
-    if (msg.op === 'rmStream') {
-      const removed = scaleProvider?.unregisterBroadcastStreamById(
-        msg.o,
-        msg.id
-      )
-      if (removed && removed.targets.length > 0) {
-        mediaManager.removeStream(removed.stream, removed.targets)
-      }
-    }
-  })
 
   leaveAction.onMessage((_, id) => exitPeer(id, undefined, peerLeftRoomErr))
 
@@ -1245,11 +1080,10 @@ export default <
         return
       }
 
-      existingPeer.destroy()
       if (wasVirtual) {
-        promotedFromVirtual.add(id)
         delete peerMap[id]
       } else {
+        existingPeer.destroy()
         clearPeerState(id, mkErr('peer replaced'))
       }
     }
@@ -1260,20 +1094,7 @@ export default <
     peer.setHandlers({
       data: d => {
         if (peerMap[id] === peer && !isPeerBanned(id)) {
-          if (scaleProvider?.isOverlayFrame(d)) {
-            if (activePeerMap[id]) {
-              scaleProvider.handleOverlayFrame(id, d)
-            } else {
-              let q = pendingOverlayFrames.get(id)
-              if (!q) {
-                q = []
-                pendingOverlayFrames.set(id, q)
-              }
-              if (q.length < 32) {
-                q.push(d.slice(0))
-              }
-            }
-          } else {
+          if (!scaleProvider?.handleFrame(id, d)) {
             handleData(id, d)
           }
         }
@@ -1383,63 +1204,15 @@ export default <
       return result
     },
 
-    addStream: (stream, options: AddMediaOptions = {}) => {
-      if (scaleProvider?.isOverlayActive() && !options.target) {
-        const streamKey = mediaManager.getStreamKey(stream)
-        const metadata = mediaManager.getStreamMetadata(stream, options)
-        const tracks = mediaManager.resolveStreamTracks(stream)
-        scaleProvider.registerBroadcastStream(
-          localSelfId,
-          streamKey,
-          stream,
-          metadata,
-          tracks
-        )
-        const targets = scaleProvider.getMediaTargets(localSelfId)
-        if (!targets.length) {
-          return Promise.resolve()
-        }
-        return mediaManager.addStream(
-          stream,
-          {
-            target: targets,
-            ...(metadata === undefined ? {} : {metadata})
-          },
-          streamMetaAction.send,
-          localSelfId,
-          streamKey,
-          tracks
-        )
-      }
-      return mediaManager.addStream(stream, options, streamMetaAction.send)
-    },
+    addStream: (stream, options: AddMediaOptions = {}) =>
+      mediaManager.addStream(stream, options, streamMetaAction.send),
 
     removeStream: (stream, options: RemoveMediaOptions = {}) => {
-      if (scaleProvider?.isOverlayActive() && !options.target) {
-        const targets = scaleProvider.unregisterBroadcastStream(
-          localSelfId,
-          stream
-        )
-        if (targets.length > 0) {
-          mediaManager.removeStream(stream, targets)
-        }
-        if (typeof stream.id === 'string') {
-          void mediaControlAction
-            .send({op: 'rmStream', o: localSelfId, id: stream.id})
-            .catch(noOp)
-        }
-        return
-      }
       mediaManager.removeStream(stream, options.target)
     },
 
-    replaceTrack: (oldTrack, newTrack, options: RemoveMediaOptions = {}) => {
-      const target =
-        scaleProvider?.isOverlayActive() && !options.target
-          ? scaleProvider.getMediaTargets(localSelfId)
-          : options.target
-      return mediaManager.replaceTrack(oldTrack, newTrack, target)
-    },
+    replaceTrack: (oldTrack, newTrack, options: RemoveMediaOptions = {}) =>
+      mediaManager.replaceTrack(oldTrack, newTrack, options.target),
 
     ...pluginApis,
 

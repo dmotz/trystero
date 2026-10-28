@@ -229,7 +229,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         didLeaveRoom ||
         isPassive ||
         !scaleProvider ||
-        scaleProvider.getSnapshot().activeMode === 'mesh'
+        scaleProvider.getActiveMode() === 'mesh'
       ) {
         return
       }

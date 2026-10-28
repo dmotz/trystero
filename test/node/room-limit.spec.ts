@@ -779,9 +779,9 @@ void test(
     const {makeJoinRoom} = createMemorySignalBus()
     const appId = `limit-overlay-${Date.now()}`
     const roomId = 'tree-room'
-    const scaleConfig = {mode: 'gossip' as const, maxConnections: 2}
+    const scaleConfig = {mode: 'gossip' as const, maxConnections: 4}
 
-    const peerIds = ['node-1', 'node-2', 'node-3', 'node-4']
+    const peerIds = ['node-1', 'node-2', 'node-3', 'node-4', 'node-5', 'node-6']
     const rooms: any[] = []
 
     for (const peerId of peerIds) {
@@ -789,7 +789,7 @@ void test(
         {
           appId,
           _test_only_forcedPeerId: peerId,
-          limit: 4,
+          limit: 6,
           use: [scale(scaleConfig)],
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
@@ -799,17 +799,17 @@ void test(
     }
 
     await waitFor(
-      () => rooms.every(r => Object.keys(r.getPeers()).length === 3),
+      () => rooms.every(r => Object.keys(r.getPeers()).length === 5),
       4_000
     )
 
-    // 5th peer tries to join the 4-peer multi-hop tree room
+    // 7th peer tries to join the 6-peer multi-hop overlay room
     const fifthErrors: any[] = []
     const fifthRoom = makeJoinRoom()(
       {
         appId,
-        _test_only_forcedPeerId: 'node-5',
-        limit: 4,
+        _test_only_forcedPeerId: 'node-7',
+        limit: 6,
         use: [scale(scaleConfig)],
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -822,7 +822,7 @@ void test(
       assert.equal(fifthErrors.length, 1)
       assert.equal(fifthErrors[0].error, 'room full')
       for (const r of rooms) {
-        assert.equal(Object.keys(r.getPeers()).length, 3)
+        assert.equal(Object.keys(r.getPeers()).length, 5)
       }
     } finally {
       await Promise.all([

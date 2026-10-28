@@ -69,7 +69,6 @@ export type ScaleConfig = {
   mode?: TopologyMode
   maxConnections?: number
   autoThreshold?: number
-  fanout?: number
 }
 
 export type TopologyRoute = {
@@ -78,19 +77,12 @@ export type TopologyRoute = {
   backupNextHop?: string
 }
 
-export type TopologyMediaTree = {
-  broadcasterId: string
-  parentId: string | null
-  childrenIds: string[]
-}
-
 export type TopologyStats = {
   messagesSent: number
   messagesReceived: number
   messagesForwarded: number
   duplicatesDropped: number
   signatureFailures: number
-  treeReparents: number
 }
 
 export type TopologySnapshot = {
@@ -100,7 +92,6 @@ export type TopologySnapshot = {
   directPeerIds: string[]
   roomPeerIds: string[]
   routes: Record<string, TopologyRoute>
-  mediaTrees: Record<string, TopologyMediaTree>
   stats: TopologyStats
 }
 
@@ -263,38 +254,16 @@ export type KernelRolesProvider = {
 }
 
 export type KernelScaleProvider = {
-  isOverlayActive: () => boolean
-  isOverlayFrame: (data: ArrayBuffer) => boolean
-  handleOverlayFrame: (fromPeerId: string, data: ArrayBuffer) => void
+  getActiveMode: () => 'mesh' | 'gossip'
+  handleFrame: (fromPeerId: string, data: ArrayBuffer) => boolean
   addDirectPeer: (peerId: string, peer: PeerHandle) => void
-  removeDirectPeer: (peerId: string, peer?: PeerHandle) => boolean
-  isDirectPeer: (peerId: string) => boolean
-  isVirtualPeer: (peerId: string) => boolean
+  removeDirectPeer: (peerId: string, peer?: PeerHandle, reason?: Error) => void
+  prepareMediaPeer?: (peerId: string, peer: PeerHandle) => Promise<PeerHandle>
   getRoute: (peerId: string) => TopologyRoute | undefined
-  isExpectedMediaRelayParent: (
-    broadcasterId: string,
-    fromPeerId: string
-  ) => boolean
   broadcastInline: (
     frame: Uint8Array,
     onProgress?: (peerId: string) => void
   ) => Promise<boolean>
-  getMediaTargets: (broadcasterId?: string) => string[]
-  registerBroadcastStream: (
-    broadcasterId: string,
-    streamKey: string,
-    stream: MediaStream,
-    metadata?: JsonValue,
-    tracks?: MediaStreamTrack[]
-  ) => void
-  unregisterBroadcastStream: (
-    broadcasterId: string,
-    stream: MediaStream
-  ) => string[]
-  unregisterBroadcastStreamById: (
-    broadcasterId: string,
-    streamId: string
-  ) => {stream: MediaStream; targets: string[]} | null
   requireDirectPeer: (peerId: string) => void
   notePeerDiscovered: (peerId: string) => void
   shouldConnectPeer: (
@@ -305,15 +274,12 @@ export type KernelScaleProvider = {
   setOnTargetsChanged: (cb: (targetPeerIds: string[]) => void) => void
   announceLeave: () => void
   destroy: () => void
-  getSnapshot: () => TopologySnapshot
-  getPeerSignPublicKey: (peerId: string) => JsonWebKey | undefined
   setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
   markPeerBanned: (peerId: string) => void
   isPeerBanned: (peerId: string) => boolean
   registerActionAuthority: (actionType: string, roles: string[]) => void
   recordSignatureFailure: () => void
-  setRoomId: (effectiveRoomId: string) => void
 }
 
 export type RoomKernel = {
@@ -364,14 +330,6 @@ export type RoomKernel = {
   onLeave: (listener: () => void) => void
   activateVirtualPeer: (peerId: string, vPeer: PeerHandle) => void
   deactivateVirtualPeer: (peerId: string, reason?: Error) => void
-  relayMediaStream: (
-    broadcasterId: string,
-    stream: MediaStream,
-    metadata: JsonValue | undefined,
-    targetPeerIds: string[],
-    streamKey: string,
-    tracks?: MediaStreamTrack[]
-  ) => void
 }
 
 export type RoomPlugin<

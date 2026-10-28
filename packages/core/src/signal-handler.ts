@@ -57,9 +57,31 @@ const disconnectedPeerGraceMs = 7_533
 const answeringTtlMs = 23_333
 const offerRelayPlaceholder = 'offer-placeholder'
 const signalKeys = ['offer', 'answer', 'candidate'] as const
+export const maxSignalMessageChars = 128 * 1024
+export const maxSignalPeerIdChars = 64
+export const maxSignalOfferIdChars = 64
+export const maxSignalSdpChars = 64 * 1024
+export const maxSignalCandidateChars = 4_096
+export const maxTrackedSignalPeers = 512
+const signalIdPattern = /^[\w.~:-]{1,64}$/
+
+export const isValidSignalPeerId = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length > 0 &&
+  value.length <= maxSignalPeerIdChars &&
+  signalIdPattern.test(value)
+
+export const isValidSignalOfferId = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length > 0 &&
+  value.length <= maxSignalOfferIdChars &&
+  signalIdPattern.test(value)
 
 const toPayload = (msg: unknown): Record<string, unknown> | null => {
   if (typeof msg === 'string') {
+    if (msg.length > maxSignalMessageChars) {
+      return null
+    }
     try {
       const parsed = fromJson<unknown>(msg)
 
@@ -95,11 +117,25 @@ const hasInvalidSignalField = (
   payload: Record<string, unknown>,
   isStringMessage = false
 ): boolean =>
-  signalKeys.some(
-    key =>
-      key in payload &&
-      (typeof payload[key] !== 'string' || payload[key] === '')
-  ) ||
+  ('peerId' in payload && !isValidSignalPeerId(payload['peerId'])) ||
+  ('offerId' in payload &&
+    payload['offerId'] !== undefined &&
+    !isValidSignalOfferId(payload['offerId'])) ||
+  ('passive' in payload &&
+    payload['passive'] !== undefined &&
+    typeof payload['passive'] !== 'boolean') ||
+  signalKeys.some(key => {
+    if (!(key in payload)) {
+      return false
+    }
+    const val = payload[key]
+    if (typeof val !== 'string' || val === '') {
+      return true
+    }
+    const maxLen =
+      key === 'candidate' ? maxSignalCandidateChars : maxSignalSdpChars
+    return val.length > maxLen
+  }) ||
   ('peer' in payload &&
     (isStringMessage ||
       (payload['peer'] !== undefined && !isPeerHandle(payload['peer']))))
@@ -212,7 +248,29 @@ const reportSdpExchangeConnectionFailure = (
 export const getState = (
   peerStates: Record<string, PeerState>,
   peerId: string
-): PeerState => (peerStates[peerId] ??= makeState())
+): PeerState => {
+  const existing = peerStates[peerId]
+  if (existing) {
+    return existing
+  }
+  const keys = Object.keys(peerStates)
+  if (keys.length >= maxTrackedSignalPeers) {
+    const idleKey = keys.find(k => {
+      const s = peerStates[k]
+      return s && !s.connectedPeer && !s.answeringPeer && !s.offerPeer
+    })
+    const evictKey =
+      idleKey ??
+      keys.find(k => {
+        const s = peerStates[k]
+        return s && !s.connectedPeer
+      })
+    if (evictKey) {
+      delete peerStates[evictKey]
+    }
+  }
+  return (peerStates[peerId] = makeState())
+}
 
 const counterAnnounceTimestamps = new WeakMap<
   PeerState,
@@ -816,6 +874,11 @@ const handleCandidate = async (
   offerId: string | undefined,
   peer: PeerHandle | undefined
 ): Promise<void> => {
+  const state = ctx.peerStates[peerId]
+  if (!peer && !state?.offerPeer && !state?.answeringPeer) {
+    return
+  }
+
   let plainCandidate: Signal
 
   try {
@@ -824,17 +887,17 @@ const handleCandidate = async (
     return
   }
 
-  const state = ctx.peerStates[peerId]
+  const currentState = ctx.peerStates[peerId]
   const offerPeerMatch =
-    offerId && state?.offerPeer && state.offerId === offerId
-      ? state.offerPeer
+    offerId && currentState?.offerPeer && currentState.offerId === offerId
+      ? currentState.offerPeer
       : null
   const answeringPeer =
-    !offerId || state?.answerReplay?.offerId === offerId
-      ? state?.answeringPeer
+    !offerId || currentState?.answerReplay?.offerId === offerId
+      ? currentState?.answeringPeer
       : null
   const fallbackOfferPeer =
-    !offerId && state?.offerPeer ? state.offerPeer : null
+    !offerId && currentState?.offerPeer ? currentState.offerPeer : null
   const targetPeer =
     peer && !peer.isDead
       ? peer
@@ -962,6 +1025,9 @@ export const createSignalHandler = (ctx: SignalContext) => {
   > = []
 
   ctx.dialPeer = (peerId: string): void => {
+    if (!isValidSignalPeerId(peerId)) {
+      return
+    }
     void getSelfId(ctx).then(localSelfId => {
       if (ctx.isLeaving() || !peerId || peerId === localSelfId) {
         return

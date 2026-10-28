@@ -44,14 +44,37 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
                 use: [
                   window.trystero.scale({
                     mode: 'gossip',
-                    maxConnections: 2,
-                    fanout: 2
+                    maxConnections: 4
                   })
                 ]
               },
               roomId
             ))
+            const selfId = (await room.getSelf()).peerId
             window.receivedPrivateMedia = []
+            window.receivedBroadcasts = []
+            window.receivedUnicasts = []
+            const bcastAction = room.makeAction('mhop-bcast', {
+              onMessage: (data, {peerId}) => {
+                window.receivedBroadcasts.push({data, peerId})
+              }
+            })
+            const ucastAction = room.makeAction('mhop-ucast', {
+              onMessage: (data, {peerId}) => {
+                window.receivedUnicasts.push({data, peerId})
+              }
+            })
+            const rpcAction = room.makeAction('mhop-rpc', {
+              kind: 'request',
+              onRequest: (payload, {peerId}) => ({
+                echo: payload,
+                from: peerId,
+                responder: selfId
+              })
+            })
+            window.sendMultiHopBroadcast = bcastAction.send
+            window.sendMultiHopUnicast = ucastAction.send
+            window.requestMultiHopRpc = rpcAction.request
             room.onPeerStream = (stream, {peerId}) => {
               window.receivedPrivateMedia.push(peerId)
               const video = document.createElement('video')
@@ -61,7 +84,7 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
               document.body.append(video)
               void video.play()
             }
-            return (await room.getSelf()).peerId
+            return selfId
           },
           {roomId, config}
         )
@@ -107,6 +130,98 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
     expect(sourceIndex).toBeGreaterThanOrEqual(0)
     const targetId = peerMaps[sourceIndex][0]
     const targetIndex = ids.indexOf(targetId)
+
+    const initialTargetInfo = await pages[sourceIndex].evaluate(
+      ([rId, target]) => window[rId].getPeers()[target],
+      [roomId, targetId]
+    )
+    expect(initialTargetInfo.direct).toBe(false)
+    expect(initialTargetInfo.hops).toBeGreaterThanOrEqual(2)
+
+    // 1. Multi-hop broadcast action over real RTCPeerConnections
+    await pages[sourceIndex].evaluate(() =>
+      window.sendMultiHopBroadcast({msg: 'hello-multihop-broadcast'})
+    )
+    await expect
+      .poll(
+        async () =>
+          Promise.all(
+            pages.map((page, i) =>
+              i === sourceIndex
+                ? Promise.resolve(true)
+                : page.evaluate(
+                    expectedSender =>
+                      window.receivedBroadcasts.some(
+                        (entry: {data: {msg: string}; peerId: string}) =>
+                          entry.peerId === expectedSender &&
+                          entry.data?.msg === 'hello-multihop-broadcast'
+                      ),
+                    ids[sourceIndex]
+                  )
+            )
+          ),
+        {timeout: 15_000}
+      )
+      .toEqual(ids.map(() => true))
+
+    // 2. Multi-hop targeted unicast action over real RTCPeerConnections (stays indirect)
+    await pages[sourceIndex].evaluate(
+      target =>
+        window.sendMultiHopUnicast(
+          {secret: 'multihop-only-for-target'},
+          {target}
+        ),
+      targetId
+    )
+    await expect
+      .poll(
+        () => pages[targetIndex].evaluate(() => window.receivedUnicasts.length),
+        {timeout: 15_000}
+      )
+      .toBe(1)
+    expect(
+      await Promise.all(
+        pages.map(page => page.evaluate(() => window.receivedUnicasts))
+      )
+    ).toEqual(
+      ids.map((_, i) =>
+        i === targetIndex
+          ? [
+              {
+                data: {secret: 'multihop-only-for-target'},
+                peerId: ids[sourceIndex]
+              }
+            ]
+          : []
+      )
+    )
+    expect(
+      await pages[sourceIndex].evaluate(
+        ([rId, target]) => window[rId].getPeers()[target].direct,
+        [roomId, targetId]
+      )
+    ).toBe(false)
+
+    // 3. Multi-hop RPC request and ping over real RTCPeerConnections (stays indirect)
+    const rpcAndPing = await pages[sourceIndex].evaluate(
+      async ([rId, target]) => {
+        const rpcReply = await window.requestMultiHopRpc({q: 42}, {target})
+        const rtt = await window[rId].ping(target)
+        const directAfter = window[rId].getPeers()[target].direct
+        return {rpcReply, rtt, directAfter}
+      },
+      [roomId, targetId]
+    )
+    expect(rpcAndPing.rpcReply).toEqual({
+      echo: {q: 42},
+      from: ids[sourceIndex],
+      responder: targetId
+    })
+    expect(typeof rpcAndPing.rtt).toBe('number')
+    expect(rpcAndPing.rtt).toBeGreaterThanOrEqual(0)
+    expect(rpcAndPing.directAfter).toBe(false)
+
+    // 4. Targeted media promotes the multi-hop peer to a direct RTCPeerConnection
     await pages[sourceIndex].evaluate(
       async ([roomId, target]) => {
         const stream = await navigator.mediaDevices.getUserMedia({video: true})
