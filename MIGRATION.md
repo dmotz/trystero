@@ -25,17 +25,16 @@ boilerplate—and eliminates subtle security and topology footguns.
    about _who_ is in the room rather than how many browser tabs they have open.
    `onUserJoin` and `onUserLeave` fire once per unique user and automatically
    deduplicate multiple tabs.
-3. **Out-of-the-Box Room Authority, Limits, and State**: Room capacity limits
-   (`config.limit`), opt-in cryptographic admin ownership (`roles(...)`),
-   role-based access control (`grantRole`, `revokeRole`, `ban`), and
-   synchronized authoritative state (`room.makeState`) are now built into the
-   core protocol and tree-shaken when `roles()` is not imported.
+3. **Out-of-the-Box Room Authority, Limits, and State**: Advisory per-peer room
+   capacity limits (`config.limit`), opt-in cryptographic admin ownership
+   (`roles(...)`), role-based access control (`grantRole`, `revokeRole`, `ban`),
+   and synchronized authoritative state (`room.makeState`) are now built into
+   the core protocol and tree-shaken when `roles()` is not imported.
 4. **Scalable Multi-Hop Topologies**: Rooms are no longer restricted to
    full-mesh WebRTC (`O(N²)` connections). By opting in with `scale()` (supports
-   `'auto'`, `'gossip'`, or `'mesh'`), rooms can scale to hundreds of
-   participants using multi-hop overlay routing with end-to-end cryptographic
-   sender verification, while apps that don't import `scale()` pay zero bundle
-   overhead.
+   `'auto'` or `'gossip'`), rooms can scale to hundreds of participants using
+   multi-hop overlay routing with end-to-end cryptographic sender verification,
+   while apps that don't import `scale()` pay zero bundle overhead.
 5. **Prebuilt `.min.js` Bundles Removed**: Prebuilt `dist/trystero-*.min.js`
    release bundles have been removed in favor of tree-shaking bundlers (or ESM
    CDNs like `esm.run`) so optional plugins like `roles()` and `scale()` are
@@ -73,9 +72,9 @@ security footguns:
    - **Identity verification**: Handled automatically by self-certifying
      `userId` and `peerId` cryptographic handshakes and end-to-end signed
      overlay envelopes.
-   - **Room capacity limits**: Handled natively by `joinRoom({limit: N})`, which
-     properly accounts for multi-tab users (`userId`) without locking out a user
-     who refreshes their page.
+   - **Room capacity limits**: Handled natively by `joinRoom({limit: N})` as a
+     best-effort per-peer cap that accounts for multi-tab users (`userId`)
+     without locking out a user who refreshes their page.
    - **Roles and moderation**: Handled cryptographically by `roles(...)`,
      `room.grantRole()`, `roles` filters on `makeAction` / `makeState`, and
      `room.ban()`. These authorize actions and enforce bans after joining; they
@@ -309,16 +308,18 @@ Previously, capping a room (for example, a 2-player game) required tracking peer
 counts inside `onPeerHandshake` and rejecting latecomers—which suffered from
 race conditions and locked out players who refreshed their browser tab.
 
-In 0.27.0, pass `limit` to `joinRoom()`. Capacity is tracked by unique
-**`userId`**, so a player who refreshes their tab reuses their existing user
-slot. Use `identity: 'local'` to share that slot across independently opened
-tabs:
+In 0.27.0, pass `limit` to `joinRoom()` for a best-effort, advisory per-peer
+capacity limit. Each peer refuses new `userId`s once its own view reaches
+`limit` (without ever evicting itself or trusting a stranger's `'room full'` to
+drop other peers), and a player who refreshes their tab reuses their existing
+user slot. Use `identity: 'local'` to share that slot across independently
+opened tabs:
 
 ```js
 const room = joinRoom(
   {
     appId: 'chess-app',
-    limit: 2, // Maximum 2 unique users
+    limit: 2, // Advisory cap of 2 unique users in this peer's view
     identity: 'local' // Shares identity across tabs and future visits
   },
   roomId,

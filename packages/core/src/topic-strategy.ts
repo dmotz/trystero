@@ -1,4 +1,3 @@
-import {shouldActivatePassiveRoom} from './signal-handler'
 import createStrategy from './strategy'
 import {mkErr, toJson} from './utils'
 import type {
@@ -64,8 +63,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   reannounceOnDisconnect = true,
   init,
   subscribeTopic,
-  publishTopic,
-  unpublishTopic
+  publishTopic
 }: TopicStrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> =>
   createStrategy<TRelay, TConfig>({
     init,
@@ -87,92 +85,44 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           makeTopicContext(context, 'signal', rootTopic, selfTopic)
         )
 
-      let selfCleanup: (() => void) | null = null
-      let selfCleanupDone = false
-      let selfSubscriptionP: Promise<void> | null = null
       let didCleanup = false
-
-      const cleanupSelf = (cleanup: () => void): void => {
-        if (selfCleanupDone) {
-          return
+      const forwardMessage = (
+        topic: string,
+        msg: Parameters<typeof onMessage>[1]
+      ) => {
+        if (!didCleanup) {
+          return onMessage(topic, msg, signalPeer)
         }
-
-        selfCleanupDone = true
-        cleanup()
       }
 
-      const ensureSelfSubscription = (): Promise<void> => {
-        if (!selfSubscriptionP) {
-          selfSubscriptionP = Promise.resolve(
-            subscribeTopic(
-              relay,
-              selfTopic,
-              (topic, msg) => {
-                if (!didCleanup) {
-                  void onMessage(topic, msg, signalPeer)
-                }
-              },
-              makeTopicContext(context, 'self', rootTopic, selfTopic)
-            )
-          ).then(cleanup => {
-            selfCleanup = cleanup
-
-            if (didCleanup) {
-              cleanupSelf(cleanup)
-            }
-          })
-        }
-
-        return selfSubscriptionP
-      }
-
-      if (!context.isPassive) {
-        await ensureSelfSubscription()
-      }
+      const selfCleanup = await subscribeTopic(
+        relay,
+        selfTopic,
+        forwardMessage,
+        makeTopicContext(context, 'self', rootTopic, selfTopic)
+      )
 
       const rootCleanup = await subscribeTopic(
         relay,
         rootTopic,
-        async (topic, msg) => {
-          if (didCleanup) {
-            return
-          }
-
-          if (
-            context.isPassive &&
-            shouldActivatePassiveRoom(msg, requirePeerId(context))
-          ) {
-            await ensureSelfSubscription()
-          }
-
-          if (!didCleanup) {
-            await onMessage(topic, msg, signalPeer)
-          }
-        },
+        forwardMessage,
         makeTopicContext(context, 'root', rootTopic, selfTopic)
       )
 
       return () => {
         didCleanup = true
-
-        if (selfCleanup) {
-          cleanupSelf(selfCleanup)
-        } else {
-          void selfSubscriptionP
-        }
-
+        selfCleanup()
         rootCleanup()
       }
     },
 
-    announce: async (relay, rootTopic, selfTopic, extraPayload, rawContext) => {
+    announce: async (relay, rootTopic, selfTopic, rawContext) => {
       const context = requireContext(rawContext)
       const result = await publishTopic(
         relay,
         rootTopic,
         toJson({
-          peerId: requirePeerId(context),
-          ...extraPayload
+          peerId: requirePeerId(context)
         }),
         makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )
@@ -197,19 +147,5 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         nextAnnounceMs: steadyAnnounceIntervalMs,
         reannounceOnDisconnect
       }
-    },
-
-    ...(unpublishTopic
-      ? {
-          deactivate: (relay, rootTopic, selfTopic, rawContext) => {
-            const context = requireContext(rawContext)
-
-            return unpublishTopic(
-              relay,
-              rootTopic,
-              makeTopicContext(context, 'announce', rootTopic, selfTopic)
-            )
-          }
-        }
-      : {})
+    }
   })

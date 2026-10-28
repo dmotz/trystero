@@ -242,21 +242,24 @@ void test(
 )
 
 void test(
-  'Trystero: createTopicStrategy leaves passive self topic unsubscribed until activation',
+  'Trystero: createTopicStrategy subscribes passive rooms to self and root without announcing',
   {timeout: 10_000},
   async () => {
     const subscriptions = []
+    const published = []
     const joinRoom = createTopicStrategy({
       init: () => ({}),
       subscribeTopic: (_relay, topic, onMessage, context) => {
         subscriptions.push({topic, onMessage, kind: context.kind})
         return () => {}
       },
-      publishTopic: () => {}
+      publishTopic: (_relay, topic, msg, context) => {
+        published.push({topic, msg, kind: context.kind})
+      }
     })
     const room = joinRoom(
       {
-        appId: `topic-passive-lazy-${Date.now()}`,
+        appId: `topic-passive-${Date.now()}`,
         passive: true,
         rtcPolyfill: MockRTCPeerConnection as any
       },
@@ -264,10 +267,25 @@ void test(
     )
 
     try {
-      await waitFor(() => subscriptions.length === 1)
+      await waitFor(() => subscriptions.length === 2)
       assert.deepEqual(
         subscriptions.map(sub => sub.kind),
-        ['root']
+        ['self', 'root']
+      )
+      await wait(100)
+      assert.equal(
+        published.filter(msg => msg.kind === 'announce').length,
+        0,
+        'passive room should never publish root announcements'
+      )
+
+      const root = subscriptions.find(sub => sub.kind === 'root')
+      await root.onMessage(root.topic, {peerId: '~active-peer'})
+      await waitFor(() => published.some(msg => msg.kind === 'signal'))
+      assert.equal(
+        published.filter(msg => msg.kind === 'announce').length,
+        0,
+        'passive room should respond via signal without starting root announcements'
       )
     } finally {
       await room.leave().catch(() => {})
@@ -276,7 +294,7 @@ void test(
 )
 
 void test(
-  'Trystero: createTopicStrategy subscribes active self topic before root topic',
+  'Trystero: createTopicStrategy subscribes self topic before root topic',
   {timeout: 10_000},
   async () => {
     const order = []
@@ -317,7 +335,7 @@ void test(
 )
 
 void test(
-  'Trystero: createTopicStrategy has active self topic ready before first direct SDP',
+  'Trystero: createTopicStrategy has self topic ready before first direct SDP',
   {timeout: 10_000},
   async () => {
     let resolveSelfSubscribe
@@ -369,112 +387,6 @@ void test(
         false,
         'ephemeral direct SDP should have a self-topic listener before root discovery begins'
       )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: createTopicStrategy awaits passive self subscription before activation',
-  {timeout: 10_000},
-  async () => {
-    let resolveSelfSubscribe
-    let selfSubscribeStarted = false
-    const subscriptions = []
-    const published = []
-    const selfReady = new Promise<void>(res => {
-      resolveSelfSubscribe = res
-    })
-    const joinRoom = createTopicStrategy({
-      init: () => ({}),
-      subscribeTopic: async (_relay, topic, onMessage, context) => {
-        if (context.kind === 'self') {
-          selfSubscribeStarted = true
-          await selfReady
-        }
-
-        subscriptions.push({topic, onMessage, kind: context.kind})
-        return () => {}
-      },
-      publishTopic: (_relay, topic, msg, context) => {
-        published.push({topic, msg, kind: context.kind})
-      }
-    })
-    const room = joinRoom(
-      {
-        appId: `topic-passive-await-self-${Date.now()}`,
-        passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
-      },
-      'room'
-    )
-
-    try {
-      await waitFor(() => subscriptions.some(sub => sub.kind === 'root'))
-
-      const root = subscriptions.find(sub => sub.kind === 'root')
-      const pending = root.onMessage(root.topic, {peerId: 'active-peer'})
-
-      await wait(50)
-      assert.equal(selfSubscribeStarted, true)
-      assert.equal(
-        published.length,
-        0,
-        'activation should wait until self-topic subscription is ready'
-      )
-
-      resolveSelfSubscribe()
-      await pending
-      await waitFor(() => published.some(msg => msg.kind === 'announce'))
-
-      const announce = published.find(msg => msg.kind === 'announce')
-      assert.equal(JSON.parse(announce.msg).passive, true)
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: createTopicStrategy ignores passive discovery without self subscription',
-  {timeout: 10_000},
-  async () => {
-    let selfSubscribeStarted = false
-    const subscriptions = []
-    const published = []
-    const joinRoom = createTopicStrategy({
-      init: () => ({}),
-      subscribeTopic: (_relay, topic, onMessage, context) => {
-        if (context.kind === 'self') {
-          selfSubscribeStarted = true
-        }
-
-        subscriptions.push({topic, onMessage, kind: context.kind})
-        return () => {}
-      },
-      publishTopic: (_relay, topic, msg, context) => {
-        published.push({topic, msg, kind: context.kind})
-      }
-    })
-    const room = joinRoom(
-      {
-        appId: `topic-passive-ignore-${Date.now()}`,
-        passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
-      },
-      'room'
-    )
-
-    try {
-      await waitFor(() => subscriptions.some(sub => sub.kind === 'root'))
-
-      const root = subscriptions.find(sub => sub.kind === 'root')
-      await root.onMessage(root.topic, {peerId: 'passive-peer', passive: true})
-      await wait(100)
-
-      assert.equal(selfSubscribeStarted, false)
-      assert.equal(published.length, 0)
     } finally {
       await room.leave().catch(() => {})
     }

@@ -1966,7 +1966,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       hostAuth.fingerprint,
       computeUserIdFingerprint(hostIdentity.userId)
     )
-    assert.equal(hostAuth.roomId, `game-lobby.~${hostAuth.fingerprint}`)
+    assert.equal(hostAuth.roomId, `game-lobby~${hostAuth.fingerprint}`)
     assert.equal(hostAuth.isAdmin, true)
     assert.deepEqual(hostAuth.roles, ['admin'])
     assert.equal(hostAuth.userId, hostIdentity.userId)
@@ -1982,7 +1982,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     )
     createdRooms.push(dottedRoom)
 
-    // Joining a self-certifying roomId (. ~ separator) WITHOUT roles() throws an error
+    // Joining a self-certifying roomId (~ separator) WITHOUT roles() throws an error
     assert.throws(
       () =>
         joinRoom(
@@ -2635,8 +2635,8 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     roomB1.fingerprint,
     'same UserIdentity must deterministically derive the same self-certifying fingerprint'
   )
-  assert.equal(roomA1.roomId, `lobby.~${roomA1.fingerprint}`)
-  assert.equal(roomB1.roomId, `general.~${roomB1.fingerprint}`)
+  assert.equal(roomA1.roomId, `lobby~${roomA1.fingerprint}`)
+  assert.equal(roomB1.roomId, `general~${roomB1.fingerprint}`)
   assert.notEqual(
     roomA1.fingerprint,
     roomOther.fingerprint,
@@ -4879,8 +4879,6 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     selfId: 'honest-self',
     selfIdP: Promise.resolve('honest-self'),
     isLeaving: () => false,
-    isPassive: false,
-    isActive: true,
     announceIntervals: [],
     announceIntervalMs: 1_000,
     toPlain: async s => {
@@ -4907,7 +4905,6 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     }),
     connectPeer: () => {},
     disconnectPeer: () => {},
-    checkDeactivate: () => {},
     onJoinError: undefined,
     onPeerDiscovered: () => {
       discoveredCount++

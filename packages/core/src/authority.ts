@@ -147,7 +147,7 @@ export const formatSelfCertifyingRoomId = (
   if (parsed.fingerprint === fingerprint) {
     return baseRoomId
   }
-  return `${baseRoomId}.~${fingerprint}`
+  return `${baseRoomId}~${fingerprint}`
 }
 
 export const createAdminRoom = async (

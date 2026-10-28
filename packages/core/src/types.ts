@@ -667,7 +667,6 @@ export type StrategyContext<TConfig extends BaseRoomConfig = JoinRoomConfig> = {
   config: TConfig
   appId: string
   roomId: string
-  isPassive: boolean
   peerId?: string
 }
 
@@ -720,15 +719,8 @@ export type StrategyAdapter<
     relay: TRelay,
     rootTopic: string,
     selfTopic: string,
-    extraPayload?: Record<string, unknown>,
     context?: StrategyContext<TConfig>
   ) => MaybePromise<AnnounceResult | void>
-  deactivate?: (
-    relay: TRelay,
-    rootTopic: string,
-    selfTopic: string,
-    context?: StrategyContext<TConfig>
-  ) => MaybePromise<void>
 }
 
 export type TopicStrategyAdapter<
@@ -750,11 +742,6 @@ export type TopicStrategyAdapter<
     msg: StrategyMessage,
     context: TopicPublishContext
   ) => MaybePromise<AnnounceResult | void>
-  unpublishTopic?: (
-    relay: TRelay,
-    topic: string,
-    context: TopicPublishContext
-  ) => MaybePromise<void>
 }
 
 type UnionToIntersection<U> = (
@@ -850,18 +837,14 @@ export type SignalContext = {
   toPlain: (signal: Signal) => Promise<Signal>
   toCipher: (signal: Signal) => Promise<Signal>
   isLeaving: () => boolean
-  isPassive: boolean
-  isActive: boolean
   onJoinError: JoinErrorHandler | undefined
   offerManager: OfferManager
   encryptOffer: (peer: PeerHandle) => Promise<string>
   initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
   connectPeer: (peer: PeerHandle, peerId: string) => void
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
-  checkDeactivate: () => void
   announceIntervals: number[]
   announceIntervalMs: number
-  requeueAnnounce?: () => void
   selfId?: string
   selfIdP?: Promise<string>
   onPeerDiscovered?: (

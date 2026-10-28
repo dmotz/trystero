@@ -939,7 +939,6 @@ export const createOverlayManager = ({
       }
     }
   })
-
   const updateActiveMode = (): void => {
     if (config.mode === 'gossip') {
       currentActiveMode = 'gossip'

@@ -17,6 +17,7 @@ import {
   getConnectedPeerHealth,
   getState,
   markPeerConnected,
+  prunePeerStates,
   resetAnsweringState,
   resetOfferState
 } from './signal-handler'
@@ -57,13 +58,11 @@ import type {
 
 const announceIntervalMs = 5_333
 const announceWarmupIntervalsMs = [233, 533, 1_333] as const
-const passiveActivationGraceMs = 7_533
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   init,
   subscribe,
-  announce,
-  deactivate
+  announce
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
   const occupiedRooms: Record<
     string,
@@ -280,29 +279,17 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
       markPeerConnected(state, peer)
 
-      if (isPassive && !ctx.isActive) {
-        ctx.isActive = true
-
-        if (ctx.requeueAnnounce) {
-          ctx.requeueAnnounce()
-        } else {
-          passiveActivationTimeout = resetTimer(passiveActivationTimeout)
-          passiveActivationTimeout = setTimeout(
-            checkDeactivate,
-            passiveActivationGraceMs
-          )
-        }
-      }
-
       onPeerConnect(peer, peerId)
       resetOfferState(state)
 
       if (peer.isDead && state.connectedPeer === peer) {
         detachConnectedPeer(state, peer)
-        checkDeactivate()
+        prunePeerStates(ctx.peerStates)
       }
     }
 
+    const isPassive = Boolean(config.passive)
+    let requeueAnnounce = noOp
     let disconnectReannounceQueued = false
     const reannounceAfterDisconnect = (): void => {
       syncOverlayNeighbors()
@@ -314,7 +301,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       queueMicrotask(() => {
         disconnectReannounceQueued = false
         if (!didLeaveRoom) {
-          ctx.requeueAnnounce?.()
+          requeueAnnounce()
         }
       })
     }
@@ -329,47 +316,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       if (state?.connectedPeer === peer) {
         DEV: log('peer disconnected:', peerId)
         clearConnectedPeer(state, peerId, 'close-event')
-        checkDeactivate()
+        prunePeerStates(ctx.peerStates)
 
         reannounceAfterDisconnect()
-      }
-    }
-
-    const isPassive = Boolean(config.passive)
-    let passiveActivationTimeout:
-      | ReturnType<typeof setTimeout>
-      | null
-      | undefined
-    let deactivateRelayAnnouncements = noOp
-
-    const checkDeactivate = (): void => {
-      if (!isPassive || !ctx.isActive) {
-        return
-      }
-
-      let hasActiveWork = false
-
-      entries(ctx.peerStates).forEach(([peerId, state]) => {
-        const isActive =
-          state.connectedPeer ||
-          state.answeringPeer ||
-          state.offerInitPromise ||
-          state.offerPeer ||
-          state.offerRelays.some(Boolean)
-
-        if (isActive) {
-          hasActiveWork = true
-        } else {
-          delete ctx.peerStates[peerId]
-        }
-      })
-
-      if (!hasActiveWork) {
-        ctx.isActive = false
-        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
-        announceTimeouts.forEach(resetTimer)
-        announceTimeouts.length = 0
-        deactivateRelayAnnouncements()
       }
     }
 
@@ -384,15 +333,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       toPlain,
       toCipher,
       isLeaving: () => didLeaveRoom || isLeavingRoom,
-      isPassive,
-      isActive: !isPassive,
       onJoinError,
       offerManager,
       encryptOffer,
       initPeer,
       connectPeer,
       disconnectPeer,
-      checkDeactivate,
       announceIntervals: [],
       announceIntervalMs,
       ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
@@ -412,7 +358,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       config,
       appId,
       roomId,
-      isPassive,
       ...(forcedPeerId ? {peerId: forcedPeerId} : {})
     }
 
@@ -444,139 +389,118 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       )
     )
 
-    void all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
-      if (didLeaveRoom) {
-        return
-      }
-
-      const queueAnnounce = async (relay: TRelay, i: number): Promise<void> => {
+    if (!isPassive) {
+      void all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
         if (didLeaveRoom) {
           return
         }
 
-        if (isPassive && !ctx.isActive) {
-          return
-        }
-
-        const extra = isPassive ? {passive: true} : undefined
-        let announceResult: Awaited<
-          ReturnType<StrategyAdapter<TRelay, TConfig>['announce']>
-        > = undefined
-
-        try {
-          announceResult = await announce(
-            relay,
-            rootTopic,
-            selfTopic,
-            extra,
-            strategyContext
-          )
-          announceErrorStreaks[i] = 0
-        } catch (error) {
+        const queueAnnounce = async (
+          relay: TRelay,
+          i: number
+        ): Promise<void> => {
           if (didLeaveRoom) {
             return
           }
 
-          const errorStreak = announceErrorStreaks[i] ?? 0
+          let announceResult: Awaited<
+            ReturnType<StrategyAdapter<TRelay, TConfig>['announce']>
+          > = undefined
 
-          if (
-            errorStreak === 0 &&
-            config.relayConfig?.warnOnRelayFailure !== false
-          ) {
-            warn(`announce failed - ${toErrorMessage(error, '')}`)
+          try {
+            announceResult = await announce(
+              relay,
+              rootTopic,
+              selfTopic,
+              strategyContext
+            )
+            announceErrorStreaks[i] = 0
+          } catch (error) {
+            if (didLeaveRoom) {
+              return
+            }
+
+            const errorStreak = announceErrorStreaks[i] ?? 0
+
+            if (
+              errorStreak === 0 &&
+              config.relayConfig?.warnOnRelayFailure !== false
+            ) {
+              warn(`announce failed - ${toErrorMessage(error, '')}`)
+            }
+
+            announceErrorStreaks[i] = errorStreak + 1
           }
 
-          announceErrorStreaks[i] = errorStreak + 1
-        }
-
-        if (didLeaveRoom || (isPassive && !ctx.isActive)) {
-          return
-        }
-
-        if (typeof announceResult === 'number') {
-          ctx.announceIntervals[i] = announceResult
-          announceScheduleIntervals[i] = announceResult
-        } else if (
-          typeof announceResult === 'object' &&
-          announceResult !== null
-        ) {
-          if ('stopAnnouncing' in announceResult) {
+          if (didLeaveRoom) {
             return
           }
-          announceScheduleIntervals[i] = announceResult.nextAnnounceMs
-          reannounceOnDisconnect ||=
-            announceResult.reannounceOnDisconnect === true
-        }
 
-        const announceAttempt = announceAttemptCounts[i] ?? 0
-        announceAttemptCounts[i] = announceAttempt + 1
-        const currentInterval =
-          announceScheduleIntervals[i] ?? announceIntervalMs
-        // Topic discovery gets one later recovery pulse. Numeric intervals
-        // (e.g. tracker-requested pacing) must retain their own cadence.
-        const warmupDelay =
-          announceWarmupIntervalsMs[announceAttempt] ??
-          (announceAttempt === 3 && typeof announceResult === 'object'
-            ? announceIntervalMs
-            : undefined)
-        const nextAnnounceDelayMs =
-          typeof warmupDelay === 'number'
-            ? Math.min(currentInterval, warmupDelay)
-            : currentInterval
-
-        announceTimeouts[i] = setTimeout(() => {
-          void queueAnnounce(relay, i)
-        }, nextAnnounceDelayMs)
-      }
-
-      deactivateRelayAnnouncements = () => {
-        if (!deactivate) {
-          return
-        }
-
-        initPromises.forEach(async relayP => {
-          const relay = await relayP
-
-          if (!didLeaveRoom) {
-            void deactivate(relay, rootTopic, selfTopic, strategyContext)
+          if (typeof announceResult === 'number') {
+            ctx.announceIntervals[i] = announceResult
+            announceScheduleIntervals[i] = announceResult
+          } else if (
+            typeof announceResult === 'object' &&
+            announceResult !== null
+          ) {
+            if ('stopAnnouncing' in announceResult) {
+              return
+            }
+            announceScheduleIntervals[i] = announceResult.nextAnnounceMs
+            reannounceOnDisconnect ||=
+              announceResult.reannounceOnDisconnect === true
           }
-        })
-      }
 
-      ctx.requeueAnnounce = () => {
-        announceTimeouts.forEach(resetTimer)
-        announceTimeouts.length = 0
-        passiveActivationTimeout = resetTimer(passiveActivationTimeout)
+          const announceAttempt = announceAttemptCounts[i] ?? 0
+          announceAttemptCounts[i] = announceAttempt + 1
+          const currentInterval =
+            announceScheduleIntervals[i] ?? announceIntervalMs
+          // Topic discovery gets one later recovery pulse. Numeric intervals
+          // (e.g. tracker-requested pacing) must retain their own cadence.
+          const warmupDelay =
+            announceWarmupIntervalsMs[announceAttempt] ??
+            (announceAttempt === 3 && typeof announceResult === 'object'
+              ? announceIntervalMs
+              : undefined)
+          const nextAnnounceDelayMs =
+            typeof warmupDelay === 'number'
+              ? Math.min(currentInterval, warmupDelay)
+              : currentInterval
 
-        passiveActivationTimeout = setTimeout(
-          checkDeactivate,
-          passiveActivationGraceMs
-        )
+          announceTimeouts[i] = setTimeout(() => {
+            void queueAnnounce(relay, i)
+          }, nextAnnounceDelayMs)
+        }
 
-        initPromises.forEach(async (relayP, i) => {
-          const relay = await relayP
+        requeueAnnounce = () => {
+          announceTimeouts.forEach(resetTimer)
+          announceTimeouts.length = 0
+
+          initPromises.forEach(async (relayP, i) => {
+            const relay = await relayP
+
+            if (relay && !didLeaveRoom) {
+              announceAttemptCounts[i] = 0
+              void queueAnnounce(relay, i)
+            }
+          })
+        }
+
+        unsubFns.forEach(async (didSub, i) => {
+          await didSub
+
+          if (didLeaveRoom) {
+            return
+          }
+
+          const relay = await initPromises[i]
 
           if (relay && !didLeaveRoom) {
-            announceAttemptCounts[i] = 0
             void queueAnnounce(relay, i)
           }
         })
-      }
-
-      unsubFns.forEach(async (didSub, i) => {
-        await didSub
-
-        if (didLeaveRoom) {
-          return
-        }
-
-        const relay = await initPromises[i]
-
-        if (relay && !didLeaveRoom && (!isPassive || ctx.isActive)) {
-          void queueAnnounce(relay, i)
-        }
       })
-    })
+    }
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
 
@@ -657,7 +581,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       })
 
       announceTimeouts.forEach(resetTimer)
-      passiveActivationTimeout = resetTimer(passiveActivationTimeout)
       unsubFns.forEach(async f => {
         const cleanup = await f
         cleanup()
@@ -720,7 +643,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             detachConnectedPeer(state, state.connectedPeer)
           }
 
-          checkDeactivate()
+          prunePeerStates(ctx.peerStates)
           // Shared-peer close handlers reach the room callback, not disconnectPeer.
           reannounceAfterDisconnect()
         },
@@ -730,7 +653,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     } catch (err) {
       didLeaveRoom = true
       announceTimeouts.forEach(resetTimer)
-      passiveActivationTimeout = resetTimer(passiveActivationTimeout)
       unsubFns.forEach(async f => {
         const cleanup = await f
         cleanup()

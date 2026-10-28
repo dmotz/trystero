@@ -8,10 +8,10 @@
   plugin for `joinRoom({appId, use: [scale()]})`, connecting peers directly in
   small groups (`<= 12` peers) and automatically switching to a bounded-degree
   `'gossip'` relay overlay (`maxConnections: 6` by default) as rooms grow to
-  dozens or hundreds of peers. You can also opt into `'mesh'` or `'gossip'`, or
-  pass a `ScaleConfig` object (`{mode, maxConnections, autoThreshold, fanout}`)
-  to customize connection limits. Apps that do not import `scale()` tree-shake
-  the entire overlay plugin out of their bundle.
+  dozens or hundreds of peers. You can also opt into `'gossip'`, or pass a
+  `ScaleConfig` object (`{mode, maxConnections, autoThreshold, fanout}`) to
+  customize connection limits. Apps that do not import `scale()` tree-shake the
+  entire overlay plugin out of their bundle.
 - All room APIs (`makeAction`, `makeState`, `addStream`, `replaceTrack`, `ping`,
   `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work transparently across both
   direct and multi-hop peers. Broadcast media in scalable topologies routes
@@ -29,9 +29,9 @@
   `joinRoom({appId, use: [roles(...)]})` (`roles()`,
   `roles({selfAsAdmin: true})`, and `roles({admins: [...]})`) for zero-trust
   public-key room administration unified with user identity (`userId`). Passing
-  `roles({selfAsAdmin: true})` appends a `.~` separator and 16-character Base62
+  `roles({selfAsAdmin: true})` appends a `~` separator and 16-character Base62
   fingerprint suffix derived from the host's `userId` to the room ID
-  (`<roomId>.~<fingerprint>`) so guests automatically verify the room creator
+  (`<roomId>~<fingerprint>`) so guests automatically verify the room creator
   from the invite room ID alone (when joining with `use: [roles()]`), and the
   host automatically regains admin authority when rejoining with the same
   persistent `userId`. Joining a fingerprinted room ID without `roles()` throws
@@ -56,9 +56,10 @@
   with optional custom `validate` rules. Existing peers automatically sync the
   latest signed state snapshot to late joiners even after the admin has left the
   room.
-- 🚪 **Room size limits** - added `limit` to room config to cap the maximum
-  number of unique users in a room (including the local user). When a room is at
-  capacity, additional joiners are rejected on that peer link during handshake
+- 🚪 **Room size limits** - added `limit` to room config for a best-effort,
+  advisory per-peer cap on the number of unique users in a peer's room view
+  (including the local user). When a peer's view is at capacity, additional
+  joiners with a new `userId` are rejected on that peer link during handshake
   before triggering `onPeerJoin` on existing members and receive
   `error: 'room full'` via `onJoinError`.
 - 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every

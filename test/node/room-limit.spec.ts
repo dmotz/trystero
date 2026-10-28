@@ -512,7 +512,7 @@ void test(
 )
 
 void test(
-  'Trystero: simultaneous burst join with 5 peers on a limit: 2 room admits exactly 2 and rejects 3 with "room full"',
+  'Trystero: advisory burst join caps each peer view at limit without self-eviction, and burst newcomers cannot evict existing peers',
   {timeout: 10_000},
   async () => {
     const {makeJoinRoom} = createMemorySignalBus()
@@ -530,7 +530,7 @@ void test(
       }
     >()
 
-    // Launch all 5 peers concurrently in the same tick
+    // Launch all 5 peers concurrently in the same tick on an empty limit: 2 room
     for (const peerId of peerIds) {
       const joinRoom = makeJoinRoom()
       const errors: any[] = []
@@ -551,70 +551,115 @@ void test(
       stateByPeer.set(peerId, {room, errors, joins, leaves})
     }
 
+    const burstNewcomers: any[] = []
     try {
-      await waitFor(() => {
-        const rejectedCount = [...stateByPeer.values()].filter(
-          s => s.errors.length > 0
-        ).length
-        const admittedCount = [...stateByPeer.values()].filter(
-          s =>
-            s.errors.length === 0 && Object.keys(s.room.getPeers()).length === 1
-        ).length
-        return rejectedCount === 3 && admittedCount === 2
-      }, 4_000)
+      await waitFor(
+        () =>
+          Object.keys(stateByPeer.get('peer-1')!.room.getPeers()).length ===
+            1 &&
+          Object.keys(stateByPeer.get('peer-2')!.room.getPeers()).length ===
+            1 &&
+          stateByPeer.get('peer-5')!.errors.length > 0,
+        4_000
+      )
 
       await wait(120)
 
-      const winners = peerIds.filter(
-        id => stateByPeer.get(id)!.errors.length === 0
-      )
-      const losers = peerIds.filter(
-        id => stateByPeer.get(id)!.errors.length > 0
-      )
-
-      assert.equal(winners.length, 2, 'expected exactly 2 winners')
-      assert.equal(losers.length, 3, 'expected exactly 3 losers')
-
-      const [w1, w2] = winners
-      assert.deepEqual(
-        Object.keys(stateByPeer.get(w1!)!.room.getPeers()),
-        [w2],
-        'winner 1 should only be connected to winner 2'
-      )
-      assert.deepEqual(
-        Object.keys(stateByPeer.get(w2!)!.room.getPeers()),
-        [w1],
-        'winner 2 should only be connected to winner 1'
-      )
-      assert.deepEqual(stateByPeer.get(w1!)!.joins, [w2])
-      assert.deepEqual(stateByPeer.get(w2!)!.joins, [w1])
-      assert.deepEqual(stateByPeer.get(w1!)!.leaves, [])
-      assert.deepEqual(stateByPeer.get(w2!)!.leaves, [])
-
-      for (const loserId of losers) {
-        const loser = stateByPeer.get(loserId)!
-        assert.equal(
-          loser.errors.length,
-          1,
-          `loser ${loserId} should receive onJoinError once`
+      // Every peer enforces its own local limit: 2 cap (at most 1 remote peer/user)
+      for (const peerId of peerIds) {
+        const {room} = stateByPeer.get(peerId)!
+        assert.ok(
+          Object.keys(room.getPeers()).length <= 1,
+          `${peerId} must never exceed 1 remote peer for limit: 2`
         )
-        assert.equal(loser.errors[0].error, 'room full')
-        assert.deepEqual(
-          loser.joins,
-          [],
-          `loser ${loserId} must not fire onPeerJoin`
+        assert.ok(
+          Object.keys(room.getUsers()).length <= 1,
+          `${peerId} must never exceed 1 remote user for limit: 2`
         )
       }
-    } finally {
-      await Promise.all(
-        [...stateByPeer.values()].map(({room}) => room.leave().catch(() => {}))
+
+      assert.deepEqual(
+        Object.keys(stateByPeer.get('peer-1')!.room.getPeers()),
+        ['peer-2']
       )
+      assert.deepEqual(
+        Object.keys(stateByPeer.get('peer-2')!.room.getPeers()),
+        ['peer-1']
+      )
+      assert.deepEqual(stateByPeer.get('peer-1')!.errors, [])
+      assert.deepEqual(stateByPeer.get('peer-2')!.errors, [])
+      assert.deepEqual(stateByPeer.get('peer-1')!.leaves, [])
+      assert.deepEqual(stateByPeer.get('peer-2')!.leaves, [])
+
+      // Clean up peer-3, peer-4, peer-5 and test a burst of newcomers (including a lower peerId 'peer-0')
+      // against the established pair (peer-1, peer-2)
+      await Promise.all(
+        ['peer-3', 'peer-4', 'peer-5'].map(id =>
+          stateByPeer
+            .get(id)!
+            .room.leave()
+            .catch(() => {})
+        )
+      )
+      await wait(60)
+
+      const newcomerErrors = new Map<string, any[]>()
+      for (const newcomerId of ['peer-0', 'peer-6', 'peer-7']) {
+        const errs: any[] = []
+        newcomerErrors.set(newcomerId, errs)
+        const room = makeJoinRoom()(
+          {
+            appId,
+            _test_only_forcedPeerId: newcomerId,
+            limit: 2,
+            rtcPolyfill: InMemoryRTCPeerConnection as any
+          },
+          roomId,
+          {onJoinError: err => errs.push(err)}
+        )
+        burstNewcomers.push(room)
+      }
+
+      await waitFor(
+        () =>
+          ['peer-0', 'peer-6', 'peer-7'].every(
+            id => newcomerErrors.get(id)!.length > 0
+          ),
+        3_000
+      )
+      await wait(100)
+
+      for (const newcomerId of ['peer-0', 'peer-6', 'peer-7']) {
+        const errs = newcomerErrors.get(newcomerId)!
+        assert.equal(errs.length, 1)
+        assert.equal(errs[0].error, 'room full')
+      }
+      // Existing pair (peer-1, peer-2) is never evicted by lower peerId 'peer-0'
+      assert.deepEqual(
+        Object.keys(stateByPeer.get('peer-1')!.room.getPeers()),
+        ['peer-2']
+      )
+      assert.deepEqual(
+        Object.keys(stateByPeer.get('peer-2')!.room.getPeers()),
+        ['peer-1']
+      )
+      assert.deepEqual(stateByPeer.get('peer-1')!.errors, [])
+      assert.deepEqual(stateByPeer.get('peer-2')!.errors, [])
+      assert.deepEqual(stateByPeer.get('peer-1')!.leaves, [])
+      assert.deepEqual(stateByPeer.get('peer-2')!.leaves, [])
+    } finally {
+      await Promise.all([
+        ...[...stateByPeer.values()].map(({room}) =>
+          room.leave().catch(() => {})
+        ),
+        ...burstNewcomers.map(room => room.leave().catch(() => {}))
+      ])
     }
   }
 )
 
 void test(
-  'Trystero: per-link rejection semantics: one peer claiming room full does not force newcomer to leave or propagate unauthenticated limit',
+  'Trystero: per-link rejection semantics: one peer claiming room full does not force newcomer to leave or drop other peers even when newcomer has limit set',
   {timeout: 10_000},
   async () => {
     const {makeJoinRoom} = createMemorySignalBus()
@@ -654,7 +699,8 @@ void test(
       {
         appId,
         _test_only_forcedPeerId: 'guest-2',
-        // guest-2 also omits limit and must not self-evict when host-peer rejects
+        // guest-2 has limit: 3 and must not self-evict or drop guest-1 when host-peer rejects as full
+        limit: 3,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,

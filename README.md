@@ -589,24 +589,24 @@ means.
 
 ### Room size limits
 
-Sometimes your app has a strict maximum number of seats per room. For example,
-you might be building:
+Sometimes you want a best-effort cap on how many users each peer accepts into a
+room. For example, you might be building:
 
 - **A 2-player board game** (like chess or Battleship) where a third person
   opening the invite link shouldn't be able to barge into an active match.
-- **A 4-player co-op lobby** that locks once all four party slots are taken.
-- **A private 1-on-1 video call** where only two people can be in the room at a
-  time.
+- **A 4-player co-op lobby** that stops accepting new players once all four
+  party slots are taken.
+- **A private 1-on-1 video call** where only two people connect at a time.
 
-To cap how many unique users (`userId`s, including the local user) can be in a
-room at once, pass `limit` in your `joinRoom()` config and listen for
-`'room full'` in `onJoinError`:
+To set an advisory per-peer limit on how many unique users (`userId`s, including
+the local user) can be in a peer's room view at once, pass `limit` in your
+`joinRoom()` config and listen for `'room full'` in `onJoinError`:
 
 ```js
 const room = joinRoom(
   {
     appId: 'chess-club',
-    limit: 2 // max 2 players in the room (you + 1 opponent)
+    limit: 2 // advisory cap of 2 unique users in this peer's view (you + 1 opponent)
   },
   'match-42',
   {
@@ -619,10 +619,11 @@ const room = joinRoom(
 )
 ```
 
-When a room is already at capacity:
+When a peer's room view is already at capacity:
 
-- Any extra user who tries to join receives `error: 'room full'` in
-  `onJoinError` and that peer connection is closed before activation.
+- Any extra user (`userId`) who tries to connect is refused by that peer before
+  activation, receives `error: 'room full'` in `onJoinError`, and has that peer
+  link closed.
 - Because `limit` counts unique `userId`s rather than raw tabs, an admitted
   player who refreshes the page shares their existing seat. Use `'local'`
   identity or an explicitly shared identity to share that seat across tabs.
@@ -634,21 +635,23 @@ When a room is already at capacity:
 <details>
   <summary>How it works behind the scenes</summary>
 
-- **Pre-activation admission control**: Capacity checks run during the internal
-  admission handshake (after `userId` verification) before a peer is ever added
-  to `getPeers()` or triggers `onPeerJoin`. If the room is already full for a
-  new `userId`, existing members immediately send a `'room full'` rejection and
-  close that pending peer connection.
+- **Best-effort advisory per-peer check**: Without a central server or room
+  admin, capacity is enforced locally by each peer on its own view. When a
+  peer's active unique `userId` count (including itself) reaches `limit`, it
+  refuses new `userId`s during the admission handshake before they are added to
+  `getPeers()` or trigger `onPeerJoin`.
+- **No self-eviction or unverified `'room full'` propagation**: A peer never
+  evicts itself and never drops connections to other peers just because a remote
+  peer claims `'room full'`. A `'room full'` response only closes that single
+  peer link and reports `onJoinError` for that peer. For authoritative roster
+  enforcement backed by a cryptographic trust root, use
+  [`roles()`](#room-admins-roles-and-authoritative-state).
 - **Password privacy**: In password-protected rooms (`config.password`),
   Trystero verifies the password proof _before_ checking room capacity. Users
   with the wrong password receive a password error rather than `'room full'`, so
   outsiders cannot probe whether a private room is full.
-- **Concurrent joins on an empty room**: When multiple peers join an empty room
-  at the same time, seats are admitted in `peerId` order and excess joiners are
-  turned away with `'room full'`. Once a room is established and at capacity,
-  existing members immediately reject new arrivals.
-- **Multi-hop rooms**: When `scale()` is enabled, capacity checks also account
-  for verified multi-hop overlay peers.
+- **Multi-hop rooms**: When `scale()` is enabled, local capacity checks also
+  account for verified multi-hop overlay peers.
 
 </details>
 
@@ -692,18 +695,18 @@ const hostRoom = joinRoom(
 )
 const {roomId} = await hostRoom.getSelf()
 
-// Share `roomId` (e.g. "friday-quiz.~9fX2kLm8pQr7vBn3") in an invite link for friends!
+// Share `roomId` (e.g. "friday-quiz~9fX2kLm8pQr7vBn3") in an invite link for friends!
 ```
 
-When you pass `roles({selfAsAdmin: true})`, Trystero attaches a `.~` separator
+When you pass `roles({selfAsAdmin: true})`, Trystero attaches a `~` separator
 and a 16-character Base62 suffix to your room name (like
-`'friday-quiz.~9fX2kLm8pQr7vBn3'`) derived from the host's `userId`. Think of
+`'friday-quiz~9fX2kLm8pQr7vBn3'`) derived from the host's `userId`. Think of
 that suffix as a built-in digital ID badge for the host.
 
 When friends join using that self-certifying `roomId`, they simply include
 `use: [roles()]` in `joinRoom()`—their browsers automatically check the suffix
 and recognize the host's `userId` as the true admin (joining a fingerprinted
-`<roomId>.~<fingerprint>` without `roles()` throws an error so misconfigured
+`<roomId>~<fingerprint>` without `roles()` throws an error so misconfigured
 clients fail fast):
 
 ```js
@@ -725,7 +728,7 @@ const guestRoom = joinRoom({appId: 'trivia-night', use: [roles()]}, roomId)
 #### 2. Specifying admin `userId`s (fixed room names or co-admins)
 
 What if you want a permanent, memorable room name like `'main-stage'` without a
-`.~<fingerprint>` suffix at the end—or want to designate additional co-admins?
+`~<fingerprint>` suffix at the end—or want to designate additional co-admins?
 
 Pass `admins: [...]` with the trusted admin `userId`s to `roles()`. When an
 admin joins with their matching `identity`, they are automatically recognized as
@@ -849,10 +852,10 @@ admin certificates.
   peer before being accepted.
 - **Self-certifying room IDs**: Both a user's 43-character Base64url `userId`
   and a self-certifying room's 16-character Base62 suffix
-  (`<baseRoomId>.~<16-char-base62>`) are derived from the exact same SHA-256
+  (`<baseRoomId>~<16-char-base62>`) are derived from the exact same SHA-256
   thumbprint of the user's P-256 public key. When you create a room with
   `roles({selfAsAdmin: true})`, Trystero encodes the first 96 bits of your
-  `userId` digest into the room ID suffix after `.~`. When peers connect—or when
+  `userId` digest into the room ID suffix after `~`. When peers connect—or when
   the host rejoins with the same persistent identity—everyone can mathematically
   verify from the `userId` alone who owns the room.
 - **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
@@ -1343,11 +1346,11 @@ the same namespace will return the same room instance.
     name. A custom password must match between any peers in the room for them to
     connect. See [encryption](#encryption) for more details.
 
-  - `limit` - **(optional)** Positive integer capping the maximum total number
-    of unique users (`userId`s) allowed in the room at once (including the local
-    user). When the room is full, additional joiners with a new `userId` are
-    rejected on that peer link before activation and receive
-    `error: 'room full'` via `onJoinError`. See
+  - `limit` - **(optional)** Positive integer setting a best-effort, advisory
+    per-peer cap on the number of unique users (`userId`s) in the peer's room
+    view at once (including the local user). When a peer's view is at capacity,
+    additional joiners with a new `userId` are rejected on that peer link before
+    activation and receive `error: 'room full'` via `onJoinError`. See
     [room size limits](#room-size-limits) for more details.
 
   - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
@@ -1356,11 +1359,11 @@ the same namespace will return the same room instance.
     files or lower it to reduce memory use.
 
   - `passive` - **(optional)** Boolean for backup or relay peers that should
-    listen for active peers without announcing themselves while a room is
-    dormant. Passive peers activate only after hearing a non-passive peer and
-    include a passive flag in their signaling so passive peers do not connect to
-    each other. For BitTorrent, dormant passive rooms announce as seeders
-    (`left: 0`) without offers, which avoids passive-to-passive discovery while
+    listen for active peers without broadcasting room presence announcements.
+    Passive peers respond directly to active peers that announce or send offers,
+    so passive peers never discover or connect to each other. For BitTorrent,
+    passive rooms register with trackers as seeders (`left: 0`) without
+    generating outgoing offers, which avoids passive-to-passive discovery while
     keeping tracker load low.
 
   - `identity` - **(optional)** Controls how the local user's `userId` is loaded
@@ -1474,7 +1477,7 @@ Returns an object with the following properties and methods:
   room:
   - `peerId` - The 20-character Base62 endpoint ID.
   - `userId` - The local user's 43-character Base64url user identity thumbprint.
-  - `roomId` - The full room ID (including the `.~<16-char-base62-fingerprint>`
+  - `roomId` - The full room ID (including the `~<16-char-base62-fingerprint>`
     suffix when created with `roles({selfAsAdmin: true})`).
   - `baseRoomId` - The base room name without the fingerprint suffix.
   - `fingerprint` - The 16-character Base62 admin fingerprint from the room ID,
@@ -1792,9 +1795,9 @@ Creates the opt-in room authority plugin (`RoomPlugin<'roles', RolesPluginApi>`)
 for `joinRoom()`. Pass in `use: [roles(config)]`:
 
 - `roles()` - Enables role and state verification for a participant joining a
-  room (required when joining a self-certifying `<roomId>.~<fingerprint>`).
+  room (required when joining a self-certifying `<roomId>~<fingerprint>`).
 - `roles({selfAsAdmin: true})` - Makes the local user (`userId`) a root room
-  admin and appends `.~<16-char-base62-fingerprint>` to `roomId`. Pair with
+  admin and appends `~<16-char-base62-fingerprint>` to `roomId`. Pair with
   `identity: 'local'` or a persistent `UserIdentity`.
 - `roles({admins: [userId1, userId2]})` - Trusts the specified `userId`s (or
   16-character Base62 fingerprints) as root room admins on either a fixed room
@@ -1846,8 +1849,8 @@ browser storage (`'session'` or `'local'`).
 
 Resolves a `UserIdentity` for `appId` (from `options.identity`, defaulting to
 `'local'` when persistent browser storage is available) and formats a
-self-certifying room ID (`<baseRoomId>.~<fingerprint>`), returning a promise
-that resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
+self-certifying room ID (`<baseRoomId>~<fingerprint>`), returning a promise that
+resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
 
 ### `getRelaySockets()`
 

@@ -24,7 +24,7 @@ import {
   verifyUserEndpointProof,
   verifyUserIdKey
 } from '../../packages/core/src/identity.ts'
-import {waitFor} from './peer-harness.ts'
+import {wait, waitFor} from './peer-harness.ts'
 
 class LinkedDataChannel {
   label: string
@@ -1186,13 +1186,13 @@ void test(
       )
       assert.equal('peer-attacker-2' in adminRoom.getPeers(), false)
 
-      // Newcomer advertising limit: 1 cannot eject established members of an unlimited room
+      // Newcomer advertising limit: 1 refuses other users locally without self-evicting or ejecting established members
       const limiterUser = await createUserIdentity()
       const limiterErrors: any[] = []
       limiterRoom = makeJoinRoom()(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-limiter',
+          _test_only_forcedPeerId: 'peer-000-limiter',
           identity: limiterUser,
           use: [roles()],
           limit: 1,
@@ -1202,8 +1202,10 @@ void test(
         {onJoinError: err => limiterErrors.push(err)}
       )
 
-      await waitFor(() => limiterErrors.length > 0, 3_000)
-      assert.equal(limiterErrors[0].error, 'room full')
+      await wait(200)
+      assert.deepEqual(limiterErrors, [])
+      assert.deepEqual(Object.keys(limiterRoom.getPeers()), [])
+      assert.equal('peer-000-limiter' in adminRoom.getPeers(), false)
       // Established members (admin + alice) must remain connected!
       assert.equal('peer-alice-1' in adminRoom.getPeers(), true)
       assert.equal('peer-alice-2' in adminRoom.getPeers(), true)

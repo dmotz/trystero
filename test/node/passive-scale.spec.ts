@@ -198,11 +198,12 @@ void test(
 )
 
 void test(
-  'Trystero: activating one passive room does not activate all passive rooms',
+  'Trystero: signaling one passive room only triggers a response in that room and never announces',
   {timeout: 120_000},
   async () => {
     const roomCount = 100
-    const announcePayloads: Map<string, number> = new Map()
+    let announceCount = 0
+    const signaledRooms = new Set<number>()
     const subscribers: Subscriber[] = []
 
     const joinRoom = createStrategy({
@@ -211,15 +212,12 @@ void test(
         subscribers.push({rootTopic, selfTopic, onMessage})
         return () => {}
       },
-      announce: (_relay, rootTopic) => {
-        announcePayloads.set(
-          rootTopic,
-          (announcePayloads.get(rootTopic) ?? 0) + 1
-        )
+      announce: () => {
+        announceCount++
       }
     })
 
-    const appId = `scale-selective-activation-${Date.now()}`
+    const appId = `scale-selective-signal-${Date.now()}`
     const config = {
       appId,
       passive: true,
@@ -233,28 +231,16 @@ void test(
 
     await waitFor(() => subscribers.length >= roomCount, 60_000)
 
-    // Activate only room-0 by sending it an announcement
     const sub0 = subscribers[0]
-    await sub0.onMessage(sub0.rootTopic, {peerId: 'active-peer'}, () => {})
+    await sub0.onMessage(sub0.rootTopic, {peerId: '~active-peer'}, () => {
+      signaledRooms.add(0)
+    })
 
-    await waitFor(() => announcePayloads.size > 0, 5_000)
+    await waitFor(() => signaledRooms.size > 0, 5_000)
     await wait(300)
 
-    // Only room-0's topic should have announced
-    assert.equal(
-      announcePayloads.size,
-      1,
-      `expected 1 topic to announce, got ${announcePayloads.size}`
-    )
-    assert.ok(
-      announcePayloads.has(sub0.rootTopic),
-      'only the activated room should announce'
-    )
-
-    console.log(
-      `  activated 1 of ${roomCount} rooms, ` +
-        `${announcePayloads.size} topic(s) announced`
-    )
+    assert.equal(announceCount, 0, 'passive rooms should never announce')
+    assert.deepEqual([...signaledRooms], [0])
 
     // Clean up
     await Promise.all(rooms.map(room => room.leave().catch(() => {})))

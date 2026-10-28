@@ -23,10 +23,7 @@ type TopicState = {
   announce: () => void | Promise<void>
   announceMs: number
   handler: (data: TrackerMessage) => void
-  isActive: boolean
   peerId: string
-  startPassiveAnnouncements: () => void
-  stopPassiveAnnouncements: () => void
   token: symbol
 }
 
@@ -261,14 +258,11 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   subscribe: (client, rootTopic, _, onMessage, getOffers, context) => {
     const states = topicStates.forRelay(client)
     const subscriptionToken = Symbol(rootTopic)
+    const isPassive = Boolean(context?.config.passive)
 
     roomSubscriberCounts[rootTopic] = (roomSubscriberCounts[rootTopic] ?? 0) + 1
 
     let passiveAnnounceTimeout: ReturnType<typeof setTimeout> | undefined
-    const stopPassiveAnnouncements = (): void => {
-      clearTimeout(passiveAnnounceTimeout)
-      passiveAnnounceTimeout = undefined
-    }
     const peerId = context?.peerId ?? ''
     const topicState: TopicState = {
       announce: async () => {
@@ -276,7 +270,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           return
         }
 
-        if (!topicState.isActive) {
+        if (isPassive) {
           void send(client, rootTopic, peerId, {
             left: 0,
             numwant: requestedPeers,
@@ -300,10 +294,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           throw error
         }
 
-        if (
-          states[rootTopic]?.token !== subscriptionToken ||
-          !topicState.isActive
-        ) {
+        if (states[rootTopic]?.token !== subscriptionToken) {
           return
         }
 
@@ -355,36 +346,32 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
           }
         }
       },
-      isActive: !context?.isPassive,
       peerId,
-      startPassiveAnnouncements: (): void => {
-        stopPassiveAnnouncements()
-
-        if (
-          states[rootTopic]?.token !== subscriptionToken ||
-          topicState.isActive
-        ) {
-          return
-        }
-
-        void topicState.announce()
-        passiveAnnounceTimeout = setTimeout(
-          topicState.startPassiveAnnouncements,
-          Math.max(topicState.announceMs, dormantAnnounceMs)
-        )
-      },
-      stopPassiveAnnouncements,
       token: subscriptionToken
     }
 
     states[rootTopic] = topicState
 
-    if (!topicState.isActive) {
-      topicState.startPassiveAnnouncements()
+    if (isPassive) {
+      const schedulePassiveAnnounce = (): void => {
+        clearTimeout(passiveAnnounceTimeout)
+
+        if (states[rootTopic]?.token !== subscriptionToken) {
+          return
+        }
+
+        void topicState.announce()
+        passiveAnnounceTimeout = setTimeout(
+          schedulePassiveAnnounce,
+          Math.max(topicState.announceMs, dormantAnnounceMs)
+        )
+      }
+
+      schedulePassiveAnnounce()
     }
 
     return () => {
-      topicState.stopPassiveAnnouncements()
+      clearTimeout(passiveAnnounceTimeout)
       roomSubscriberCounts[rootTopic] = Math.max(
         0,
         (roomSubscriberCounts[rootTopic] ?? 1) - 1
@@ -404,25 +391,9 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   announce: async (client, rootTopic) => {
     const state = topicStates.forRelay(client)[rootTopic]
 
-    if (state) {
-      state.stopPassiveAnnouncements()
-      state.isActive = true
-      await state.announce()
-    }
+    await state?.announce()
 
     return state?.announceMs ?? defaultAnnounceMs
-  },
-
-  deactivate: (client, rootTopic) => {
-    const state = topicStates.forRelay(client)[rootTopic]
-
-    if (state) {
-      state.isActive = false
-    }
-
-    reclaimAllOutstandingOffers(rootTopic)
-
-    state?.startPassiveAnnouncements()
   }
 })
 

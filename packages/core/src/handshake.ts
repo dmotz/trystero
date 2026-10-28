@@ -371,10 +371,7 @@ type HandshakeManagerDeps = {
     data: HandshakeReadyPayload,
     peerId: string
   ) => Promise<void>
-  canAcceptBeforeHandshake?: (peerId: string) => boolean
-  onRejectFull?: (peerId: string, peer: PeerHandle) => void
   onLocalHandshakePassed?: (peerId: string, peer: PeerHandle) => boolean
-  onRemoteHandshakeReady?: () => boolean
   onActivate: (peerId: string, peer: PeerHandle) => void
   onFailure: (peerId: string, peer: PeerHandle, reason: Error) => void
 }
@@ -395,10 +392,7 @@ export const createHandshakeManager = ({
   handshakeTimeoutMs,
   sendHandshakeData,
   sendHandshakeReady,
-  canAcceptBeforeHandshake,
-  onRejectFull,
   onLocalHandshakePassed,
-  onRemoteHandshakeReady,
   onActivate,
   onFailure
 }: HandshakeManagerDeps): {
@@ -412,10 +406,8 @@ export const createHandshakeManager = ({
     metadata?: JsonValue
   ) => void
   receiveHandshakeReady: (id: string) => void
-  getReadyPendingIds: () => string[]
   getPendingIds: () => string[]
   getPeer: (id: string) => PeerHandle | undefined
-  activate: (id: string) => void
 } => {
   const peerStates: Record<string, PendingPeerState> = {}
 
@@ -473,9 +465,6 @@ export const createHandshakeManager = ({
         )
       )
     )
-    if (!state.didReceiveRemoteReady || onRemoteHandshakeReady?.()) {
-      return
-    }
     maybeActivatePeer(id, peer)
   }
 
@@ -515,11 +504,6 @@ export const createHandshakeManager = ({
       const state = peerStates[id]
 
       if (!state || state.peer !== peer) {
-        return
-      }
-
-      if (canAcceptBeforeHandshake && !canAcceptBeforeHandshake(id)) {
-        onRejectFull?.(id, peer)
         return
       }
 
@@ -619,24 +603,11 @@ export const createHandshakeManager = ({
       }
 
       state.didReceiveRemoteReady = true
-
-      if (!state.didLocalHandshakePass || onRemoteHandshakeReady?.()) {
-        return
-      }
-
       maybeActivatePeer(id)
     },
 
-    getReadyPendingIds: () =>
-      keys(peerStates).filter(id => {
-        const s = peerStates[id]
-        return Boolean(
-          s && !s.isActive && s.didLocalHandshakePass && s.didReceiveRemoteReady
-        )
-      }),
     getPendingIds: () =>
       keys(peerStates).filter(id => !peerStates[id]?.isActive),
-    getPeer: id => peerStates[id]?.peer,
-    activate: id => maybeActivatePeer(id)
+    getPeer: id => peerStates[id]?.peer
   }
 }
