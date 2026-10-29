@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {createTopicStrategy, scale} from '../../packages/core/src/index.ts'
-import {wait, waitFor} from './peer-harness.ts'
+import {joinAsTestPeer, wait, waitFor} from './peer-harness.ts'
 
 class LinkedDataChannel {
   label: string
@@ -218,8 +218,8 @@ const createMemorySignalBus = () => {
     Set<(topic: string, data: any) => void>
   >()
 
-  const makeJoinRoom = () =>
-    createTopicStrategy({
+  const makeJoinRoom = (peerId?: string) => {
+    const join = createTopicStrategy({
       steadyAnnounceIntervalMs: 120,
       init: () => ({}),
       subscribeTopic: (_relay, topic, onTopicMessage) => {
@@ -243,6 +243,8 @@ const createMemorySignalBus = () => {
         }
       }
     })
+    return peerId ? joinAsTestPeer(peerId, join) : join
+  }
 
   return {makeJoinRoom}
 }
@@ -275,7 +277,7 @@ void test(
     const appId = `limit-1-${Date.now()}`
     const roomId = 'solo-room'
 
-    const hostJoin = makeJoinRoom()
+    const hostJoin = makeJoinRoom('peer-host')
     const hostErrors: any[] = []
     const hostJoins: string[] = []
     const hostLeaves: string[] = []
@@ -283,7 +285,6 @@ void test(
     const hostRoom = hostJoin(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-host',
         limit: 1,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -297,7 +298,7 @@ void test(
 
     await wait(60)
 
-    const lateJoin = makeJoinRoom()
+    const lateJoin = makeJoinRoom('peer-late')
     const lateErrors: any[] = []
     const lateJoins: string[] = []
 
@@ -307,7 +308,6 @@ void test(
       lateRoom = lateJoin(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-late',
           limit: 1,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
@@ -348,12 +348,11 @@ void test(
       await hostRoom.leave()
       await wait(50)
 
-      const nextJoin = makeJoinRoom()
+      const nextJoin = makeJoinRoom('peer-next')
       const nextErrors: any[] = []
       nextRoom = nextJoin(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-next',
           limit: 1,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
@@ -383,10 +382,10 @@ void test(
     const appId = `limit-2-seq-${Date.now()}`
     const roomId = 'duel-room'
 
-    const joinA = makeJoinRoom()
-    const joinB = makeJoinRoom()
-    const joinC = makeJoinRoom()
-    const joinD = makeJoinRoom()
+    const joinA = makeJoinRoom('peer-a')
+    const joinB = makeJoinRoom('peer-b')
+    const joinC = makeJoinRoom('peer-c')
+    const joinD = makeJoinRoom('peer-d')
 
     const errorsA: any[] = []
     const errorsB: any[] = []
@@ -403,7 +402,6 @@ void test(
     const roomA = joinA(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-a',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -416,7 +414,6 @@ void test(
     const roomB = joinB(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-b',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -435,7 +432,6 @@ void test(
     const roomC = joinC(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-c',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -484,7 +480,6 @@ void test(
     const roomD = joinD(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-d',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -532,14 +527,13 @@ void test(
 
     // Launch all 5 peers concurrently in the same tick on an empty limit: 2 room
     for (const peerId of peerIds) {
-      const joinRoom = makeJoinRoom()
+      const joinRoom = makeJoinRoom(peerId)
       const errors: any[] = []
       const joins: string[] = []
       const leaves: string[] = []
       const room = joinRoom(
         {
           appId,
-          _test_only_forcedPeerId: peerId,
           limit: 2,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
@@ -607,10 +601,9 @@ void test(
       for (const newcomerId of ['peer-0', 'peer-6', 'peer-7']) {
         const errs: any[] = []
         newcomerErrors.set(newcomerId, errs)
-        const room = makeJoinRoom()(
+        const room = makeJoinRoom(newcomerId)(
           {
             appId,
-            _test_only_forcedPeerId: newcomerId,
             limit: 2,
             rtcPolyfill: InMemoryRTCPeerConnection as any
           },
@@ -666,20 +659,18 @@ void test(
     const appId = `limit-asym-${Date.now()}`
     const roomId = 'asym-room'
 
-    const hostRoom = makeJoinRoom()(
+    const hostRoom = makeJoinRoom('host-peer')(
       {
         appId,
-        _test_only_forcedPeerId: 'host-peer',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId
     )
     const guest1Joins: string[] = []
-    const guest1Room = makeJoinRoom()(
+    const guest1Room = makeJoinRoom('guest-1')(
       {
         appId,
-        _test_only_forcedPeerId: 'guest-1',
         // guest-1 omits limit and must not adopt unauthenticated limit from host-peer
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -695,10 +686,9 @@ void test(
     )
 
     const guest2Errors: any[] = []
-    const guest2Room = makeJoinRoom()(
+    const guest2Room = makeJoinRoom('guest-2')(
       {
         appId,
-        _test_only_forcedPeerId: 'guest-2',
         // guest-2 has limit: 3 and must not self-evict or drop guest-1 when host-peer rejects as full
         limit: 3,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -738,10 +728,9 @@ void test(
     const appId = `limit-pw-hs-${Date.now()}`
     const roomId = 'secure-duel'
 
-    const roomA = makeJoinRoom()(
+    const roomA = makeJoinRoom('peer-a')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-a',
         password: 'correct-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -749,10 +738,9 @@ void test(
       roomId
     )
 
-    const roomB = makeJoinRoom()(
+    const roomB = makeJoinRoom('peer-b')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-b',
         password: 'correct-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -769,10 +757,9 @@ void test(
 
     // 1. Peer with WRONG password must NOT receive 'room full' (must fail with password error)
     const wrongPwErrors: any[] = []
-    const wrongPwRoom = makeJoinRoom()(
+    const wrongPwRoom = makeJoinRoom('peer-wrong-pw')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-wrong-pw',
         password: 'wrong-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -790,10 +777,9 @@ void test(
 
     // 2. Peer with CORRECT password when room is full receives 'room full'
     const fullErrors: any[] = []
-    const rightPwFullRoom = makeJoinRoom()(
+    const rightPwFullRoom = makeJoinRoom('peer-c')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-c',
         password: 'correct-password',
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -831,10 +817,9 @@ void test(
     const rooms: any[] = []
 
     for (const peerId of peerIds) {
-      const room = makeJoinRoom()(
+      const room = makeJoinRoom(peerId)(
         {
           appId,
-          _test_only_forcedPeerId: peerId,
           limit: 6,
           use: [scale(scaleConfig)],
           rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -851,10 +836,9 @@ void test(
 
     // 7th peer tries to join the 6-peer multi-hop overlay room
     const fifthErrors: any[] = []
-    const fifthRoom = makeJoinRoom()(
+    const fifthRoom = makeJoinRoom('node-7')(
       {
         appId,
-        _test_only_forcedPeerId: 'node-7',
         limit: 6,
         use: [scale(scaleConfig)],
         rtcPolyfill: InMemoryRTCPeerConnection as any

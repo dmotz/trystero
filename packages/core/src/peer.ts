@@ -4,13 +4,7 @@ import {
   pendingDataTimeoutMs
 } from './data-limits'
 import {all, alloc, candidateType, resetTimer, toError, warn} from './utils'
-import type {
-  BaseRoomConfig,
-  PeerHandle,
-  PeerHandlers,
-  Signal,
-  TestOnlyRoomConfig
-} from './types'
+import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
 const iceCandidateSettleMs = 150
@@ -114,7 +108,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
   const normalizeSdp = (sdp: string): string => {
     DEV: if (
-      (config as TestOnlyRoomConfig)._test_only_mdnsHostFallbackToLoopback
+      '_test_only_mdnsHostFallbackToLoopback' in config &&
+      config._test_only_mdnsHostFallbackToLoopback
     ) {
       return rewriteMdnsCandidatesToLoopback(sdp)
     }
@@ -125,7 +120,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     candidate: RTCIceCandidateInit
   ): RTCIceCandidateInit => {
     DEV: if (
-      (config as TestOnlyRoomConfig)._test_only_mdnsHostFallbackToLoopback &&
+      '_test_only_mdnsHostFallbackToLoopback' in config &&
+      config._test_only_mdnsHostFallbackToLoopback &&
       typeof candidate.candidate === 'string'
     ) {
       const normalizedCandidate = rewriteMdnsCandidatesToLoopback(

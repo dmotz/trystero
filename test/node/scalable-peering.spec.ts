@@ -64,6 +64,7 @@ import {
 } from '../../packages/core/src/utils.ts'
 import {
   encodeInternalAction,
+  joinAsTestPeer,
   LinkedMediaPeer,
   LinkedPeer,
   linkPeers,
@@ -1247,49 +1248,51 @@ void test('Elegant API & automatic configuration: joinRoom with scale "auto" tra
   }
 })
 
-void test('End-to-end createTopicStrategy integration with config._test_only_forcedPeerId and scale()', async () => {
+void test('End-to-end createTopicStrategy integration with scale()', async () => {
   const topicSubs = new Map<string, Set<(topic: string, msg: string) => void>>()
 
-  const joinRoom = createTopicStrategy({
-    init: () => ({}),
-    subscribeTopic: (_relay, topic, onMessage) => {
-      let set = topicSubs.get(topic)
-      if (!set) {
-        set = new Set()
-        topicSubs.set(topic, set)
-      }
-      const handler = (t: string, m: string) => {
-        void onMessage(t, m)
-      }
-      set.add(handler)
-      return () => {
-        set?.delete(handler)
-      }
-    },
-    publishTopic: (_relay, topic, msg) => {
-      const handlers = topicSubs.get(topic)
-      if (handlers) {
-        const text = typeof msg === 'string' ? msg : JSON.stringify(msg)
-        for (const h of handlers) {
-          queueMicrotask(() => h(topic, text))
+  const makeJoinRoom = (peerId: string) =>
+    joinAsTestPeer(
+      peerId,
+      createTopicStrategy({
+        init: () => ({}),
+        subscribeTopic: (_relay, topic, onMessage) => {
+          let set = topicSubs.get(topic)
+          if (!set) {
+            set = new Set()
+            topicSubs.set(topic, set)
+          }
+          const handler = (t: string, m: string) => {
+            void onMessage(t, m)
+          }
+          set.add(handler)
+          return () => {
+            set?.delete(handler)
+          }
+        },
+        publishTopic: (_relay, topic, msg) => {
+          const handlers = topicSubs.get(topic)
+          if (handlers) {
+            const text = typeof msg === 'string' ? msg : JSON.stringify(msg)
+            for (const h of handlers) {
+              queueMicrotask(() => h(topic, text))
+            }
+          }
         }
-      }
-    }
-  })
+      })
+    )
 
-  const roomA = joinRoom(
+  const roomA = makeJoinRoom('peer-alpha')(
     {
       appId: 'topic-e2e-overlay',
-      _test_only_forcedPeerId: 'peer-alpha',
       use: [scale('gossip')],
       rtcPolyfill: MockRTCPeerConnection as any
     },
     'lobby'
   )
-  const roomB = joinRoom(
+  const roomB = makeJoinRoom('peer-beta')(
     {
       appId: 'topic-e2e-overlay',
-      _test_only_forcedPeerId: 'peer-beta',
       use: [scale({mode: 'gossip', maxConnections: 6})],
       rtcPolyfill: MockRTCPeerConnection as any
     },
@@ -1297,6 +1300,7 @@ void test('End-to-end createTopicStrategy integration with config._test_only_for
   )
 
   try {
+    await Promise.all([roomA.ready, roomB.ready])
     assert.equal(roomA.getTopology().selfId, 'peer-alpha')
     assert.equal(roomA.getTopology().mode, 'gossip')
     assert.equal(roomB.getTopology().selfId, 'peer-beta')
@@ -1915,40 +1919,43 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
 
   // 2. On-the-fly admin room creation via joinRoom({ appId, admin: true }, 'lobby')
   const topicSubs = new Map<string, Set<(topic: string, msg: string) => void>>()
-  const joinRoom = createTopicStrategy({
-    init: () => ({}),
-    subscribeTopic: (_relay, topic, onMessage) => {
-      let set = topicSubs.get(topic)
-      if (!set) {
-        set = new Set()
-        topicSubs.set(topic, set)
-      }
-      const handler = (t: string, m: string) => {
-        void onMessage(t, m)
-      }
-      set.add(handler)
-      return () => {
-        set?.delete(handler)
-      }
-    },
-    publishTopic: (_relay, topic, msg) => {
-      const handlers = topicSubs.get(topic)
-      if (handlers) {
-        const text = typeof msg === 'string' ? msg : JSON.stringify(msg)
-        for (const h of handlers) {
-          queueMicrotask(() => h(topic, text))
+  const makeJoinRoom = (peerId: string) =>
+    joinAsTestPeer(
+      peerId,
+      createTopicStrategy({
+        init: () => ({}),
+        subscribeTopic: (_relay, topic, onMessage) => {
+          let set = topicSubs.get(topic)
+          if (!set) {
+            set = new Set()
+            topicSubs.set(topic, set)
+          }
+          const handler = (t: string, m: string) => {
+            void onMessage(t, m)
+          }
+          set.add(handler)
+          return () => {
+            set?.delete(handler)
+          }
+        },
+        publishTopic: (_relay, topic, msg) => {
+          const handlers = topicSubs.get(topic)
+          if (handlers) {
+            const text = typeof msg === 'string' ? msg : JSON.stringify(msg)
+            for (const h of handlers) {
+              queueMicrotask(() => h(topic, text))
+            }
+          }
         }
-      }
-    }
-  })
+      })
+    )
 
-  const createdRooms: Array<ReturnType<typeof joinRoom>> = []
+  const createdRooms: Room[] = []
   try {
     const hostIdentity = await createUserIdentity()
-    const hostRoom = joinRoom(
+    const hostRoom = makeJoinRoom('host-peer')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'host-peer',
         identity: hostIdentity,
         use: [roles({selfAsAdmin: true})],
         rtcPolyfill: MockRTCPeerConnection as any
@@ -1972,10 +1979,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     assert.equal(hostAuth.userId, hostIdentity.userId)
 
     // Room IDs with a single dot + 16 alphanumeric chars (e.g. lobby-${Math.random()}) must NOT throw without roles()
-    const dottedRoom = joinRoom(
+    const dottedRoom = makeJoinRoom('dotted-room-peer')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'dotted-room-peer',
         rtcPolyfill: MockRTCPeerConnection as any
       },
       `lobby-0.${hostAuth.fingerprint}`
@@ -1985,10 +1991,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     // Joining a self-certifying roomId (~ separator) WITHOUT roles() throws an error
     assert.throws(
       () =>
-        joinRoom(
+        makeJoinRoom('missing-roles-peer')(
           {
             appId: 'auth-bootstrap-app',
-            _test_only_forcedPeerId: 'missing-roles-peer',
             rtcPolyfill: MockRTCPeerConnection as any
           },
           hostAuth.roomId
@@ -1997,10 +2002,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     )
 
     // Guest joins using the self-certifying roomId with roles()
-    const guestRoom = joinRoom(
+    const guestRoom = makeJoinRoom('guest-peer')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'guest-peer',
         use: [roles()],
         rtcPolyfill: MockRTCPeerConnection as any
       },
@@ -2016,10 +2020,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
 
     // Impostor whose userId does not match the room fingerprint and is not in admins[] does not get admin status
     const impostorIdentity = await createUserIdentity()
-    const impostorRoom = joinRoom(
+    const impostorRoom = makeJoinRoom('impostor-peer')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'impostor-peer',
         identity: impostorIdentity,
         use: [roles()],
         rtcPolyfill: MockRTCPeerConnection as any
@@ -2036,10 +2039,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
 
     // Configured co-admins in admins: [...] ARE honored even in fingerprinted rooms
     const coAdminIdentity = await createUserIdentity()
-    const coAdminRoom = joinRoom(
+    const coAdminRoom = makeJoinRoom('coadmin-peer')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'coadmin-peer',
         identity: coAdminIdentity,
         use: [roles({admins: [coAdminIdentity.userId]})],
         rtcPolyfill: MockRTCPeerConnection as any
@@ -2055,10 +2057,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     )
 
     // Rejoining with the saved host UserIdentity automatically restores root admin status on the same roomId (with roles())
-    const rejoinedHostRoom = joinRoom(
+    const rejoinedHostRoom = makeJoinRoom('host-rejoined')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'host-rejoined',
         identity: await importUserIdentity(exportUserIdentity(hostIdentity)),
         use: [roles()],
         rtcPolyfill: MockRTCPeerConnection as any
@@ -2072,10 +2073,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     assert.equal(rejoinedAuth.userId, hostIdentity.userId)
 
     // 3. Mode B: Fixed room slug with trusted admin userId(s)
-    const fixedHostRoom = joinRoom(
+    const fixedHostRoom = makeJoinRoom('fixed-host-peer')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'fixed-host-peer',
         identity: hostIdentity,
         use: [roles({admins: [hostIdentity.userId]})],
         rtcPolyfill: MockRTCPeerConnection as any
@@ -2089,10 +2089,9 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     assert.equal(fixedHostAuth.isAdmin, true)
     assert.deepEqual(fixedHostAuth.roles, ['admin'])
 
-    const fixedGuestRoom = joinRoom(
+    const fixedGuestRoom = makeJoinRoom('fixed-guest-peer')(
       {
         appId: 'auth-bootstrap-app',
-        _test_only_forcedPeerId: 'fixed-guest-peer',
         use: [roles({admins: [hostIdentity.userId]})],
         rtcPolyfill: MockRTCPeerConnection as any
       },

@@ -5,6 +5,7 @@ import {prunePeerStates} from '../../packages/core/src/signal-handler.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {
   BufferedPeer,
+  joinAsTestPeer,
   linkPeers,
   MockPeer,
   MockRTCPeerConnection,
@@ -275,31 +276,33 @@ void test(
     const subscribers: Subscriber[] = []
     let announces = 0
 
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announces++
-      }
-    })
+    const makeJoinRoom = (peerId: string) =>
+      joinAsTestPeer(
+        peerId,
+        createStrategy({
+          init: () => ({}),
+          subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+            subscribers.push({rootTopic, selfTopic, onMessage})
+            return () => {}
+          },
+          announce: () => {
+            announces++
+          }
+        })
+      )
 
     const appId = `two-passives-${Date.now()}`
-    const roomA = joinRoom(
+    const roomA = makeJoinRoom('passive-a')(
       {
         appId,
-        _test_only_forcedPeerId: 'passive-a',
         passive: true,
         rtcPolyfill: MockRTCPeerConnection as any
       },
       'test-room'
     )
-    const roomB = joinRoom(
+    const roomB = makeJoinRoom('passive-b')(
       {
         appId,
-        _test_only_forcedPeerId: 'passive-b',
         passive: true,
         rtcPolyfill: MockRTCPeerConnection as any
       },
@@ -408,20 +411,22 @@ void test(
   async () => {
     const subscribers: Subscriber[] = []
 
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {}
-    })
+    const joinRoom = joinAsTestPeer(
+      'passive-peer',
+      createStrategy({
+        init: () => ({}),
+        subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+          subscribers.push({rootTopic, selfTopic, onMessage})
+          return () => {}
+        },
+        announce: () => {}
+      })
+    )
 
     const appId = `passive-graceful-leave-${Date.now()}`
     const room = joinRoom(
       {
         appId,
-        _test_only_forcedPeerId: 'passive-peer',
         passive: true,
         rtcPolyfill: MockRTCPeerConnection as any
       },
@@ -444,17 +449,19 @@ void test(
         () => {}
       )
 
-      activeRoom = createStrategy({
-        init: () => ({}),
-        subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-          subscribers.push({rootTopic, selfTopic, onMessage})
-          return () => {}
-        },
-        announce: () => {}
-      })(
+      activeRoom = joinAsTestPeer(
+        'active-peer',
+        createStrategy({
+          init: () => ({}),
+          subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+            subscribers.push({rootTopic, selfTopic, onMessage})
+            return () => {}
+          },
+          announce: () => {}
+        })
+      )(
         {
           appId,
-          _test_only_forcedPeerId: 'active-peer',
           rtcPolyfill: MockRTCPeerConnection as any
         },
         'test-room'

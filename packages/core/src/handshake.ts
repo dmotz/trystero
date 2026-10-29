@@ -1,7 +1,8 @@
 import {
+  type EndpointIdentity,
   extractDtlsFingerprints,
   fromBase64Url,
-  getOrCreateEndpointIdentity,
+  getDefaultEndpointIdentity,
   resolveSelfId,
   toBase64Url,
   verifyPeerIdKey,
@@ -140,7 +141,7 @@ const verifyTranscriptDualSignatures = async (
 }
 
 export const createIdentityHandshake = (params: {
-  selfId?: string
+  endpointIdentityP?: Promise<EndpointIdentity>
   appId: string
   roomId: string | Promise<string>
   getUserIdentity: () => Promise<UserIdentity>
@@ -155,7 +156,8 @@ export const createIdentityHandshake = (params: {
   ) => Promise<VerifiedPeerIdentity>
   compose: (nextHandshake?: PeerHandshake) => PeerHandshake
 } => {
-  const localEndpointP = getOrCreateEndpointIdentity(params.selfId)
+  const localEndpointP =
+    params.endpointIdentityP ?? getDefaultEndpointIdentity()
 
   const signTranscript = async (
     transcriptBytes: Uint8Array,
@@ -183,7 +185,7 @@ export const createIdentityHandshake = (params: {
       params.getUserIdentity(),
       localEndpointP
     ])
-    const effectiveSelfId = params.selfId || localEndpoint.peerId
+    const effectiveSelfId = localEndpoint.peerId
     const peer = params.getPeerHandle?.(remotePeerId)
     const localDtls = extractDtlsFingerprints(
       peer?.connection?.localDescription?.sdp

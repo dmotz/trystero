@@ -521,8 +521,7 @@ void test(
 
     try {
       const {peerId: selfId} = await room.getSelf()
-      const lowerPeerId =
-        String.fromCharCode(selfId.charCodeAt(0) - 1) + selfId.slice(1)
+      const lowerPeerId = `!${selfId}`
       await waitFor(() => subscribers.length >= 1)
       const sub = subscribers[0]
 
@@ -573,8 +572,7 @@ void test(
 
     try {
       const {peerId: selfId} = await room.getSelf()
-      const higherPeerId =
-        String.fromCharCode(selfId.charCodeAt(0) + 1) + selfId.slice(1)
+      const higherPeerId = `~${selfId}`
       await waitFor(() => subscribers.length >= 1)
       const sub = subscribers[0]
 

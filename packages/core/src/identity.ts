@@ -38,7 +38,6 @@ const userKeyPrefix = `${libId}_uk_`
 const storagePrefix = `${libId}:user_identity:v1:`
 const idbDbName = `${libId}_identity_v1`
 const idbStoreName = 'identities'
-const testUidPrefix = `${libId}-test-uid:`
 const invalidKeyMaterialErr = mkErr(
   'invalid user identity key material; expected exported userKey or P-256 JWK'
 )
@@ -284,13 +283,29 @@ export type EndpointIdentity = {
   sign: (payload: Uint8Array) => Promise<Uint8Array>
 }
 
-let resolvedDefaultSelfId: string | null = null
+export type DevIdentityProvider = {
+  getEndpointIdentity: (
+    peerId?: string
+  ) => Promise<EndpointIdentity> | undefined
+  isPeerIdKeyCachedValid: (peerId: string, rec: VerifiedPubKeyRecord) => boolean
+  verifyPeerIdKey: (
+    peerId: string,
+    rec: VerifiedPubKeyRecord
+  ) => Promise<boolean> | boolean
+  getUserIdentity: (peerId?: string) => Promise<UserIdentity> | undefined
+}
+
+let devIdentityProvider: DevIdentityProvider | null = null
+
+export const setDevIdentityProvider = (
+  provider: DevIdentityProvider | null
+): void => {
+  DEV: devIdentityProvider = provider
+}
 
 let defaultEndpointIdentityPromise: Promise<EndpointIdentity> | null = null
 
-const generateEndpointIdentity = async (
-  forcedPeerId?: string
-): Promise<EndpointIdentity> => {
+export const createEndpointIdentity = async (): Promise<EndpointIdentity> => {
   const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, true, [
     'sign',
     'verify'
@@ -307,9 +322,8 @@ const generateEndpointIdentity = async (
     d: privJwk.d ?? ''
   }
   const rec = await getVerifiedPubKeyRecord(signPubJwk, keyPair.publicKey)
-  const peerId = forcedPeerId ?? rec!.peerId
   return {
-    peerId,
+    peerId: rec!.peerId,
     signPrivateKey: keyPair.privateKey,
     signPublicKey: keyPair.publicKey,
     signPubJwk,
@@ -319,53 +333,23 @@ const generateEndpointIdentity = async (
   }
 }
 
-export const getDefaultEndpointIdentity = (): Promise<EndpointIdentity> =>
-  (defaultEndpointIdentityPromise ??= generateEndpointIdentity().then(id => {
-    resolvedDefaultSelfId = id.peerId
-    return id
-  }))
+export const getDefaultEndpointIdentity = (
+  peerId?: string
+): Promise<EndpointIdentity> => {
+  DEV: {
+    const overridden = devIdentityProvider?.getEndpointIdentity(peerId)
+    if (overridden) {
+      return overridden
+    }
+  }
+  return (defaultEndpointIdentityPromise ??= createEndpointIdentity())
+}
 
 export const getDefaultSelfId = (): Promise<string> =>
   getDefaultEndpointIdentity().then(id => id.peerId)
 
 export const resolveSelfId = (explicitSelfId?: string): Promise<string> =>
   explicitSelfId ? Promise.resolve(explicitSelfId) : getDefaultSelfId()
-
-const endpointIdentityByPeerId = new Map<string, Promise<EndpointIdentity>>()
-const registeredTestForcedPeerIds = new Set<string>()
-const resolvedTestEndpointCanonicalJwk = new Map<string, string>()
-
-export const registerTestForcedPeerId = (
-  peerId: string
-): Promise<EndpointIdentity> => {
-  if (!peerId || peerId === resolvedDefaultSelfId) {
-    return getDefaultEndpointIdentity()
-  }
-  const existing = endpointIdentityByPeerId.get(peerId)
-  if (existing) {
-    registeredTestForcedPeerIds.add(peerId)
-    return existing
-  }
-  registeredTestForcedPeerIds.add(peerId)
-  const promise = generateEndpointIdentity(peerId).then(id => {
-    resolvedTestEndpointCanonicalJwk.set(
-      peerId,
-      canonicalizePubJwk(id.signPubJwk)
-    )
-    return id
-  })
-  endpointIdentityByPeerId.set(peerId, promise)
-  return promise
-}
-
-export const getOrCreateEndpointIdentity = (
-  peerId?: string
-): Promise<EndpointIdentity> => {
-  DEV: if (peerId && peerId !== resolvedDefaultSelfId) {
-    return registerTestForcedPeerId(peerId)
-  }
-  return getDefaultEndpointIdentity()
-}
 
 export const isPeerIdKeyCachedValid = (
   peerId: string,
@@ -381,11 +365,8 @@ export const isPeerIdKeyCachedValid = (
   if (rec.peerId === peerId) {
     return true
   }
-  DEV: {
-    const forcedCanonical = resolvedTestEndpointCanonicalJwk.get(peerId)
-    if (forcedCanonical && rec.canonicalJwk === forcedCanonical) {
-      return true
-    }
+  DEV: if (devIdentityProvider?.isPeerIdKeyCachedValid(peerId, rec)) {
+    return true
   }
   return false
 }
@@ -407,9 +388,8 @@ export const verifyPeerIdKey = async (
   if (rec.peerId === peerId) {
     return true
   }
-  DEV: if (registeredTestForcedPeerIds.has(peerId)) {
-    const expected = await registerTestForcedPeerId(peerId)
-    return rec.canonicalJwk === canonicalizePubJwk(expected.signPubJwk)
+  DEV: if (devIdentityProvider) {
+    return devIdentityProvider.verifyPeerIdKey(peerId, rec)
   }
   return false
 }
@@ -712,23 +692,13 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
 }
 
 let defaultUserIdentityPromise: Promise<UserIdentity> | null = null
-let resolvedDefaultUserId = ''
-DEV: {
-  const slug = toBase64Url(encodeBytes(`${testUidPrefix}__default__`))
-  resolvedDefaultUserId = slug.padEnd(43, '0').slice(0, 43)
-}
 
 export const getDefaultUserIdentity = (): Promise<UserIdentity> =>
-  (defaultUserIdentityPromise ??= createUserIdentity().then(id => {
-    resolvedDefaultUserId = id.userId
-    return id
-  }))
+  (defaultUserIdentityPromise ??= createUserIdentity())
 
 const runtimeUserIdentityByScope = new Map<string, Promise<UserIdentity>>()
 const sessionMutexByApp = new Map<string, Promise<UserIdentity>>()
 const localMutexByApp = new Map<string, Promise<UserIdentity>>()
-const testUserIdentityByPeerId = new Map<string, Promise<UserIdentity>>()
-const resolvedTestUserIdentityByPeerId = new Map<string, UserIdentity>()
 
 const getOrCreateRuntimeUserIdentity = (
   appId?: string
@@ -743,39 +713,6 @@ const getOrCreateRuntimeUserIdentity = (
     runtimeUserIdentityByScope.set(scopeKey, cached)
   }
   return cached
-}
-
-export const getDefaultTestUserIdentity = (
-  peerId?: string | null
-): Promise<UserIdentity> => {
-  if (!peerId || peerId === resolvedDefaultSelfId) {
-    return getDefaultUserIdentity()
-  }
-  let cached = testUserIdentityByPeerId.get(peerId)
-  if (!cached) {
-    cached = createUserIdentity().then(id => {
-      resolvedTestUserIdentityByPeerId.set(peerId, id)
-      return id
-    })
-    testUserIdentityByPeerId.set(peerId, cached)
-  }
-  return cached
-}
-
-export const getDefaultTestUserIdentityUserIdSync = (
-  peerId?: string | null
-): string => {
-  if (!peerId || peerId === resolvedDefaultSelfId) {
-    void getDefaultUserIdentity()
-    return resolvedDefaultUserId
-  }
-  const resolved = resolvedTestUserIdentityByPeerId.get(peerId)
-  if (resolved) {
-    return resolved.userId
-  }
-  void getDefaultTestUserIdentity(peerId)
-  const slug = toBase64Url(encodeBytes(`${testUidPrefix}${peerId}`))
-  return slug.padEnd(43, '0').slice(0, 43)
 }
 
 type StoredIdbIdentityRecord = {
@@ -982,9 +919,8 @@ export const resolveUserIdentity = async (
   config?: {
     identity?: UserIdentityConfig
     preferLocal?: boolean
-    _test_only_forcedPeerId?: string
   },
-  localSelfId?: string | null
+  peerId?: string
 ): Promise<UserIdentity> => {
   const raw = config?.identity
 
@@ -1002,22 +938,13 @@ export const resolveUserIdentity = async (
     return coerceCustomUserIdentity(raw)
   }
 
-  let forcedPeerId: string | undefined
-  DEV: forcedPeerId =
-    config?._test_only_forcedPeerId ??
-    (localSelfId && localSelfId !== resolvedDefaultSelfId
-      ? localSelfId
-      : undefined)
-
-  const defaultMode: UserIdentityPersistence = forcedPeerId
+  const defaultMode: UserIdentityPersistence = !canPersistLocalIdentity()
     ? 'none'
-    : !canPersistLocalIdentity()
-      ? 'none'
-      : config?.preferLocal
-        ? 'local'
-        : getSessionStorage()
-          ? 'session'
-          : 'none'
+    : config?.preferLocal
+      ? 'local'
+      : getSessionStorage()
+        ? 'session'
+        : 'none'
 
   const mode: UserIdentityPersistence =
     (raw as UserIdentityPersistence | undefined) ?? defaultMode
@@ -1026,8 +953,11 @@ export const resolveUserIdentity = async (
     if (shouldWarn) {
       warn("IndexedDB unavailable; falling back to identity: 'none'")
     }
-    DEV: if (forcedPeerId) {
-      return getDefaultTestUserIdentity(forcedPeerId)
+    DEV: {
+      const overridden = devIdentityProvider?.getUserIdentity(peerId)
+      if (overridden) {
+        return overridden
+      }
     }
     return getOrCreateRuntimeUserIdentity(appId)
   }

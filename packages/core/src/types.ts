@@ -352,11 +352,6 @@ export interface BaseRoomConfig {
   turnConfig?: TurnServerConfig[]
 }
 
-export type TestOnlyRoomConfig = BaseRoomConfig & {
-  _test_only_forcedPeerId?: string
-  _test_only_mdnsHostFallbackToLoopback?: boolean
-}
-
 export type JoinRoomConfig = BaseRoomConfig & {
   relayConfig?: RelayConfig
 }

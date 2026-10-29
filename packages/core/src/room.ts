@@ -32,9 +32,8 @@ import {
   type VerifiedPeerIdentity
 } from './handshake'
 import {
-  getDefaultTestUserIdentity,
-  getDefaultTestUserIdentityUserIdSync,
-  getOrCreateEndpointIdentity,
+  type EndpointIdentity,
+  getDefaultEndpointIdentity,
   resolveUserIdentity
 } from './identity'
 import {createMediaManager, type InternalMediaMeta} from './media'
@@ -103,6 +102,7 @@ export const getRoomSignalingBridge = (
 
 type RoomOptions = {
   selfId?: string
+  endpointIdentityP?: Promise<EndpointIdentity>
   appId?: string
   roomId?: string
   password?: string
@@ -130,6 +130,7 @@ export default <
 ): RoomWithPlugins<TPlugins> => {
   const {
     selfId: explicitSelfId,
+    endpointIdentityP,
     appId = '',
     roomId: initialRoomId = '',
     password = '',
@@ -145,14 +146,14 @@ export default <
     onBeforeLeave
   } = roomOptions
   let localSelfId = explicitSelfId ?? ''
-  const localEndpointP = getOrCreateEndpointIdentity(explicitSelfId).then(
-    ep => {
-      if (!explicitSelfId) {
-        localSelfId = ep.peerId
-      }
-      return ep
+  const localEndpointP = (
+    endpointIdentityP ?? getDefaultEndpointIdentity(explicitSelfId)
+  ).then(ep => {
+    if (!explicitSelfId) {
+      localSelfId = ep.peerId
     }
-  )
+    return ep
+  })
   const localSelfIdP = explicitSelfId
     ? Promise.resolve(explicitSelfId)
     : localEndpointP.then(ep => ep.peerId)
@@ -180,33 +181,21 @@ export default <
   const roomIdChangedListeners: Array<(roomId: string) => void> = []
   const leaveListeners: Array<() => void> = []
   let localUserId = ''
-  DEV: localUserId = getDefaultTestUserIdentityUserIdSync(localSelfId)
-  let defaultIdentityP: Promise<UserIdentity> | undefined
-  DEV: if (!userIdentityP && identity === undefined) {
-    defaultIdentityP = getDefaultTestUserIdentity(localSelfId)
-  }
   const resolvedUserIdentityP = (
     userIdentityP ??
-    defaultIdentityP ??
     resolveUserIdentity(
       appId,
       initialRoomId,
       identity === undefined ? undefined : {identity},
-      localSelfId
+      explicitSelfId
     )
   ).then(resolvedId => {
     localUserId = resolvedId.userId
     return resolvedId
   })
 
-  const getPeerUserId = (peerId: string): string => {
-    if (peerId === localSelfId) {
-      return localUserId
-    }
-    let userId = peerUserIds.get(peerId)
-    DEV: userId ??= getDefaultTestUserIdentityUserIdSync(peerId)
-    return userId ?? peerId
-  }
+  const getPeerUserId = (peerId: string): string =>
+    peerId === localSelfId ? localUserId : (peerUserIds.get(peerId) ?? peerId)
 
   const getUserPeerIds = (userId: string): string[] => {
     const set = activeUserPeers.get(userId)
@@ -631,16 +620,8 @@ export default <
     },
     getLocalUserIdentity: () => resolvedUserIdentityP,
     getPeerUserId,
-    getKnownPeerUserId: peerId => {
-      if (peerId === localSelfId) {
-        return localUserId
-      }
-      let userId = peerUserIds.get(peerId)
-      DEV: if (!userId && peerId in peerMap) {
-        userId = getDefaultTestUserIdentityUserIdSync(peerId)
-      }
-      return userId
-    },
+    getKnownPeerUserId: peerId =>
+      peerId === localSelfId ? localUserId : peerUserIds.get(peerId),
     setPeerUserId: (peerId, userId) => {
       if (userId) {
         peerUserIds.set(peerId, userId)
@@ -850,29 +831,10 @@ export default <
       )
   }
 
-  let effectiveOnPeerHandshake = onPeerHandshake
-  DEV: if (
-    !verifyPeerIdentity &&
-    (limit !== undefined ||
-      identity !== undefined ||
-      userIdentityP !== undefined)
-  ) {
-    effectiveOnPeerHandshake = async (id, send, receive, isInitiator) => {
-      const resolvedSelfId = await localSelfIdP
-      await Promise.all([
-        resolvedUserIdentityP,
-        id === resolvedSelfId ? undefined : getDefaultTestUserIdentity(id)
-      ])
-      await onPeerHandshake?.(id, send, receive, isInitiator)
-    }
-  }
-
   const handshakeManager = createHandshakeManager({
     selfId: localSelfId,
     selfIdP: localSelfIdP,
-    ...(effectiveOnPeerHandshake === undefined
-      ? {}
-      : {onPeerHandshake: effectiveOnPeerHandshake}),
+    ...(onPeerHandshake === undefined ? {} : {onPeerHandshake}),
     ...(onHandshakeError === undefined ? {} : {onHandshakeError}),
     handshakeTimeoutMs,
     sendHandshakeData: handshakeDataAction.send,

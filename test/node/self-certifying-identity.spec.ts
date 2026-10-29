@@ -24,7 +24,7 @@ import {
   verifyUserEndpointProof,
   verifyUserIdKey
 } from '../../packages/core/src/identity.ts'
-import {wait, waitFor} from './peer-harness.ts'
+import {joinAsTestPeer, wait, waitFor} from './peer-harness.ts'
 
 class LinkedDataChannel {
   label: string
@@ -248,8 +248,8 @@ const createMemorySignalBus = () => {
     Set<(topic: string, data: any) => void>
   >()
 
-  const makeJoinRoom = () =>
-    createTopicStrategy({
+  const makeJoinRoom = (peerId?: string) => {
+    const join = createTopicStrategy({
       steadyAnnounceIntervalMs: 120,
       init: () => ({}),
       subscribeTopic: (_relay, topic, onTopicMessage) => {
@@ -277,6 +277,8 @@ const createMemorySignalBus = () => {
         }
       }
     })
+    return peerId ? joinAsTestPeer(peerId, join) : join
+  }
 
   return {makeJoinRoom}
 }
@@ -460,19 +462,17 @@ void test('Identity config validation & persistence modes: none, session, local,
     warnings.push(args.map(String).join(' '))
   }
   try {
-    const noIdbSessionRoom = joinRoom(
+    const noIdbSessionRoom = makeJoinRoom('peer-noidb-s')(
       {
         appId: 'no-idb-app',
-        _test_only_forcedPeerId: 'peer-noidb-s',
         identity: 'session',
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       'room-session'
     )
-    const noIdbLocalRoom = joinRoom(
+    const noIdbLocalRoom = makeJoinRoom('peer-noidb-l')(
       {
         appId: 'no-idb-app',
-        _test_only_forcedPeerId: 'peer-noidb-l',
         identity: 'local',
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -499,28 +499,25 @@ void test('Identity config validation & persistence modes: none, session, local,
 
   try {
     // 'session' reuses userId within same appId and isolates across appIds
-    const sRoom1 = makeJoinRoom()(
+    const sRoom1 = makeJoinRoom('peer-s1')(
       {
         appId: 'app-session-1',
-        _test_only_forcedPeerId: 'peer-s1',
         identity: 'session',
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       'r1'
     )
-    const sRoom2 = makeJoinRoom()(
+    const sRoom2 = makeJoinRoom('peer-s2')(
       {
         appId: 'app-session-1',
-        _test_only_forcedPeerId: 'peer-s2',
         identity: 'session',
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       'r2'
     )
-    const sRoomOtherApp = makeJoinRoom()(
+    const sRoomOtherApp = makeJoinRoom('peer-s3')(
       {
         appId: 'app-session-2',
-        _test_only_forcedPeerId: 'peer-s3',
         identity: 'session',
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -539,19 +536,17 @@ void test('Identity config validation & persistence modes: none, session, local,
 
     // 'local' coordinates concurrent first-time tabs to converge on the same userId
     const [lRoom1, lRoom2] = [
-      makeJoinRoom()(
+      makeJoinRoom('peer-l1')(
         {
           appId: 'app-local-1',
-          _test_only_forcedPeerId: 'peer-l1',
           identity: 'local',
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'r-local-1'
       ),
-      makeJoinRoom()(
+      makeJoinRoom('peer-l2')(
         {
           appId: 'app-local-1',
-          _test_only_forcedPeerId: 'peer-l2',
           identity: 'local',
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
@@ -569,10 +564,9 @@ void test('Identity config validation & persistence modes: none, session, local,
     // Custom loader receives {appId, roomId} and returns UserIdentity or exported key
     const customUser = await createUserIdentity()
     let loaderContext: any = null
-    const cRoom = makeJoinRoom()(
+    const cRoom = makeJoinRoom('peer-c1')(
       {
         appId: 'app-custom',
-        _test_only_forcedPeerId: 'peer-c1',
         identity: async ctx => {
           loaderContext = ctx
           return importUserIdentity(exportUserIdentity(customUser))
@@ -611,10 +605,9 @@ void test(
     const bobUserJoins: any[] = []
     const bobUserLeaves: any[] = []
 
-    const roomBob = makeJoinRoom()(
+    const roomBob = makeJoinRoom('peer-bob')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-bob',
         identity: bobIdentity,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
@@ -629,10 +622,9 @@ void test(
     let roomAlice2: Room = null
     try {
       // 1. Alice's 1st tab joins
-      roomAlice1 = makeJoinRoom()(
+      roomAlice1 = makeJoinRoom('peer-alice-1')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-alice-1',
           identity: aliceIdentity,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
@@ -654,10 +646,9 @@ void test(
       assert.equal(bobUserJoins[0].peerId, 'peer-alice-1')
 
       // 2. Alice's 2nd tab joins with the same aliceIdentity
-      roomAlice2 = makeJoinRoom()(
+      roomAlice2 = makeJoinRoom('peer-alice-2')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-alice-2',
           identity: aliceIdentity,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
@@ -852,10 +843,9 @@ void test(
     const mitmErrors: any[] = []
     const honestJoins: any[] = []
 
-    const honestRoom = makeJoinRoom()(
+    const honestRoom = makeJoinRoom('peer-honest')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-honest',
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
       roomId,
@@ -863,10 +853,9 @@ void test(
     )
     honestRoom.onPeerJoin = ctx => honestJoins.push(ctx)
 
-    const mitmRoom = makeJoinRoom()(
+    const mitmRoom = makeJoinRoom('peer-mitm')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-mitm',
         rtcPolyfill: MitmRTCPeerConnection as any
       },
       roomId,
@@ -966,10 +955,9 @@ void test(
     const aliceUser = await createUserIdentity()
     const intruderUser = await createUserIdentity()
 
-    const hostRoom = makeJoinRoom()(
+    const hostRoom = makeJoinRoom('peer-host')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-host',
         identity: hostUser,
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -977,10 +965,9 @@ void test(
       roomId
     )
 
-    const aliceTab1 = makeJoinRoom()(
+    const aliceTab1 = makeJoinRoom('peer-alice-1')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-alice-1',
         identity: aliceUser,
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -997,10 +984,9 @@ void test(
 
     // Alice opens a 2nd tab with the same aliceUser in a limit: 2 room -> admitted!
     const aliceTab2Errors: any[] = []
-    const aliceTab2 = makeJoinRoom()(
+    const aliceTab2 = makeJoinRoom('peer-alice-2')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-alice-2',
         identity: aliceUser,
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -1021,10 +1007,9 @@ void test(
 
     // A 3rd distinct user (intruderUser) tries to join -> rejected with 'room full'!
     const intruderErrors: any[] = []
-    const intruderRoom = makeJoinRoom()(
+    const intruderRoom = makeJoinRoom('peer-intruder')(
       {
         appId,
-        _test_only_forcedPeerId: 'peer-intruder',
         identity: intruderUser,
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -1066,10 +1051,9 @@ void test(
     let limiterRoom: Room & RolesPluginApi
 
     try {
-      adminRoom = makeJoinRoom()(
+      adminRoom = makeJoinRoom('peer-admin')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-admin',
           identity: adminUser,
           use: [roles({selfAsAdmin: true})],
           rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -1078,10 +1062,9 @@ void test(
       )
       const authInfo = await adminRoom.getSelf()
 
-      aliceTab1 = makeJoinRoom()(
+      aliceTab1 = makeJoinRoom('peer-alice-1')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-alice-1',
           identity: aliceUser,
           use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -1101,10 +1084,9 @@ void test(
       await waitFor(() => aliceTab1.getRoles().includes('moderator'), 3_000)
 
       // Alice opens Tab 2 (or reloads with persistent userId -> new peerId 'peer-alice-2')
-      aliceTab2 = makeJoinRoom()(
+      aliceTab2 = makeJoinRoom('peer-alice-2')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-alice-2',
           identity: aliceUser,
           use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -1151,10 +1133,9 @@ void test(
       assert.equal(adminTopicState.getMeta()?.userId, aliceUser.userId)
 
       // Attacker joins, gets banned by userId, and then tries to evade the ban by opening a new tab with a fresh peerId
-      attackerTab1 = makeJoinRoom()(
+      attackerTab1 = makeJoinRoom('peer-attacker-1')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-attacker-1',
           identity: attackerUser,
           use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -1167,10 +1148,9 @@ void test(
       await attackerTab1.leave()
 
       const attackerTab2Errors: any[] = []
-      attackerTab2 = makeJoinRoom()(
+      attackerTab2 = makeJoinRoom('peer-attacker-2')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-attacker-2',
           identity: attackerUser,
           use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
@@ -1189,10 +1169,9 @@ void test(
       // Newcomer advertising limit: 1 refuses other users locally without self-evicting or ejecting established members
       const limiterUser = await createUserIdentity()
       const limiterErrors: any[] = []
-      limiterRoom = makeJoinRoom()(
+      limiterRoom = makeJoinRoom('peer-000-limiter')(
         {
           appId,
-          _test_only_forcedPeerId: 'peer-000-limiter',
           identity: limiterUser,
           use: [roles()],
           limit: 1,
@@ -1277,11 +1256,47 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
   })
 
   const dtsContent = readFileSync(distIndexDmts, 'utf8')
-  assert.equal(
-    dtsContent.includes('_test_only_forcedPeerId'),
-    false,
-    'built .d.mts must not expose _test_only_forcedPeerId'
+  const typesDtsContent = readFileSync(
+    resolve(import.meta.dirname, '../../packages/core/dist/types.d.mts'),
+    'utf8'
   )
+  const distBundles = ['strategy.mjs', 'identity.mjs', 'room.mjs']
+    .map(name =>
+      readFileSync(
+        resolve(import.meta.dirname, `../../packages/core/dist/${name}`),
+        'utf8'
+      )
+    )
+    .join('\n')
+
+  for (const forbidden of [
+    'forcedPeerId',
+    'scopeAppId',
+    'registerTestForcedPeerId',
+    'endpointIdentityByPeerId',
+    'registeredTestForcedPeerIds',
+    'resolvedTestEndpointCanonicalJwk',
+    'getDefaultTestUserIdentity',
+    'setDevIdentityProvider',
+    'devIdentityProvider',
+    'TestOnlyRoomConfig'
+  ]) {
+    assert.equal(
+      distBundles.includes(forbidden),
+      false,
+      `production dist bundle must not contain "${forbidden}"`
+    )
+    assert.equal(
+      dtsContent.includes(forbidden),
+      false,
+      `built index.d.mts must not contain "${forbidden}"`
+    )
+    assert.equal(
+      typesDtsContent.includes(forbidden),
+      false,
+      `built types.d.mts must not contain "${forbidden}"`
+    )
+  }
   assert.equal(
     dtsContent.includes('_test_only_mdnsHostFallbackToLoopback'),
     false,

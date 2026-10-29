@@ -3,7 +3,7 @@ import {ecdsaSign, sha256} from './crypto'
 import {maxActionFrameBytes, maxOverlayHeaderBytes} from './data-limits'
 import {
   getCachedPubKeyRecord,
-  getOrCreateEndpointIdentity,
+  getDefaultEndpointIdentity,
   isPeerIdKeyCachedValid,
   isUserEndpointProofCachedValid,
   signUserEndpointProof,
@@ -636,7 +636,7 @@ const getOrCreateCryptoIdentity = (peerId: string): Promise<CryptoIdentity> => {
   if (!cached) {
     cached = (async () => {
       const [endpointId, encPair] = await all([
-        getOrCreateEndpointIdentity(peerId),
+        getDefaultEndpointIdentity(peerId),
         crypto.subtle.generateKey({name: 'ECDH', namedCurve: 'P-256'}, true, [
           'deriveKey',
           'deriveBits'
@@ -825,7 +825,7 @@ export const createOverlayManager = ({
     syncSessionSeqFloor(selfId)
   }
 
-  void getOrCreateEndpointIdentity(initialSelfId).then(ep => {
+  void getDefaultEndpointIdentity(initialSelfId).then(ep => {
     if (!initialSelfId && ep.peerId !== selfId) {
       knownRoster.delete(selfId)
       selfId = ep.peerId

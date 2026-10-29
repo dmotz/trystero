@@ -2,7 +2,6 @@ import {isSelfAsAdminPlugin} from './authority'
 import {decrypt, encrypt, genKey, sha1} from './crypto'
 import {
   getDefaultEndpointIdentity,
-  registerTestForcedPeerId,
   resolveUserIdentity,
   validateIdentityConfig
 } from './identity'
@@ -52,8 +51,7 @@ import type {
   Signal,
   SignalContext,
   StrategyContext,
-  StrategyAdapter,
-  TestOnlyRoomConfig
+  StrategyAdapter
 } from './types'
 
 const announceIntervalMs = 5_333
@@ -136,43 +134,27 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       warnEphemeralAdmin()
     }
 
-    let forcedPeerId: string | undefined
-    DEV: {
-      const testConfig = config as TestOnlyRoomConfig
-      if (
-        typeof testConfig._test_only_forcedPeerId === 'string' &&
-        testConfig._test_only_forcedPeerId
-      ) {
-        forcedPeerId = testConfig._test_only_forcedPeerId
-      }
-    }
-    const localEndpointP = forcedPeerId
-      ? registerTestForcedPeerId(forcedPeerId)
-      : getDefaultEndpointIdentity()
-    const selfIdP = localEndpointP.then(ep => forcedPeerId ?? ep.peerId)
-    const scopeAppId = forcedPeerId ? `${appId}:${forcedPeerId}` : appId
-
-    if (occupiedRooms[scopeAppId]?.[roomId]) {
-      return occupiedRooms[scopeAppId][roomId] as RoomWithPlugins<TPlugins>
+    if (occupiedRooms[appId]?.[roomId]) {
+      return occupiedRooms[appId][roomId] as RoomWithPlugins<TPlugins>
     }
 
-    leavingRoomCleanups[scopeAppId]?.[roomId]?.(true)
+    leavingRoomCleanups[appId]?.[roomId]?.(true)
+
+    const localEndpointP = getDefaultEndpointIdentity()
+    const selfIdP = localEndpointP.then(ep => ep.peerId)
 
     let effectiveRoomId = roomId
-    const userIdentityP = resolveUserIdentity(
-      appId,
-      roomId,
-      config,
-      forcedPeerId
-    ).catch(async err => {
-      onJoinError?.({
-        error: toErrorMessage(err, 'identity resolution failed'),
-        appId,
-        peerId: forcedPeerId ?? (await selfIdP),
-        roomId: effectiveRoomId
-      })
-      throw err
-    })
+    const userIdentityP = resolveUserIdentity(appId, roomId, config).catch(
+      async err => {
+        onJoinError?.({
+          error: toErrorMessage(err, 'identity resolution failed'),
+          appId,
+          peerId: await selfIdP,
+          roomId: effectiveRoomId
+        })
+        throw err
+      }
+    )
     void userIdentityP.catch(noOp)
 
     const preResolvedPlugins = new Map<RoomPlugin, unknown>()
@@ -198,7 +180,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       ctx.rootTopicPlaintext = topicPath(libName, appId, res.effectiveRoomId)
       strategyContext.roomId = res.effectiveRoomId
       if (res.effectiveRoomId !== roomId && !didLeaveRoom) {
-        ;(occupiedRooms[scopeAppId] ??= {})[res.effectiveRoomId] = joinedRoom
+        ;(occupiedRooms[appId] ??= {})[res.effectiveRoomId] = joinedRoom
       }
       return res.effectiveRoomId
     })
@@ -341,7 +323,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       disconnectPeer,
       announceIntervals: [],
       announceIntervalMs,
-      ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
       selfIdP,
       onPeerDiscovered: peerId => {
         bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)
@@ -357,8 +338,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const strategyContext: StrategyContext<TConfig> = {
       config,
       appId,
-      roomId,
-      ...(forcedPeerId ? {peerId: forcedPeerId} : {})
+      roomId
     }
 
     const handleMessage = createSignalHandler(ctx)
@@ -505,7 +485,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
 
     const {compose: composeIdentity} = createIdentityHandshake({
-      ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
+      endpointIdentityP: localEndpointP,
       appId,
       roomId: effectiveRoomIdP ?? roomId,
       getUserIdentity: () => userIdentityP,
@@ -517,7 +497,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const composedPeerHandshake = composeIdentity()
 
     const releaseOccupiedRoom = (): void => {
-      const appRooms = occupiedRooms[scopeAppId]
+      const appRooms = occupiedRooms[appId]
       if (!appRooms) {
         return
       }
@@ -531,12 +511,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         delete appRooms[effectiveRoomId]
       }
       if (keys(appRooms).length === 0) {
-        delete occupiedRooms[scopeAppId]
+        delete occupiedRooms[appId]
       }
     }
 
     const clearLeavingCleanup = (): void => {
-      const appCleanups = leavingRoomCleanups[scopeAppId]
+      const appCleanups = leavingRoomCleanups[appId]
       if (!appCleanups) {
         return
       }
@@ -550,7 +530,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         delete appCleanups[effectiveRoomId]
       }
       if (keys(appCleanups).length === 0) {
-        delete leavingRoomCleanups[scopeAppId]
+        delete leavingRoomCleanups[appId]
       }
     }
 
@@ -596,7 +576,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const roomOptions = {
-      ...(forcedPeerId ? {selfId: forcedPeerId} : {}),
+      endpointIdentityP: localEndpointP,
       appId,
       roomId,
       ...(config.password === undefined ? {} : {password: config.password}),
@@ -615,7 +595,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceTimeouts.forEach(resetTimer)
         announceTimeouts.length = 0
         releaseOccupiedRoom()
-        ;(leavingRoomCleanups[scopeAppId] ??= {})[roomId] = cleanupRoom
+        ;(leavingRoomCleanups[appId] ??= {})[roomId] = cleanupRoom
       },
       onHandshakeError: (peerId: string, error: string) =>
         onJoinError?.({
@@ -626,7 +606,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         })
     }
 
-    occupiedRooms[scopeAppId] ??= {}
+    occupiedRooms[appId] ??= {}
 
     let joinedRoom: RoomWithPlugins<TPlugins>
     try {
@@ -674,7 +654,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     })
 
-    return (occupiedRooms[scopeAppId][roomId] =
+    return (occupiedRooms[appId][roomId] =
       joinedRoom) as RoomWithPlugins<TPlugins>
   }
 }
