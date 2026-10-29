@@ -8,8 +8,11 @@ const offerRoomLeftErr = mkErr('room left while preparing offer')
 export class OfferManager {
   private leased = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
   private destroyed = false
+  private makeOffer: () => PeerHandle
 
-  constructor(private makeOffer: () => PeerHandle) {}
+  constructor(makeOffer: () => PeerHandle) {
+    this.makeOffer = makeOffer
+  }
 
   claimLeased(peer: PeerHandle): void {
     const timer = this.leased.get(peer)

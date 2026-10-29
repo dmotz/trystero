@@ -45,7 +45,7 @@ const startPeer = ({
   roomId: string
   roomConfig: Record<string, unknown>
 }) => {
-  const child = spawn('pnpm', ['exec', 'jiti', peerScript], {
+  const child = spawn(process.execPath, [peerScript], {
     cwd: projectRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {

@@ -97,7 +97,7 @@ export default {
   ],
   webServer: [
     {
-      command: `TRYSTERO_WS_RELAY_PORTS=${wsRelayPorts.join(',')} jiti scripts/start-ws-relay.ts`,
+      command: `TRYSTERO_WS_RELAY_PORTS=${wsRelayPorts.join(',')} node scripts/start-ws-relay.ts`,
       port: wsRelayPorts[0],
       name: 'ws-relay'
     },
