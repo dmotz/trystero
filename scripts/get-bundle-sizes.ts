@@ -17,17 +17,17 @@ const variants = [
   {
     name: 'core',
     exports:
-      'joinRoom, createUserIdentity, importUserIdentity, exportUserIdentity'
+      'joinRoom, createUserIdentity, importUserIdentity, exportUserIdentity, clearUserIdentity'
   },
   {
     name: 'core+roles',
     exports:
-      'joinRoom, createUserIdentity, importUserIdentity, exportUserIdentity, roles'
+      'joinRoom, createUserIdentity, importUserIdentity, exportUserIdentity, clearUserIdentity, roles'
   },
   {
     name: 'core+scale',
     exports:
-      'joinRoom, createUserIdentity, importUserIdentity, exportUserIdentity, scale'
+      'joinRoom, createUserIdentity, importUserIdentity, exportUserIdentity, clearUserIdentity, scale'
   },
   {
     name: 'core+both',

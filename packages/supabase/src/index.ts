@@ -229,6 +229,7 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((
 }) as JoinRoom<SupabaseRoomConfig>
 
 export {
+  clearUserIdentity,
   createAdminRoom,
   createUserIdentity,
   definePlugin,

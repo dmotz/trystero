@@ -17,7 +17,7 @@ import {
   toBase64Url,
   toJson
 } from './crypto'
-import {invalidP256KeyErr, warn} from './utils'
+import {invalidP256KeyErr, noOp, requiredErr, warn} from './utils'
 import type {
   ResolvedIdentityPersistence,
   UserIdentity,
@@ -740,7 +740,8 @@ export const getDefaultUserIdentity = (): Promise<UserIdentity> =>
   (defaultUserIdentityPromise ??= createUserIdentity())
 
 const runtimeUserIdentityByScope = new Map<string, Promise<UserIdentity>>()
-const localMutexByApp = new Map<string, Promise<UserIdentity>>()
+const inflightLocalLoadByApp = new Map<string, Promise<UserIdentity>>()
+const localOpTailByApp = new Map<string, Promise<unknown>>()
 
 const getOrCreateRuntimeUserIdentity = (
   appId?: string
@@ -973,17 +974,83 @@ const loadOrCreateIdbIdentity = (idbKey: string): Promise<UserIdentity> =>
     }
   })
 
+const idbDeleteRecord = (db: IDBDatabase, appId: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const tx = db.transaction(idbStoreName, 'readwrite')
+    const store = tx.objectStore(idbStoreName)
+    const delReq = store.delete(appId)
+    delReq.onsuccess = () => resolve()
+    delReq.onerror = () => reject(delReq.error ?? idbErr('delete'))
+  })
+
 const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
-  const inflight = localMutexByApp.get(appId)
+  const inflight = inflightLocalLoadByApp.get(appId)
   if (inflight) {
     return inflight
   }
 
-  const promise = loadOrCreateIdbIdentity(appId).finally(() => {
-    localMutexByApp.delete(appId)
+  const prev = localOpTailByApp.get(appId)
+  const promise = (
+    prev
+      ? prev.catch(noOp).then(() => loadOrCreateIdbIdentity(appId))
+      : loadOrCreateIdbIdentity(appId)
+  ).finally(() => {
+    if (inflightLocalLoadByApp.get(appId) === promise) {
+      inflightLocalLoadByApp.delete(appId)
+    }
+    if (localOpTailByApp.get(appId) === promise) {
+      localOpTailByApp.delete(appId)
+    }
   })
 
-  localMutexByApp.set(appId, promise)
+  inflightLocalLoadByApp.set(appId, promise)
+  localOpTailByApp.set(appId, promise)
+  return promise
+}
+
+const clearRuntimeAppCaches = (appId: string): void => {
+  if (appId === '__default__') {
+    defaultUserIdentityPromise = null
+    defaultEndpointIdentityPromise = null
+    return
+  }
+  runtimeUserIdentityByScope.delete(appId)
+  appEndpointCache.delete(appId)
+}
+
+export const clearUserIdentity = async (appId: string): Promise<void> => {
+  if (typeof appId !== 'string' || !appId.trim()) {
+    throw requiredErr('clearUserIdentity: appId')
+  }
+
+  inflightLocalLoadByApp.delete(appId)
+  clearRuntimeAppCaches(appId)
+
+  const prev = localOpTailByApp.get(appId)
+  const clearIdb = async (): Promise<void> => {
+    clearRuntimeAppCaches(appId)
+    if (!hasIndexedDB()) {
+      return
+    }
+    await withNavigatorLock(`${storagePrefix}${appId}`, async () => {
+      const db = await openIdentityDb()
+      try {
+        await idbDeleteRecord(db, appId)
+      } finally {
+        db.close()
+      }
+    })
+  }
+
+  const promise = (prev ? prev.catch(noOp).then(clearIdb) : clearIdb()).finally(
+    () => {
+      if (localOpTailByApp.get(appId) === promise) {
+        localOpTailByApp.delete(appId)
+      }
+    }
+  )
+
+  localOpTailByApp.set(appId, promise)
   return promise
 }
 

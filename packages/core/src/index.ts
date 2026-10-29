@@ -19,6 +19,7 @@ export {createAdminRoom, roles} from './authority'
 export {scale} from './overlay'
 
 export {
+  clearUserIdentity,
   createUserIdentity,
   exportUserIdentity,
   importUserIdentity

@@ -65,6 +65,7 @@ You can see what people are building with Trystero
   - [`createUserIdentity()`](#createuseridentity)
   - [`importUserIdentity(input)`](#importuseridentityinput)
   - [`exportUserIdentity(identity)`](#exportuseridentityidentity)
+  - [`clearUserIdentity(appId)`](#clearuseridentityappid)
   - [`createAdminRoom(appId, baseRoomId, [options])`](#createadminroomappid-baseroomid-options)
   - [`getRelaySockets()`](#getrelaysockets)
   - [`setRelayConnectivity(mode)`](#setrelayconnectivitymode)
@@ -404,11 +405,22 @@ const room = joinRoom(
 )
 ```
 
-| `identity` value                        | `userId` lifetime                                                                                                |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `'local'` _(browser default)_           | Reused across all open tabs and future visits on the same device (`IndexedDB`) until browser storage is cleared. |
-| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload, new tab, or process restart generates a new `userId`.               |
-| Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno).         |
+| `identity` value                        | `userId` lifetime                                                                                                                         |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `'local'` _(browser default)_           | Reused across all open tabs and future visits on the same device (`IndexedDB`) until `clearUserIdentity(appId)` or site storage clears it |
+| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload, new tab, or process restart generates a new `userId`.                                        |
+| Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno).                                  |
+
+To reset a user's stored identity for an app (for example, on "Sign out" or a
+shared device), leave any active rooms and call
+`await clearUserIdentity(appId)`:
+
+```js
+import {clearUserIdentity} from 'trystero'
+
+await room.leave()
+await clearUserIdentity('my-app')
+```
 
 ### Multiple connections for a single user (`userId` vs `peerId`)
 
@@ -1858,6 +1870,14 @@ Exports a `UserIdentity` (created via `createUserIdentity()` or
 `importUserIdentity()`) as a compact `trystero_uk_...` string suitable for
 persisting in custom storage. Throws if the identity is backed by
 non-extractable browser storage (`'local'`).
+
+### `clearUserIdentity(appId)`
+
+Deletes the stored `'local'` `UserIdentity` in `IndexedDB` and clears in-memory
+identity and endpoint caches for `appId`, returning a promise that resolves when
+cleanup completes (other `appId`s on the same origin are unaffected). Applies to
+subsequent `joinRoom()` and `createAdminRoom()` calls—call `await room.leave()`
+first if already connected.
 
 ### `createAdminRoom(appId, baseRoomId, [options])`
 

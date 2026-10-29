@@ -146,6 +146,7 @@ export const getRelaySockets: () => Record<string, WebSocket> =
   relayManager.getSockets
 
 export {
+  clearUserIdentity,
   createAdminRoom,
   createUserIdentity,
   definePlugin,

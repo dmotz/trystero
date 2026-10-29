@@ -50,6 +50,7 @@ export const createBoundedCache = <K, V>(
   get: (key: K) => V | undefined
   has: (key: K) => boolean
   set: (key: K, value: V) => void
+  delete: (key: K) => boolean
 } => {
   const map = new Map<K, V>()
   return {
@@ -63,7 +64,8 @@ export const createBoundedCache = <K, V>(
         }
       }
       map.set(key, value)
-    }
+    },
+    delete: key => map.delete(key)
   }
 }
 

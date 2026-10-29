@@ -7,6 +7,7 @@ import * as corePublicExports from '../../packages/core/src/index.ts'
 import {
   type RolesPluginApi,
   type Room,
+  clearUserIdentity,
   createAdminRoom,
   createTopicStrategy,
   createUserIdentity,
@@ -1454,6 +1455,28 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
                     }
                   })
                   return addReq
+                },
+                put: (val: any, key: string) => {
+                  const putReq: any = {
+                    onsuccess: null,
+                    onerror: null
+                  }
+                  queueMicrotask(() => {
+                    idbStore.set(key, val)
+                    putReq.onsuccess?.()
+                  })
+                  return putReq
+                },
+                delete: (key: string) => {
+                  const delReq: any = {
+                    onsuccess: null,
+                    onerror: null
+                  }
+                  queueMicrotask(() => {
+                    idbStore.delete(key)
+                    delReq.onsuccess?.()
+                  })
+                  return delReq
                 }
               }),
               onabort: null,
@@ -1587,6 +1610,124 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
     'joining a room created with createAdminRoom(appId, baseRoomId) with default identity must have admin authority'
   )
   await hostJoined.leave()
+
+  // 3. clearUserIdentity(appId) validates appId, deletes only that appId from IndexedDB, rotates both userId and peerId, and serializes concurrent calls
+  for (const badAppId of ['', '   ', undefined, null, 42]) {
+    await assert.rejects(
+      () => (clearUserIdentity as any)(badAppId),
+      /appId is required/
+    )
+  }
+
+  await clearUserIdentity('my-admin-app')
+  assert.equal(
+    idbStore.has('my-admin-app'),
+    false,
+    'clearUserIdentity must delete the target appId from IndexedDB'
+  )
+  assert.equal(
+    idbStore.has('idb-default-app'),
+    true,
+    'clearUserIdentity must leave other appIds untouched in IndexedDB'
+  )
+
+  const postClearJoined = joinRoom(
+    {
+      appId: 'my-admin-app',
+      use: [roles()],
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    adminRoom1.roomId
+  )
+  const postClearSelf = await postClearJoined.getSelf()
+  assert.notEqual(
+    postClearSelf.userId,
+    hostSelf.userId,
+    'rejoining after clearUserIdentity must generate a fresh userId'
+  )
+  assert.notEqual(
+    postClearSelf.peerId,
+    hostSelf.peerId,
+    'rejoining in the same SPA runtime after clearUserIdentity must also rotate peerId'
+  )
+  assert.equal(
+    postClearSelf.isAdmin,
+    false,
+    'cleared identity must no longer hold admin authority in previous fingerprinted room'
+  )
+  await postClearJoined.leave()
+
+  // Un-awaited clearUserIdentity followed immediately by joinRoom serializes cleanly
+  const unawaitedClear = clearUserIdentity('my-admin-app')
+  const immediateNextRoom = joinRoom(
+    {
+      appId: 'my-admin-app',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'room-after-unawaited-clear'
+  )
+  const immediateNextSelf = await immediateNextRoom.getSelf()
+  await unawaitedClear
+  assert.notEqual(
+    immediateNextSelf.userId,
+    postClearSelf.userId,
+    'joinRoom called synchronously after un-awaited clearUserIdentity must wait for deletion and create a new userId'
+  )
+  assert.notEqual(immediateNextSelf.peerId, postClearSelf.peerId)
+  assert.equal(idbStore.get('my-admin-app')?.userId, immediateNextSelf.userId)
+  await immediateNextRoom.leave()
+})
+
+void test('clearUserIdentity without IndexedDB resets runtime userId and peerId caches only for that appId', async () => {
+  const {makeJoinRoom} = createMemorySignalBus()
+  const joinRoom = makeJoinRoom()
+
+  const roomA1 = joinRoom(
+    {
+      appId: 'clear-no-idb-a',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'r1'
+  )
+  const roomB1 = joinRoom(
+    {
+      appId: 'clear-no-idb-b',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'r1'
+  )
+  const [selfA1, selfB1] = await Promise.all([
+    roomA1.getSelf(),
+    roomB1.getSelf()
+  ])
+  await Promise.all([roomA1.leave(), roomB1.leave()])
+
+  await clearUserIdentity('clear-no-idb-a')
+
+  const roomA2 = joinRoom(
+    {
+      appId: 'clear-no-idb-a',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'r1'
+  )
+  const roomB2 = joinRoom(
+    {
+      appId: 'clear-no-idb-b',
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'r1'
+  )
+  const [selfA2, selfB2] = await Promise.all([
+    roomA2.getSelf(),
+    roomB2.getSelf()
+  ])
+  await Promise.all([roomA2.leave(), roomB2.leave()])
+
+  assert.notEqual(selfA2.userId, selfA1.userId)
+  assert.notEqual(selfA2.peerId, selfA1.peerId)
+  assert.equal(selfB2.userId, selfB1.userId)
+  assert.equal(selfB2.peerId, selfB1.peerId)
 })
 
 void test('makeState widens primitive literals, isPassive is removed, and core exports/types are pruned', async () => {
@@ -1680,6 +1821,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'roles',
     'scale',
     'definePlugin',
+    'clearUserIdentity',
     'createUserIdentity',
     'exportUserIdentity',
     'importUserIdentity',
@@ -1689,6 +1831,25 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       typeof (coreExports as Record<string, unknown>)[kept],
       'function',
       `"${kept}" must remain exported from @trystero-p2p/core`
+    )
+  }
+
+  const distCore = await import('../../packages/core/dist/index.mjs')
+  assert.equal(typeof distCore.clearUserIdentity, 'function')
+  for (const pkg of [
+    'trystero',
+    'nostr',
+    'mqtt',
+    'torrent',
+    'firebase',
+    'supabase',
+    'ws-relay'
+  ]) {
+    const mod = await import(`../../packages/${pkg}/dist/index.mjs`)
+    assert.equal(
+      mod.clearUserIdentity,
+      distCore.clearUserIdentity,
+      `packages/${pkg} must re-export clearUserIdentity`
     )
   }
 

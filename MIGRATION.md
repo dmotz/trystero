@@ -17,8 +17,9 @@ boilerplate—and eliminates subtle security and topology footguns.
    an unforgeable cryptographic `userId` alongside their per-connection
    `peerId`. By default in browsers (`identity: 'local'`), `userId` persists
    across page refreshes, open tabs, and browser restarts on that device (each
-   tab still has its own `peerId`), can be made strictly ephemeral with
-   `identity: 'none'`, or can be loaded from your own backend.
+   tab still has its own `peerId`), can be reset per app via
+   `clearUserIdentity(appId)`, made strictly ephemeral with `identity: 'none'`,
+   or loaded from your own backend.
 2. **`onUserJoin` / `onUserLeave` as the New Default**: Most applications care
    about _who_ is in the room rather than how many browser tabs they have open.
    `onUserJoin` and `onUserLeave` fire once per unique user and automatically
