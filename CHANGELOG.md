@@ -69,9 +69,8 @@
   descriptors across multi-hop overlays) and a persistent 43-character Base64url
   `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) public-key
   thumbprint).
-- Added `identity` to room config (`'session'` default in browsers using a
-  per-tab `sessionStorage` token backed by a non-extractable IndexedDB
-  `CryptoKey`, `'local'` stored in IndexedDB across tabs and future visits,
+- Added `identity` to room config (`'local'` default in browsers stored in
+  IndexedDB as a non-extractable `CryptoKey` across tabs and future visits,
   `'none'` for ephemeral runtime, or a custom `UserIdentity` / loader function),
   plus top-level helpers `createUserIdentity()`, `importUserIdentity()`, and
   `exportUserIdentity()`.
@@ -145,8 +144,8 @@ const {userId, connection, direct, hops, roles} = peers[peerId]
 
 Arbitrary `config.peerId` strings are no longer supported because all `peerId`s
 and `userId`s are now cryptographically self-certifying. Use `config.identity`
-(`'session'`, `'local'`, `'none'`, or a custom `UserIdentity` / loader) to
-persist or supply a custom identity.
+(`'local'`, `'none'`, or a custom `UserIdentity` / loader) to control
+persistence or supply a custom identity.
 
 `onPeerHandshake` and `handshakeTimeoutMs` have been removed from `joinRoom()`
 callbacks. Peer and user identity verification, password verification, room

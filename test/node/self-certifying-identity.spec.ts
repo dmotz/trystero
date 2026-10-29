@@ -340,7 +340,7 @@ void test('Identity primitives: peerId is 20-char Base62, selfId is not exported
   )
 })
 
-void test('Identity config validation & persistence modes: none, session, local, and custom', async t => {
+void test('Identity config validation & persistence modes: default local, none, and custom', async t => {
   for (const name of ['sessionStorage', 'localStorage', 'indexedDB']) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name)
     t.after(() => {
@@ -359,19 +359,21 @@ void test('Identity config validation & persistence modes: none, session, local,
   const {makeJoinRoom} = createMemorySignalBus()
   const joinRoom = makeJoinRoom()
 
-  // Rejects arbitrary strings or un-imported key strings synchronously
-  assert.throws(
-    () =>
-      joinRoom(
-        {
-          appId: 'validation-app',
-          identity: 'sesion' as any,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
-        },
-        'room-1'
-      ),
-    /invalid custom user identity/i
-  )
+  // Rejects removed 'session', arbitrary strings, or un-imported key strings synchronously
+  for (const invalidMode of ['session', 'sesion']) {
+    assert.throws(
+      () =>
+        joinRoom(
+          {
+            appId: 'validation-app',
+            identity: invalidMode as any,
+            rtcPolyfill: InMemoryRTCPeerConnection as any
+          },
+          'room-1'
+        ),
+      /invalid custom user identity/i
+    )
+  }
 
   const tempUser = await createUserIdentity()
   assert.throws(
@@ -455,20 +457,19 @@ void test('Identity config validation & persistence modes: none, session, local,
   ;(globalThis as any).sessionStorage = makeMockStorage(sessionStore)
   ;(globalThis as any).localStorage = makeMockStorage(localStore)
 
-  // Falls back to 'none' and warns when IndexedDB is unavailable (no plaintext Web Storage fallback)
+  // Outside IndexedDB: default is silent 'none', while explicit 'local' warns and falls back to 'none' (no plaintext Web Storage fallback)
   const warnings: string[] = []
   const origWarn = console.warn
   console.warn = (...args: any[]) => {
     warnings.push(args.map(String).join(' '))
   }
   try {
-    const noIdbSessionRoom = makeJoinRoom('peer-noidb-s')(
+    const noIdbDefaultRoom = makeJoinRoom('peer-noidb-d')(
       {
-        appId: 'no-idb-app',
-        identity: 'session',
+        appId: 'no-idb-default-app',
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
-      'room-session'
+      'room-default'
     )
     const noIdbLocalRoom = makeJoinRoom('peer-noidb-l')(
       {
@@ -478,19 +479,23 @@ void test('Identity config validation & persistence modes: none, session, local,
       },
       'room-local'
     )
-    const [selfNoIdbS, selfNoIdbL] = await Promise.all([
-      noIdbSessionRoom.getSelf(),
+    const [selfNoIdbD, selfNoIdbL] = await Promise.all([
+      noIdbDefaultRoom.getSelf(),
       noIdbLocalRoom.getSelf()
     ])
-    assert.notEqual(selfNoIdbS.userId, selfNoIdbL.userId)
+    assert.equal(selfNoIdbD.persisted, false)
+    assert.equal(selfNoIdbD.identityPersistence, 'none')
+    assert.equal(selfNoIdbL.persisted, false)
+    assert.equal(selfNoIdbL.identityPersistence, 'none')
+    assert.notEqual(selfNoIdbD.userId, selfNoIdbL.userId)
     assert.equal(sessionStore.size, 0)
     assert.equal(localStore.size, 0)
     assert.equal(
       warnings.filter(w => /IndexedDB.*none/i.test(w)).length,
-      2,
-      'must warn and fall back to "none" when IndexedDB is unavailable'
+      1,
+      'explicit identity: "local" must warn and fall back to "none" when IndexedDB is unavailable, while default stays silent'
     )
-    await Promise.all([noIdbSessionRoom.leave(), noIdbLocalRoom.leave()])
+    await Promise.all([noIdbDefaultRoom.leave(), noIdbLocalRoom.leave()])
   } finally {
     console.warn = origWarn
   }
@@ -498,68 +503,61 @@ void test('Identity config validation & persistence modes: none, session, local,
   ;(globalThis as any).indexedDB = mockIndexedDB
 
   try {
-    // 'session' reuses userId within same appId and isolates across appIds
-    const sRoom1 = makeJoinRoom('peer-s1')(
-      {
-        appId: 'app-session-1',
-        identity: 'session',
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      'r1'
-    )
-    const sRoom2 = makeJoinRoom('peer-s2')(
-      {
-        appId: 'app-session-1',
-        identity: 'session',
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      'r2'
-    )
-    const sRoomOtherApp = makeJoinRoom('peer-s3')(
-      {
-        appId: 'app-session-2',
-        identity: 'session',
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      'r1'
-    )
-
-    const selfS1 = await sRoom1.getSelf()
-    const selfS2 = await sRoom2.getSelf()
-    const selfSOther = await sRoomOtherApp.getSelf()
-
-    assert.equal(selfS1.userId, selfS2.userId)
-    assert.notEqual(selfS1.peerId, selfS2.peerId)
-    assert.notEqual(selfS1.userId, selfSOther.userId)
-
-    await Promise.all([sRoom1.leave(), sRoom2.leave(), sRoomOtherApp.leave()])
-
-    // 'local' coordinates concurrent first-time tabs to converge on the same userId
-    const [lRoom1, lRoom2] = [
-      makeJoinRoom('peer-l1')(
+    // Default (omitted identity) uses 'local', reuses userId within same appId across tabs/rooms, and isolates across appIds
+    const [dRoom1, dRoom2] = [
+      makeJoinRoom('peer-d1')(
         {
           appId: 'app-local-1',
-          identity: 'local',
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
-        'r-local-1'
+        'r1'
       ),
-      makeJoinRoom('peer-l2')(
+      makeJoinRoom('peer-d2')(
         {
           appId: 'app-local-1',
-          identity: 'local',
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
-        'r-local-2'
+        'r2'
       )
     ]
+    const dRoomOtherApp = makeJoinRoom('peer-d3')(
+      {
+        appId: 'app-local-2',
+        rtcPolyfill: InMemoryRTCPeerConnection as any
+      },
+      'r1'
+    )
 
-    const [selfL1, selfL2] = await Promise.all([
-      lRoom1.getSelf(),
-      lRoom2.getSelf()
+    const [selfD1, selfD2, selfDOther] = await Promise.all([
+      dRoom1.getSelf(),
+      dRoom2.getSelf(),
+      dRoomOtherApp.getSelf()
     ])
-    assert.equal(selfL1.userId, selfL2.userId)
-    await Promise.all([lRoom1.leave(), lRoom2.leave()])
+
+    assert.equal(selfD1.userId, selfD2.userId)
+    assert.equal(selfD1.persisted, true)
+    assert.equal(selfD1.identityPersistence, 'local')
+    assert.notEqual(selfD1.peerId, selfD2.peerId)
+    assert.notEqual(selfD1.userId, selfDOther.userId)
+    assert.equal(sessionStore.size, 0)
+    assert.equal(localStore.size, 0)
+
+    await Promise.all([dRoom1.leave(), dRoom2.leave(), dRoomOtherApp.leave()])
+
+    // Explicit identity: 'none' bypasses IndexedDB even when available
+    const noneRoom = makeJoinRoom('peer-none-1')(
+      {
+        appId: 'app-none-explicit',
+        identity: 'none',
+        rtcPolyfill: InMemoryRTCPeerConnection as any
+      },
+      'r-none'
+    )
+    const selfNone = await noneRoom.getSelf()
+    assert.equal(selfNone.persisted, false)
+    assert.equal(selfNone.identityPersistence, 'none')
+    assert.equal(idbStore.has('app-none-explicit'), false)
+    await noneRoom.leave()
 
     // Custom loader receives {appId, roomId} and returns UserIdentity or exported key
     const customUser = await createUserIdentity()
@@ -1396,7 +1394,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
   )
 })
 
-void test('Session identity with IndexedDB: stores non-extractable CryptoKey keyed by per-tab sessionStorage token, and createAdminRoom(appId, baseRoomId) reuses local identity', async t => {
+void test('Default local identity with IndexedDB: stores non-extractable CryptoKey without touching Web Storage, suppresses ephemeral admin warning, and matches createAdminRoom(appId, baseRoomId)', async t => {
   for (const name of ['sessionStorage', 'localStorage', 'indexedDB']) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name)
     t.after(() => {
@@ -1493,80 +1491,68 @@ void test('Session identity with IndexedDB: stores non-extractable CryptoKey key
   const {makeJoinRoom} = createMemorySignalBus()
   const joinRoom = makeJoinRoom()
 
-  // 1. 'session' identity stores only an opaque token in sessionStorage and a non-extractable CryptoKey in IndexedDB
-  const roomTab1A = joinRoom(
-    {
-      appId: 'idb-session-app',
-      identity: 'session',
-      rtcPolyfill: InMemoryRTCPeerConnection as any
-    },
-    'room-a'
-  )
-  const selfTab1A = await roomTab1A.getSelf()
-  await roomTab1A.leave()
+  // 1. Default identity stores a non-extractable CryptoKey in IndexedDB keyed by appId, never writes to Web Storage, and does not warn on selfAsAdmin
+  const warnings: string[] = []
+  const origWarn = console.warn
+  console.warn = (...args: any[]) => {
+    warnings.push(args.map(String).join(' '))
+  }
+  let selfTab1A: Awaited<ReturnType<Room['getSelf']>>
+  try {
+    const roomTab1A = joinRoom(
+      {
+        appId: 'idb-default-app',
+        use: [roles({selfAsAdmin: true})],
+        rtcPolyfill: InMemoryRTCPeerConnection as any
+      },
+      'room-a'
+    )
+    selfTab1A = await roomTab1A.getSelf()
+    await roomTab1A.leave()
+  } finally {
+    console.warn = origWarn
+  }
 
-  const storedSessionToken = sessionMap.get(
-    'trystero:user_identity:v1:session:idb-session-app'
-  )
-  assert.ok(storedSessionToken, 'sessionStorage must contain a per-tab token')
-  assert.match(
-    storedSessionToken,
-    /^[0-9A-Za-z]{24}$/,
-    'sessionStorage token must be an opaque 24-char Base62 tab token, not a serialized private key'
-  )
   assert.equal(
-    storedSessionToken.includes('trystero_uk_'),
+    warnings.some(w => w.includes('ephemeral identity')),
     false,
-    'sessionStorage must never contain an exported private key when IndexedDB is available'
+    'roles({selfAsAdmin: true}) with default browser IndexedDB identity must not warn'
   )
+  assert.equal(sessionMap.size, 0, 'sessionStorage must not be touched')
+  assert.equal(localMap.size, 0, 'localStorage must not be touched')
 
-  const idbRecord = idbStore.get(
-    `session:idb-session-app:${storedSessionToken}`
-  )
-  assert.ok(idbRecord, 'IndexedDB must store the session CryptoKey record')
+  const idbRecord = idbStore.get('idb-default-app')
+  assert.ok(idbRecord, 'IndexedDB must store the local CryptoKey record')
   assert.equal(idbRecord.userId, selfTab1A.userId)
   assert.equal(
     idbRecord.privateKey.extractable,
     false,
-    'Session CryptoKey in IndexedDB must be non-extractable (extractable: false)'
+    'CryptoKey in IndexedDB must be non-extractable (extractable: false)'
   )
 
-  // Refreshing the same tab (same sessionMap token) reuses the non-extractable IndexedDB key
-  const roomTab1Refresh = joinRoom(
-    {
-      appId: 'idb-session-app',
-      identity: 'session',
-      rtcPolyfill: InMemoryRTCPeerConnection as any
-    },
-    'room-b'
-  )
-  const selfTab1Refresh = await roomTab1Refresh.getSelf()
-  assert.equal(
-    selfTab1Refresh.userId,
-    selfTab1A.userId,
-    'same tab refresh must reuse the non-extractable session identity'
-  )
-  await roomTab1Refresh.leave()
-
-  // Opening a new tab (fresh sessionStorage) generates a distinct session identity
-  sessionMap.clear()
+  // Opening a new tab or refreshing reuses the non-extractable IndexedDB key and regains admin authority
   const roomTab2 = joinRoom(
     {
-      appId: 'idb-session-app',
-      identity: 'session',
+      appId: 'idb-default-app',
+      use: [roles()],
       rtcPolyfill: InMemoryRTCPeerConnection as any
     },
-    'room-a'
+    selfTab1A.roomId
   )
   const selfTab2 = await roomTab2.getSelf()
-  assert.notEqual(
+  assert.equal(
     selfTab2.userId,
     selfTab1A.userId,
-    'new tab with empty sessionStorage must get a distinct session userId'
+    'another tab or reload must reuse the persistent local userId by default'
+  )
+  assert.equal(
+    selfTab2.isAdmin,
+    true,
+    'rejoining fingerprinted room with default browser identity must retain admin authority'
   )
   await roomTab2.leave()
 
-  // 2. createAdminRoom(appId, baseRoomId) requires appId first and defaults to persistent 'local' identity for appId
+  // 2. createAdminRoom(appId, baseRoomId) requires appId first and matches default joinRoom identity out of the box
   await assert.rejects(
     () => (createAdminRoom as any)('', 'room-x'),
     /appId is required/
@@ -1588,7 +1574,6 @@ void test('Session identity with IndexedDB: stores non-extractable CryptoKey key
   const hostJoined = joinRoom(
     {
       appId: 'my-admin-app',
-      identity: 'local',
       use: [roles()],
       rtcPolyfill: InMemoryRTCPeerConnection as any
     },
@@ -1599,7 +1584,7 @@ void test('Session identity with IndexedDB: stores non-extractable CryptoKey key
   assert.equal(
     hostSelf.isAdmin,
     true,
-    'joining a room created with createAdminRoom(appId, baseRoomId) using identity: "local" must have admin authority'
+    'joining a room created with createAdminRoom(appId, baseRoomId) with default identity must have admin authority'
   )
   await hostJoined.leave()
 })

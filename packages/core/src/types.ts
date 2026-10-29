@@ -95,7 +95,7 @@ export type TopologySnapshot = {
   stats: TopologyStats
 }
 
-export type UserIdentityPersistence = 'none' | 'session' | 'local'
+export type UserIdentityPersistence = 'none' | 'local'
 
 export type ResolvedIdentityPersistence = UserIdentityPersistence | 'custom'
 

@@ -158,6 +158,10 @@ Listen for users joining the room:
 room.onUserJoin = ({userId}) => console.log(`${userId} joined`)
 ```
 
+> **Tip:** Because tabs in the same browser profile share your `userId` by
+> default, open a Private/Incognito window (or set `identity: 'none'`) when
+> simulating multiple users on one machine.
+
 Listen for users leaving the room:
 
 ```js
@@ -367,22 +371,21 @@ accounts, login screens, or backend servers required. Because every `userId` is
 cryptographically verified during connection setup, no one can spoof or hijack
 another user's ID.
 
-### Semi-ephemeral by default, persistent with a one-line change
+### Persistent by default, ephemeral or custom with a one-line change
 
-By default in the browser, `userId` is **semi-ephemeral**
-(`identity: 'session'`): if a user refreshes the page, they come right back with
-the same `userId`, and closing the tab starts fresh next time.
+By default in the browser (`identity: 'local'`), `userId` persists across page
+reloads, open tabs, and future visits on that device.
 
-If you want users to keep the same `userId` across all open tabs and future
-visits on that device, set `identity: 'local'`:
+If you want a strictly ephemeral identity that resets on every page reload or
+new tab without saving to browser storage, set `identity: 'none'`:
 
 ```js
 const room = joinRoom(
   {
-    appId: 'co-op-RPG',
-    identity: 'local'
+    appId: 'ephemeral-chat',
+    identity: 'none'
   },
-  'tavern-1'
+  'lobby-1'
 )
 ```
 
@@ -403,9 +406,8 @@ const room = joinRoom(
 
 | `identity` value                        | `userId` lifetime                                                                                                |
 | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `'session'` _(browser default)_         | Reused across page reloads in the same tab (`sessionStorage` + `IndexedDB`), reset when the tab closes.          |
-| `'local'`                               | Reused across all open tabs and future visits on the same device (`IndexedDB`) until browser storage is cleared. |
-| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload or process restart generates a new `userId`.                         |
+| `'local'` _(browser default)_           | Reused across all open tabs and future visits on the same device (`IndexedDB`) until browser storage is cleared. |
+| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload, new tab, or process restart generates a new `userId`.               |
 | Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno).         |
 
 ### Multiple connections for a single user (`userId` vs `peerId`)
@@ -631,8 +633,7 @@ When a peer's room view is already at capacity:
   activation, receives `error: 'room full'` in `onJoinError`, and has that peer
   link closed.
 - Because `limit` counts unique `userId`s rather than raw tabs, an admitted
-  player who refreshes the page shares their existing seat. Use `'local'`
-  identity or an explicitly shared identity to share that seat across tabs.
+  player who refreshes the page or opens another tab shares their existing seat.
 - Existing players in the room are never interrupted—`onPeerJoin` and
   `onPeerLeave` won't fire for someone who was turned away at the door.
 - If one of the current players leaves (`room.leave()` or closes their last
@@ -696,7 +697,6 @@ import {joinRoom, roles} from 'trystero'
 const hostRoom = joinRoom(
   {
     appId: 'trivia-night',
-    identity: 'local',
     use: [roles({selfAsAdmin: true})]
   },
   'friday-quiz'
@@ -722,15 +722,15 @@ clients fail fast):
 const guestRoom = joinRoom({appId: 'trivia-night', use: [roles()]}, roomId)
 ```
 
-> **Important:** Because a fingerprinted room's root admin authority is tied
-> permanently to the host's `userId` key, always pair `selfAsAdmin: true` with
-> `identity: 'local'` or a saved `UserIdentity` (from `createUserIdentity()` /
-> `importUserIdentity()`). With the default browser `identity: 'session'`,
-> refreshing the tab keeps your admin key, but closing the tab discards it—which
-> would leave the fingerprinted room without a root admin if you ever needed to
-> rejoin later. Trystero logs a warning if `selfAsAdmin: true` is used with an
-> ephemeral identity. You can also generate the `roomId` ahead of time before
-> calling `joinRoom()` using
+> **Important:** A fingerprinted room's root admin authority is tied permanently
+> to the host's `userId` key. In browsers, Trystero's default `'local'` identity
+> persists this key automatically in `IndexedDB`. When running server-side
+> (Node, Bun, Deno) or without browser storage, pass a saved `UserIdentity`
+> (from `createUserIdentity()` / `importUserIdentity()`) instead of an ephemeral
+> `'none'` identity—otherwise closing the process discards the admin key and
+> leaves the fingerprinted room without a root admin. Trystero logs a warning if
+> `selfAsAdmin: true` is used with an ephemeral identity. You can also generate
+> the `roomId` ahead of time before calling `joinRoom()` using
 > `await createAdminRoom('trivia-night', 'friday-quiz')`.
 
 #### 2. Specifying admin `userId`s (fixed room names or co-admins)
@@ -754,7 +754,6 @@ const HOST_USER_ID = 'tY8mK3pQvN2xR7wL9jB4cF6hZ1sD5gA0eU8iO2uP4yM'
 const room = joinRoom(
   {
     appId: 'town-hall',
-    identity: 'local',
     use: [roles({admins: [HOST_USER_ID]})]
   },
   'main-stage'
@@ -1381,13 +1380,9 @@ the same namespace will return the same room instance.
 
   - `identity` - **(optional)** Controls how the local user's `userId` is loaded
     and saved (see [User identity](#user-identity)):
-    - `'session'` _(default in browsers)_ - Persists the user identity for the
-      current tab (using a `sessionStorage` token and a non-extractable
-      IndexedDB `CryptoKey`) scoped to `appId` so page reloads in the same tab
-      keep the same `userId`.
-    - `'local'` - Persists the user identity across tabs and future visits on
-      the same device using IndexedDB (with a non-extractable WebCrypto
-      `CryptoKey`).
+    - `'local'` _(default in browsers)_ - Persists the user identity across tabs
+      and future visits on the same device (scoped to `appId`) using IndexedDB
+      with a non-extractable WebCrypto `CryptoKey`.
     - `'none'` _(default outside browsers)_ - Generates a fresh runtime `userId`
       that is discarded when the page reloads or process exits.
     - `UserIdentity | ((context: {appId: string, roomId: string}) => UserIdentity | Promise<UserIdentity>)` -
@@ -1502,7 +1497,7 @@ Returns an object with the following properties and methods:
     by persistent storage (`false` if `identity: 'none'` or if browser storage
     downgraded to an ephemeral key).
   - `identityPersistence` - Effective storage tier
-    (`'local' | 'session' | 'custom' | 'none'`).
+    (`'local' | 'custom' | 'none'`).
 
 - ### `getUsers()`
 
@@ -1812,8 +1807,9 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 - `roles()` - Enables role and state verification for a participant joining a
   room (required when joining a self-certifying `<roomId>~<fingerprint>`).
 - `roles({selfAsAdmin: true})` - Makes the local user (`userId`) a root room
-  admin and appends `~<16-char-base62-fingerprint>` to `roomId`. Pair with
-  `identity: 'local'` or a persistent `UserIdentity`.
+  admin and appends `~<16-char-base62-fingerprint>` to `roomId`. Uses persistent
+  `'local'` identity by default in browsers; pair with a saved `UserIdentity`
+  when running outside browsers.
 - `roles({admins: [userId1, userId2]})` - Trusts the specified `userId`s (or
   16-character Base62 fingerprints) as root room admins on either a fixed room
   name or alongside `selfAsAdmin: true`.
@@ -1860,8 +1856,8 @@ is not valid P-256 key material.
 
 Exports a `UserIdentity` (created via `createUserIdentity()` or
 `importUserIdentity()`) as a compact `trystero_uk_...` string suitable for
-persisting in custom storage. Throws if the identity is backed by non-exportable
-browser storage (`'session'` or `'local'`).
+persisting in custom storage. Throws if the identity is backed by
+non-extractable browser storage (`'local'`).
 
 ### `createAdminRoom(appId, baseRoomId, [options])`
 

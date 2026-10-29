@@ -2,6 +2,7 @@ import {isSelfAsAdminPlugin} from './authority'
 import {decrypt, encrypt, genKey, sha1} from './crypto'
 import {
   getDefaultEndpointIdentity,
+  isEphemeralIdentityConfig,
   resolveUserIdentity,
   validateIdentityConfig
 } from './identity'
@@ -128,9 +129,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
     if (
       plugins.some(isSelfAsAdminPlugin) &&
-      (config.identity === undefined ||
-        config.identity === 'session' ||
-        config.identity === 'none')
+      isEphemeralIdentityConfig(config.identity)
     ) {
       warnEphemeralAdmin()
     }

@@ -34,6 +34,7 @@ import {
 import {
   type EndpointIdentity,
   getDefaultEndpointIdentity,
+  isEphemeralIdentityConfig,
   resolveUserIdentity
 } from './identity'
 import {createMediaManager, type InternalMediaMeta} from './media'
@@ -741,7 +742,7 @@ export default <
   if (
     !userIdentityP &&
     plugins.some(isSelfAsAdminPlugin) &&
-    (identity === undefined || identity === 'session' || identity === 'none')
+    isEphemeralIdentityConfig(identity)
   ) {
     warnEphemeralAdmin()
   }

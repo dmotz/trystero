@@ -15,12 +15,10 @@ boilerplate—and eliminates subtle security and topology footguns.
 
 1. **Users (`userId`) vs. Connections (`peerId`)**: Every participant now gets
    an unforgeable cryptographic `userId` alongside their per-connection
-   `peerId`. By default, `userId` persists across page refreshes
-   (`identity: 'session'`), can be persisted across browser restarts with a
-   one-line config change (`identity: 'local'`), or can be loaded from your own
-   backend. Use `identity: 'local'` or an explicitly shared identity to give
-   independently opened tabs the same `userId`; each tab still has its own
-   `peerId`. The default `'session'` identity survives reloads within one tab.
+   `peerId`. By default in browsers (`identity: 'local'`), `userId` persists
+   across page refreshes, open tabs, and browser restarts on that device (each
+   tab still has its own `peerId`), can be made strictly ephemeral with
+   `identity: 'none'`, or can be loaded from your own backend.
 2. **`onUserJoin` / `onUserLeave` as the New Default**: Most applications care
    about _who_ is in the room rather than how many browser tabs they have open.
    `onUserJoin` and `onUserLeave` fire once per unique user and automatically
@@ -311,16 +309,14 @@ race conditions and locked out players who refreshed their browser tab.
 In 0.27.0, pass `limit` to `joinRoom()` for a best-effort, advisory per-peer
 capacity limit. Each peer refuses new `userId`s once its own view reaches
 `limit` (without ever evicting itself or trusting a stranger's `'room full'` to
-drop other peers), and a player who refreshes their tab reuses their existing
-user slot. Use `identity: 'local'` to share that slot across independently
-opened tabs:
+drop other peers), and a player who refreshes their tab or opens another tab
+automatically reuses their existing user slot:
 
 ```js
 const room = joinRoom(
   {
     appId: 'chess-app',
-    limit: 2, // Advisory cap of 2 unique users in this peer's view
-    identity: 'local' // Shares identity across tabs and future visits
+    limit: 2 // Advisory cap of 2 unique users in this peer's view
   },
   roomId,
   {
@@ -350,7 +346,6 @@ import {joinRoom, roles} from 'trystero'
 const room = joinRoom(
   {
     appId: 'poker-club',
-    identity: 'local',
     use: [roles({selfAsAdmin: true})]
   },
   'table-1'

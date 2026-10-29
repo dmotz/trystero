@@ -40,7 +40,6 @@ import {myPlugin} from 'trystero-my-plugin'
 const room = joinRoom(
   {
     appId: 'my-app',
-    identity: 'local',
     use: [scale('gossip'), roles({selfAsAdmin: true}), myPlugin({option: 123})]
   },
   'room-1'

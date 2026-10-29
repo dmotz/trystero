@@ -46,7 +46,7 @@ const userIdMismatchErr = mkErr(
   'invalid custom user identity; userId does not match signPubJwk'
 )
 const invalidCustomIdentityErr = mkErr(
-  'invalid custom user identity; use "none", "session", "local", loader, or importUserIdentity()'
+  'invalid custom user identity; use "local", "none", loader, or importUserIdentity()'
 )
 const idbErr = (op: string): Error => mkErr(`IndexedDB ${op} failed`)
 const idbGetErr = idbErr('get')
@@ -696,18 +696,6 @@ const coerceCustomUserIdentity = async (
   throw invalidCustomIdentityErr
 }
 
-const getSessionStorage = (): Storage | null => {
-  try {
-    const storage =
-      typeof globalThis !== 'undefined' && 'sessionStorage' in globalThis
-        ? (globalThis as {sessionStorage?: Storage}).sessionStorage
-        : undefined
-    return storage && typeof storage.getItem === 'function' ? storage : null
-  } catch {
-    return null
-  }
-}
-
 const hasIndexedDB = (): boolean => {
   try {
     return (
@@ -720,12 +708,17 @@ const hasIndexedDB = (): boolean => {
   }
 }
 
+export const isEphemeralIdentityConfig = (
+  identity?: UserIdentityConfig
+): boolean =>
+  identity === 'none' ||
+  ((identity === undefined || identity === 'local') && !hasIndexedDB())
+
 export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   const raw = config?.identity
   if (
     raw === undefined ||
     raw === 'none' ||
-    raw === 'session' ||
     raw === 'local' ||
     typeof raw === 'function'
   ) {
@@ -747,7 +740,6 @@ export const getDefaultUserIdentity = (): Promise<UserIdentity> =>
   (defaultUserIdentityPromise ??= createUserIdentity())
 
 const runtimeUserIdentityByScope = new Map<string, Promise<UserIdentity>>()
-const sessionMutexByApp = new Map<string, Promise<UserIdentity>>()
 const localMutexByApp = new Map<string, Promise<UserIdentity>>()
 
 const getOrCreateRuntimeUserIdentity = (
@@ -803,16 +795,6 @@ const generateNonExtractableIdbRecord =
       privateKey: keyPair.privateKey
     }
   }
-
-const generateRandomTabToken = (): string => {
-  const bytes = new Uint8Array(24)
-  crypto.getRandomValues(bytes)
-  let token = ''
-  for (const b of bytes) {
-    token += base62Alphabet[b % 62]!
-  }
-  return token
-}
 
 const openIdentityDb = (): Promise<IDBDatabase> =>
   new Promise((resolve, reject) => {
@@ -957,10 +939,7 @@ const withNavigatorLock = async <T>(
   return fn()
 }
 
-const loadOrCreateIdbIdentity = (
-  idbKey: string,
-  persistence: 'local' | 'session'
-): Promise<UserIdentity> =>
+const loadOrCreateIdbIdentity = (idbKey: string): Promise<UserIdentity> =>
   withNavigatorLock(`${storagePrefix}${idbKey}`, async () => {
     const db = await openIdentityDb()
     try {
@@ -969,7 +948,7 @@ const loadOrCreateIdbIdentity = (
         if (await isValidStoredIdbRecord(existing)) {
           return withPersistence(
             buildUserIdentityFromIdbRecord(existing),
-            persistence,
+            'local',
             true
           )
         }
@@ -977,7 +956,7 @@ const loadOrCreateIdbIdentity = (
         const saved = await idbPutRecord(db, idbKey, repaired)
         return withPersistence(
           buildUserIdentityFromIdbRecord(saved),
-          persistence,
+          'local',
           true
         )
       }
@@ -986,7 +965,7 @@ const loadOrCreateIdbIdentity = (
       const committed = await idbAddOrGetRecord(db, idbKey, candidate)
       return withPersistence(
         buildUserIdentityFromIdbRecord(committed),
-        persistence,
+        'local',
         true
       )
     } finally {
@@ -994,42 +973,13 @@ const loadOrCreateIdbIdentity = (
     }
   })
 
-const loadOrCreateSessionIdentity = (
-  sessionStore: Storage,
-  appId: string
-): Promise<UserIdentity> => {
-  const inflight = sessionMutexByApp.get(appId)
-  if (inflight) {
-    return inflight
-  }
-
-  const tokenKey = `${storagePrefix}session:${appId}`
-  const promise = (async (): Promise<UserIdentity> => {
-    let tabToken = sessionStore.getItem(tokenKey)
-    if (!tabToken || !/^[0-9A-Za-z]{16,64}$/.test(tabToken)) {
-      const generated = generateRandomTabToken()
-      sessionStore.setItem(tokenKey, generated)
-      const verified = sessionStore.getItem(tokenKey)
-      tabToken =
-        verified && /^[0-9A-Za-z]{16,64}$/.test(verified) ? verified : generated
-    }
-
-    return loadOrCreateIdbIdentity(`session:${appId}:${tabToken}`, 'session')
-  })().finally(() => {
-    sessionMutexByApp.delete(appId)
-  })
-
-  sessionMutexByApp.set(appId, promise)
-  return promise
-}
-
 const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
   const inflight = localMutexByApp.get(appId)
   if (inflight) {
     return inflight
   }
 
-  const promise = loadOrCreateIdbIdentity(appId, 'local').finally(() => {
+  const promise = loadOrCreateIdbIdentity(appId).finally(() => {
     localMutexByApp.delete(appId)
   })
 
@@ -1044,7 +994,6 @@ export const resolveUserIdentity = async (
   roomId: string,
   config?: {
     identity?: UserIdentityConfig
-    preferLocal?: boolean
   },
   peerId?: string
 ): Promise<UserIdentity> => {
@@ -1055,22 +1004,13 @@ export const resolveUserIdentity = async (
     return coerceCustomUserIdentity(loaded)
   }
 
-  if (
-    raw !== undefined &&
-    raw !== 'none' &&
-    raw !== 'session' &&
-    raw !== 'local'
-  ) {
+  if (raw !== undefined && raw !== 'none' && raw !== 'local') {
     return coerceCustomUserIdentity(raw)
   }
 
-  const defaultMode: UserIdentityPersistence = !canPersistLocalIdentity()
-    ? 'none'
-    : config?.preferLocal
-      ? 'local'
-      : getSessionStorage()
-        ? 'session'
-        : 'none'
+  const defaultMode: UserIdentityPersistence = canPersistLocalIdentity()
+    ? 'local'
+    : 'none'
 
   const mode: UserIdentityPersistence =
     (raw as UserIdentityPersistence | undefined) ?? defaultMode
@@ -1102,18 +1042,6 @@ export const resolveUserIdentity = async (
 
   if (!hasIndexedDB()) {
     return fallbackToNone(true)
-  }
-
-  if (mode === 'session') {
-    const sessionStore = getSessionStorage()
-    if (!sessionStore) {
-      return fallbackToNone(true)
-    }
-    try {
-      return await loadOrCreateSessionIdentity(sessionStore, appId)
-    } catch {
-      return fallbackToNone(true)
-    }
   }
 
   try {
