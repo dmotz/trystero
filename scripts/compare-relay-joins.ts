@@ -1,5 +1,5 @@
 // Run against installed npm releases or a built workspace entry point:
-// node --import jiti/register scripts/compare-relay-joins.ts label=/absolute/path/index.mjs ...
+// node scripts/compare-relay-joins.ts label=/absolute/path/index.mjs ...
 // See docs/investigations/196-join-regression.md for scenarios and methodology.
 import {spawn} from 'node:child_process'
 import {createHash} from 'node:crypto'
@@ -349,7 +349,6 @@ async function run(label: string, module: string, scenario: string) {
     const child = spawn(
       process.execPath,
       [
-        ...(browser ? [] : ['--import', 'jiti/register']),
         fileURLToPath(
           new URL(
             browser ? './relay-compare-browser.ts' : './relay-compare-peer.ts',

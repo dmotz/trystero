@@ -16,6 +16,7 @@
     "noImplicitOverride": true,
     "useUnknownInCatchVariables": true,
     "isolatedModules": true,
+    "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
