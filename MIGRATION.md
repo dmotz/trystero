@@ -442,9 +442,9 @@ Create a user identity with `await createUserIdentity()` and store its exported
 with `const serverIdentity = await importUserIdentity(savedUserKey)` and pass
 `identity: serverIdentity` when the backend joins the room with an RTC polyfill.
 Guests can trust its `userId` on a fixed room name using
-`use: [roles({admins: [serverUserId]})]`, or use a self-certifying room ID from
-`await createAdminRoom(appId, baseRoomId, {identity: serverIdentity})` along
-with `use: [roles()]`.
+`use: [roles({admins: [serverIdentity.userId]})]`, or use a self-certifying room
+ID (`` `${baseRoomId}~${serverIdentity.fingerprint}` ``) along with
+`use: [roles()]`.
 
 The backend can issue roles with `room.grantRole()` while it is connected. There
 is no public standalone role-certificate import API in this beta.

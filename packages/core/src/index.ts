@@ -14,7 +14,7 @@ export {
   toJson
 } from './utils'
 
-export {createAdminRoom, roles} from './authority'
+export {roles} from './authority'
 
 export {scale} from './overlay'
 

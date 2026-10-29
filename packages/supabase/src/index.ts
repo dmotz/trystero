@@ -230,7 +230,6 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((
 
 export {
   clearUserIdentity,
-  createAdminRoom,
   createUserIdentity,
   definePlugin,
   exportUserIdentity,

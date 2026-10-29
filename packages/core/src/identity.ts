@@ -45,6 +45,9 @@ const invalidKeyMaterialErr = mkErr(
 const userIdMismatchErr = mkErr(
   'invalid custom user identity; userId does not match signPubJwk'
 )
+const fingerprintMismatchErr = mkErr(
+  'invalid custom user identity; fingerprint does not match userId'
+)
 const invalidCustomIdentityErr = mkErr(
   'invalid custom user identity; use "local", "none", loader, or importUserIdentity()'
 )
@@ -484,6 +487,7 @@ const buildUserIdentityFromKeys = async (
 
   const identity: UserIdentity = {
     userId,
+    fingerprint: rec.fingerprint,
     publicKey: encodedPub,
     signPubJwk,
     sign: (payload: Uint8Array) =>
@@ -672,6 +676,7 @@ const withPersistence = (
   persisted: boolean
 ): UserIdentity => ({
   userId: val.userId,
+  fingerprint: computeUserIdFingerprint(val.userId),
   publicKey: val.publicKey,
   signPubJwk: val.signPubJwk,
   sign: async (payload: Uint8Array) =>
@@ -684,6 +689,12 @@ const coerceCustomUserIdentity = async (
   val: unknown
 ): Promise<UserIdentity> => {
   if (isUserIdentityObjectStructural(val)) {
+    if (
+      val.fingerprint !== undefined &&
+      val.fingerprint !== computeUserIdFingerprint(val.userId)
+    ) {
+      throw fingerprintMismatchErr
+    }
     if (await verifyUserIdKey(val.userId, val.signPubJwk)) {
       return withPersistence(
         val,
@@ -725,6 +736,12 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
     return
   }
   if (isUserIdentityObjectStructural(raw)) {
+    if (
+      raw.fingerprint !== undefined &&
+      raw.fingerprint !== computeUserIdFingerprint(raw.userId)
+    ) {
+      throw fingerprintMismatchErr
+    }
     const cached = getCachedPubKeyRecord(raw.signPubJwk)
     if (cached && cached.userId !== raw.userId) {
       throw userIdMismatchErr
@@ -769,6 +786,7 @@ const buildUserIdentityFromIdbRecord = (
   rec: StoredIdbIdentityRecord
 ): UserIdentity => ({
   userId: rec.userId,
+  fingerprint: computeUserIdFingerprint(rec.userId),
   publicKey: rec.publicKey,
   signPubJwk: rec.signPubJwk,
   sign: (payload: Uint8Array) =>

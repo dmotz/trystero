@@ -174,7 +174,6 @@ export const getRelaySockets: () => Record<string, WebSocket> =
 
 export {
   clearUserIdentity,
-  createAdminRoom,
   createUserIdentity,
   definePlugin,
   exportUserIdentity,

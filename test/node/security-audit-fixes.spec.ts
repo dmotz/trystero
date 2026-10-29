@@ -4,7 +4,6 @@ import test from 'node:test'
 import {promisify} from 'node:util'
 import {
   compareStateRecords,
-  createAdminRoom,
   createRoomAuthority,
   roles,
   signRoleRevocation,
@@ -214,21 +213,19 @@ void test('S1: multi-ring expander guarantees 100% reachability within deriveMax
 void test('S2: delegated or co-admin cannot demote root admin via cert replacement, revocation, or ban', async () => {
   const rootUser = await createUserIdentity()
   const modUser = await createUserIdentity()
-  const adminInfo = await createAdminRoom('s2-app', 's2-room', {
-    identity: rootUser
-  })
+  const s2RoomId = `s2-room~${rootUser.fingerprint}`
 
   const rootAuth = createRoomAuthority({
     selfId: 'root-ep',
     appId: 's2-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: s2RoomId,
     admin: {selfAsAdmin: true},
     getLocalUserIdentity: async () => rootUser
   })
   const modAuth = createRoomAuthority({
     selfId: 'mod-ep',
     appId: 's2-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: s2RoomId,
     admin: {},
     getLocalUserIdentity: async () => modUser
   })
@@ -236,7 +233,7 @@ void test('S2: delegated or co-admin cannot demote root admin via cert replaceme
   const guestAuth = createRoomAuthority({
     selfId: 'guest-ep',
     appId: 's2-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: s2RoomId,
     admin: {},
     getLocalUserIdentity: async () => guestUser
   })
@@ -275,7 +272,7 @@ void test('S2: delegated or co-admin cannot demote root admin via cert replaceme
     1,
     'forged-cert-id-123456',
     's2-app',
-    adminInfo.roomId,
+    s2RoomId,
     rootUser.userId,
     modUser.userId,
     ['dj'],
@@ -286,7 +283,7 @@ void test('S2: delegated or co-admin cannot demote root admin via cert replaceme
     v: 1 as const,
     certId: 'forged-cert-id-123456',
     appId: 's2-app',
-    roomId: adminInfo.roomId,
+    roomId: s2RoomId,
     subUserId: rootUser.userId,
     issUserId: modUser.userId,
     issPubKey: modUser.signPubJwk,
@@ -993,13 +990,11 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
 void test('S10: AuthoritativeStateRecord binds userId in signature and validates userId/updatedBy shapes', async () => {
   const adminUser = await createUserIdentity()
   const otherUser = await createUserIdentity()
-  const adminInfo = await createAdminRoom('s10-app', 's10-room', {
-    identity: adminUser
-  })
+  const s10RoomId = `s10-room~${adminUser.fingerprint}`
   const auth = createRoomAuthority({
     selfId: 'admin-ep',
     appId: 's10-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: s10RoomId,
     admin: {selfAsAdmin: true},
     getLocalUserIdentity: async () => adminUser
   })
@@ -1012,7 +1007,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
     cert,
     {
       appId: 's10-app',
-      roomId: adminInfo.roomId,
+      roomId: s10RoomId,
       namespace: 'score',
       seq: 1,
       epoch: 1,
@@ -1023,15 +1018,9 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
     }
   )
 
-  const rootFps = new Set([adminInfo.fingerprint])
+  const rootFps = new Set([adminUser.fingerprint])
   assert.equal(
-    await verifyStateRecord(
-      rec,
-      's10-app',
-      adminInfo.roomId,
-      ['admin'],
-      rootFps
-    ),
+    await verifyStateRecord(rec, 's10-app', s10RoomId, ['admin'], rootFps),
     true
   )
 
@@ -1040,7 +1029,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
     await verifyStateRecord(
       {...rec, userId: otherUser.userId},
       's10-app',
-      adminInfo.roomId,
+      s10RoomId,
       ['admin'],
       rootFps
     ),
@@ -1050,7 +1039,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
     await verifyStateRecord(
       {...rec, updatedBy: 'bad peer id with spaces!'},
       's10-app',
-      adminInfo.roomId,
+      s10RoomId,
       ['admin'],
       rootFps
     ),
@@ -1062,9 +1051,7 @@ void test('S11: multi-tab admin and multi-tab delegated moderator operate across
   const rootUser = await createUserIdentity()
   const modUser = await createUserIdentity()
   const targetUser = await createUserIdentity()
-  const adminInfo = await createAdminRoom('s11-app', 's11-room', {
-    identity: rootUser
-  })
+  const s11RoomId = `s11-room~${rootUser.fingerprint}`
 
   let sigFailures = 0
   const mkAuth = (
@@ -1075,7 +1062,7 @@ void test('S11: multi-tab admin and multi-tab delegated moderator operate across
     createRoomAuthority({
       selfId,
       appId: 's11-app',
-      initialRoomId: adminInfo.roomId,
+      initialRoomId: s11RoomId,
       admin: selfAsAdmin ? {selfAsAdmin: true} : {},
       getLocalUserIdentity: async () => user,
       onSignatureFailure: () => {
@@ -1114,9 +1101,7 @@ void test('S12: concurrent mutual bans/revocations between two delegated admins 
   const adminB = await createUserIdentity()
   const observer1User = await createUserIdentity()
   const observer2User = await createUserIdentity()
-  const adminInfo = await createAdminRoom('s12-app', 's12-room', {
-    identity: rootUser
-  })
+  const s12RoomId = `s12-room~${rootUser.fingerprint}`
 
   const mk = (
     selfId: string,
@@ -1126,7 +1111,7 @@ void test('S12: concurrent mutual bans/revocations between two delegated admins 
     createRoomAuthority({
       selfId,
       appId: 's12-app',
-      initialRoomId: adminInfo.roomId,
+      initialRoomId: s12RoomId,
       admin: selfAsAdmin ? {selfAsAdmin: true} : {},
       getLocalUserIdentity: async () => user
     })
@@ -1178,9 +1163,6 @@ void test('S12: concurrent mutual bans/revocations between two delegated admins 
 void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and chunked role-gated actions verify signature once', async () => {
   const adminUser = await createUserIdentity()
   const attackerUser = await createUserIdentity()
-  const adminInfo = await createAdminRoom('s13-app', 's13-room', {
-    identity: adminUser
-  })
 
   let hostReg: ((p: PeerHandle, id: string) => void) | null = null
   let atkReg: ((p: PeerHandle, id: string) => void) | null = null
@@ -1253,12 +1235,13 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
       null
     let r2Reg: ((p: PeerHandle, id: string) => void | Promise<void>) | null =
       null
+    const s13RoomId = `s13-room~${adminUser.fingerprint}`
     let senderRoomRef: Room | null = null
     let receiverRoomRef: Room | null = null
     const senderHs = createIdentityHandshake({
       endpointIdentityP: Promise.resolve(senderEp),
       appId: 's13-app',
-      roomId: adminInfo.roomId,
+      roomId: s13RoomId,
       getUserIdentity: async () => adminUser,
       getPeerHandle: pid =>
         getRoomSignalingBridge(senderRoomRef!)?.getPeerHandle(pid),
@@ -1268,7 +1251,7 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
     const recvHs = createIdentityHandshake({
       endpointIdentityP: Promise.resolve(recvEp),
       appId: 's13-app',
-      roomId: adminInfo.roomId,
+      roomId: s13RoomId,
       getUserIdentity: async () => receiverUser,
       getPeerHandle: pid =>
         getRoomSignalingBridge(receiverRoomRef!)?.getPeerHandle(pid),
@@ -1285,7 +1268,7 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
         selfId: senderEp.peerId,
         endpointIdentityP: Promise.resolve(senderEp),
         appId: 's13-app',
-        roomId: adminInfo.roomId,
+        roomId: s13RoomId,
         verifyPeerIdentity: true,
         identity: adminUser,
         onPeerHandshake: senderHs.compose(),
@@ -1303,7 +1286,7 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
         selfId: recvEp.peerId,
         endpointIdentityP: Promise.resolve(recvEp),
         appId: 's13-app',
-        roomId: adminInfo.roomId,
+        roomId: s13RoomId,
         verifyPeerIdentity: true,
         identity: receiverUser,
         onPeerHandshake: recvHs.compose(),
@@ -1622,13 +1605,11 @@ void test('S17: high-S P-256 signatures are rejected and revocation dedupe is im
   // Verify RoleRevocationRecord also rejects high-S and deduplicates by content
   const rootUser = await createUserIdentity()
   const targetUser = await createUserIdentity()
-  const adminInfo = await createAdminRoom('s17-app', 's17-room', {
-    identity: rootUser
-  })
+  const s17RoomId = `s17-room~${rootUser.fingerprint}`
   const auth = createRoomAuthority({
     selfId: 'root-s17',
     appId: 's17-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: s17RoomId,
     admin: {selfAsAdmin: true},
     getLocalUserIdentity: async () => rootUser
   })
@@ -1640,7 +1621,7 @@ void test('S17: high-S P-256 signatures are rejected and revocation dedupe is im
     rootCert,
     {
       appId: 's17-app',
-      roomId: adminInfo.roomId,
+      roomId: s17RoomId,
       issuerUserId: rootUser.userId,
       targetUserId: targetUser.userId,
       role: 'dj',
@@ -1664,8 +1645,8 @@ void test('S17: high-S P-256 signatures are rejected and revocation dedupe is im
     await verifyRoleRevocation(
       malleableRev,
       's17-app',
-      adminInfo.roomId,
-      new Set([adminInfo.fingerprint])
+      s17RoomId,
+      new Set([rootUser.fingerprint])
     ),
     false
   )
@@ -1921,28 +1902,26 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
 void test('D7: maxClockSkewMs configures clock tolerance and makeState causal epoch supersedes stale pre-rejoin state', async () => {
   const adminUser = await createUserIdentity()
   const guestUser = await createUserIdentity()
-  const adminInfo = await createAdminRoom('d7-app', 'd7-room', {
-    identity: adminUser
-  })
+  const d7RoomId = `d7-room~${adminUser.fingerprint}`
 
   const strictGuest = createRoomAuthority({
     selfId: 'strict-guest',
     appId: 'd7-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: d7RoomId,
     admin: {},
     getLocalUserIdentity: async () => guestUser
   })
   const tolerantGuest = createRoomAuthority({
     selfId: 'tolerant-guest',
     appId: 'd7-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: d7RoomId,
     admin: {maxClockSkewMs: 300_000},
     getLocalUserIdentity: async () => guestUser
   })
   const adminSession1 = createRoomAuthority({
     selfId: 'admin-s1',
     appId: 'd7-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: d7RoomId,
     admin: {selfAsAdmin: true},
     getLocalUserIdentity: async () => adminUser
   })
@@ -1961,7 +1940,7 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
     adminCert,
     {
       appId: 'd7-app',
-      roomId: adminInfo.roomId,
+      roomId: d7RoomId,
       namespace: 'clock',
       seq: 1,
       epoch: 10,
@@ -1991,7 +1970,7 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
   const adminSession2 = createRoomAuthority({
     selfId: 'admin-s2',
     appId: 'd7-app',
-    initialRoomId: adminInfo.roomId,
+    initialRoomId: d7RoomId,
     admin: {selfAsAdmin: true},
     getLocalUserIdentity: async () => adminUser
   })
@@ -2240,13 +2219,14 @@ void test('D12: endpoint identities are partitioned per appId and use non-extrac
   assert.equal(epAppB.signPrivateKey.extractable, false)
 })
 
-void test('D13: SelfInfo and AdminRoomInfo surface persisted and identityPersistence on storage downgrade', async () => {
-  // Outside browser (no IndexedDB), createAdminRoom({identity: 'local'}) downgrades to ephemeral and reports persisted: false
-  const degradedAdmin = await createAdminRoom('d13-app', 'd13-room', {
+void test('D13: SelfInfo and resolved UserIdentity surface persisted and identityPersistence on storage downgrade', async () => {
+  // Outside browser (no IndexedDB), resolveUserIdentity({identity: 'local'}) downgrades to ephemeral and reports persisted: false
+  const degradedIdentity = await resolveUserIdentity('d13-app', 'd13-room', {
     identity: 'local'
   })
-  assert.equal(degradedAdmin.persisted, false)
-  assert.equal(degradedAdmin.identityPersistence, 'none')
+  assert.equal(degradedIdentity.persisted, false)
+  assert.equal(degradedIdentity.persistence, 'none')
+  assert.match(degradedIdentity.fingerprint, /^[0-9A-Za-z]{16}$/)
 
   const joinRoom = createTopicStrategy({
     init: () => Promise.resolve({}),

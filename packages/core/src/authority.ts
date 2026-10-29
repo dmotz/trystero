@@ -5,7 +5,6 @@ import {
   getVerifiedPubKeyRecord,
   isValidUserId,
   pubJwkToUncompressedBytes,
-  resolveUserIdentity,
   verifyWithP256
 } from './identity'
 import {isValidSignalPeerId} from './signal-handler'
@@ -17,7 +16,6 @@ import type {
   KernelRolesProvider,
   MaybePromise,
   PeerBanRecord,
-  ResolvedIdentityPersistence,
   RoleCertificate,
   RoleRevocationRecord,
   RolesConfig,
@@ -26,7 +24,6 @@ import type {
   StateChangeContext,
   StateConfig,
   UserIdentity,
-  UserIdentityConfig,
   Widen
 } from './types'
 import {
@@ -44,7 +41,6 @@ import {
   noOp,
   peerBannedErr,
   posSafeIntErr,
-  requiredErr,
   selfCertifyingRoomRegex,
   toBase64Url,
   toHex,
@@ -155,49 +151,6 @@ export const parseSelfCertifyingRoomId = (
 
 export const formatSelfCertifyingRoomId = (base: string, fp: string): string =>
   `${parseSelfCertifyingRoomId(base).baseRoomId}~${fp}`
-
-export type AdminRoomInfo = {
-  roomId: string
-  baseRoomId: string
-  fingerprint: string
-  userId: string
-  identity: UserIdentity
-  persisted: boolean
-  identityPersistence: ResolvedIdentityPersistence
-}
-
-export const createAdminRoom = async (
-  appId: string,
-  baseRoomId: string,
-  options?: {identity?: UserIdentityConfig}
-): Promise<AdminRoomInfo> => {
-  if (typeof appId !== 'string' || !appId.trim()) {
-    throw requiredErr('createAdminRoom: appId')
-  }
-  if (typeof baseRoomId !== 'string' || !baseRoomId.trim()) {
-    throw requiredErr('createAdminRoom: baseRoomId')
-  }
-  const {baseRoomId: cleanBase} = parseSelfCertifyingRoomId(baseRoomId)
-  const identity = await resolveUserIdentity(appId, cleanBase, {
-    identity: options?.identity ?? 'local'
-  })
-  const fingerprint = computeUserIdFingerprint(identity.userId)
-  const persisted = Boolean(identity.persisted)
-  const identityPersistence: ResolvedIdentityPersistence =
-    identity.persistence ??
-    (options?.identity && typeof options.identity === 'object'
-      ? 'custom'
-      : 'none')
-  return {
-    roomId: formatSelfCertifyingRoomId(cleanBase, fingerprint),
-    baseRoomId: cleanBase,
-    fingerprint,
-    userId: identity.userId,
-    identity,
-    persisted,
-    identityPersistence
-  }
-}
 
 const normalizeRolesConfig = (config?: RolesConfig): RolesConfig => {
   if (isObj(config)) {
@@ -1252,7 +1205,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
         ? await init.getLocalUserIdentity()
         : null
       const localFp = localUser
-        ? computeUserIdFingerprint(localUser.userId)
+        ? localUser.fingerprint || computeUserIdFingerprint(localUser.userId)
         : null
       if (!fingerprint && admin.selfAsAdmin && localUser && localFp) {
         fingerprint = localFp
@@ -1931,7 +1884,7 @@ export const roles = (
         return {
           effectiveRoomId: formatSelfCertifyingRoomId(
             roomId,
-            computeUserIdFingerprint(user.userId)
+            user.fingerprint || computeUserIdFingerprint(user.userId)
           )
         }
       }

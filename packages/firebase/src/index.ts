@@ -215,7 +215,6 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
 
 export {
   clearUserIdentity,
-  createAdminRoom,
   createUserIdentity,
   definePlugin,
   exportUserIdentity,

@@ -8,7 +8,6 @@ import {
   type RolesPluginApi,
   type Room,
   clearUserIdentity,
-  createAdminRoom,
   createTopicStrategy,
   createUserIdentity,
   definePlugin,
@@ -17,6 +16,7 @@ import {
   roles
 } from '../../packages/core/src/index.ts'
 import {
+  computeUserIdFingerprint,
   derivePeerId,
   deriveUserId,
   getDefaultEndpointIdentity,
@@ -295,6 +295,9 @@ void test('Identity primitives: peerId is 20-char Base62, selfId is not exported
   assert.equal(user.userId.length, 43)
   assert.match(user.userId, /^[0-9A-Za-z_-]{43}$/)
   assert.notEqual(user.userId.length, selfId.length)
+  assert.equal(typeof user.fingerprint, 'string')
+  assert.match(user.fingerprint, /^[0-9A-Za-z]{16}$/)
+  assert.equal(user.fingerprint, computeUserIdFingerprint(user.userId))
 
   assert.equal(await deriveUserId(user.publicKey), user.userId)
   assert.equal(await verifyUserIdKey(user.userId, user.publicKey), true)
@@ -314,10 +317,12 @@ void test('Identity primitives: peerId is 20-char Base62, selfId is not exported
   const importedFromStr = await importUserIdentity(exported)
   assert.equal('userKey' in importedFromStr, false)
   assert.equal(importedFromStr.userId, user.userId)
+  assert.equal(importedFromStr.fingerprint, user.fingerprint)
   assert.deepEqual(importedFromStr.publicKey, user.publicKey)
 
   for (const droppedHelper of [
     'selfId',
+    'createAdminRoom',
     'computePublicKeyFingerprint',
     'formatSelfCertifyingRoomId',
     'parseSelfCertifyingRoomId',
@@ -388,6 +393,18 @@ void test('Identity config validation & persistence modes: default local, none, 
         'room-1'
       ),
     /importUserIdentity/
+  )
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'validation-app',
+          identity: {...tempUser, fingerprint: '0000000000000000'},
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        'room-1'
+      ),
+    /fingerprint does not match userId/
   )
 
   const sessionStore = new Map<string, string>()
@@ -1395,7 +1412,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
   )
 })
 
-void test('Default local identity with IndexedDB: stores non-extractable CryptoKey without touching Web Storage, suppresses ephemeral admin warning, and matches createAdminRoom(appId, baseRoomId)', async t => {
+void test('Default local identity with IndexedDB: stores non-extractable CryptoKey without touching Web Storage, suppresses ephemeral admin warning, and reuses persistent fingerprint across rooms', async t => {
   for (const name of ['sessionStorage', 'localStorage', 'indexedDB']) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name)
     t.after(() => {
@@ -1575,24 +1592,36 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
   )
   await roomTab2.leave()
 
-  // 2. createAdminRoom(appId, baseRoomId) requires appId first and matches default joinRoom identity out of the box
-  await assert.rejects(
-    () => (createAdminRoom as any)('', 'room-x'),
-    /appId is required/
+  // 2. Default persistent local identity derives consistent self-certifying room fingerprints across rooms
+  const hostRoom1 = joinRoom(
+    {
+      appId: 'my-admin-app',
+      use: [roles({selfAsAdmin: true})],
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'friday-quiz'
   )
-  await assert.rejects(
-    () => (createAdminRoom as any)('my-admin-app', ''),
-    /baseRoomId is required/
-  )
+  const hostSelf = await hostRoom1.getSelf()
+  assert.equal(hostSelf.roomId, `friday-quiz~${hostSelf.fingerprint}`)
+  assert.equal(hostSelf.isAdmin, true)
+  await hostRoom1.leave()
 
-  const adminRoom1 = await createAdminRoom('my-admin-app', 'friday-quiz')
-  const adminRoom2 = await createAdminRoom('my-admin-app', 'saturday-quiz')
-  assert.equal(
-    adminRoom1.userId,
-    adminRoom2.userId,
-    'createAdminRoom with same appId must reuse persistent local identity'
+  const hostRoom2 = joinRoom(
+    {
+      appId: 'my-admin-app',
+      use: [roles({selfAsAdmin: true})],
+      rtcPolyfill: InMemoryRTCPeerConnection as any
+    },
+    'saturday-quiz'
   )
-  assert.equal(adminRoom1.fingerprint, adminRoom2.fingerprint)
+  const hostSelf2 = await hostRoom2.getSelf()
+  assert.equal(
+    hostSelf.userId,
+    hostSelf2.userId,
+    'same appId must reuse persistent local identity across rooms'
+  )
+  assert.equal(hostSelf.fingerprint, hostSelf2.fingerprint)
+  await hostRoom2.leave()
 
   const hostJoined = joinRoom(
     {
@@ -1600,14 +1629,14 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
       use: [roles()],
       rtcPolyfill: InMemoryRTCPeerConnection as any
     },
-    adminRoom1.roomId
+    hostSelf.roomId
   )
-  const hostSelf = await hostJoined.getSelf()
-  assert.equal(hostSelf.userId, adminRoom1.userId)
+  const rejoinedSelf = await hostJoined.getSelf()
+  assert.equal(rejoinedSelf.userId, hostSelf.userId)
   assert.equal(
-    hostSelf.isAdmin,
+    rejoinedSelf.isAdmin,
     true,
-    'joining a room created with createAdminRoom(appId, baseRoomId) with default identity must have admin authority'
+    'rejoining a fingerprinted room with default identity must retain admin authority'
   )
   await hostJoined.leave()
 
@@ -1637,7 +1666,7 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
       use: [roles()],
       rtcPolyfill: InMemoryRTCPeerConnection as any
     },
-    adminRoom1.roomId
+    hostSelf.roomId
   )
   const postClearSelf = await postClearJoined.getSelf()
   assert.notEqual(
@@ -1817,7 +1846,6 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'encodeBytes',
     'decodeBytes',
     'genId',
-    'createAdminRoom',
     'roles',
     'scale',
     'definePlugin',
@@ -1836,6 +1864,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
 
   const distCore = await import('../../packages/core/dist/index.mjs')
   assert.equal(typeof distCore.clearUserIdentity, 'function')
+  assert.equal('createAdminRoom' in distCore, false)
   for (const pkg of [
     'trystero',
     'nostr',
@@ -1850,6 +1879,11 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       mod.clearUserIdentity,
       distCore.clearUserIdentity,
       `packages/${pkg} must re-export clearUserIdentity`
+    )
+    assert.equal(
+      'createAdminRoom' in mod,
+      false,
+      `packages/${pkg} must not export createAdminRoom`
     )
   }
 
@@ -1866,6 +1900,8 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'TopologyConfig',
     'RolesInput',
     'RoomAuthorityInfo',
+    'AdminRoomInfo',
+    'createAdminRoom',
     'manualReconnection'
   ]) {
     assert.equal(

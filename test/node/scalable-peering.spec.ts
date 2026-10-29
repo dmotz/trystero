@@ -11,7 +11,6 @@ import {
   compareStateRecords,
   computePayloadDigest,
   computePublicKeyFingerprint,
-  createAdminRoom,
   formatSelfCertifyingRoomId,
   parseSelfCertifyingRoomId,
   roles,
@@ -1893,28 +1892,27 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
   bob.destroy()
 })
 
-void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ admin: true }), createAdminRoom, and userId-pinned rooms', async () => {
-  // 1. Standalone createAdminRoom helper unified with UserIdentity
-  const provisioned = await createAdminRoom('auth-boot-app', 'watch-party')
-  assert.equal(provisioned.baseRoomId, 'watch-party')
-  assert.match(provisioned.fingerprint, /^[0-9A-Za-z]{16}$/)
-  assert.equal(provisioned.userId, provisioned.identity.userId)
+void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ admin: true }), UserIdentity.fingerprint, and userId-pinned rooms', async () => {
+  // 1. UserIdentity exposes self-certifying fingerprint for offline room ID formatting
+  const provisionedIdentity = await createUserIdentity()
+  assert.match(provisionedIdentity.fingerprint, /^[0-9A-Za-z]{16}$/)
+  const provisionedRoomId = `watch-party~${provisionedIdentity.fingerprint}`
   assert.equal(
-    provisioned.roomId,
-    formatSelfCertifyingRoomId('watch-party', provisioned.fingerprint)
+    provisionedRoomId,
+    formatSelfCertifyingRoomId('watch-party', provisionedIdentity.fingerprint)
   )
-  const parsed = parseSelfCertifyingRoomId(provisioned.roomId)
+  const parsed = parseSelfCertifyingRoomId(provisionedRoomId)
   assert.deepEqual(parsed, {
     baseRoomId: 'watch-party',
-    fingerprint: provisioned.fingerprint
+    fingerprint: provisionedIdentity.fingerprint
   })
   assert.equal(
-    await computePublicKeyFingerprint(provisioned.identity.publicKey),
-    provisioned.fingerprint
+    await computePublicKeyFingerprint(provisionedIdentity.publicKey),
+    provisionedIdentity.fingerprint
   )
   assert.equal(
-    computeUserIdFingerprint(provisioned.userId),
-    provisioned.fingerprint
+    computeUserIdFingerprint(provisionedIdentity.userId),
+    provisionedIdentity.fingerprint
   )
 
   // 2. On-the-fly admin room creation via joinRoom({ appId, admin: true }, 'lobby')
@@ -2107,8 +2105,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
 })
 
 void test('Privileged actions, role delegation, sub-delegation, and revocation across mesh and multi-hop overlays', async () => {
-  const provisioned = await createAdminRoom('priv-action-app', 'raid-room')
-  const roomId = provisioned.roomId
+  const adminIdentity = await createUserIdentity()
+  const roomId = `raid-room~${adminIdentity.fingerprint}`
   const appId = 'priv-action-app'
 
   // Set up a 4-peer multi-hop chain in small-world overlay:
@@ -2119,7 +2117,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
 
   for (const id of peers) {
     const peerIdentity =
-      id === 'admin' ? provisioned.identity : await createUserIdentity()
+      id === 'admin' ? adminIdentity : await createUserIdentity()
     const room = createRoom(
       f => regMap.set(id, f),
       () => {},
@@ -2525,8 +2523,8 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
   hop1RelayOverlay.destroy()
 
   // 3. Multi-layer room.ban(peerId) enforcement
-  const provisioned = await createAdminRoom('ban-test-app', 'ban-test-room')
-  const roomId = provisioned.roomId
+  const banAdminIdentity = await createUserIdentity()
+  const roomId = `ban-test-room~${banAdminIdentity.fingerprint}`
   const appId = 'ban-test-app'
 
   const regMap = new Map<string, (peer: any, id: string) => void>()
@@ -2535,7 +2533,7 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
 
   for (const id of peerIds) {
     const peerIdentity =
-      id === 'admin' ? provisioned.identity : await createUserIdentity()
+      id === 'admin' ? banAdminIdentity : await createUserIdentity()
     const room = createRoom(
       f => regMap.set(id, f),
       () => {},
@@ -2620,29 +2618,21 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
   }
 })
 
-void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascading delegator revocation, anti-replay, offer-time role rejection, plaintext unicast rejection, and concurrent makeState serialization', async () => {
-  // 1. createAdminRoom with an existing UserIdentity deterministically derives the same fingerprint across rooms
+void test('PeerInfo in room.getPeers(), UserIdentity fingerprint reuse, cascading delegator revocation, anti-replay, offer-time role rejection, plaintext unicast rejection, and concurrent makeState serialization', async () => {
+  // 1. UserIdentity deterministically preserves the same fingerprint across export/import and room formatting
   const hostUser = await createUserIdentity()
+  const reimportedHostUser = await importUserIdentity(
+    exportUserIdentity(hostUser)
+  )
   const otherUser = await createUserIdentity()
-  const roomA1 = await createAdminRoom('app-one', 'lobby', {
-    identity: hostUser
-  })
-  const roomB1 = await createAdminRoom('app-one', 'general', {
-    identity: hostUser
-  })
-  const roomOther = await createAdminRoom('app-one', 'lobby', {
-    identity: otherUser
-  })
   assert.equal(
-    roomA1.fingerprint,
-    roomB1.fingerprint,
+    hostUser.fingerprint,
+    reimportedHostUser.fingerprint,
     'same UserIdentity must deterministically derive the same self-certifying fingerprint'
   )
-  assert.equal(roomA1.roomId, `lobby~${roomA1.fingerprint}`)
-  assert.equal(roomB1.roomId, `general~${roomB1.fingerprint}`)
   assert.notEqual(
-    roomA1.fingerprint,
-    roomOther.fingerprint,
+    hostUser.fingerprint,
+    otherUser.fingerprint,
     'different UserIdentities must derive distinct fingerprints'
   )
 
@@ -2694,8 +2684,8 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
   // 4. Multi-hop topology: room.getPeers() PeerInfo, cascading delegator revocation,
   //    offer-stage bulk rejection on role-protected actions, and serialized concurrent state.set()
   //    Line topology: admin -- bob -- carol -- mallory
-  const provisioned = await createAdminRoom('audit-app', 'audit-room')
-  const roomId = provisioned.roomId
+  const auditAdminIdentity = await createUserIdentity()
+  const roomId = `audit-room~${auditAdminIdentity.fingerprint}`
   const appId = 'audit-app'
   const peerIds = ['admin', 'bob', 'carol', 'mallory']
   const regMap = new Map<string, (peer: any, id: string) => void>()
@@ -2703,7 +2693,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
 
   for (const id of peerIds) {
     const peerIdentity =
-      id === 'admin' ? provisioned.identity : await createUserIdentity()
+      id === 'admin' ? auditAdminIdentity : await createUserIdentity()
     const room = createRoom(
       f => regMap.set(id, f),
       () => {},
@@ -3265,8 +3255,8 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
   let maxObservedControlFrameBytes = 0
   let oversizedDrops = 0
   const peerCount = 25
-  const provisioned = await createAdminRoom('c1-cluster-app', 'c1-cluster-room')
-  const roomId = provisioned.roomId
+  const c1AdminIdentity = await createUserIdentity()
+  const roomId = `c1-cluster-room~${c1AdminIdentity.fingerprint}`
   const appId = 'c1-cluster-app'
   const peerIds = Array.from(
     {length: peerCount},
@@ -3330,8 +3320,7 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
 
   for (let i = 0; i < peerCount; i++) {
     const id = peerIds[i]!
-    const peerIdentity =
-      i === 0 ? provisioned.identity : await createUserIdentity()
+    const peerIdentity = i === 0 ? c1AdminIdentity : await createUserIdentity()
     const room = createRoom(
       peerRegister => {
         registerCallbacks.set(id, peerRegister)
@@ -3588,8 +3577,8 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
 })
 
 void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as a PeerBanRecord', async () => {
-  const provisioned = await createAdminRoom('c3-live-app', 'c3-live-room')
-  const roomId = provisioned.roomId
+  const c3AdminIdentity = await createUserIdentity()
+  const roomId = `c3-live-room~${c3AdminIdentity.fingerprint}`
   const appId = 'c3-live-app'
   const [modUser, attackerUser] = await Promise.all([
     createUserIdentity(),
@@ -3597,7 +3586,7 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
   ])
   const peerIds = ['admin-peer', 'mod-peer', 'attacker-peer']
   const usersByPeer: Record<string, any> = {
-    'admin-peer': provisioned.identity,
+    'admin-peer': c3AdminIdentity,
     'mod-peer': modUser,
     'attacker-peer': attackerUser
   }

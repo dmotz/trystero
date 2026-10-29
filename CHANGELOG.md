@@ -43,9 +43,8 @@
   `room.isBanned()` (on rooms configured with `roles()`), and expanded
   `room.getSelf()` (returning
   `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`), plus
-  top-level helpers `createAdminRoom(appId, baseRoomId, [options])` and
-  `definePlugin()` (for authoring custom/3rd-party room plugins with TypeScript
-  return-type inference via `use: [...]`).
+  top-level helper `definePlugin()` (for authoring custom/3rd-party room plugins
+  with TypeScript return-type inference via `use: [...]`).
 - Actions now accept a `roles` option (`makeAction(name, {roles})`) to restrict
   sending or requesting to `'admin'` or specific custom roles, with the sender's
   verified `roles` included in `onMessage` and `onRequest` contexts.

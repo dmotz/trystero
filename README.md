@@ -66,7 +66,6 @@ You can see what people are building with Trystero
   - [`importUserIdentity(input)`](#importuseridentityinput)
   - [`exportUserIdentity(identity)`](#exportuseridentityidentity)
   - [`clearUserIdentity(appId)`](#clearuseridentityappid)
-  - [`createAdminRoom(appId, baseRoomId, [options])`](#createadminroomappid-baseroomid-options)
   - [`getRelaySockets()`](#getrelaysockets)
   - [`setRelayConnectivity(mode)`](#setrelayconnectivitymode)
 - [Which strategy should I choose?](#which-strategy-should-i-choose)
@@ -741,9 +740,9 @@ const guestRoom = joinRoom({appId: 'trivia-night', use: [roles()]}, roomId)
 > (from `createUserIdentity()` / `importUserIdentity()`) instead of an ephemeral
 > `'none'` identity—otherwise closing the process discards the admin key and
 > leaves the fingerprinted room without a root admin. Trystero logs a warning if
-> `selfAsAdmin: true` is used with an ephemeral identity. You can also generate
-> the `roomId` ahead of time before calling `joinRoom()` using
-> `await createAdminRoom('trivia-night', 'friday-quiz')`.
+> `selfAsAdmin: true` is used with an ephemeral identity. With a `UserIdentity`,
+> you can also format the self-certifying room ID ahead of time as
+> `` `${baseRoomId}~${identity.fingerprint}` ``.
 
 #### 2. Specifying admin `userId`s (fixed room names or co-admins)
 
@@ -1854,7 +1853,7 @@ inferred by TypeScript (`RoomWithPlugins`). See the
 ### `createUserIdentity()`
 
 Returns a promise resolving to a fresh self-certifying ECDSA P-256
-`UserIdentity` (`{userId, publicKey, signPubJwk, sign}`). Use
+`UserIdentity` (`{userId, fingerprint, publicKey, signPubJwk, sign}`). Use
 `exportUserIdentity(identity)` to serialize its private key material if you want
 to persist it in custom storage.
 
@@ -1876,16 +1875,8 @@ non-extractable browser storage (`'local'`).
 Deletes the stored `'local'` `UserIdentity` in `IndexedDB` and clears in-memory
 identity and endpoint caches for `appId`, returning a promise that resolves when
 cleanup completes (other `appId`s on the same origin are unaffected). Applies to
-subsequent `joinRoom()` and `createAdminRoom()` calls—call `await room.leave()`
-first if already connected.
-
-### `createAdminRoom(appId, baseRoomId, [options])`
-
-Resolves a `UserIdentity` for `appId` (from `options.identity`, defaulting to
-`'local'` when persistent browser storage is available) and formats a
-self-certifying room ID (`<baseRoomId>~<fingerprint>`), returning a promise that
-resolves to
-`{roomId, baseRoomId, fingerprint, userId, identity, persisted, identityPersistence}`.
+subsequent `joinRoom()` calls—call `await room.leave()` first if already
+connected.
 
 ### `getRelaySockets()`
 
