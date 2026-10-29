@@ -1,4 +1,5 @@
 import {
+  base62Alphabet,
   createBoundedCache,
   createBoundedSet,
   decodeBytes,
@@ -6,13 +7,15 @@ import {
   ecdsaSign,
   ecdsaVerify,
   encodeBytes,
+  fingerprintLength,
   fromBase64Url,
   fromJson,
   isLowSP256Signature,
+  isValidP256PrivateScalar,
   libId,
   mkErr,
   normalizeLowSP256Signature,
-  p256N,
+  peerIdLength,
   sha256,
   toBase64Url,
   toJson
@@ -25,14 +28,18 @@ import type {
   UserIdentityPersistence
 } from './types'
 
-export {decodeBytes, encodeBytes, fromBase64Url, toBase64Url}
+export {
+  base62Alphabet,
+  decodeBytes,
+  encodeBytes,
+  fingerprintLength,
+  fromBase64Url,
+  peerIdLength,
+  toBase64Url
+}
 
-export const base62Alphabet =
-  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 const base62Radix = 62n
-export const peerIdLength = 20
-export const fingerprintLength = 16
-const peerIdRegex = /^[0-9A-Za-z]{20}$/
+const peerIdRegex = new RegExp(`^[0-9A-Za-z]{${peerIdLength}}$`)
 const userIdRegex = /^[A-Za-z0-9_-]{43}$/
 
 const userKeyPrefix = `${libId}_uk_`
@@ -102,6 +109,7 @@ export const pubJwkToUncompressedBytes = (
 ): Uint8Array | null => {
   if (
     !jwk ||
+    jwk.d !== undefined ||
     (jwk.kty && jwk.kty !== 'EC') ||
     (jwk.crv && jwk.crv !== 'P-256') ||
     typeof jwk.x !== 'string' ||
@@ -206,7 +214,7 @@ export const getVerifiedPubKeyRecord = (
         digest,
         peerId: encodeBase62(digest, peerIdLength),
         userId: toBase64Url(digest),
-        fingerprint: encodeBase62(digest.subarray(0, 16), fingerprintLength)
+        fingerprint: encodeBase62(digest, fingerprintLength)
       }
       resolvedPubKeyCache.set(canonicalJwk, record)
       return record
@@ -252,7 +260,7 @@ export const computeUserIdFingerprint = (userId: string): string => {
   if (!digest || digest.byteLength !== 32) {
     throw mkErr('invalid userId')
   }
-  return encodeBase62(digest.subarray(0, 16), fingerprintLength)
+  return encodeBase62(digest, fingerprintLength)
 }
 
 export const verifyWithP256 = async (
@@ -558,11 +566,12 @@ const tryParsePrivateJwk = (
     }
 
     const secretKey = fromBase64Url(jwkObj.d)
-    if (secretKey.byteLength !== 32 || toBase64Url(secretKey) !== jwkObj.d) {
-      return null
-    }
-    const scalar = bytesToBigInt(secretKey)
-    if (scalar <= 0n || scalar >= p256N) {
+    const canonicalSecret =
+      secretKey.byteLength === 32 &&
+      toBase64Url(secretKey) === jwkObj.d &&
+      isValidP256PrivateScalar(secretKey)
+    secretKey.fill(0)
+    if (!canonicalSecret) {
       return null
     }
 

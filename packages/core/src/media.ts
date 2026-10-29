@@ -1,5 +1,5 @@
 import {maxQueuedDataFrames} from './data-limits'
-import {all, genId, mkErr, toJson, warn} from './utils'
+import {all, mkErr, toJson, warn} from './utils'
 import type {
   AddMediaOptions,
   JsonValue,
@@ -67,7 +67,7 @@ const makeKeyGetter =
     let key = map.get(item)
 
     if (!key) {
-      key = genId(20)
+      key = crypto.randomUUID()
       map.set(item, key)
     }
 

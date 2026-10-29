@@ -129,7 +129,7 @@ announces to relays. Most plugins do not need this hook; use it only if your
 plugin needs to:
 
 - Transform or validate the room ID before topic subscription (for example,
-  `roles({selfAsAdmin: true})` appends a 16-character self-certifying
+  `roles({selfAsAdmin: true})` appends a 22-character self-certifying
   fingerprint `<roomId>~<fingerprint>`).
 - Pre-compute asynchronous state from `userIdentityP` before peer handshakes
   begin.

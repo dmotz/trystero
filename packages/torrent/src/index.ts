@@ -3,9 +3,9 @@ import {
   createStrategy,
   fromJson,
   getRelays,
+  hashTopic,
   libName,
   makeSocket,
-  sha1,
   toJson,
   type JoinRoom,
   type JoinRoomConfig,
@@ -69,7 +69,7 @@ const getInfoHash = async (topic: string): Promise<string> => {
     return topicToInfoHash[topic]
   }
 
-  const hash = (await sha1(topic)).slice(0, hashLimit)
+  const hash = (await hashTopic(topic)).slice(0, hashLimit)
   topicToInfoHash[topic] = hash
   infoHashToTopic[hash] = topic
 

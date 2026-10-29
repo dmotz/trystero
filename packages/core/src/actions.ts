@@ -3,7 +3,6 @@ import {
   all,
   authMetaKey,
   entries,
-  genId,
   insufficientAuthPrefix,
   internalActionPrefix,
   logActionHandlerErr,
@@ -679,7 +678,7 @@ export const createActionManager = ({
           ? await signActionPayload(type, state.requiredRoles, data, metadata)
           : metadata
 
-      const requestId = genId(20)
+      const requestId = crypto.randomUUID()
       const controller = new AbortController()
       const responsePromise = new Promise<DataPayload>((resolve, reject) => {
         const waiter: PendingRequestWaiter = {

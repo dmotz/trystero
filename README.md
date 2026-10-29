@@ -714,13 +714,13 @@ const hostRoom = joinRoom(
 )
 const {roomId} = await hostRoom.getSelf()
 
-// Share `roomId` (e.g. "friday-quiz~9fX2kLm8pQr7vBn3") in an invite link for friends!
+// Share `roomId` (e.g. "friday-quiz~9fX2kLm8pQr7vBn3wZy4xT") in an invite link for friends!
 ```
 
 When you pass `roles({selfAsAdmin: true})`, Trystero attaches a `~` separator
-and a 16-character Base62 suffix to your room name (like
-`'friday-quiz~9fX2kLm8pQr7vBn3'`) derived from the host's `userId`. Think of
-that suffix as a built-in digital ID badge for the host.
+and a 22-character Base62 suffix to your room name (like
+`'friday-quiz~9fX2kLm8pQr7vBn3wZy4xT'`) derived from the host's `userId`. Think
+of that suffix as a built-in digital ID badge for the host.
 
 When friends join using that self-certifying `roomId`, they simply include
 `use: [roles()]` in `joinRoom()`—their browsers automatically check the suffix
@@ -866,13 +866,13 @@ can issue role certificates.
   grant, or ban is signed with the sender's private key and verified by every
   peer before being accepted.
 - **Self-certifying room IDs**: Both a user's 43-character Base64url `userId`
-  and a self-certifying room's 16-character Base62 suffix
-  (`<baseRoomId>~<16-char-base62>`) are derived from the exact same SHA-256
+  and a self-certifying room's 22-character Base62 suffix
+  (`<baseRoomId>~<22-char-base62>`) are derived from the exact same SHA-256
   thumbprint of the user's P-256 public key. When you create a room with
-  `roles({selfAsAdmin: true})`, Trystero encodes the first 96 bits of your
-  `userId` digest into the room ID suffix after `~`. When peers connect—or when
-  the host rejoins with the same persistent identity—everyone can mathematically
-  verify from the `userId` alone who owns the room.
+  `roles({selfAsAdmin: true})`, Trystero encodes your `userId`'s SHA-256 digest
+  (`mod 62²²`, ~131 bits) into the room ID suffix after `~`. When peers
+  connect—or when the host rejoins with the same persistent identity—everyone
+  can mathematically verify from the `userId` alone who owns the room.
 - **2-tier role certificates**: Calling `room.grantRole()` issues a signed
   `RoleCertificate` binding the recipient's `subUserId` to the granted role(s).
   Because the certificate binds `subUserId`, a promoted user retains their roles
@@ -1496,10 +1496,10 @@ Returns an object with the following properties and methods:
   room:
   - `peerId` - The 20-character Base62 endpoint ID.
   - `userId` - The local user's 43-character Base64url user identity thumbprint.
-  - `roomId` - The full room ID (including the `~<16-char-base62-fingerprint>`
+  - `roomId` - The full room ID (including the `~<22-char-base62-fingerprint>`
     suffix when created with `roles({selfAsAdmin: true})`).
   - `baseRoomId` - The base room name without the fingerprint suffix.
-  - `fingerprint` - The 16-character Base62 admin fingerprint from the room ID,
+  - `fingerprint` - The 22-character Base62 admin fingerprint from the room ID,
     or `null`.
   - `isAdmin` - Boolean indicating whether the local user is a verified
     `'admin'`.
@@ -1818,11 +1818,11 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 - `roles()` - Enables role and state verification for a participant joining a
   room (required when joining a self-certifying `<roomId>~<fingerprint>`).
 - `roles({selfAsAdmin: true})` - Makes the local user (`userId`) a root room
-  admin and appends `~<16-char-base62-fingerprint>` to `roomId`. Uses persistent
+  admin and appends `~<22-char-base62-fingerprint>` to `roomId`. Uses persistent
   `'local'` identity by default in browsers; pair with a saved `UserIdentity`
   when running outside browsers.
 - `roles({admins: [userId1, userId2]})` - Trusts the specified `userId`s (or
-  16-character Base62 fingerprints) as root room admins on either a fixed room
+  22-character Base62 fingerprints) as root room admins on either a fixed room
   name or alongside `selfAsAdmin: true`.
 - `roles({maxClockSkewMs})` - Configures maximum tolerated future wall-clock
   skew in milliseconds for incoming signed authority records (default: `60000`,

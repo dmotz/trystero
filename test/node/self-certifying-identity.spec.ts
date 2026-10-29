@@ -296,7 +296,7 @@ void test('Identity primitives: peerId is 20-char Base62, selfId is not exported
   assert.match(user.userId, /^[0-9A-Za-z_-]{43}$/)
   assert.notEqual(user.userId.length, selfId.length)
   assert.equal(typeof user.fingerprint, 'string')
-  assert.match(user.fingerprint, /^[0-9A-Za-z]{16}$/)
+  assert.match(user.fingerprint, /^[0-9A-Za-z]{22}$/)
   assert.equal(user.fingerprint, computeUserIdFingerprint(user.userId))
 
   assert.equal(await deriveUserId(user.publicKey), user.userId)
@@ -399,7 +399,7 @@ void test('Identity config validation & persistence modes: default local, none, 
       joinRoom(
         {
           appId: 'validation-app',
-          identity: {...tempUser, fingerprint: '0000000000000000'},
+          identity: {...tempUser, fingerprint: '0'.repeat(22)},
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'room-1'
@@ -1815,6 +1815,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
   const coreExports = corePublicExports
   for (const pruned of [
     'hashWith',
+    'sha1',
     'all',
     'entries',
     'getConfiguredPlugins',
@@ -1840,7 +1841,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'createRelayManager',
     'makeSocket',
     'getRelays',
-    'sha1',
+    'hashTopic',
     'toJson',
     'fromJson',
     'encodeBytes',

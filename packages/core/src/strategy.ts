@@ -1,5 +1,5 @@
 import {isSelfAsAdminPlugin} from './authority'
-import {decrypt, encrypt, genKey, sha1} from './crypto'
+import {decrypt, encrypt, genKey, hashTopic} from './crypto'
 import {
   getDefaultEndpointIdentity,
   isEphemeralIdentityConfig,
@@ -208,8 +208,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     void effectiveRoomIdP?.catch(noOp)
 
     const rootTopicP = effectiveRoomIdP
-      ? effectiveRoomIdP.then(rid => sha1(topicPath(libName, appId, rid)))
-      : sha1(rootTopicPlaintext)
+      ? effectiveRoomIdP.then(rid => hashTopic(topicPath(libName, appId, rid)))
+      : hashTopic(rootTopicPlaintext)
     void rootTopicP.catch(noOp)
     const selfTopicP = all([
       effectiveRoomIdP ?? Promise.resolve(roomId),
@@ -217,7 +217,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     ]).then(([rid, resolvedPeerId]) => {
       ctx.selfId = resolvedPeerId
       strategyContext.peerId = resolvedPeerId
-      return sha1(topicPath(topicPath(libName, appId, rid), resolvedPeerId))
+      return hashTopic(
+        topicPath(topicPath(libName, appId, rid), resolvedPeerId)
+      )
     })
     void selfTopicP.catch(noOp)
     const key = effectiveRoomIdP

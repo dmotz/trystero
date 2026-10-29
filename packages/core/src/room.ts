@@ -952,7 +952,7 @@ export default <
     }
     if (data && typeof data === 'object' && !data.ok) {
       if (data.err === roomFullMsg) {
-        if (!handshakeManager.getPeer(id) || activePeerMap[id]) {
+        if (!handshakeManager.getPeer(id) || isDirectPeer(id)) {
           return
         }
         handshakeManager.clearPeer(id, roomFullErr)
@@ -981,7 +981,7 @@ export default <
       return
     }
     if (verifyPeerIdentity && !verifiedPeerIds.has(id)) {
-      if (handshakeManager.getPeer(id) && !activePeerMap[id]) {
+      if (handshakeManager.getPeer(id) && !isDirectPeer(id)) {
         deferredHandshakeReady.set(id, data)
       }
       return
@@ -1006,6 +1006,8 @@ export default <
       }
 
       if (wasVirtual) {
+        verifiedPeerIds.delete(id)
+        deferredHandshakeReady.delete(id)
         delete peerMap[id]
       } else {
         existingPeer.destroy()

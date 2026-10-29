@@ -12,7 +12,6 @@ import {
 } from './identity'
 import {
   encodeBytes,
-  genId,
   keys,
   libId,
   mkErr,
@@ -201,7 +200,7 @@ export const createIdentityHandshake = (params: {
     }
 
     if (isInitiator) {
-      const initNonce = genId(32)
+      const initNonce = crypto.randomUUID()
       await send({
         [hsStepKey]: 1,
         n: initNonce,
@@ -280,7 +279,7 @@ export const createIdentityHandshake = (params: {
       localDtls
     )
 
-    const respNonce = genId(32)
+    const respNonce = crypto.randomUUID()
     const transcriptBytes = encodeBytes(
       toJson([
         hsDomain,

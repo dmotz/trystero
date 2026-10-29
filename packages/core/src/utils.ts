@@ -1,11 +1,14 @@
 import {
+  base62Alphabet,
   createBoundedCache,
   createBoundedSet,
   decodeBytes,
   encodeBytes,
+  fingerprintLength,
   fromBase64,
   fromBase64Url,
   fromJson,
+  hash32,
   libId,
   libName,
   mkErr,
@@ -92,21 +95,27 @@ export const noActivePeerMsg = (id: string): string =>
 export const requiredErr = (field: string): Error =>
   mkErr(`${field} is required`)
 
-const {floor, min, sin} = Math
+const {floor, min} = Math
 
 export const alloc = <T>(n: number, f: (v: undefined, i: number) => T): T[] =>
   Array(n).fill(undefined).map(f)
 
-const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
+const base62UnbiasedLimit = 248 // 62 * 4 (largest multiple of 62 <= 256)
 
 export const genId = (n: number): string => {
   if (n <= 0) {
     return ''
   }
-  const bytes = crypto.getRandomValues(new Uint8Array(n))
+  const buf = new Uint8Array(Math.ceil(n * 1.15) + 4)
   let out = ''
-  for (let i = 0; i < n; i++) {
-    out += charSet[bytes[i]! % charSet.length]!
+  while (out.length < n) {
+    crypto.getRandomValues(buf)
+    for (let i = 0; i < buf.byteLength && out.length < n; i++) {
+      const b = buf[i]!
+      if (b < base62UnbiasedLimit) {
+        out += base62Alphabet[b % 62]!
+      }
+    }
   }
   return out
 }
@@ -149,13 +158,16 @@ export const toErrorMessage = (reason: unknown, fallback: string): string => {
 export const toError = (reason: unknown, fallback: string): Error =>
   reason instanceof Error ? reason : mkErr(toErrorMessage(reason, fallback))
 
-export const topicPath = (...parts: string[]): string => parts.join('@')
+export const topicPath = (...parts: string[]): string => toJson(parts)
 
 export const shuffle = <T>(xs: readonly T[], seed: number): T[] => {
   const a = [...xs]
+  let state = (Math.trunc(seed) || 1) >>> 0
   const rand = (): number => {
-    const x = sin(seed++) * 10_000
-    return x - floor(x)
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = Math.imul(state ^ (state >>> 15), 1 | state)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 0x1_0000_0000
   }
 
   let i = a.length
@@ -187,7 +199,7 @@ export const getRelays = <
 export const strToNum = (
   str: string,
   limit: number = Number.MAX_SAFE_INTEGER
-): number => str.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % limit
+): number => hash32(str) % limit
 
 const defaultRetryMs = 3333
 const maxRetryMs = 60_000
@@ -487,7 +499,13 @@ export const createRelayManager = <TRelay extends object>(
 
 export const log = (...args: unknown[]): void => console.log(...args)
 
-export const selfCertifyingRoomRegex: RegExp = /^(.+)~([0-9A-Za-z]{16})$/
+export const fingerprintRegex: RegExp = new RegExp(
+  `^[0-9A-Za-z]{${fingerprintLength}}$`
+)
+
+export const selfCertifyingRoomRegex: RegExp = new RegExp(
+  `^(.+)~([0-9A-Za-z]{${fingerprintLength}})$`
+)
 
 export const reservedRoomPropertyNames: Set<string> = new Set([
   'ready',

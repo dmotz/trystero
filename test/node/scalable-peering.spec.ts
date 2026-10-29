@@ -23,7 +23,7 @@ import {
   exportUserIdentity,
   importUserIdentity
 } from '../../packages/core/src/identity.ts'
-import {ecdsaSign} from '../../packages/core/src/crypto.ts'
+import {ecdsaSign, signRoomAuth} from '../../packages/core/src/crypto.ts'
 import {inspectActionWireHeader} from '../../packages/core/src/action-wire.ts'
 import {
   maxActionFrameBytes,
@@ -1422,17 +1422,13 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     crypto.subtle.exportKey('jwk', mallorySignPair.publicKey),
     crypto.subtle.exportKey('jwk', malloryEncPair.publicKey)
   ])
-  const authDigest = new Uint8Array(
-    await crypto.subtle.digest(
-      'SHA-256',
-      encodeBytes(
-        'trystero-ov-auth:shared-room-secret:adv-app:adv-room:alice:999'
-      ) as BufferSource
-    )
+  const validRoomAuthForHijack = await signRoomAuth(
+    'shared-room-secret',
+    'adv-app',
+    'adv-room',
+    'alice',
+    999
   )
-  const validRoomAuthForHijack = Array.from(authDigest, b =>
-    b.toString(16).padStart(2, '0')
-  ).join('')
   const hijackCanonical = descriptorCanonicalPayload(
     {
       peerId: 'alice',
@@ -1895,7 +1891,7 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
 void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ admin: true }), UserIdentity.fingerprint, and userId-pinned rooms', async () => {
   // 1. UserIdentity exposes self-certifying fingerprint for offline room ID formatting
   const provisionedIdentity = await createUserIdentity()
-  assert.match(provisionedIdentity.fingerprint, /^[0-9A-Za-z]{16}$/)
+  assert.match(provisionedIdentity.fingerprint, /^[0-9A-Za-z]{22}$/)
   const provisionedRoomId = `watch-party~${provisionedIdentity.fingerprint}`
   assert.equal(
     provisionedRoomId,
@@ -1965,7 +1961,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const hostAuth = await hostRoom.getSelf()
     assert.equal(hostAuth.baseRoomId, 'game-lobby')
     assert.ok(
-      hostAuth.fingerprint && /^[0-9A-Za-z]{16}$/.test(hostAuth.fingerprint)
+      hostAuth.fingerprint && /^[0-9A-Za-z]{22}$/.test(hostAuth.fingerprint)
     )
     assert.equal(
       hostAuth.fingerprint,

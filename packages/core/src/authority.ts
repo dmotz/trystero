@@ -32,8 +32,8 @@ import {
   createBoundedSet,
   definePlugin,
   encodeBytes,
+  fingerprintRegex,
   fromBase64Url,
-  genId,
   insufficientAuthPrefix,
   invalidP256KeyErr,
   keys,
@@ -215,7 +215,7 @@ export const signRoleCertificate = async (
 ): Promise<RoleCertificate> => {
   const u: Omit<RoleCertificate, 'sig'> = {
     v: 1,
-    certId: genId(16),
+    certId: crypto.randomUUID(),
     issuerPubKey: canonicalizePubJwk(issuerPubJwk),
     subUserId: p.subUserId,
     appId: p.appId,
@@ -519,20 +519,23 @@ export const computePayloadDigest = async (
     }
   }
   const totalLen = isBlob ? data.size : rawB.byteLength
-  if (!isBlob && (tag !== 0x02 || totalLen <= digestChunkBytes)) {
+  if (tag !== 0x02 || totalLen <= digestChunkBytes) {
+    if (isBlob) {
+      rawB = new Uint8Array(await data.arrayBuffer())
+    }
     return packDigest(tag, rawB, metaB)
   }
   const nChunks = Math.ceil(totalLen / digestChunkBytes)
-  const body = new Uint8Array(4 + nChunks * 32)
-  new DataView(body.buffer).setUint32(0, totalLen, false)
+  const body = new Uint8Array(8 + nChunks * 32)
+  new DataView(body.buffer).setBigUint64(0, BigInt(totalLen), false)
   for (let i = 0, off = 0; off < totalLen; i++, off += digestChunkBytes) {
     const end = Math.min(off + digestChunkBytes, totalLen)
     const part = isBlob
       ? new Uint8Array(await data.slice(off, end).arrayBuffer())
       : rawB.subarray(off, end)
-    body.set(await sha256(part as BufferSource), 4 + i * 32)
+    body.set(await sha256(part as BufferSource), 8 + i * 32)
   }
-  return packDigest(0x02, body, metaB)
+  return packDigest(0x04, body, metaB)
 }
 
 const actionAuthPayload = (
@@ -960,7 +963,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   let localUser: UserIdentity | null = null
   for (const raw of admin.admins ?? []) {
     const e = raw.trim()
-    if (/^[0-9A-Za-z]{16}$/.test(e)) {
+    if (fingerprintRegex.test(e)) {
       rootFps.add(e)
     } else if (e) {
       rootUids.add(e)

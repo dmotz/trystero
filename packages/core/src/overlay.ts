@@ -1,11 +1,18 @@
 import {inspectActionWireHeader} from './action-wire'
-import {ecdsaSign, sha256} from './crypto'
+import {
+  derivePairwiseAesKey,
+  ecdsaSign,
+  hash32,
+  signRoomAuth,
+  verifyRoomAuth
+} from './crypto'
 import {maxActionFrameBytes, maxOverlayHeaderBytes} from './data-limits'
 import {
   getCachedPubKeyRecord,
   getDefaultEndpointIdentity,
   isPeerIdKeyCachedValid,
   isUserEndpointProofCachedValid,
+  pubJwkToUncompressedBytes,
   signUserEndpointProof,
   verifyPeerIdKey,
   verifyUserEndpointProof,
@@ -33,7 +40,6 @@ import {
   resetTimer,
   toBase64,
   toError,
-  toHex,
   toJson
 } from './utils'
 import type {
@@ -183,25 +189,14 @@ export const normalizeTopologyConfig = (
 const ringKeyCache = createBoundedCache<string, string>(8_192)
 
 const hashRingKey = (ringSalt: string, peerId: string): string => {
-  const input = `${ringSalt}\0${peerId}`
+  const input = toJson([ringSalt, peerId])
   const cached = ringKeyCache.get(input)
   if (cached !== undefined) {
     return cached
   }
-  let h1 = 0xdeadbeef ^ input.length
-  let h2 = 0x41c6ce57 ^ input.length
-  for (let i = 0; i < input.length; i++) {
-    const ch = input.charCodeAt(i)
-    h1 = Math.imul(h1 ^ ch, 0x85ebca6b)
-    h2 = Math.imul(h2 ^ ch, 0xc2b2ae35)
-  }
-  h1 =
-    Math.imul(h1 ^ (h1 >>> 16), 0x85ebca6b) ^
-    Math.imul(h2 ^ (h2 >>> 13), 0xc2b2ae35)
-  h2 =
-    Math.imul(h2 ^ (h2 >>> 16), 0x85ebca6b) ^
-    Math.imul(h1 ^ (h1 >>> 16), 0xc2b2ae35)
-  const res = `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}:${peerId}`
+  const h1 = hash32(`0:${input}`)
+  const h2 = hash32(`1:${input}`)
+  const res = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}:${peerId}`
   ringKeyCache.set(input, res)
   return res
 }
@@ -237,7 +232,7 @@ export const computeTargetNeighbors = (
   const uniqueList = [...unique]
 
   for (let r = 0; r < numRings; r++) {
-    const ringSalt = `${roomSalt}\0ring:${r}`
+    const ringSalt = toJson([roomSalt, 'ring', r])
     const ringSorted = uniqueList
       .map(id => ({id, key: hashRingKey(ringSalt, id)}))
       .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
@@ -570,19 +565,6 @@ export const descriptorCanonicalPayload = (
     ...(d.userId ? [d.userId, d.userPubKey ?? null, d.userProof ?? null] : [])
   ])
 
-const computeRoomAuthToken = async (
-  password: string,
-  appId: string,
-  roomId: string,
-  peerId: string,
-  seq: number
-): Promise<string> =>
-  toHex(
-    await sha256(
-      `${libId}-ov-auth:${password}:${appId}:${roomId}:${peerId}:${seq}`
-    )
-  )
-
 type CryptoIdentity = {
   peerId: string
   signPrivateKey: CryptoKey
@@ -847,8 +829,15 @@ export const createOverlayManager = ({
     signatureFailures: 0
   }
 
+  let passwordTopologySalt = ''
+  let passwordSaltToken = 0
+
   const getRoomSalt = (): string =>
-    appId || roomId ? `${appId}\0${roomId}` : ''
+    passwordTopologySalt
+      ? toJson([appId, roomId, passwordTopologySalt])
+      : appId || roomId
+        ? toJson([appId, roomId])
+        : ''
 
   const currentMaxHops = (): number =>
     deriveMaxHops(
@@ -1294,9 +1283,10 @@ export const createOverlayManager = ({
   }
 
   const isAssignedGatekeeperFor = (candidateId: string): boolean => {
-    const gateSalt = `${getRoomSalt()}\0gate:${candidateId}`
+    const gateSalt = toJson([getRoomSalt(), 'gate', candidateId])
+    const cappedRoster = capRosterPeersPerUser(knownRoster)
     const lowerVerified: Array<{id: string; key: string}> = []
-    for (const u of knownRoster) {
+    for (const u of cappedRoster) {
       if (u < candidateId && !bannedPeers.has(u) && !leftPeersSeq.has(u)) {
         lowerVerified.push({id: u, key: hashRingKey(gateSalt, u)})
       }
@@ -1608,7 +1598,7 @@ export const createOverlayManager = ({
     }
 
     if (password) {
-      descriptor.roomAuth = await computeRoomAuthToken(
+      descriptor.roomAuth = await signRoomAuth(
         password,
         appId,
         roomId,
@@ -1668,6 +1658,8 @@ export const createOverlayManager = ({
       Number.isSafeInteger(d.seq) &&
       d.seq > 0 &&
       isValidDescriptorNeighbors(d.peerId, d.neighbors) &&
+      (d.encPubKey === undefined ||
+        Boolean(pubJwkToUncompressedBytes(d.encPubKey))) &&
       !bannedPeers.has(d.peerId)
     )
 
@@ -1753,18 +1745,18 @@ export const createOverlayManager = ({
     }
 
     if (password) {
-      if (!d.roomAuth) {
-        stats.signatureFailures++
-        return false
-      }
-      const expectedAuth = await computeRoomAuthToken(
-        password,
-        appId,
-        roomId,
-        d.peerId,
-        d.seq
-      )
-      if (d.roomAuth !== expectedAuth) {
+      if (
+        typeof d.roomAuth !== 'string' ||
+        !d.roomAuth ||
+        !(await verifyRoomAuth(
+          password,
+          appId,
+          roomId,
+          d.peerId,
+          d.seq,
+          d.roomAuth
+        ))
+      ) {
         stats.signatureFailures++
         return false
       }
@@ -1875,48 +1867,29 @@ export const createOverlayManager = ({
 
   const getPairwiseKey = (remotePeerId: string): Promise<CryptoKey> | null => {
     const remoteDesc = descriptors.get(remotePeerId)
-    if (!remoteDesc?.encPubKey) {
+    const remoteUncompressed = remoteDesc?.encPubKey
+      ? pubJwkToUncompressedBytes(remoteDesc.encPubKey)
+      : null
+    if (!remoteUncompressed) {
       return null
     }
     let cached = derivedPairwiseKeys.get(remotePeerId)
     if (!cached) {
-      const remoteJwk = remoteDesc.encPubKey
       cached = (async () => {
         const id = identityReady ?? (await getLocalCryptoIdentityImpl())
         identityReady = id
-        const remotePub = await crypto.subtle.importKey(
-          'jwk',
-          remoteJwk,
-          {name: 'ECDH', namedCurve: 'P-256'},
-          false,
-          []
-        )
-        const rawBits = await crypto.subtle.deriveBits(
-          {name: 'ECDH', public: remotePub},
+        return derivePairwiseAesKey(
           id.encPrivateKey,
-          256
-        )
-        const sortedPair =
-          selfId < remotePeerId
-            ? `${selfId}:${remotePeerId}`
-            : `${remotePeerId}:${selfId}`
-        const contextBytes = encodeBytes(
-          `${libId}-e2e-v1:${appId}:${roomId}:${sortedPair}`
-        )
-        const combined = new Uint8Array(
-          rawBits.byteLength + contextBytes.byteLength
-        )
-        combined.set(new Uint8Array(rawBits), 0)
-        combined.set(contextBytes, rawBits.byteLength)
-        const derivedBytes = await sha256(combined)
-        return crypto.subtle.importKey(
-          'raw',
-          derivedBytes as BufferSource,
-          {name: 'AES-GCM', length: 256},
-          false,
-          ['encrypt', 'decrypt']
+          remoteUncompressed,
+          appId,
+          roomId,
+          selfId,
+          remotePeerId
         )
       })()
+      cached.catch(() => {
+        derivedPairwiseKeys.delete(remotePeerId)
+      })
       derivedPairwiseKeys.set(remotePeerId, cached)
     }
     return cached
@@ -3000,6 +2973,31 @@ export const createOverlayManager = ({
     }
   }
 
+  const refreshPasswordSalt = (): void => {
+    const token = ++passwordSaltToken
+    if (!password) {
+      passwordTopologySalt = ''
+      return
+    }
+    const targetRoomId = roomId
+    void signRoomAuth(password, appId, targetRoomId, '@topology', 0)
+      .then(salt => {
+        if (
+          !isDestroyed &&
+          token === passwordSaltToken &&
+          roomId === targetRoomId &&
+          passwordTopologySalt !== salt
+        ) {
+          passwordTopologySalt = salt
+          recomputeTopologyAndRoutes()
+          scheduleTargetsNotification()
+        }
+      })
+      .catch(noOp)
+  }
+
+  refreshPasswordSalt()
+
   return {
     config,
 
@@ -3298,6 +3296,7 @@ export const createOverlayManager = ({
     setRoomId: (effectiveRoomId: string): void => {
       if (effectiveRoomId && effectiveRoomId !== roomId) {
         roomId = effectiveRoomId
+        refreshPasswordSalt()
         didInitSessionSeqFloor = false
         syncSessionSeqFloor(selfId)
         derivedPairwiseKeys.clear()

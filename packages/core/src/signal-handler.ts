@@ -1,4 +1,4 @@
-import {sha1} from './crypto'
+import {hashTopic} from './crypto'
 import {resolveSelfId} from './identity'
 import {
   all,
@@ -616,7 +616,7 @@ const handleAnnouncement = async (
   }
 
   const [peerTopic, offerInfo, localSelfId] = await all([
-    sha1(topicPath(ctx.rootTopicPlaintext, peerId)),
+    hashTopic(topicPath(ctx.rootTopicPlaintext, peerId)),
     ensureOffer(ctx, state, peerId),
     getSelfId(ctx)
   ])
@@ -751,7 +751,7 @@ const replayExistingAnswerIfMatch = async (
   ) {
     replay.lastSentAt[relayId] = Date.now()
 
-    const peerTopic = await sha1(topicPath(ctx.rootTopicPlaintext, peerId))
+    const peerTopic = await hashTopic(topicPath(ctx.rootTopicPlaintext, peerId))
 
     if (
       !ctx.isLeaving() &&
@@ -911,7 +911,7 @@ const handleOffer = async (
 
   DEV: log('got offer from', peerId)
 
-  const peerTopic = await sha1(topicPath(ctx.rootTopicPlaintext, peerId))
+  const peerTopic = await hashTopic(topicPath(ctx.rootTopicPlaintext, peerId))
 
   if (ctx.isLeaving() || state.answerReplay !== replay) {
     return
@@ -1204,7 +1204,7 @@ export const createSignalHandler = (ctx: SignalContext) => {
             void handleAnnouncement(ctx, relayId, peerId, signalPeer)
           }
         } else {
-          void sha1(topicPath(ctx.rootTopicPlaintext, peerId)).then(
+          void hashTopic(topicPath(ctx.rootTopicPlaintext, peerId)).then(
             peerSelfTopic => {
               if (
                 !ctx.isLeaving() &&
@@ -1345,7 +1345,7 @@ export const createSignalHandler = (ctx: SignalContext) => {
 
           lastSentByRelay[relayId] = Date.now()
 
-          const peerSelfTopic = await sha1(
+          const peerSelfTopic = await hashTopic(
             topicPath(ctx.rootTopicPlaintext, peerId)
           )
           if (

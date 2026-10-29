@@ -79,11 +79,9 @@ if (!versions.length) {
 async function run(label: string, module: string, scenario: string) {
   const roomId = 'room'
   const appId = `comparison-${Date.now()}-${Math.random()}`
-  const rootTopic = Array.from(
-    createHash('sha1').update(`Trystero@${appId}@${roomId}`).digest()
-  )
-    .map(byte => byte.toString(36))
-    .join('')
+  const rootTopic = createHash('sha256')
+    .update(JSON.stringify(['Trystero', appId, roomId]))
+    .digest('base64url')
   let started = 0
   const publicTraffic: Record<
     string,
