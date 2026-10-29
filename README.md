@@ -823,10 +823,8 @@ roles (like `'moderator'` or `'dj'`), revoke those roles later, or permanently
 ban a disruptive user from the room:
 
 ```js
-// Promote a user to 'moderator' (and let them promote others too)
-await room.grantRole(userId, 'moderator', {
-  canDelegate: true
-})
+// Promote a user to 'moderator'
+await room.grantRole(userId, 'moderator')
 
 // Check which verified roles a user currently has
 console.log(room.getRoles(userId)) // => ['moderator']
@@ -838,9 +836,8 @@ await room.revokeRole(userId, 'moderator')
 await room.ban(maliciousUserId, {reason: 'spam'})
 ```
 
-Delegators may revoke only roles they still hold. Revoked or banned admins
-cannot issue new moderation commands. Only the root authority can issue root
-admin certificates.
+Revoked or banned admins cannot issue new moderation commands. Only root admins
+can issue role certificates.
 
 <details>
   <summary>How it works behind the scenes</summary>
@@ -858,15 +855,13 @@ admin certificates.
   `userId` digest into the room ID suffix after `~`. When peers connect—or when
   the host rejoins with the same persistent identity—everyone can mathematically
   verify from the `userId` alone who owns the room.
-- **Delegated certificate chains**: Calling `room.grantRole()` issues a signed
-  `RoleCertificate` binding the recipient's `peerId`, `userId`, and public key
-  to the granted role(s) and `canDelegate` flag (up to a maximum delegation
-  depth of 2). Because the certificate binds `subUserId`, a promoted user
-  retains their roles across page reloads and multiple open tabs by presenting a
-  signed `userProof` linking their new endpoint `peerId` to their `userId`.
-  Peers verify the full signature chain back to a root admin key and check
-  against signed `RoleRevocationRecord`s. Likewise, `room.ban()` bans both the
-  target `peerId` and `userId` across all current and future tabs.
+- **2-tier role certificates**: Calling `room.grantRole()` issues a signed
+  `RoleCertificate` binding the recipient's `subUserId` to the granted role(s).
+  Because the certificate binds `subUserId`, a promoted user retains their roles
+  across page reloads and multiple open tabs automatically. Peers verify the
+  root admin's signature on the certificate and check against signed
+  `RoleRevocationRecord`s. Likewise, `room.ban()` bans the target `userId`
+  across all current and future tabs.
 - **Tamper-proof state syncing (`makeState`)**: Each state update is signed with
   a monotonically increasing sequence number (`seq`) and chained to the SHA-256
   hash of the previous state record (`prevHash`, verified for successive updates
@@ -1546,15 +1541,12 @@ Returns an object with the following properties and methods:
   - `onChange` - Nullable callback `(value, prev, context) => void` called
     whenever a verified state update arrives.
 
-- ### `grantRole(targetId, role, [options])`
+- ### `grantRole(targetId, role)`
 
   _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
   after `await room.ready`)_ Grants `role` (a role name string or array of
   strings) to `targetId` (which can be either a `peerId` or a `userId`).
-  Requires the local user to be an `'admin'` or to hold that role with
-  `canDelegate: true`.
-  - `options.canDelegate` - **(optional)** Boolean allowing the recipient to
-    grant those role(s) to other peers as well.
+  Requires the local user to be a root `'admin'`.
 
 - ### `revokeRole(targetId, [role])`
 

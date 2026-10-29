@@ -672,9 +672,6 @@ export default <
     },
     registerRolesProvider: provider => {
       rolesProvider = provider
-      for (const [pid, pubKey] of peerPubKeys.entries()) {
-        provider.registerPeerPublicKey(pid, pubKey)
-      }
     },
     registerScaleProvider: provider => {
       scaleProvider = provider
@@ -1222,7 +1219,7 @@ export default <
       }
       peerPubKeys.set(peerId, verified.peerPubKey)
       scaleProvider?.setPeerSignPublicKey(peerId, verified.peerPubKey)
-      rolesProvider?.registerPeerPublicKey(peerId, verified.peerPubKey)
+      rolesProvider?.registerPeerPublicKey(peerId, verified.userPubKey)
     },
     getPeerHandle: peerId => handshakeManager.getPeer(peerId) ?? peerMap[peerId]
   })

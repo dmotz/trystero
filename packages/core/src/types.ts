@@ -127,16 +127,11 @@ export type RoleCertificate = {
   v: 1
   certId: string
   issuerPubKey: string
-  subPeerId: string
-  subUserId?: string
-  subPubKey: JsonWebKey
+  subUserId: string
   appId: string
   roomId: string
   roles: string[]
-  canDelegate?: boolean
-  isRoot?: boolean
   iat: number
-  parentCert?: RoleCertificate
   sig: string
 }
 
@@ -144,17 +139,14 @@ export type RoleRevocationRecord = {
   v: 1
   appId: string
   roomId: string
-  issuerPeerId: string
-  targetPeerId: string
-  targetUserId?: string
+  issuerUserId: string
+  targetUserId: string
   targetCertId?: string
   role?: string
   seq: number
   ts: number
   issuerCert: RoleCertificate
-  signerPubKey?: JsonWebKey
-  userPubKey?: JsonWebKey
-  userProof?: string
+  signerPubKey: JsonWebKey
   sig: string
 }
 
@@ -162,16 +154,13 @@ export type PeerBanRecord = {
   v: 1
   appId: string
   roomId: string
-  issuerPeerId: string
-  targetPeerId: string
-  targetUserId?: string
+  issuerUserId: string
+  targetUserId: string
   reason?: string
   seq: number
   ts: number
   issuerCert: RoleCertificate
-  signerPubKey?: JsonWebKey
-  userPubKey?: JsonWebKey
-  userProof?: string
+  signerPubKey: JsonWebKey
   sig: string
 }
 
@@ -184,9 +173,7 @@ export type AuthoritativeStateRecord<T = JsonValue> = {
   prevHash: string
   ts: number
   updatedBy: string
-  userId?: string
-  userPubKey?: JsonWebKey
-  userProof?: string
+  userId: string
   signerPubKey: JsonWebKey
   cert: RoleCertificate
   value: T
@@ -564,8 +551,7 @@ export type RolesPluginApi = {
   ) => AuthoritativeState<Widen<T>>
   grantRole: (
     targetId: string,
-    role: string | string[],
-    options?: {canDelegate?: boolean}
+    role: string | string[]
   ) => Promise<RoleCertificate>
   revokeRole: (targetId: string, role?: string) => Promise<void>
   getRoles: (targetId?: string) => string[]

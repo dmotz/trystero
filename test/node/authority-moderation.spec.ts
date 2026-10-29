@@ -20,29 +20,28 @@ import {
   validateRoleRevocationShape,
   validateStateRecordShape
 } from '../../packages/core/src/authority.ts'
-import {
-  createUserIdentity,
-  getOrCreateEndpointIdentity,
-  signUserEndpointProof
-} from '../../packages/core/src/identity.ts'
+import {createUserIdentity} from '../../packages/core/src/identity.ts'
 
 const setup = async () => {
-  const [root, owner, delegate, target] = await Promise.all([
+  const [root, delegate, target] = await Promise.all([
     createUserIdentity(),
-    getOrCreateEndpointIdentity('peer-owner'),
-    getOrCreateEndpointIdentity('peer-delegate'),
-    getOrCreateEndpointIdentity('peer-target')
+    createUserIdentity(),
+    createUserIdentity()
   ])
   const scope = {appId: 'moderation-test', roomId: 'room'}
+  const peerUsers: Record<string, string> = {
+    'peer-owner': root.userId,
+    'peer-delegate': delegate.userId,
+    'peer-target': target.userId
+  }
   const authority = createRoomAuthority({
-    selfId: owner.peerId,
+    selfId: 'peer-owner',
     appId: scope.appId,
     initialRoomId: scope.roomId,
     admin: {admins: [root.userId]},
-    getLocalCryptoIdentity: async () => owner,
     getLocalUserIdentity: async () => root,
-    getOverlayPeerPublicKey: () => undefined,
     isOverlayPeerBanned: () => false,
+    getPeerUserId: pid => peerUsers[pid],
     onRoomIdResolved: () => {},
     onPeerPublicKey: () => {},
     onLocalRoleCertificate: () => {},
@@ -53,15 +52,20 @@ const setup = async () => {
   const grant = async (identity: typeof delegate, roles: string[]) => {
     const cert = await signRoleCertificate(root.sign, root.signPubJwk, {
       ...scope,
-      subPeerId: identity.peerId,
-      subPubKey: identity.signPubJwk,
-      roles,
-      canDelegate: true
+      subUserId: identity.userId,
+      roles
     })
     await authority.verifyAndApplyCert(cert)
     return cert
   }
-  return {authority, root, delegate, target, scope, grant}
+  return {
+    authority,
+    root,
+    delegate: {...delegate, peerId: 'peer-delegate'},
+    target: {...target, peerId: 'peer-target'},
+    scope,
+    grant
+  }
 }
 
 void test('revoked admins cannot issue new bans or revocations', async () => {
@@ -71,98 +75,91 @@ void test('revoked admins cannot issue new bans or revocations', async () => {
   await authority.issueRoleRevocation(delegate.peerId, 'admin')
   assert.deepEqual(authority.getPeerRoles(delegate.peerId), [])
 
-  const ban = await signPeerBan(delegate.signPrivateKey, cert, {
+  const ban = await signPeerBan(delegate.sign, delegate.signPubJwk, cert, {
     ...scope,
-    issuerPeerId: delegate.peerId,
-    targetPeerId: target.peerId,
+    issuerUserId: delegate.userId,
+    targetUserId: target.userId,
     seq: 1
   })
   assert.equal(await authority.verifyAndApplyBan(ban), false)
   assert.equal(authority.isPeerBanned(target.peerId), false)
 
-  const revocation = await signRoleRevocation(delegate.signPrivateKey, cert, {
-    ...scope,
-    issuerPeerId: delegate.peerId,
-    targetPeerId: target.peerId,
-    seq: 2
-  })
+  const revocation = await signRoleRevocation(
+    delegate.sign,
+    delegate.signPubJwk,
+    cert,
+    {
+      ...scope,
+      issuerUserId: delegate.userId,
+      targetUserId: target.userId,
+      seq: 2
+    }
+  )
   assert.equal(await authority.verifyAndApplyRevocation(revocation), false)
   assert.deepEqual(authority.getPeerRoles(target.peerId), ['player'])
 })
 
-void test('delegators can revoke only roles they currently hold', async () => {
+void test('non-admin roles cannot issue revocations or bans', async () => {
   const {authority, delegate, target, scope, grant} = await setup()
   const cert = await grant(delegate, ['viewer'])
   await grant(target, ['admin', 'viewer'])
 
-  for (const role of ['admin', '*', undefined]) {
-    const revocation = await signRoleRevocation(delegate.signPrivateKey, cert, {
-      ...scope,
-      issuerPeerId: delegate.peerId,
-      targetPeerId: target.peerId,
-      seq: 1,
-      ...(role === undefined ? {} : {role})
-    })
+  for (const role of ['admin', 'viewer', '*', undefined]) {
+    const revocation = await signRoleRevocation(
+      delegate.sign,
+      delegate.signPubJwk,
+      cert,
+      {
+        ...scope,
+        issuerUserId: delegate.userId,
+        targetUserId: target.userId,
+        seq: 1,
+        ...(role === undefined ? {} : {role})
+      }
+    )
     assert.equal(await authority.verifyAndApplyRevocation(revocation), false)
   }
-  const allowed = await signRoleRevocation(delegate.signPrivateKey, cert, {
+
+  const ban = await signPeerBan(delegate.sign, delegate.signPubJwk, cert, {
     ...scope,
-    issuerPeerId: delegate.peerId,
-    targetPeerId: target.peerId,
-    role: 'viewer',
+    issuerUserId: delegate.userId,
+    targetUserId: target.userId,
     seq: 2
   })
-  assert.equal(await authority.verifyAndApplyRevocation(allowed), true)
-  assert.deepEqual(authority.getPeerRoles(target.peerId), ['admin'])
+  assert.equal(await authority.verifyAndApplyBan(ban), false)
+  assert.deepEqual(authority.getPeerRoles(target.peerId), ['admin', 'viewer'])
 })
 
-void test('delegated admins cannot manufacture root certificates', async () => {
+void test('delegated admins cannot issue role certificates (2-tier authority model)', async () => {
   const {authority, delegate, target, scope, grant} = await setup()
-  const parentCert = await grant(delegate, ['admin'])
-  const forgedRoot = await signRoleCertificate(
-    delegate.signPrivateKey,
+  await grant(delegate, ['admin'])
+  const forgedCert = await signRoleCertificate(
+    delegate.sign,
     delegate.signPubJwk,
     {
       ...scope,
-      subPeerId: target.peerId,
-      subPubKey: target.signPubJwk,
-      roles: ['admin'],
-      canDelegate: true,
-      parentCert,
-      isRoot: true
+      subUserId: target.userId,
+      roles: ['admin']
     }
   )
-  assert.equal(await authority.verifyAndApplyCert(forgedRoot), false)
+  assert.equal(await authority.verifyAndApplyCert(forgedCert), false)
   assert.deepEqual(authority.getPeerRoles(target.peerId), [])
 })
 
 void test('C3 regression: RoleRevocationRecord cannot be re-wrapped as a PeerBanRecord (and vice versa)', async () => {
   const {authority, root, delegate, target, scope, grant} = await setup()
-  const targetUser = await createUserIdentity()
   const adminCert = await grant(delegate, ['admin'])
-  const modCert = await signRoleCertificate(
-    delegate.signPrivateKey,
-    delegate.signPubJwk,
-    {
-      ...scope,
-      subPeerId: target.peerId,
-      subUserId: targetUser.userId,
-      subPubKey: target.signPubJwk,
-      roles: ['moderator'],
-      parentCert: adminCert
-    }
-  )
-  assert.equal(await authority.verifyAndApplyCert(modCert), true)
+  const modCert = await grant(target, ['moderator'])
   assert.deepEqual(authority.getPeerRoles(target.peerId), ['moderator'])
 
   const revocation = await signRoleRevocation(
-    delegate.signPrivateKey,
+    delegate.sign,
+    delegate.signPubJwk,
     adminCert,
     {
       ...scope,
-      issuerPeerId: delegate.peerId,
-      targetPeerId: target.peerId,
-      targetUserId: targetUser.userId,
+      issuerUserId: delegate.userId,
+      targetUserId: target.userId,
       targetCertId: modCert.certId,
       role: 'moderator',
       seq: 1
@@ -173,13 +170,13 @@ void test('C3 regression: RoleRevocationRecord cannot be re-wrapped as a PeerBan
     v: revocation.v,
     appId: revocation.appId,
     roomId: revocation.roomId,
-    issuerPeerId: revocation.issuerPeerId,
-    targetPeerId: revocation.targetPeerId,
-    ...(revocation.targetUserId ? {targetUserId: revocation.targetUserId} : {}),
+    issuerUserId: revocation.issuerUserId,
+    targetUserId: revocation.targetUserId,
     ...(revocation.role ? {reason: revocation.role} : {}),
     seq: revocation.seq,
     ts: revocation.ts,
     issuerCert: revocation.issuerCert,
+    signerPubKey: revocation.signerPubKey,
     sig: revocation.sig
   }
 
@@ -206,28 +203,32 @@ void test('C3 regression: RoleRevocationRecord cannot be re-wrapped as a PeerBan
     'verifyAndApplyBan must reject a re-wrapped RoleRevocationRecord'
   )
   assert.equal(authority.isPeerBanned(target.peerId), false)
-  assert.equal(authority.isPeerBanned(targetUser.userId), false)
+  assert.equal(authority.isPeerBanned(target.userId), false)
 
   // Also verify that a valid PeerBanRecord cannot be re-wrapped as a RoleRevocationRecord
-  const validBan = await signPeerBan(delegate.signPrivateKey, adminCert, {
-    ...scope,
-    issuerPeerId: delegate.peerId,
-    targetPeerId: target.peerId,
-    targetUserId: targetUser.userId,
-    reason: 'moderator',
-    seq: 2
-  })
+  const validBan = await signPeerBan(
+    delegate.sign,
+    delegate.signPubJwk,
+    adminCert,
+    {
+      ...scope,
+      issuerUserId: delegate.userId,
+      targetUserId: target.userId,
+      reason: 'moderator',
+      seq: 2
+    }
+  )
   const forgedRevocationFromBan = {
     v: validBan.v,
     appId: validBan.appId,
     roomId: validBan.roomId,
-    issuerPeerId: validBan.issuerPeerId,
-    targetPeerId: validBan.targetPeerId,
-    ...(validBan.targetUserId ? {targetUserId: validBan.targetUserId} : {}),
+    issuerUserId: validBan.issuerUserId,
+    targetUserId: validBan.targetUserId,
     ...(validBan.reason ? {role: validBan.reason} : {}),
     seq: validBan.seq,
     ts: validBan.ts,
     issuerCert: validBan.issuerCert,
+    signerPubKey: validBan.signerPubKey,
     sig: validBan.sig
   }
   assert.equal(
@@ -249,20 +250,26 @@ void test('C3 regression: RoleRevocationRecord cannot be re-wrapped as a PeerBan
   assert.deepEqual(authority.getPeerRoles(target.peerId), ['moderator'])
 })
 
-void test('offer-time role spoofing via matching certId, malformed records, stale cert deduplication, state Infinity/prevHash/hash, and delegation edge cases', async () => {
+void test('offer-time role spoofing via matching certId, malformed records, stale cert deduplication, state Infinity/prevHash/hash, and multi-device admin ban', async () => {
   const {authority, root, delegate, target, scope, grant} = await setup()
 
   // 1. Offer-time role spoofing: peer with stored 'speaker' cert sends offer with tampered wire cert (same certId, forged roles: ['admin'])
   const speakerCert = await grant(target, ['speaker'])
   assert.deepEqual(authority.getPeerRoles(target.peerId), ['speaker'])
 
-  const validEnv = await signActionAuth(target.signPrivateKey, speakerCert, {
-    ...scope,
-    namespace: 'admin-cmd',
-    peerId: target.peerId,
-    seq: 1,
-    data: new Uint8Array([1, 2, 3])
-  })
+  const validEnv = await signActionAuth(
+    target.sign,
+    target.signPubJwk,
+    speakerCert,
+    {
+      ...scope,
+      namespace: 'admin-cmd',
+      peerId: target.peerId,
+      userId: target.userId,
+      seq: 1,
+      data: new Uint8Array([1, 2, 3])
+    }
+  )
   const spoofedWireMeta = {
     __trysteroAuth: {
       ...validEnv,
@@ -285,17 +292,18 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   )
   assert.deepEqual(offerRes.roles, [])
 
-  // 2. Malformed records (issuerCert: {}, cert: {}, parentCert: {}) return false without throwing TypeError
+  // 2. Malformed records return false without throwing TypeError
   assert.equal(
     await verifyRoleRevocation(
       {
         v: 1,
         ...scope,
-        issuerPeerId: delegate.peerId,
-        targetPeerId: target.peerId,
+        issuerUserId: delegate.userId,
+        targetUserId: target.userId,
         seq: 1,
         ts: 100,
         issuerCert: {} as any,
+        signerPubKey: {} as any,
         sig: 'AAAA'
       },
       scope.appId,
@@ -310,11 +318,12 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       {
         v: 1,
         ...scope,
-        issuerPeerId: delegate.peerId,
-        targetPeerId: target.peerId,
+        issuerUserId: delegate.userId,
+        targetUserId: target.userId,
         seq: 1,
         ts: 100,
         issuerCert: {} as any,
+        signerPubKey: {} as any,
         sig: 'AAAA'
       },
       scope.appId,
@@ -333,7 +342,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
           digest: '00',
           cert: {} as any,
           sig: 'AAAA'
-        },
+        } as any,
         {
           ...scope,
           namespace: 'x',
@@ -357,6 +366,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
         prevHash: '00000000000000000000000000000000',
         ts: 100,
         updatedBy: delegate.peerId,
+        userId: delegate.userId,
         signerPubKey: {} as any,
         cert: {} as any,
         value: 1,
@@ -376,12 +386,12 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       await verifyRoleCertificateChain(
         {
           ...speakerCert,
-          parentCert: {canDelegate: true} as any
+          roles: []
         },
         scope.appId,
         scope.roomId,
         new Set(),
-        new Set()
+        new Set([root.userId])
       )
     ).valid,
     false
@@ -390,18 +400,14 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   // 3. verifyAndApplyCert returns false for stale certs (iat < existing.iat) to prevent sync re-broadcast storms
   const newerCert = await signRoleCertificate(root.sign, root.signPubJwk, {
     ...scope,
-    subPeerId: delegate.peerId,
-    subPubKey: delegate.signPubJwk,
+    subUserId: delegate.userId,
     roles: ['admin'],
-    canDelegate: true,
     now: Date.now() + 5_000
   })
   const olderCert = await signRoleCertificate(root.sign, root.signPubJwk, {
     ...scope,
-    subPeerId: delegate.peerId,
-    subPubKey: delegate.signPubJwk,
+    subUserId: delegate.userId,
     roles: ['moderator'],
-    canDelegate: true,
     now: Date.now() - 5_000
   })
   assert.equal(await authority.verifyAndApplyCert(newerCert), true)
@@ -413,7 +419,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
 
   // 4. State records: reject Infinity seq, enforce prevHash continuity, and compute deterministic hash from canonical payload
   const stateRec1 = await signStateRecord(
-    delegate.signPrivateKey,
+    delegate.sign,
     delegate.signPubJwk,
     newerCert,
     {
@@ -422,11 +428,12 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       seq: 1,
       prevHash: '00000000000000000000000000000000',
       updatedBy: delegate.peerId,
+      userId: delegate.userId,
       value: {step: 1}
     }
   )
   const infStateRec = await signStateRecord(
-    delegate.signPrivateKey,
+    delegate.sign,
     delegate.signPubJwk,
     newerCert,
     {
@@ -435,6 +442,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       seq: Number.POSITIVE_INFINITY,
       prevHash: stateRec1.hash,
       updatedBy: delegate.peerId,
+      userId: delegate.userId,
       value: {step: 999}
     }
   )
@@ -453,7 +461,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   assert.equal(await authority.verifyAndApplyStateRecord(stateRec1), true)
 
   const badPrevHashRec = await signStateRecord(
-    delegate.signPrivateKey,
+    delegate.sign,
     delegate.signPubJwk,
     newerCert,
     {
@@ -462,6 +470,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       seq: 2,
       prevHash: 'deadbeefdeadbeefdeadbeefdeadbeef',
       updatedBy: delegate.peerId,
+      userId: delegate.userId,
       value: {step: 2}
     }
   )
@@ -472,14 +481,11 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   )
 
   // 5. Delegated admin cannot ban or revoke root admin even on a peer that has not yet seen the root cert
-  const freshPeerId = await getOrCreateEndpointIdentity('peer-fresh')
   const freshAuthority = createRoomAuthority({
-    selfId: freshPeerId.peerId,
+    selfId: 'peer-fresh',
     appId: scope.appId,
     initialRoomId: scope.roomId,
     admin: {admins: [root.userId]},
-    getLocalCryptoIdentity: async () => freshPeerId,
-    getOverlayPeerPublicKey: () => undefined,
     isOverlayPeerBanned: () => false,
     getPeerUserId: pid => (pid === 'peer-owner' ? root.userId : undefined),
     onRoomIdResolved: () => {},
@@ -490,13 +496,17 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   })
   await freshAuthority.getAuthorityInfo()
 
-  const banAgainstRoot = await signPeerBan(delegate.signPrivateKey, newerCert, {
-    ...scope,
-    issuerPeerId: delegate.peerId,
-    targetPeerId: 'peer-owner',
-    targetUserId: root.userId,
-    seq: 10
-  })
+  const banAgainstRoot = await signPeerBan(
+    delegate.sign,
+    delegate.signPubJwk,
+    newerCert,
+    {
+      ...scope,
+      issuerUserId: delegate.userId,
+      targetUserId: root.userId,
+      seq: 10
+    }
+  )
   assert.equal(
     await freshAuthority.verifyAndApplyBan(banAgainstRoot),
     false,
@@ -505,37 +515,29 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   assert.equal(freshAuthority.isPeerBanned('peer-owner'), false)
   assert.equal(freshAuthority.isPeerBanned(root.userId), false)
 
-  // 6. Multi-device delegated admin can issue revocations and bans from a second tab/endpoint using userProof
+  // 6. Multi-device delegated admin can issue revocations and bans from any tab using their UserIdentity
   const adminUser2 = await createUserIdentity()
-  const adminTab1 = await getOrCreateEndpointIdentity('peer-admin2-tab1')
-  const adminTab2 = await getOrCreateEndpointIdentity('peer-admin2-tab2')
   const tab1Cert = await signRoleCertificate(root.sign, root.signPubJwk, {
     ...scope,
-    subPeerId: adminTab1.peerId,
     subUserId: adminUser2.userId,
-    subPubKey: adminTab1.signPubJwk,
-    roles: ['admin'],
-    canDelegate: true
+    roles: ['admin']
   })
   await authority.verifyAndApplyCert(tab1Cert)
-  const tab2Proof = await signUserEndpointProof(adminUser2, {
-    ...scope,
-    peerId: adminTab2.peerId,
-    peerPubJwk: adminTab2.signPubJwk
-  })
-  const multiTabBan = await signPeerBan(adminTab2.signPrivateKey, tab1Cert, {
-    ...scope,
-    issuerPeerId: adminTab2.peerId,
-    targetPeerId: target.peerId,
-    seq: 1,
-    signerPubKey: adminTab2.signPubJwk,
-    userPubKey: adminUser2.signPubJwk,
-    userProof: tab2Proof
-  })
+  const multiTabBan = await signPeerBan(
+    adminUser2.sign,
+    adminUser2.signPubJwk,
+    tab1Cert,
+    {
+      ...scope,
+      issuerUserId: adminUser2.userId,
+      targetUserId: target.userId,
+      seq: 1
+    }
+  )
   assert.equal(
     await authority.verifyAndApplyBan(multiTabBan),
     true,
-    'multi-device admin tab must be able to issue a valid ban using user endpoint proof'
+    'multi-device admin tab must be able to issue a valid ban using user identity'
   )
   assert.equal(authority.isPeerBanned(target.peerId), true)
 
@@ -551,7 +553,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   assert.equal(
     validateRoleRevocationShape({
       ...multiTabBan,
-      revId: 'r1',
       targetCertId: ''
     }),
     false
@@ -567,14 +568,14 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   assert.equal(
     await authority.verifyAndApplyCert({
       ...tab1Cert,
-      parentCert: {corrupted: true} as never
+      roles: [] as never
     }),
     false
   )
   assert.equal(
     await authority.verifyAndApplyBan({
       ...multiTabBan,
-      userProof: {corrupted: true} as never
+      signerPubKey: {corrupted: true} as never
     }),
     false
   )
@@ -587,7 +588,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   )
 })
 
-void test('clock skew hardening and delegation depth cap: reject future-dated records, floor re-granted cert iat above skewed revocations, and cap delegation at depth 2', async () => {
+void test('clock skew hardening and 2-tier authority enforcement: reject future-dated records, floor re-granted cert iat above skewed revocations, and reject non-root cert issuance', async () => {
   const {authority, root, delegate, target, scope, grant} = await setup()
   const adminCert = await grant(delegate, ['admin'])
   await grant(target, ['player'])
@@ -595,12 +596,13 @@ void test('clock skew hardening and delegation depth cap: reject future-dated re
 
   // 1. Poison-pill future timestamps (> Date.now() + 60_000) on revocations, bans, and state records are rejected
   const poisonRevocation = await signRoleRevocation(
-    delegate.signPrivateKey,
+    delegate.sign,
+    delegate.signPubJwk,
     adminCert,
     {
       ...scope,
-      issuerPeerId: delegate.peerId,
-      targetPeerId: target.peerId,
+      issuerUserId: delegate.userId,
+      targetUserId: target.userId,
       role: 'player',
       seq: 1,
       ts: Number.MAX_SAFE_INTEGER
@@ -623,18 +625,23 @@ void test('clock skew hardening and delegation depth cap: reject future-dated re
   )
   assert.deepEqual(authority.getPeerRoles(target.peerId), ['player'])
 
-  const futureBan = await signPeerBan(delegate.signPrivateKey, adminCert, {
-    ...scope,
-    issuerPeerId: delegate.peerId,
-    targetPeerId: target.peerId,
-    seq: 2,
-    ts: Date.now() + 120_000
-  })
+  const futureBan = await signPeerBan(
+    delegate.sign,
+    delegate.signPubJwk,
+    adminCert,
+    {
+      ...scope,
+      issuerUserId: delegate.userId,
+      targetUserId: target.userId,
+      seq: 2,
+      ts: Date.now() + 120_000
+    }
+  )
   assert.equal(await authority.verifyAndApplyBan(futureBan), false)
   assert.equal(authority.isPeerBanned(target.peerId), false)
 
   const futureState = await signStateRecord(
-    delegate.signPrivateKey,
+    delegate.sign,
     delegate.signPubJwk,
     adminCert,
     {
@@ -644,6 +651,7 @@ void test('clock skew hardening and delegation depth cap: reject future-dated re
       prevHash: '00000000000000000000000000000000',
       ts: Date.now() + 120_000,
       updatedBy: delegate.peerId,
+      userId: delegate.userId,
       value: 'future'
     }
   )
@@ -651,12 +659,13 @@ void test('clock skew hardening and delegation depth cap: reject future-dated re
 
   // 2. Re-granting a role via issueRoleCertificate floors iat above a revocation from a slightly fast clock
   const skewedRevocation = await signRoleRevocation(
-    delegate.signPrivateKey,
+    delegate.sign,
+    delegate.signPubJwk,
     adminCert,
     {
       ...scope,
-      issuerPeerId: delegate.peerId,
-      targetPeerId: target.peerId,
+      issuerUserId: delegate.userId,
+      targetUserId: target.userId,
       role: 'player',
       seq: 3,
       ts: Date.now() + 30_000
@@ -667,9 +676,7 @@ void test('clock skew hardening and delegation depth cap: reject future-dated re
 
   const regrantedCert = await authority.issueRoleCertificate(
     target.peerId,
-    'player',
-    undefined,
-    () => {}
+    'player'
   )
   assert.ok(
     regrantedCert.iat > skewedRevocation.ts,
@@ -677,45 +684,22 @@ void test('clock skew hardening and delegation depth cap: reject future-dated re
   )
   assert.deepEqual(authority.getPeerRoles(target.peerId), ['player'])
 
-  // 3. Delegation depth cap: depth 2 (root -> delegate -> subMod) is valid, depth 3 is rejected
-  const subMod = await getOrCreateEndpointIdentity('peer-sub-mod')
-  const leafPeer = await getOrCreateEndpointIdentity('peer-leaf')
-  const depth2Cert = await signRoleCertificate(
-    delegate.signPrivateKey,
+  // 3. 2-tier authority: only root admins can issue role certificates
+  const subMod = await createUserIdentity()
+  const nonRootCert = await signRoleCertificate(
+    delegate.sign,
     delegate.signPubJwk,
     {
       ...scope,
-      subPeerId: subMod.peerId,
-      subPubKey: subMod.signPubJwk,
-      roles: ['admin'],
-      canDelegate: true,
-      parentCert: adminCert
+      subUserId: subMod.userId,
+      roles: ['moderator']
     }
   )
-  assert.equal(validateRoleCertificateShape(depth2Cert), true)
-  assert.equal(await authority.verifyAndApplyCert(depth2Cert), true)
-
-  const depth3Cert = await signRoleCertificate(
-    subMod.signPrivateKey,
-    subMod.signPubJwk,
-    {
-      ...scope,
-      subPeerId: leafPeer.peerId,
-      subPubKey: leafPeer.signPubJwk,
-      roles: ['admin'],
-      canDelegate: false,
-      parentCert: depth2Cert
-    }
-  )
-  assert.equal(
-    validateRoleCertificateShape(depth3Cert),
-    false,
-    'validateRoleCertificateShape must reject delegation depth > 2'
-  )
+  assert.equal(validateRoleCertificateShape(nonRootCert), true)
   assert.equal(
     (
       await verifyRoleCertificateChain(
-        depth3Cert,
+        nonRootCert,
         scope.appId,
         scope.roomId,
         new Set(),
@@ -723,7 +707,7 @@ void test('clock skew hardening and delegation depth cap: reject future-dated re
       )
     ).valid,
     false,
-    'verifyRoleCertificateChain must reject delegation depth > 2'
+    'verifyRoleCertificateChain must reject certificates signed by non-root issuers'
   )
-  assert.equal(await authority.verifyAndApplyCert(depth3Cert), false)
+  assert.equal(await authority.verifyAndApplyCert(nonRootCert), false)
 })

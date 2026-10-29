@@ -2210,8 +2210,8 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       2_000
     )
 
-    // 3. Root admin grants 'moderator' with canDelegate: true to Bob
-    await rooms.get('admin')!.grantRole('bob', 'moderator', {canDelegate: true})
+    // 3. Root admin grants 'moderator' to Bob
+    await rooms.get('admin')!.grantRole('bob', 'moderator')
     await waitFor(
       () =>
         rooms.get('bob')!.getRoles('bob').includes('moderator') &&
@@ -2237,12 +2237,16 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       .find(a => a.data.msg === 'mod-warning-1')!
     assert.deepEqual(bobAlertOnMallory.roles, ['moderator'])
 
-    // 4. Bob sub-delegates 'moderator' to Carol (without canDelegate), and cannot escalate to 'admin'
+    // 4. Bob cannot grant roles (2-tier model: only root admins can grant roles), while root admin grants 'moderator' to Carol
     await assert.rejects(
       () => rooms.get('bob')!.grantRole('carol', 'admin'),
       /insufficient authority/
     )
-    await rooms.get('bob')!.grantRole('carol', 'moderator')
+    await assert.rejects(
+      () => rooms.get('bob')!.grantRole('carol', 'moderator'),
+      /insufficient authority/
+    )
+    await rooms.get('admin')!.grantRole('carol', 'moderator')
     await waitFor(
       () =>
         rooms.get('carol')!.getRoles('carol').includes('moderator') &&
@@ -2260,10 +2264,10 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       2_000
     )
 
-    // 5. Delegated moderator Bob cannot revoke root admin
+    // 5. Non-admin moderator Bob cannot revoke root admin
     await assert.rejects(
       () => rooms.get('bob')!.revokeRole('admin'),
-      /cannot revoke a root admin/
+      /insufficient authority/
     )
 
     // 6. Root admin revokes Carol's 'moderator' role
@@ -2669,8 +2673,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
   const rootId = await createUserIdentity()
   const subId = await createUserIdentity()
   const futureCert = await signRoleCertificate(rootId.sign, rootId.signPubJwk, {
-    subPeerId: 'sub-peer',
-    subPubKey: subId.signPubJwk,
+    subUserId: subId.userId,
     appId: 'test-app',
     roomId: 'test-room',
     roles: ['moderator'],
@@ -2791,15 +2794,12 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
       modSenders.set(id, act.send)
     }
 
-    // Grant 'moderator' with canDelegate: true to Bob, then Bob sub-delegates 'moderator' to Carol
-    await rooms.get('admin')!.grantRole('bob', 'moderator', {canDelegate: true})
-    await waitFor(
-      () => rooms.get('carol')!.getRoles('bob').includes('moderator'),
-      2_000
-    )
-    await rooms.get('bob')!.grantRole('carol', 'moderator')
+    // Grant 'moderator' to Bob and Carol
+    await rooms.get('admin')!.grantRole('bob', 'moderator')
+    await rooms.get('admin')!.grantRole('carol', 'moderator')
     await waitFor(
       () =>
+        rooms.get('carol')!.getRoles('bob').includes('moderator') &&
         rooms.get('admin')!.getRoles('carol').includes('moderator') &&
         rooms.get('mallory')!.getRoles('carol').includes('moderator'),
       2_000
@@ -2808,8 +2808,9 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
       'moderator'
     ])
 
-    // Cascading revocation: Admin revokes BOB's 'moderator' role -> Carol's sub-delegated 'moderator' role must automatically be invalidated!
+    // Admin revokes Bob's and Carol's 'moderator' roles
     await rooms.get('admin')!.revokeRole('bob', 'moderator')
+    await rooms.get('admin')!.revokeRole('carol', 'moderator')
     await waitFor(
       () =>
         !rooms.get('admin')!.getRoles('bob').includes('moderator') &&
@@ -2820,7 +2821,7 @@ void test('PeerInfo in room.getPeers(), createAdminRoom identity reuse, cascadin
     assert.deepEqual(
       rooms.get('admin')!.getPeers()['carol']?.roles,
       [],
-      'revoking delegator bob must cascade and strip sub-delegated role from carol'
+      'revoking role from carol must strip role across peers'
     )
 
     // Offer-stage bulk transfer rejection on role-protected action:
@@ -3198,11 +3199,19 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
       {
         appId: 'c1-app',
         roomId: 'c1-room',
-        subPeerId: peerId,
         subUserId: peerUser.userId,
-        subPubKey: peerUser.signPubJwk,
-        roles: ['moderator', 'speaker'],
-        canDelegate: true
+        roles: [
+          'moderator',
+          'speaker',
+          'presenter',
+          'curator',
+          'editor',
+          'archivist',
+          'host-assistant',
+          'stage-manager',
+          'broadcaster',
+          'reviewer'
+        ]
       }
     )
     descriptors.push({
@@ -3368,7 +3377,7 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
     // Grant moderator role certificates to 18 peers so their descriptors grow to ~1.5-2.1 KB
     const adminRoom = rooms.get(peerIds[0]!)!
     for (let i = 1; i <= 18; i++) {
-      await adminRoom.grantRole(peerIds[i]!, 'moderator', {canDelegate: true})
+      await adminRoom.grantRole(peerIds[i]!, 'moderator')
     }
     await waitFor(
       () =>
@@ -3695,15 +3704,13 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       v: capturedRevocation.v,
       appId: capturedRevocation.appId,
       roomId: capturedRevocation.roomId,
-      issuerPeerId: capturedRevocation.issuerPeerId,
-      targetPeerId: capturedRevocation.targetPeerId,
-      ...(capturedRevocation.targetUserId
-        ? {targetUserId: capturedRevocation.targetUserId}
-        : {}),
+      issuerUserId: capturedRevocation.issuerUserId,
+      targetUserId: capturedRevocation.targetUserId,
       ...(capturedRevocation.role ? {reason: capturedRevocation.role} : {}),
       seq: capturedRevocation.seq,
       ts: capturedRevocation.ts,
       issuerCert: capturedRevocation.issuerCert,
+      signerPubKey: capturedRevocation.signerPubKey,
       sig: capturedRevocation.sig
     }
 
