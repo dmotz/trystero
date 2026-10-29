@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {createTopicStrategy} from '../../packages/core/src/index.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
 import {MockPeer} from './peer-harness.ts'
 
 class MockDataChannel {
@@ -172,11 +173,19 @@ for (const reannounce of [true, false]) {
 
         const root = subscriptions.find(sub => sub.kind === 'root')
         const peers = Array.from({length: 3}, () => new MockPeer())
-        const answer = await encrypt(genKey('', appId, 'room'), 'answer-sdp')
+        const roomKey = genKey('', appId, 'room')
 
         for (const [i, peer] of peers.entries()) {
+          const remotePeerId = `remote-${i}`
+          const offerId = `offer-${i}`
+          const answer = await encrypt(
+            roomKey,
+            'answer-sdp',
+            buildSignalAad('answer', remotePeerId, offerId)
+          )
           await root.onMessage(root.topic, {
-            peerId: `remote-${i}`,
+            peerId: remotePeerId,
+            offerId,
             answer,
             peer
           })

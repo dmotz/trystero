@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
-import {prunePeerStates} from '../../packages/core/src/signal-handler.ts'
+import {
+  buildSignalAad,
+  prunePeerStates
+} from '../../packages/core/src/signal-handler.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {
   BufferedPeer,
@@ -62,7 +65,8 @@ void test(
 
       const encryptedOffer = await encrypt(
         genKey('', appId, 'test-room'),
-        JSON.stringify({type: 'offer', sdp: 'offer-sdp'})
+        JSON.stringify({type: 'offer', sdp: 'offer-sdp'}),
+        buildSignalAad('offer', 'active-peer-2', 'offer-1')
       )
       await sub.onMessage(
         sub.selfTopic,
@@ -439,13 +443,20 @@ void test(
       await waitFor(() => subscribers.length >= 1)
 
       const sub = subscribers[0]
-      const encryptedAnswer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'answer-sdp'
+      const roomKey = genKey('', appId, 'test-room')
+      const encryptedAnswerForPassive = await encrypt(
+        roomKey,
+        'answer-sdp',
+        buildSignalAad('answer', 'active-peer', 'offer-1')
       )
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: 'active-peer', answer: encryptedAnswer, peer: peerA},
+        {
+          peerId: 'active-peer',
+          offerId: 'offer-1',
+          answer: encryptedAnswerForPassive,
+          peer: peerA
+        },
         () => {}
       )
 
@@ -468,9 +479,19 @@ void test(
       )
 
       await waitFor(() => subscribers.length >= 2)
+      const encryptedAnswerForActive = await encrypt(
+        roomKey,
+        'answer-sdp',
+        buildSignalAad('answer', 'passive-peer', 'offer-1')
+      )
       await subscribers[1].onMessage(
         subscribers[1].rootTopic,
-        {peerId: 'passive-peer', answer: encryptedAnswer, peer: peerB},
+        {
+          peerId: 'passive-peer',
+          offerId: 'offer-1',
+          answer: encryptedAnswerForActive,
+          peer: peerB
+        },
         () => {}
       )
 

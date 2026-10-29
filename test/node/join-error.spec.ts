@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {MockRTCPeerConnection, waitFor} from './peer-harness.ts'
 
@@ -93,7 +94,8 @@ void test(
 
       const encryptedAnswer = await encrypt(
         genKey('', appId, roomId),
-        'mock-answer'
+        'mock-answer',
+        buildSignalAad('answer', remotePeerId, offerPayload.offerId)
       )
 
       await sub.onMessage(
@@ -147,7 +149,8 @@ void test(
       const sub = subscribers[0]
       const encryptedOffer = await encrypt(
         genKey('', appId, roomId),
-        'mock-offer'
+        'mock-offer',
+        buildSignalAad('offer', remotePeerId, 'offer-1')
       )
       let answerPayload: Record<string, string> | null = null
 
@@ -200,18 +203,27 @@ for (const failure of ['decrypt', 'remote SDP'] as const) {
     )
     try {
       await waitFor(() => subscribers.length > 0)
-      const offer =
-        failure === 'decrypt'
-          ? 'invalid ciphertext'
-          : await encrypt(genKey('', appId, roomId), 'invalid SDP')
+      const roomKey = genKey('', appId, roomId)
       for (let i = 0; i < 3; i++) {
+        const offerId = String(i)
+        const offer =
+          failure === 'decrypt'
+            ? 'invalid ciphertext'
+            : await encrypt(
+                roomKey,
+                'invalid SDP',
+                buildSignalAad('offer', 'remote', offerId)
+              )
         await subscribers[0].onMessage(
           subscribers[0].rootTopic,
-          {peerId: 'remote', offer, offerId: String(i)},
+          {peerId: 'remote', offer, offerId},
           () => {}
         )
       }
-      assert.equal(FailingRTCPeerConnection.instances.length, 3)
+      assert.equal(
+        FailingRTCPeerConnection.instances.length,
+        failure === 'decrypt' ? 0 : 3
+      )
       assert.ok(
         FailingRTCPeerConnection.instances.every(
           pc => pc.connectionState === 'closed'

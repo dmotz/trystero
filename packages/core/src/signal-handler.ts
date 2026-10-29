@@ -63,8 +63,15 @@ export const maxSignalPeerIdChars = 64
 export const maxSignalOfferIdChars = 64
 export const maxSignalSdpChars = 64 * 1024
 export const maxSignalCandidateChars = 4_096
-export const maxTrackedSignalPeers = 512
+export const maxTrackedSignalPeers = 256
+export const maxPendingPeerConnections = 64
 const signalIdPattern = /^[\w.~:!-]{1,64}$/
+
+export const buildSignalAad = (
+  type: Signal['type'],
+  peerId: string,
+  offerId: string
+): string => `${type}|${peerId}|${offerId}`
 
 export const isValidSignalPeerId = (value: unknown): value is string =>
   typeof value === 'string' &&
@@ -117,32 +124,59 @@ const isPeerHandle = (value: unknown): value is PeerHandle =>
 const hasInvalidSignalField = (
   payload: Record<string, unknown>,
   isStringMessage = false
-): boolean =>
-  ('peerId' in payload && !isValidSignalPeerId(payload['peerId'])) ||
-  ('offerId' in payload &&
-    payload['offerId'] !== undefined &&
-    !isValidSignalOfferId(payload['offerId'])) ||
-  ('passive' in payload &&
-    payload['passive'] !== undefined &&
-    typeof payload['passive'] !== 'boolean') ||
-  signalKeys.some(key => {
-    if (!(key in payload)) {
-      return false
-    }
-    const val = payload[key]
-    if (typeof val !== 'string' || val === '') {
-      return true
-    }
-    const maxLen =
-      key === 'candidate' ? maxSignalCandidateChars : maxSignalSdpChars
-    return val.length > maxLen
-  }) ||
-  ('peer' in payload &&
-    (isStringMessage ||
-      (payload['peer'] !== undefined && !isPeerHandle(payload['peer']))))
+): boolean => {
+  const hasSignalContent = signalKeys.some(key => key in payload)
+  return (
+    ('peerId' in payload && !isValidSignalPeerId(payload['peerId'])) ||
+    (hasSignalContent && !isValidSignalOfferId(payload['offerId'])) ||
+    ('offerId' in payload &&
+      payload['offerId'] !== undefined &&
+      !isValidSignalOfferId(payload['offerId'])) ||
+    ('passive' in payload &&
+      payload['passive'] !== undefined &&
+      typeof payload['passive'] !== 'boolean') ||
+    signalKeys.some(key => {
+      if (!(key in payload)) {
+        return false
+      }
+      const val = payload[key]
+      if (typeof val !== 'string' || val === '') {
+        return true
+      }
+      const maxLen =
+        key === 'candidate' ? maxSignalCandidateChars : maxSignalSdpChars
+      return val.length > maxLen
+    }) ||
+    ('peer' in payload &&
+      (isStringMessage ||
+        (payload['peer'] !== undefined && !isPeerHandle(payload['peer']))))
+  )
+}
 
 const getSelfId = (ctx: SignalContext): Promise<string> =>
-  ctx.selfIdP ?? (ctx.selfId ? Promise.resolve(ctx.selfId) : resolveSelfId())
+  ctx.selfIdP ??
+  (ctx.selfId
+    ? Promise.resolve(ctx.selfId)
+    : resolveSelfId(undefined, ctx.appId))
+
+export const countPendingPeerConnections = (
+  peerStates: Record<string, PeerState>,
+  excludePeerId?: string
+): number => {
+  let count = 0
+  for (const [id, s] of entries(peerStates)) {
+    if (id === excludePeerId || s.connectedPeer) {
+      continue
+    }
+    if ((s.offerPeer && !s.offerPeer.isDead) || s.offerInitPromise) {
+      count++
+    }
+    if (s.answeringPeer && !s.answeringPeer.isDead) {
+      count++
+    }
+  }
+  return count
+}
 
 export const prunePeerStates = (peerStates: Record<string, PeerState>): void =>
   entries(peerStates).forEach(([peerId, state]) => {
@@ -160,18 +194,23 @@ export const prunePeerStates = (peerStates: Record<string, PeerState>): void =>
 const publishCipheredSignalingMessage = (
   ctx: SignalContext,
   signal: Signal,
+  senderPeerId: string,
+  offerId: string,
   peerTopic: string,
   signalPeer: (peerTopic: string, signalJson: string) => void,
   buildPayload: (encryptedSdp: string) => Record<string, unknown>,
   stillValid: () => boolean
 ): void => {
-  void ctx.toCipher(signal).then(encryptedSignal => {
-    if (ctx.isLeaving() || !stillValid()) {
-      return
-    }
+  void ctx
+    .toCipher(signal, senderPeerId, offerId)
+    .then(encryptedSignal => {
+      if (ctx.isLeaving() || !stillValid()) {
+        return
+      }
 
-    signalPeer(peerTopic, toJson(buildPayload(encryptedSignal.sdp)))
-  })
+      signalPeer(peerTopic, toJson(buildPayload(encryptedSignal.sdp)))
+    })
+    .catch(() => {})
 }
 
 const makeState = (): PeerState => ({
@@ -259,6 +298,14 @@ export const getState = (
         return s && !s.connectedPeer
       })
     if (evictKey) {
+      const evicted = peerStates[evictKey]
+      if (evicted) {
+        if (evicted.answeringPeer && !evicted.answeringPeer.isDead) {
+          evicted.answeringPeer.destroy()
+        }
+        resetOfferState(evicted)
+        resetAnsweringState(evicted)
+      }
       delete peerStates[evictKey]
     }
   }
@@ -473,14 +520,27 @@ const ensureOffer = (
     return state.offerInitPromise
   }
 
+  if (
+    countPendingPeerConnections(ctx.peerStates, peerId) >=
+    maxPendingPeerConnections
+  ) {
+    return Promise.resolve(null)
+  }
+
   const allocateOffer = async (): NonNullable<
     PeerState['offerInitPromise']
   > => {
+    const localSelfId = ctx.selfId ?? (await getSelfId(ctx))
     let firstOffer: OfferRecord | undefined
 
     try {
       firstOffer = (
-        await ctx.offerManager.checkout(1, false, ctx.encryptOffer)
+        await ctx.offerManager.checkout(
+          1,
+          false,
+          (peer, offerId) => ctx.encryptOffer(peer, localSelfId, offerId),
+          offerIdSize
+        )
       )[0]
     } catch (error) {
       if (ctx.isLeaving() || state.offerInitPromise !== pending) {
@@ -495,6 +555,7 @@ const ensureOffer = (
     }
 
     const {peer, offer} = firstOffer
+    const offerId = firstOffer.offerId || genId(offerIdSize)
 
     if (ctx.isLeaving() || state.offerInitPromise !== pending) {
       peer.destroy()
@@ -502,7 +563,7 @@ const ensureOffer = (
     }
 
     state.offerPeer = peer
-    state.offerId = genId(offerIdSize)
+    state.offerId = offerId
     state.offerSdp = offer
     state.offerAnswered = false
     state.connectionErrorReported = false
@@ -635,6 +696,8 @@ const handleAnnouncement = async (
     publishCipheredSignalingMessage(
       ctx,
       signal,
+      localSelfId,
+      offerInfo.offerId,
       peerTopic,
       signalPeer,
       sdp => ({
@@ -666,6 +729,42 @@ const handleAnnouncement = async (
   )
 }
 
+const replayExistingAnswerIfMatch = async (
+  ctx: SignalContext,
+  state: PeerState,
+  relayId: number,
+  peerId: string,
+  offer: string,
+  offerId: string,
+  signalPeer: (peerTopic: string, signal: string) => void
+): Promise<void> => {
+  const replay = state.answerReplay
+  const lastSentAt = replay?.lastSentAt[relayId]
+
+  if (
+    state.answeringPeer &&
+    !state.answeringPeer.isDead &&
+    replay &&
+    replay.offer === offer &&
+    replay.offerId === offerId &&
+    (lastSentAt === undefined || Date.now() - lastSentAt >= 1_000)
+  ) {
+    replay.lastSentAt[relayId] = Date.now()
+
+    const peerTopic = await sha1(topicPath(ctx.rootTopicPlaintext, peerId))
+
+    if (
+      !ctx.isLeaving() &&
+      state.answerReplay === replay &&
+      !state.connectedPeer
+    ) {
+      const send = (message: string): void => signalPeer(peerTopic, message)
+      replay.relays[relayId] = send
+      replay.messages.forEach(send)
+    }
+  }
+}
+
 const handleOffer = async (
   ctx: SignalContext,
   relayId: number,
@@ -674,40 +773,79 @@ const handleOffer = async (
   offerId: string | undefined,
   signalPeer: (peerTopic: string, signal: string) => void
 ): Promise<void> => {
+  if (!offerId) {
+    return
+  }
   const localSelfId = ctx.selfId ?? (await getSelfId(ctx))
   if (ctx.shouldConnectPeer && !ctx.shouldConnectPeer(peerId, 'inbound')) {
     return
   }
 
+  const existingState = ctx.peerStates[peerId]
+  if (
+    existingState &&
+    (existingState.answeringPeer || existingState.offerAnswered)
+  ) {
+    await replayExistingAnswerIfMatch(
+      ctx,
+      existingState,
+      relayId,
+      peerId,
+      offer,
+      offerId,
+      signalPeer
+    )
+    return
+  }
+
+  const preHasTrackedOutgoingOffer = Boolean(
+    existingState &&
+    (existingState.offerPeer || existingState.offerRelays.some(Boolean))
+  )
+  if (preHasTrackedOutgoingOffer && localSelfId < peerId) {
+    return
+  }
+
+  if (
+    countPendingPeerConnections(ctx.peerStates, peerId) >=
+    maxPendingPeerConnections
+  ) {
+    return
+  }
+
+  let plainOffer: Signal
+
+  try {
+    plainOffer = await ctx.toPlain({type: 'offer', sdp: offer}, peerId, offerId)
+  } catch {
+    ctx.onJoinError?.({
+      error: badPasswordMsg('offer'),
+      appId: ctx.appId,
+      peerId,
+      roomId: ctx.roomId
+    })
+    return
+  }
+
+  if (ctx.isLeaving()) {
+    return
+  }
+
   const state = getState(ctx.peerStates, peerId)
+  if (state.connectedPeer) {
+    return
+  }
 
   if (state.answeringPeer || state.offerAnswered) {
-    const replay = state.answerReplay
-    const lastSentAt = replay?.lastSentAt[relayId]
-
-    if (
-      state.answeringPeer &&
-      !state.answeringPeer.isDead &&
-      replay &&
-      replay.offer === offer &&
-      replay.offerId === offerId &&
-      (lastSentAt === undefined || Date.now() - lastSentAt >= 1_000)
-    ) {
-      replay.lastSentAt[relayId] = Date.now()
-
-      const peerTopic = await sha1(topicPath(ctx.rootTopicPlaintext, peerId))
-
-      if (
-        !ctx.isLeaving() &&
-        state.answerReplay === replay &&
-        !state.connectedPeer
-      ) {
-        const send = (message: string): void => signalPeer(peerTopic, message)
-        replay.relays[relayId] = send
-        replay.messages.forEach(send)
-      }
-    }
-
+    await replayExistingAnswerIfMatch(
+      ctx,
+      state,
+      relayId,
+      peerId,
+      offer,
+      offerId,
+      signalPeer
+    )
     return
   }
 
@@ -721,6 +859,14 @@ const handleOffer = async (
 
   if (hasTrackedOutgoingOffer) {
     resetOfferState(state)
+  }
+
+  if (
+    countPendingPeerConnections(ctx.peerStates, peerId) >=
+    maxPendingPeerConnections
+  ) {
+    prunePeerStates(ctx.peerStates)
+    return
   }
 
   const answerPeer = ctx.initPeer(false, ctx.config)
@@ -757,22 +903,6 @@ const handleOffer = async (
     error: onAnswerPeerClosedOrError
   })
 
-  let plainOffer: Signal
-
-  try {
-    plainOffer = await ctx.toPlain({type: 'offer', sdp: offer})
-  } catch {
-    clearAnswering(state, answerPeer)
-    prunePeerStates(ctx.peerStates)
-    ctx.onJoinError?.({
-      error: badPasswordMsg('offer'),
-      appId: ctx.appId,
-      peerId,
-      roomId: ctx.roomId
-    })
-    return
-  }
-
   if (answerPeer.isDead) {
     clearAnswering(state, answerPeer)
     prunePeerStates(ctx.peerStates)
@@ -793,45 +923,45 @@ const handleOffer = async (
   let didSendAnswer = false
 
   const publishAnswerSignal = (signal: Signal): void => {
-    void ctx.toCipher(signal).then(encryptedSignal => {
-      if (
-        ctx.isLeaving() ||
-        state.answeringPeer !== answerPeer ||
-        answerPeer.isDead
-      ) {
-        return
-      }
+    void ctx
+      .toCipher(signal, localSelfId, offerId)
+      .then(encryptedSignal => {
+        if (
+          ctx.isLeaving() ||
+          state.answeringPeer !== answerPeer ||
+          answerPeer.isDead
+        ) {
+          return
+        }
 
-      const payloadToSend: Record<string, unknown> = {
-        peerId: localSelfId
-      }
+        const payloadToSend: Record<string, unknown> = {
+          peerId: localSelfId,
+          offerId
+        }
 
-      if (signal.type === 'answer') {
-        state.answerSent = true
-        payloadToSend['answer'] = encryptedSignal.sdp
-      } else {
-        payloadToSend['candidate'] = encryptedSignal.sdp
-      }
+        if (signal.type === 'answer') {
+          state.answerSent = true
+          payloadToSend['answer'] = encryptedSignal.sdp
+        } else {
+          payloadToSend['candidate'] = encryptedSignal.sdp
+        }
 
-      if (offerId) {
-        payloadToSend['offerId'] = offerId
-      }
+        const message = toJson(payloadToSend)
+        const now = Date.now()
+        replay.messages.push(message)
+        replay.relays.forEach((send, id) => {
+          if (send) {
+            replay.lastSentAt[id] = now
+            send(message)
+          }
+        })
 
-      const message = toJson(payloadToSend)
-      const now = Date.now()
-      replay.messages.push(message)
-      replay.relays.forEach((send, id) => {
-        if (send) {
-          replay.lastSentAt[id] = now
-          send(message)
+        if (signal.type === 'answer' && !didSendAnswer) {
+          didSendAnswer = true
+          pendingCandidates.splice(0).forEach(publishAnswerSignal)
         }
       })
-
-      if (signal.type === 'answer' && !didSendAnswer) {
-        didSendAnswer = true
-        pendingCandidates.splice(0).forEach(publishAnswerSignal)
-      }
-    })
+      .catch(() => {})
   }
 
   answerPeer.setHandlers({
@@ -868,6 +998,9 @@ const handleCandidate = async (
   offerId: string | undefined,
   peer: PeerHandle | undefined
 ): Promise<void> => {
+  if (!offerId) {
+    return
+  }
   const state = ctx.peerStates[peerId]
   if (!peer && !state?.offerPeer && !state?.answeringPeer) {
     return
@@ -876,26 +1009,26 @@ const handleCandidate = async (
   let plainCandidate: Signal
 
   try {
-    plainCandidate = await ctx.toPlain({type: candidateType, sdp: candidate})
+    plainCandidate = await ctx.toPlain(
+      {type: candidateType, sdp: candidate},
+      peerId,
+      offerId
+    )
   } catch {
     return
   }
 
   const currentState = ctx.peerStates[peerId]
   const offerPeerMatch =
-    offerId && currentState?.offerPeer && currentState.offerId === offerId
+    currentState?.offerPeer && currentState.offerId === offerId
       ? currentState.offerPeer
       : null
   const answeringPeer =
-    !offerId || currentState?.answerReplay?.offerId === offerId
-      ? currentState?.answeringPeer
+    currentState?.answerReplay?.offerId === offerId
+      ? currentState.answeringPeer
       : null
-  const fallbackOfferPeer =
-    !offerId && currentState?.offerPeer ? currentState.offerPeer : null
   const targetPeer =
-    peer && !peer.isDead
-      ? peer
-      : (offerPeerMatch ?? answeringPeer ?? fallbackOfferPeer)
+    peer && !peer.isDead ? peer : (offerPeerMatch ?? answeringPeer)
 
   if (targetPeer && !targetPeer.isDead) {
     void targetPeer.signal(plainCandidate)
@@ -909,11 +1042,18 @@ const handleAnswer = async (
   offerId: string | undefined,
   peer: PeerHandle | undefined
 ): Promise<void> => {
+  if (!offerId) {
+    return
+  }
   const localSelfId = ctx.selfId ?? (await getSelfId(ctx))
   let plainAnswer: Signal
 
   try {
-    plainAnswer = await ctx.toPlain({type: 'answer', sdp: answer})
+    plainAnswer = await ctx.toPlain(
+      {type: 'answer', sdp: answer},
+      peerId,
+      offerId
+    )
   } catch {
     if (peer) {
       ctx.offerManager.reclaimLeased(peer)
@@ -955,7 +1095,7 @@ const handleAnswer = async (
 
     resetOfferState(state)
     state.offerPeer = peer
-    state.offerId = offerId ?? null
+    state.offerId = offerId
     state.offerAnswered = true
     scheduleOfferExpiry(ctx, state, peerId, offerPostAnswerTtlMs)
     bindOfferPeerHandlers(ctx, state, peerId, peer)
@@ -968,7 +1108,8 @@ const handleAnswer = async (
       !state ||
       !state.offerPeer ||
       state.offerAnswered ||
-      (offerId && state.offerId && offerId !== state.offerId) ||
+      !state.offerId ||
+      offerId !== state.offerId ||
       state.offerPeer.isDead
     ) {
       DEV: log(
@@ -979,7 +1120,7 @@ const handleAnswer = async (
           ? 'no-state'
           : state.offerAnswered
             ? 'already-answered'
-            : offerId && state.offerId && offerId !== state.offerId
+            : !state.offerId || offerId !== state.offerId
               ? 'offer-id-mismatch'
               : state.offerPeer
                 ? 'dead-offer'
@@ -1024,6 +1165,13 @@ export const createSignalHandler = (ctx: SignalContext) => {
     }
     void getSelfId(ctx).then(localSelfId => {
       if (ctx.isLeaving() || !peerId || peerId === localSelfId) {
+        return
+      }
+      if (
+        !ctx.peerStates[peerId] &&
+        countPendingPeerConnections(ctx.peerStates, peerId) >=
+          maxPendingPeerConnections
+      ) {
         return
       }
       const state = getState(ctx.peerStates, peerId)
@@ -1156,6 +1304,14 @@ export const createSignalHandler = (ctx: SignalContext) => {
         if (
           ctx.shouldConnectPeer &&
           !ctx.shouldConnectPeer(peerId, 'outbound')
+        ) {
+          return
+        }
+
+        if (
+          !ctx.peerStates[peerId] &&
+          countPendingPeerConnections(ctx.peerStates, peerId) >=
+            maxPendingPeerConnections
         ) {
           return
         }

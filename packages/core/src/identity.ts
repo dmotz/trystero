@@ -8,23 +8,24 @@ import {
   encodeBytes,
   fromBase64Url,
   fromJson,
+  isLowSP256Signature,
   libId,
   mkErr,
+  normalizeLowSP256Signature,
+  p256N,
   sha256,
   toBase64Url,
   toJson
 } from './crypto'
 import {invalidP256KeyErr, warn} from './utils'
 import type {
+  ResolvedIdentityPersistence,
   UserIdentity,
   UserIdentityConfig,
   UserIdentityPersistence
 } from './types'
 
 export {decodeBytes, encodeBytes, fromBase64Url, toBase64Url}
-
-const p256N =
-  0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
 
 export const base62Alphabet =
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
@@ -256,7 +257,7 @@ export const verifyWithP256 = async (
   payload: Uint8Array,
   pubKeyOrJwk: JsonWebKey | string
 ): Promise<boolean> => {
-  if (!sigBytes || sigBytes.byteLength !== 64) {
+  if (!sigBytes || !isLowSP256Signature(sigBytes)) {
     return false
   }
   const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
@@ -279,7 +280,6 @@ export type EndpointIdentity = {
   signPrivateKey: CryptoKey
   signPublicKey: CryptoKey
   signPubJwk: JsonWebKey
-  signPrivateJwk: JsonWebKey
   sign: (payload: Uint8Array) => Promise<Uint8Array>
 }
 
@@ -304,22 +304,24 @@ export const setDevIdentityProvider = (
 }
 
 let defaultEndpointIdentityPromise: Promise<EndpointIdentity> | null = null
+const appEndpointCache = createBoundedCache<string, Promise<EndpointIdentity>>(
+  256
+)
+const ownEndpointCache = createBoundedCache<string, Promise<EndpointIdentity>>(
+  256
+)
 
 export const createEndpointIdentity = async (): Promise<EndpointIdentity> => {
-  const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, true, [
+  const keyPair = await crypto.subtle.generateKey(ecdsaKeyAlgo, false, [
     'sign',
     'verify'
   ])
-  const privJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey)
+  const rawPubJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey)
   const signPubJwk: JsonWebKey = {
     crv: 'P-256',
     kty: 'EC',
-    x: privJwk.x ?? '',
-    y: privJwk.y ?? ''
-  }
-  const signPrivateJwk: JsonWebKey = {
-    ...signPubJwk,
-    d: privJwk.d ?? ''
+    x: rawPubJwk.x ?? '',
+    y: rawPubJwk.y ?? ''
   }
   const rec = await getVerifiedPubKeyRecord(signPubJwk, keyPair.publicKey)
   return {
@@ -327,29 +329,59 @@ export const createEndpointIdentity = async (): Promise<EndpointIdentity> => {
     signPrivateKey: keyPair.privateKey,
     signPublicKey: keyPair.publicKey,
     signPubJwk,
-    signPrivateJwk,
     sign: (payload: Uint8Array) =>
       ecdsaSign(keyPair.privateKey, payload as BufferSource)
   }
 }
 
+const rememberOwnEndpoint = (
+  promise: Promise<EndpointIdentity>
+): Promise<EndpointIdentity> =>
+  promise.then(id => {
+    ownEndpointCache.set(id.peerId, promise)
+    return id
+  })
+
 export const getDefaultEndpointIdentity = (
-  peerId?: string
+  peerId?: string,
+  appId?: string
 ): Promise<EndpointIdentity> => {
+  if (peerId) {
+    const own = ownEndpointCache.get(peerId)
+    if (own) {
+      return own
+    }
+  }
   DEV: {
     const overridden = devIdentityProvider?.getEndpointIdentity(peerId)
     if (overridden) {
       return overridden
     }
   }
-  return (defaultEndpointIdentityPromise ??= createEndpointIdentity())
+  if (!appId || appId === '__default__') {
+    return (defaultEndpointIdentityPromise ??= rememberOwnEndpoint(
+      createEndpointIdentity()
+    ))
+  }
+  const existing = appEndpointCache.get(appId)
+  if (existing) {
+    return existing
+  }
+  const created = rememberOwnEndpoint(createEndpointIdentity())
+  appEndpointCache.set(appId, created)
+  return created
 }
 
 export const getDefaultSelfId = (): Promise<string> =>
   getDefaultEndpointIdentity().then(id => id.peerId)
 
-export const resolveSelfId = (explicitSelfId?: string): Promise<string> =>
-  explicitSelfId ? Promise.resolve(explicitSelfId) : getDefaultSelfId()
+export const resolveSelfId = (
+  explicitSelfId?: string,
+  appId?: string
+): Promise<string> =>
+  explicitSelfId
+    ? Promise.resolve(explicitSelfId)
+    : getDefaultEndpointIdentity(undefined, appId).then(id => id.peerId)
 
 export const isPeerIdKeyCachedValid = (
   peerId: string,
@@ -634,12 +666,30 @@ const isUserIdentityObjectStructural = (val: unknown): val is UserIdentity =>
     typeof (val as UserIdentity).sign === 'function'
   )
 
+const withPersistence = (
+  val: UserIdentity,
+  persistence: ResolvedIdentityPersistence,
+  persisted: boolean
+): UserIdentity => ({
+  userId: val.userId,
+  publicKey: val.publicKey,
+  signPubJwk: val.signPubJwk,
+  sign: async (payload: Uint8Array) =>
+    normalizeLowSP256Signature(new Uint8Array(await val.sign(payload))),
+  persisted,
+  persistence
+})
+
 const coerceCustomUserIdentity = async (
   val: unknown
 ): Promise<UserIdentity> => {
   if (isUserIdentityObjectStructural(val)) {
     if (await verifyUserIdKey(val.userId, val.signPubJwk)) {
-      return val
+      return withPersistence(
+        val,
+        val.persistence ?? 'custom',
+        val.persisted ?? true
+      )
     }
     throw userIdMismatchErr
   }
@@ -790,6 +840,61 @@ const idbGetRecord = (
     req.onerror = () => reject(req.error ?? idbGetErr)
   })
 
+const idbProbeBytes = encodeBytes(`${libId}:idb-key-probe:v1`)
+
+const isValidStoredIdbRecord = async (
+  rec: StoredIdbIdentityRecord | undefined
+): Promise<boolean> => {
+  if (
+    !rec ||
+    typeof rec !== 'object' ||
+    !rec.userId ||
+    !rec.signPubJwk ||
+    !rec.privateKey
+  ) {
+    return false
+  }
+  if (!(await verifyUserIdKey(rec.userId, rec.signPubJwk))) {
+    return false
+  }
+  try {
+    const sig = await ecdsaSign(rec.privateKey, idbProbeBytes as BufferSource)
+    return await verifyWithP256(sig, idbProbeBytes, rec.signPubJwk)
+  } catch {
+    return false
+  }
+}
+
+const idbPutRecord = (
+  db: IDBDatabase,
+  appId: string,
+  candidate: StoredIdbIdentityRecord
+): Promise<StoredIdbIdentityRecord> =>
+  new Promise((resolve, reject) => {
+    const tx = db.transaction(idbStoreName, 'readwrite')
+    const store = tx.objectStore(idbStoreName) as IDBObjectStore & {
+      put?: (value: unknown, key?: IDBValidKey) => IDBRequest
+      delete?: (key: IDBValidKey) => IDBRequest
+    }
+    if (typeof store.put === 'function') {
+      const putReq = store.put(candidate, appId)
+      putReq.onsuccess = () => resolve(candidate)
+      putReq.onerror = () => reject(putReq.error ?? idbErr('put'))
+      return
+    }
+    if (typeof store.delete === 'function') {
+      const delReq = store.delete(appId)
+      delReq.onsuccess = () => {
+        const addReq = store.add(candidate, appId)
+        addReq.onsuccess = () => resolve(candidate)
+        addReq.onerror = () => reject(addReq.error ?? idbErr('add'))
+      }
+      delReq.onerror = () => reject(delReq.error ?? idbErr('delete'))
+      return
+    }
+    reject(idbErr('put'))
+  })
+
 const idbAddOrGetRecord = (
   db: IDBDatabase,
   appId: string,
@@ -801,26 +906,33 @@ const idbAddOrGetRecord = (
     const getReq = store.get(appId)
     getReq.onsuccess = () => {
       const existing = getReq.result as StoredIdbIdentityRecord | undefined
-      if (
-        existing &&
-        existing.userId &&
-        existing.signPubJwk &&
-        existing.privateKey
-      ) {
-        resolve(existing)
+      if (existing !== undefined) {
+        isValidStoredIdbRecord(existing).then(valid => {
+          if (valid) {
+            resolve(existing)
+          } else {
+            idbPutRecord(db, appId, candidate).then(resolve, reject)
+          }
+        }, reject)
         return
       }
       const addReq = store.add(candidate, appId)
       addReq.onsuccess = () => resolve(candidate)
       addReq.onerror = event => {
-        event.preventDefault()
+        event?.preventDefault?.()
         // ConstraintError from concurrent tab: read winner in a fresh readonly tx
         idbGetRecord(db, appId).then(winner => {
-          if (winner) {
-            resolve(winner)
-          } else {
+          if (!winner) {
             reject(addReq.error ?? idbErr('add'))
+            return
           }
+          isValidStoredIdbRecord(winner).then(valid => {
+            if (valid) {
+              resolve(winner)
+            } else {
+              idbPutRecord(db, appId, candidate).then(resolve, reject)
+            }
+          }, reject)
         }, reject)
       }
     }
@@ -845,24 +957,38 @@ const withNavigatorLock = async <T>(
   return fn()
 }
 
-const loadOrCreateIdbIdentity = (idbKey: string): Promise<UserIdentity> =>
+const loadOrCreateIdbIdentity = (
+  idbKey: string,
+  persistence: 'local' | 'session'
+): Promise<UserIdentity> =>
   withNavigatorLock(`${storagePrefix}${idbKey}`, async () => {
     const db = await openIdentityDb()
     try {
       const existing = await idbGetRecord(db, idbKey)
-      if (
-        existing &&
-        existing.userId &&
-        existing.signPubJwk &&
-        existing.privateKey &&
-        (await verifyUserIdKey(existing.userId, existing.signPubJwk))
-      ) {
-        return buildUserIdentityFromIdbRecord(existing)
+      if (existing !== undefined) {
+        if (await isValidStoredIdbRecord(existing)) {
+          return withPersistence(
+            buildUserIdentityFromIdbRecord(existing),
+            persistence,
+            true
+          )
+        }
+        const repaired = await generateNonExtractableIdbRecord()
+        const saved = await idbPutRecord(db, idbKey, repaired)
+        return withPersistence(
+          buildUserIdentityFromIdbRecord(saved),
+          persistence,
+          true
+        )
       }
 
       const candidate = await generateNonExtractableIdbRecord()
       const committed = await idbAddOrGetRecord(db, idbKey, candidate)
-      return buildUserIdentityFromIdbRecord(committed)
+      return withPersistence(
+        buildUserIdentityFromIdbRecord(committed),
+        persistence,
+        true
+      )
     } finally {
       db.close()
     }
@@ -888,7 +1014,7 @@ const loadOrCreateSessionIdentity = (
         verified && /^[0-9A-Za-z]{16,64}$/.test(verified) ? verified : generated
     }
 
-    return loadOrCreateIdbIdentity(`session:${appId}:${tabToken}`)
+    return loadOrCreateIdbIdentity(`session:${appId}:${tabToken}`, 'session')
   })().finally(() => {
     sessionMutexByApp.delete(appId)
   })
@@ -903,7 +1029,7 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
     return inflight
   }
 
-  const promise = loadOrCreateIdbIdentity(appId).finally(() => {
+  const promise = loadOrCreateIdbIdentity(appId, 'local').finally(() => {
     localMutexByApp.delete(appId)
   })
 
@@ -949,17 +1075,25 @@ export const resolveUserIdentity = async (
   const mode: UserIdentityPersistence =
     (raw as UserIdentityPersistence | undefined) ?? defaultMode
 
-  const fallbackToNone = (shouldWarn?: boolean): Promise<UserIdentity> => {
+  let devUserOverride: Promise<UserIdentity> | undefined
+  DEV: if (!peerId || !ownEndpointCache.has(peerId)) {
+    devUserOverride = devIdentityProvider?.getUserIdentity(peerId)
+  }
+
+  const fallbackToNone = async (
+    shouldWarn?: boolean
+  ): Promise<UserIdentity> => {
     if (shouldWarn) {
       warn("IndexedDB unavailable; falling back to identity: 'none'")
     }
-    DEV: {
-      const overridden = devIdentityProvider?.getUserIdentity(peerId)
-      if (overridden) {
-        return overridden
-      }
+    DEV: if (devUserOverride) {
+      return withPersistence(await devUserOverride, 'none', false)
     }
-    return getOrCreateRuntimeUserIdentity(appId)
+    return withPersistence(
+      await getOrCreateRuntimeUserIdentity(appId),
+      'none',
+      false
+    )
   }
 
   if (mode === 'none') {
@@ -1020,7 +1154,9 @@ export const signUserEndpointProof = async (
   }
 ): Promise<string> => {
   const payload = userEndpointProofPayload(params)
-  const sigBytes = await userIdentity.sign(payload)
+  const sigBytes = normalizeLowSP256Signature(
+    new Uint8Array(await userIdentity.sign(payload))
+  )
   const proof = toBase64Url(sigBytes)
   const cacheKey = `${params.appId}:${params.roomId}:${params.peerId}:${canonicalizePubJwk(params.peerPubJwk)}:${userIdentity.userId}:${params.seq ?? 0}:${proof}`
   verifiedUserProofCache.add(cacheKey)

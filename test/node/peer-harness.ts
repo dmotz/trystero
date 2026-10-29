@@ -181,6 +181,16 @@ export class MockRTCPeerConnection {
   removeTrack() {}
 }
 
+let mockFingerprintCounter = 0
+
+const nextMockFingerprintSdp = () => {
+  const n = ++mockFingerprintCounter
+  const b0 = ((n >>> 16) & 0xff).toString(16).padStart(2, '0').toUpperCase()
+  const b1 = ((n >>> 8) & 0xff).toString(16).padStart(2, '0').toUpperCase()
+  const b2 = (n & 0xff).toString(16).padStart(2, '0').toUpperCase()
+  return `v=0\r\na=fingerprint:sha-256 AA:BB:CC:${b0}:${b1}:${b2}\r\n`
+}
+
 export class MockPeer {
   created = Date.now()
   isDead = false
@@ -190,6 +200,8 @@ export class MockPeer {
   connection = {
     connectionState: 'connected',
     iceConnectionState: 'connected',
+    localDescription: {type: 'offer', sdp: nextMockFingerprintSdp()},
+    remoteDescription: {type: 'answer', sdp: nextMockFingerprintSdp()},
     getSenders: () => []
   }
   channel = {
@@ -241,6 +253,8 @@ export class LinkedPeer {
   connection = {
     connectionState: 'connected',
     iceConnectionState: 'connected',
+    localDescription: {type: 'offer', sdp: nextMockFingerprintSdp()},
+    remoteDescription: {type: 'answer', sdp: nextMockFingerprintSdp()},
     getSenders: () => []
   }
   channel = {
@@ -406,6 +420,14 @@ export const linkPeers = <A extends LinkedPeer, B extends LinkedPeer>(
 ): {peerA: A; peerB: B} => {
   peerA.partner = peerB
   peerB.partner = peerA
+  peerA.connection.remoteDescription = {
+    type: 'answer',
+    sdp: peerB.connection.localDescription.sdp
+  }
+  peerB.connection.remoteDescription = {
+    type: 'answer',
+    sdp: peerA.connection.localDescription.sdp
+  }
 
   return {peerA, peerB}
 }

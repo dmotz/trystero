@@ -1,3 +1,4 @@
+import {normalizeLowSP256Signature} from './crypto'
 import {
   type EndpointIdentity,
   extractDtlsFingerprints,
@@ -157,17 +158,19 @@ export const createIdentityHandshake = (params: {
   compose: (nextHandshake?: PeerHandshake) => PeerHandshake
 } => {
   const localEndpointP =
-    params.endpointIdentityP ?? getDefaultEndpointIdentity()
+    params.endpointIdentityP ??
+    getDefaultEndpointIdentity(undefined, params.appId)
 
   const signTranscript = async (
     transcriptBytes: Uint8Array,
     localUser: UserIdentity
   ): Promise<{ps: string; us: string}> => {
     const localEndpoint = await localEndpointP
-    const [psBytes, usBytes] = await Promise.all([
+    const [psBytes, usBytesRaw] = await Promise.all([
       localEndpoint.sign(transcriptBytes),
       localUser.sign(transcriptBytes)
     ])
+    const usBytes = normalizeLowSP256Signature(new Uint8Array(usBytesRaw))
     return {
       ps: toBase64Url(psBytes),
       us: toBase64Url(usBytes)
@@ -193,6 +196,9 @@ export const createIdentityHandshake = (params: {
     const remoteDtls = extractDtlsFingerprints(
       peer?.connection?.remoteDescription?.sdp
     )
+    if (peer?.connection && (!localDtls.length || !remoteDtls.length)) {
+      throw mkErr('DTLS fingerprint missing')
+    }
 
     if (isInitiator) {
       const initNonce = genId(32)

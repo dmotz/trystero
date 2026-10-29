@@ -103,7 +103,51 @@ export const ecdsaSignAlgo: EcdsaParams = {
 }
 
 const algo = 'AES-GCM'
-const strToSha1: Record<string, string> = {}
+const pbkdf2Iterations = 600_000
+const strToSha1 = createBoundedCache<string, string>(4_096)
+const derivedKeyCache = createBoundedCache<string, Promise<CryptoKey>>(64)
+
+export const p256N =
+  0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
+const p256HalfN = p256N >> 1n
+
+const sliceToBigInt = (
+  bytes: Uint8Array,
+  start: number,
+  end: number
+): bigint => {
+  let res = 0n
+  for (let i = start; i < end; i++) {
+    res = (res << 8n) | BigInt(bytes[i]!)
+  }
+  return res
+}
+
+export const normalizeLowSP256Signature = (sig: Uint8Array): Uint8Array => {
+  if (sig.byteLength !== 64) {
+    return sig
+  }
+  const s = sliceToBigInt(sig, 32, 64)
+  if (s <= p256HalfN) {
+    return sig
+  }
+  const out = sig.slice()
+  let lowS = p256N - s
+  for (let i = 63; i >= 32; i--) {
+    out[i] = Number(lowS & 0xffn)
+    lowS >>= 8n
+  }
+  return out
+}
+
+export const isLowSP256Signature = (sig: Uint8Array): boolean => {
+  if (sig.byteLength !== 64) {
+    return false
+  }
+  const r = sliceToBigInt(sig, 0, 32)
+  const s = sliceToBigInt(sig, 32, 64)
+  return r > 0n && r < p256N && s > 0n && s <= p256HalfN
+}
 
 export const hashWith = async (
   algorithm: string,
@@ -123,7 +167,9 @@ export const ecdsaSign = async (
   privateKey: CryptoKey,
   data: BufferSource
 ): Promise<Uint8Array> =>
-  new Uint8Array(await crypto.subtle.sign(ecdsaSignAlgo, privateKey, data))
+  normalizeLowSP256Signature(
+    new Uint8Array(await crypto.subtle.sign(ecdsaSignAlgo, privateKey, data))
+  )
 
 export const ecdsaVerify = (
   publicKey: CryptoKey,
@@ -131,30 +177,75 @@ export const ecdsaVerify = (
   data: BufferSource
 ): Promise<boolean> => crypto.subtle.verify(ecdsaSignAlgo, publicKey, sig, data)
 
-export const sha1 = async (str: string): Promise<string> =>
-  (strToSha1[str] ??= Array.from(await hashWith('SHA-1', str))
+export const sha1 = async (str: string): Promise<string> => {
+  const cached = strToSha1.get(str)
+  if (cached !== undefined) {
+    return cached
+  }
+  const digest = Array.from(await hashWith('SHA-1', str))
     .map(b => b.toString(36))
-    .join(''))
+    .join('')
+  strToSha1.set(str, digest)
+  return digest
+}
 
 export const genKey = async (
   secret: string,
   appId: string,
   roomId: string
-): Promise<CryptoKey> =>
-  crypto.subtle.importKey(
-    'raw',
-    (await sha256(`${secret}:${appId}:${roomId}`)) as BufferSource,
-    {name: algo},
-    false,
-    ['encrypt', 'decrypt']
-  )
+): Promise<CryptoKey> => {
+  if (!secret) {
+    return crypto.subtle.importKey(
+      'raw',
+      (await sha256(`:${appId}:${roomId}`)) as BufferSource,
+      {name: algo},
+      false,
+      ['encrypt', 'decrypt']
+    )
+  }
+
+  const cacheKey = `${secret}\u0000${appId}\u0000${roomId}`
+  const existing = derivedKeyCache.get(cacheKey)
+  if (existing) {
+    return existing
+  }
+
+  const deriveP = (async () => {
+    const [baseKey, salt] = await Promise.all([
+      crypto.subtle.importKey(
+        'raw',
+        encodeBytes(secret) as BufferSource,
+        'PBKDF2',
+        false,
+        ['deriveKey']
+      ),
+      sha256(`${libId}:pbkdf2:v1:${appId}\u0000${roomId}`)
+    ])
+    return crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: salt as BufferSource,
+        iterations: pbkdf2Iterations,
+        hash: 'SHA-256'
+      },
+      baseKey,
+      {name: algo, length: 256},
+      false,
+      ['encrypt', 'decrypt']
+    )
+  })()
+
+  derivedKeyCache.set(cacheKey, deriveP)
+  return deriveP
+}
 
 const joinChar = '$'
 const ivJoinChar = ','
 
 export const encrypt = async (
   keyP: Promise<CryptoKey>,
-  plaintext: string
+  plaintext: string,
+  aad?: string
 ): Promise<string> => {
   const iv = crypto.getRandomValues(new Uint8Array(16))
 
@@ -164,7 +255,13 @@ export const encrypt = async (
     toBase64(
       new Uint8Array(
         await crypto.subtle.encrypt(
-          {name: algo, iv},
+          aad === undefined
+            ? {name: algo, iv}
+            : {
+                name: algo,
+                iv,
+                additionalData: encodeBytes(aad) as BufferSource
+              },
           await keyP,
           encodeBytes(plaintext) as BufferSource
         )
@@ -175,15 +272,37 @@ export const encrypt = async (
 
 export const decrypt = async (
   keyP: Promise<CryptoKey>,
-  raw: string
+  raw: string,
+  aad?: string
 ): Promise<string> => {
-  const [iv, c] = raw.split(joinChar)
+  if (typeof raw !== 'string') {
+    throw mkErr('invalid ciphertext')
+  }
+  const sep = raw.indexOf(joinChar)
+  if (sep <= 0 || raw.indexOf(joinChar, sep + 1) !== -1) {
+    throw mkErr('invalid ciphertext')
+  }
+  const ivParts = raw.slice(0, sep).split(ivJoinChar)
+  const c = raw.slice(sep + 1)
+  if (ivParts.length !== 16 || !c) {
+    throw mkErr('invalid ciphertext')
+  }
+  const iv = new Uint8Array(16)
+  for (let i = 0; i < 16; i++) {
+    const n = Number(ivParts[i])
+    if (!Number.isInteger(n) || n < 0 || n > 255 || ivParts[i] === '') {
+      throw mkErr('invalid ciphertext')
+    }
+    iv[i] = n
+  }
 
   return decodeBytes(
     await crypto.subtle.decrypt(
-      {name: algo, iv: new Uint8Array(iv?.split(ivJoinChar).map(Number) ?? [])},
+      aad === undefined
+        ? {name: algo, iv}
+        : {name: algo, iv, additionalData: encodeBytes(aad) as BufferSource},
       await keyP,
-      fromBase64(c ?? '') as BufferSource
+      fromBase64(c) as BufferSource
     )
   )
 }

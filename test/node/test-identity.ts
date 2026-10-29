@@ -14,23 +14,15 @@ import type {
 } from '../../packages/core/src/types.ts'
 
 let currentTestPeerId: string | undefined
-let defaultEndpointPromise: Promise<EndpointIdentity> | null = null
-let resolvedDefaultPeerId: string | undefined
 const endpointByPeerId = new Map<string, Promise<EndpointIdentity>>()
 const canonicalJwkByPeerId = new Map<string, string>()
 const userIdentityByPeerId = new Map<string, Promise<UserIdentity>>()
 
-const getDefaultEndpoint = (): Promise<EndpointIdentity> =>
-  (defaultEndpointPromise ??= createEndpointIdentity().then(ep => {
-    resolvedDefaultPeerId = ep.peerId
-    return ep
-  }))
-
 const testIdentityProvider: DevIdentityProvider = {
   getEndpointIdentity: peerId => {
     const targetId = peerId ?? currentTestPeerId
-    if (!targetId || targetId === resolvedDefaultPeerId) {
-      return getDefaultEndpoint()
+    if (!targetId) {
+      return undefined
     }
     let existing = endpointByPeerId.get(targetId)
     if (!existing) {
@@ -58,7 +50,7 @@ const testIdentityProvider: DevIdentityProvider = {
   },
   getUserIdentity: peerId => {
     const targetId = peerId ?? currentTestPeerId
-    if (!targetId || targetId === resolvedDefaultPeerId) {
+    if (!targetId) {
       return undefined
     }
     let existing = userIdentityByPeerId.get(targetId)

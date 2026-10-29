@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import {createTopicStrategy} from '../../packages/core/src/index.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
 import {MockPeer, MockRTCPeerConnection, waitFor} from './peer-harness.ts'
 
 for (const channelState of ['closed', 'connecting']) {
@@ -37,9 +38,15 @@ for (const channelState of ['closed', 'connecting']) {
       await waitFor(() => Boolean(root))
       const answer = await encrypt(
         genKey('', config.appId, 'room'),
-        'answer-sdp'
+        'answer-sdp',
+        buildSignalAad('answer', 'remote-peer', 'offer-1')
       )
-      await root.onMessage(root.topic, {peerId: 'remote-peer', answer, peer})
+      await root.onMessage(root.topic, {
+        peerId: 'remote-peer',
+        offerId: 'offer-1',
+        answer,
+        peer
+      })
       await waitFor(() => Boolean(peer.handlers.data))
 
       peer.sendData = () => {

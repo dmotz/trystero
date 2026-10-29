@@ -69,6 +69,7 @@ export type {
   RequestContext,
   RequestManyOptions,
   RequestOptions,
+  ResolvedIdentityPersistence,
   RoleCertificate,
   RoleRevocationRecord,
   RolesConfig,

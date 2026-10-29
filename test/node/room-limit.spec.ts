@@ -89,6 +89,12 @@ class InMemoryRTCPeerConnection {
   dataChannel: LinkedDataChannel | null = null
   matchedOfferPc: InMemoryRTCPeerConnection | null = null
   partnerPc: InMemoryRTCPeerConnection | null = null
+  dtlsFingerprint = (() => {
+    const n = ++sdpCounter
+    const b0 = ((n >>> 8) & 0xff).toString(16).padStart(2, '0').toUpperCase()
+    const b1 = (n & 0xff).toString(16).padStart(2, '0').toUpperCase()
+    return `sha-256 AA:BB:CC:DD:${b0}:${b1}`
+  })()
 
   createDataChannel(label: string) {
     const ch = new LinkedDataChannel(label)
@@ -107,13 +113,13 @@ class InMemoryRTCPeerConnection {
   restartIce() {}
 
   async createOffer() {
-    const sdp = `inmem-offer-${++sdpCounter}-${Math.random().toString(36).slice(2)}`
+    const sdp = `v=0\r\na=fingerprint:${this.dtlsFingerprint}\r\na=mid:${++sdpCounter}\r\n`
     offerMap.set(sdp, this)
     return {type: 'offer', sdp}
   }
 
   async createAnswer() {
-    const sdp = `inmem-answer-${++sdpCounter}-${Math.random().toString(36).slice(2)}`
+    const sdp = `v=0\r\na=fingerprint:${this.dtlsFingerprint}\r\na=mid:${++sdpCounter}\r\n`
     if (this.matchedOfferPc) {
       answerMap.set(sdp, {offerPc: this.matchedOfferPc, answerPc: this})
     }

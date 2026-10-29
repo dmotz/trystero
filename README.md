@@ -583,9 +583,15 @@ joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
 ```
 
 This is a shared secret that must be known ahead of time and the password must
-match for all users in the room for them to be able to connect. An example use
-case might be a private chat room where users learn the password via external
-means.
+match for all users in the room for them to be able to connect. When a
+`password` is set, Trystero derives the AES-256-GCM signaling key using
+WebCrypto `PBKDF2-SHA256` (`600,000` iterations, domain-separated by `appId` and
+`roomId`) and binds each encrypted SDP or ICE payload to its message type,
+sender `peerId`, and `offerId` via GCM additional authenticated data (AAD).
+Because signaling relays observe encrypted SDP ciphertexts and could mount an
+offline dictionary guess against weak passwords, use a strong, high-entropy
+password when protecting sensitive rooms. An example use case might be a private
+chat room where users learn the password via external means.
 
 ### Room size limits
 
@@ -646,10 +652,12 @@ When a peer's room view is already at capacity:
   peer link and reports `onJoinError` for that peer. For authoritative roster
   enforcement backed by a cryptographic trust root, use
   [`roles()`](#room-admins-roles-and-authoritative-state).
-- **Password privacy**: In password-protected rooms (`config.password`),
-  Trystero verifies the password proof _before_ checking room capacity. Users
-  with the wrong password receive a password error rather than `'room full'`, so
-  outsiders cannot probe whether a private room is full.
+- **Password privacy**: In password-protected rooms (`config.password`), SDP
+  offers and answers are encrypted and authenticated with the PBKDF2-derived
+  room key _before_ any WebRTC data channel opens or room capacity is checked.
+  Users with the wrong password fail signaling decryption (`onJoinError` with
+  `reason: 'decrypt'`) rather than receiving `'room full'`, so outsiders cannot
+  probe whether a private room is full.
 - **Multi-hop rooms**: When `scale()` is enabled, local capacity checks also
   account for verified multi-hop overlay peers.
 
@@ -861,15 +869,20 @@ can issue role certificates.
   across page reloads and multiple open tabs automatically. Peers verify the
   root admin's signature on the certificate and check against signed
   `RoleRevocationRecord`s. Likewise, `room.ban()` bans the target `userId`
-  across all current and future tabs.
+  across all current and future tabs. Concurrent moderation records (such as
+  delegated admins revoking or banning one another) are evaluated in a total
+  causal order `(iat, recordType, sig)` so all peers converge to the exact same
+  set of active roles and bans regardless of message arrival or sync order.
 - **Tamper-proof state syncing (`makeState`)**: Each state update is signed with
-  a monotonically increasing sequence number (`seq`) and chained to the SHA-256
-  hash of the previous state record (`prevHash`, verified for successive updates
-  from the same writer). This prevents replay attacks and lets any regular peer
-  cache and serve the latest state snapshot to late joiners—the newcomer simply
-  verifies the writer's signature on the snapshot. Concurrent updates across
-  co-admins converge deterministically using last-writer-wins ordering
-  `(seq, timestamp, hash)`.
+  a causal session `epoch`, a monotonically increasing sequence number (`seq`),
+  and the SHA-256 hash of the previous state record (`prevHash`, verified for
+  successive updates within the same `epoch`). If an admin leaves and rejoins
+  later, a fresh monotonic `epoch` lets new writes supersede stale pre-rejoin
+  snapshots cleanly. Concurrent updates across co-admins converge
+  deterministically using last-writer-wins ordering
+  `(epoch, seq, ts, updatedBy, hash)`. Authority records tolerate up to
+  `maxClockSkewMs` (default: `60,000` ms) of future wall-clock skew across
+  devices.
 - **Edge filtering & private signaling**: In multi-hop topologies, immediate
   neighbors (Hop-1 relays) verify role certificates, signatures, and
   `PeerBanRecord`s before forwarding packets, stopping unauthorized traffic or
@@ -959,14 +972,17 @@ relays, and how data routes are organized.
   <summary>How it works behind the scenes</summary>
 
 - **Gossip overlay (`'gossip'`)**: Peers arrange themselves on a room-salted,
-  bounded-degree circulant ring with deterministic multi-scale chords, and
-  derive packet hop limits dynamically from the verified room roster size.
-  Routing tables require mutual neighbor confirmation in signed link-state
-  descriptors (refreshed by heartbeats and verified data traffic with a 180 s
-  TTL) before using an edge. Broadcasts propagate across neighbor links with
-  per-origin sliding replay windows and message-ID deduplication, while small
-  point-to-point messages (`target`) route along shortest paths with disjoint
-  backup next-hops for instant failover.
+  per-user-capped multi-ring expander (`floor(maxConnections / 2)` independent
+  permuted cycles for `O(log N)` diameter), and derive hop-capped shortest-path
+  routes dynamically from the verified room roster size so unreachable peers
+  beyond the hop limit are never falsely exposed as active. Routing tables
+  require mutual neighbor confirmation in signed link-state descriptors
+  (refreshed by heartbeats and verified data traffic with a 180 s TTL and a 1.2
+  s route-churn grace window) before using an edge. Broadcasts propagate across
+  neighbor links with persistent per-origin sliding replay windows and
+  message-ID deduplication, while point-to-point messages (`target`) route along
+  backpressure-aware shortest paths with disjoint backup next-hops and signed
+  short-lived stream leases that amortize ECDSA signatures across packet bursts.
 - **Direct WebRTC promotion for media & bulk transfers**: Calling `addStream()`
   or sending a multi-chunk payload (> 16 KiB) to a multi-hop peer automatically
   establishes a direct 1-hop WebRTC connection to that peer so media and bulk
@@ -1335,11 +1351,13 @@ the same namespace will return the same room instance.
     `relayConfig.firebaseApp` below for an alternative way of configuring the
     Firebase strategy).
 
-  - `password` - **(optional)** A string to encrypt session descriptions via
-    AES-GCM as they are passed through the peering medium. If not set, session
-    descriptions will be encrypted with a key derived from the app ID and room
-    name. A custom password must match between any peers in the room for them to
-    connect. See [encryption](#encryption) for more details.
+  - `password` - **(optional)** A string used to derive an AES-256-GCM signaling
+    key via `PBKDF2-SHA256` (`600,000` iterations, salted with `appId` and
+    `roomId`) as session descriptions are passed through the peering medium. If
+    not set, session descriptions are encrypted with a key derived from the app
+    ID and room name. A custom password must match between any peers in the room
+    for them to connect; prefer high-entropy secrets for sensitive rooms. See
+    [encryption](#encryption) for more details.
 
   - `limit` - **(optional)** Positive integer setting a best-effort, advisory
     per-peer cap on the number of unique users (`userId`s) in the peer's room
@@ -1480,6 +1498,11 @@ Returns an object with the following properties and methods:
   - `isAdmin` - Boolean indicating whether the local user is a verified
     `'admin'`.
   - `roles` - Array of verified roles currently held by the local user.
+  - `persisted` - Boolean indicating whether the local `UserIdentity` is backed
+    by persistent storage (`false` if `identity: 'none'` or if browser storage
+    downgraded to an ephemeral key).
+  - `identityPersistence` - Effective storage tier
+    (`'local' | 'session' | 'custom' | 'none'`).
 
 - ### `getUsers()`
 
@@ -1794,6 +1817,9 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 - `roles({admins: [userId1, userId2]})` - Trusts the specified `userId`s (or
   16-character Base62 fingerprints) as root room admins on either a fixed room
   name or alongside `selfAsAdmin: true`.
+- `roles({maxClockSkewMs})` - Configures maximum tolerated future wall-clock
+  skew in milliseconds for incoming signed authority records (default: `60000`,
+  up to `86400000`).
 
 ### `scale([config])`
 
@@ -1842,7 +1868,8 @@ browser storage (`'session'` or `'local'`).
 Resolves a `UserIdentity` for `appId` (from `options.identity`, defaulting to
 `'local'` when persistent browser storage is available) and formats a
 self-certifying room ID (`<baseRoomId>~<fingerprint>`), returning a promise that
-resolves to `{roomId, baseRoomId, fingerprint, userId, identity}`.
+resolves to
+`{roomId, baseRoomId, fingerprint, userId, identity, persisted, identityPersistence}`.
 
 ### `getRelaySockets()`
 

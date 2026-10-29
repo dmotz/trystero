@@ -10,6 +10,7 @@ import {createIdentityHandshake} from './handshake'
 import initPeer from './peer'
 import room, {getRoomSignalingBridge, type RoomSignalingBridge} from './room'
 import {
+  buildSignalAad,
   createSignalHandler,
   clearConnectedPeer,
   detachConnectedPeer,
@@ -140,18 +141,24 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     leavingRoomCleanups[appId]?.[roomId]?.(true)
 
-    const localEndpointP = getDefaultEndpointIdentity()
+    const localEndpointP = getDefaultEndpointIdentity(undefined, appId)
     const selfIdP = localEndpointP.then(ep => ep.peerId)
 
+    let didLeaveRoom = false
+    let isLeavingRoom = false
+    let didReportSetupError = false
     let effectiveRoomId = roomId
     const userIdentityP = resolveUserIdentity(appId, roomId, config).catch(
       async err => {
-        onJoinError?.({
-          error: toErrorMessage(err, 'identity resolution failed'),
-          appId,
-          peerId: await selfIdP,
-          roomId: effectiveRoomId
-        })
+        didReportSetupError = true
+        if (!didLeaveRoom) {
+          onJoinError?.({
+            error: toErrorMessage(err, 'identity resolution failed'),
+            appId,
+            peerId: await selfIdP,
+            roomId: effectiveRoomId
+          })
+        }
         throw err
       }
     )
@@ -165,13 +172,28 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       if (plugin.resolveRoomId) {
         const resP = plugin.resolveRoomId({appId, roomId, userIdentityP})
         if (resP) {
-          resolvedRoomIdP = resP.then(res => {
-            preResolvedPlugins.set(plugin, res.state)
-            return res
-          })
+          resolvedRoomIdP = resP.then(
+            res => {
+              preResolvedPlugins.set(plugin, res.state)
+              return res
+            },
+            async err => {
+              if (!didReportSetupError && !didLeaveRoom) {
+                didReportSetupError = true
+                onJoinError?.({
+                  error: toErrorMessage(err, 'room resolution failed'),
+                  appId,
+                  peerId: await selfIdP,
+                  roomId: effectiveRoomId
+                })
+              }
+              throw err
+            }
+          )
         }
       }
     }
+    void resolvedRoomIdP?.catch(noOp)
 
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
     const effectiveRoomIdP = resolvedRoomIdP?.then(res => {
@@ -184,10 +206,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
       return res.effectiveRoomId
     })
+    void effectiveRoomIdP?.catch(noOp)
 
     const rootTopicP = effectiveRoomIdP
       ? effectiveRoomIdP.then(rid => sha1(topicPath(libName, appId, rid)))
       : sha1(rootTopicPlaintext)
+    void rootTopicP.catch(noOp)
     const selfTopicP = all([
       effectiveRoomIdP ?? Promise.resolve(roomId),
       selfIdP
@@ -196,12 +220,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       strategyContext.peerId = resolvedPeerId
       return sha1(topicPath(topicPath(libName, appId, rid), resolvedPeerId))
     })
+    void selfTopicP.catch(noOp)
     const key = effectiveRoomIdP
       ? effectiveRoomIdP.then(rid => genKey(config.password ?? '', appId, rid))
       : genKey(config.password ?? '', appId, roomId)
+    void key.catch(noOp)
 
-    let didLeaveRoom = false
-    let isLeavingRoom = false
     const bridgeRef: {current?: RoomSignalingBridge | undefined} = {}
 
     const syncOverlayNeighbors = (): void => {
@@ -220,10 +244,24 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     const withKey =
-      (f: (keyP: Promise<CryptoKey>, text: string) => Promise<string>) =>
-      async (signal: Signal): Promise<Signal> => ({
+      (
+        f: (
+          keyP: Promise<CryptoKey>,
+          text: string,
+          aad?: string
+        ) => Promise<string>
+      ) =>
+      async (
+        signal: Signal,
+        peerId: string,
+        offerId: string
+      ): Promise<Signal> => ({
         type: signal.type,
-        sdp: await f(key, signal.sdp)
+        sdp: await f(
+          key,
+          signal.sdp,
+          buildSignalAad(signal.type, peerId, offerId)
+        )
       })
 
     const toPlain = withKey(decrypt)
@@ -232,14 +270,18 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     let reannounceOnDisconnect = false
     const offerManager = new OfferManager(makeOffer)
 
-    const encryptOffer = async (peer: PeerHandle): Promise<string> => {
+    const encryptOffer = async (
+      peer: PeerHandle,
+      peerId: string,
+      offerId: string
+    ): Promise<string> => {
       const plainOffer = await peer.getOffer()
 
       if (!plainOffer || plainOffer.type !== 'offer') {
         throw mkErr('failed to get offer for peer')
       }
 
-      return (await toCipher(plainOffer)).sdp
+      return (await toCipher(plainOffer, peerId, offerId)).sdp
     }
 
     const connectPeer = (peer: PeerHandle, peerId: string): void => {
@@ -358,16 +400,33 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const announceTimeouts: Array<ReturnType<typeof setTimeout> | undefined> =
       []
 
-    const unsubFns = initPromises.map(async (relayP, i) =>
-      subscribe(
-        await relayP,
-        await rootTopicP,
-        await selfTopicP,
-        handleMessage(i),
-        n => offerManager.getOffers(n, encryptOffer),
-        strategyContext
-      )
-    )
+    const unsubFns = initPromises.map(async (relayP, i) => {
+      try {
+        const [relay, rootTopic, selfTopic] = await all([
+          relayP,
+          rootTopicP,
+          selfTopicP
+        ])
+        if (didLeaveRoom) {
+          return noOp
+        }
+        return await subscribe(
+          relay,
+          rootTopic,
+          selfTopic,
+          handleMessage(i),
+          n =>
+            selfIdP.then(sid =>
+              offerManager.getOffers(n, (peer, offerId) =>
+                encryptOffer(peer, sid, offerId)
+              )
+            ),
+          strategyContext
+        )
+      } catch {
+        return noOp
+      }
+    })
 
     if (!isPassive) {
       void all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
@@ -456,30 +515,29 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           announceTimeouts.forEach(resetTimer)
           announceTimeouts.length = 0
 
-          initPromises.forEach(async (relayP, i) => {
-            const relay = await relayP
-
-            if (relay && !didLeaveRoom) {
-              announceAttemptCounts[i] = 0
-              void queueAnnounce(relay, i)
-            }
+          initPromises.forEach((relayP, i) => {
+            void relayP.then(relay => {
+              if (relay && !didLeaveRoom) {
+                announceAttemptCounts[i] = 0
+                void queueAnnounce(relay, i)
+              }
+            }, noOp)
           })
         }
 
-        unsubFns.forEach(async (didSub, i) => {
-          await didSub
-
-          if (didLeaveRoom) {
-            return
-          }
-
-          const relay = await initPromises[i]
-
-          if (relay && !didLeaveRoom) {
-            void queueAnnounce(relay, i)
-          }
+        unsubFns.forEach((didSub, i) => {
+          void didSub.then(cleanup => {
+            if (didLeaveRoom || cleanup === noOp) {
+              return
+            }
+            void initPromises[i]?.then(relay => {
+              if (relay && !didLeaveRoom) {
+                void queueAnnounce(relay, i)
+              }
+            }, noOp)
+          }, noOp)
         })
-      })
+      }, noOp)
     }
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
@@ -561,9 +619,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       })
 
       announceTimeouts.forEach(resetTimer)
-      unsubFns.forEach(async f => {
-        const cleanup = await f
-        cleanup()
+      unsubFns.forEach(f => {
+        void f.then(cleanup => cleanup(), noOp)
       })
 
       offerManager.destroy()
@@ -633,9 +690,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     } catch (err) {
       didLeaveRoom = true
       announceTimeouts.forEach(resetTimer)
-      unsubFns.forEach(async f => {
-        const cleanup = await f
-        cleanup()
+      unsubFns.forEach(f => {
+        void f.then(cleanup => cleanup(), noOp)
       })
       offerManager.destroy()
       if (!hasActiveRooms()) {

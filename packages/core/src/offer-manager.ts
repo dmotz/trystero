@@ -1,7 +1,8 @@
-import {all, alloc, mkErr, resetTimer} from './utils'
+import {all, alloc, genId, mkErr, resetTimer} from './utils'
 import type {OfferRecord, PeerHandle} from './types'
 
 const offerLeaseTtlMs = 180_000
+const defaultOfferIdSize = 20
 const offerRoomLeftErr = mkErr('room left while preparing offer')
 
 export class OfferManager {
@@ -29,7 +30,8 @@ export class OfferManager {
   checkout(
     n: number,
     leaseOffers: boolean,
-    encryptOffer: (peer: PeerHandle) => Promise<string>
+    encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>,
+    offerIdSize: number = defaultOfferIdSize
   ): Promise<OfferRecord[]> {
     const toRecord = async (didRetry = false): Promise<OfferRecord> => {
       if (this.destroyed) {
@@ -37,9 +39,10 @@ export class OfferManager {
       }
 
       const peer = this.makeOffer()
+      const offerId = genId(offerIdSize)
 
       try {
-        const offer = await encryptOffer(peer)
+        const offer = await encryptOffer(peer, offerId)
 
         if (this.destroyed) {
           throw offerRoomLeftErr
@@ -57,12 +60,13 @@ export class OfferManager {
           return {
             peer,
             offer,
+            offerId,
             claim: () => this.claimLeased(peer),
             reclaim: () => this.reclaimLeased(peer)
           }
         }
 
-        return {peer, offer}
+        return {peer, offer, offerId}
       } catch (error) {
         peer.destroy()
 
@@ -79,7 +83,7 @@ export class OfferManager {
 
   getOffers(
     n: number,
-    encryptOffer: (peer: PeerHandle) => Promise<string>
+    encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>
   ): Promise<OfferRecord[]> {
     return this.checkout(n, true, encryptOffer)
   }

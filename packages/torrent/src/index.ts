@@ -2,7 +2,6 @@ import {
   createRelayManager,
   createStrategy,
   fromJson,
-  genId,
   getRelays,
   libName,
   makeSocket,
@@ -163,7 +162,7 @@ const ensureOutstandingOffers = async (
 
     if (missingOffers > 0) {
       ;(await getOffers(missingOffers)).forEach(peerAndOffer => {
-        outstandingOffers[genId(hashLimit)] = {
+        outstandingOffers[peerAndOffer.offerId] = {
           ...peerAndOffer,
           createdAt: Date.now()
         }

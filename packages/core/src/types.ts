@@ -97,11 +97,15 @@ export type TopologySnapshot = {
 
 export type UserIdentityPersistence = 'none' | 'session' | 'local'
 
+export type ResolvedIdentityPersistence = UserIdentityPersistence | 'custom'
+
 export type UserIdentity = {
   userId: string
   publicKey: string
   signPubJwk: JsonWebKey
   sign: (payload: Uint8Array) => MaybePromise<Uint8Array>
+  persisted?: boolean
+  persistence?: ResolvedIdentityPersistence
 }
 
 export type UserIdentityLoaderContext = {
@@ -121,6 +125,7 @@ export type UserIdentityConfig =
 export type RolesConfig = {
   selfAsAdmin?: boolean
   admins?: string[]
+  maxClockSkewMs?: number
 }
 
 export type RoleCertificate = {
@@ -169,6 +174,7 @@ export type AuthoritativeStateRecord<T = JsonValue> = {
   appId: string
   roomId: string
   namespace: string
+  epoch?: number
   seq: number
   prevHash: string
   ts: number
@@ -237,7 +243,9 @@ export type KernelRolesProvider = {
     data: DataPayload,
     wireMetadata?: JsonValue
   ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
-  getAuthorityInfo: () => Promise<Omit<SelfInfo, 'peerId'>>
+  getAuthorityInfo: () => Promise<
+    Omit<SelfInfo, 'peerId' | 'persisted' | 'identityPersistence'>
+  >
 }
 
 export type KernelScaleProvider = {
@@ -274,6 +282,7 @@ export type RoomKernel = {
   readonly appId: string
   readonly initialRoomId: string
   readonly password: string
+  readonly limit?: number | undefined
   getRoomId: () => string
   setEffectiveRoomId: (roomId: string) => void
   getLocalUserIdentity: () => Promise<UserIdentity>
@@ -315,7 +324,7 @@ export type RoomKernel = {
   onPeerDeactivated: (listener: (peerId: string) => void) => void
   onRoomIdChanged: (listener: (roomId: string) => void) => void
   onLeave: (listener: () => void) => void
-  activateVirtualPeer: (peerId: string, vPeer: PeerHandle) => void
+  activateVirtualPeer: (peerId: string, vPeer: PeerHandle) => boolean
   deactivateVirtualPeer: (peerId: string, reason?: Error) => void
 }
 
@@ -519,6 +528,8 @@ export type UserInfo = {
 export type SelfInfo = {
   peerId: string
   userId: string
+  persisted: boolean
+  identityPersistence: ResolvedIdentityPersistence
   roomId: string
   baseRoomId: string
   fingerprint: string | null
@@ -672,6 +683,7 @@ export type TopicPublishContext = {
 export type OfferRecord = {
   peer: PeerHandle
   offer: string
+  offerId: string
   claim?: () => void
   reclaim?: () => void
 }
@@ -815,12 +827,16 @@ export type SignalContext = {
   rootTopicPlaintext: string
   rootTopicP: Promise<string>
   selfTopicP: Promise<string>
-  toPlain: (signal: Signal) => Promise<Signal>
-  toCipher: (signal: Signal) => Promise<Signal>
+  toPlain: (signal: Signal, peerId: string, offerId: string) => Promise<Signal>
+  toCipher: (signal: Signal, peerId: string, offerId: string) => Promise<Signal>
   isLeaving: () => boolean
   onJoinError: JoinErrorHandler | undefined
   offerManager: OfferManager
-  encryptOffer: (peer: PeerHandle) => Promise<string>
+  encryptOffer: (
+    peer: PeerHandle,
+    peerId: string,
+    offerId: string
+  ) => Promise<string>
   initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
   connectPeer: (peer: PeerHandle, peerId: string) => void
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
