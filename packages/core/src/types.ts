@@ -101,7 +101,6 @@ export type ResolvedIdentityPersistence = UserIdentityPersistence | 'custom'
 
 export type UserIdentity = {
   userId: string
-  fingerprint: string
   publicKey: string
   signPubJwk: JsonWebKey
   sign: (payload: Uint8Array) => MaybePromise<Uint8Array>
@@ -533,7 +532,6 @@ export type SelfInfo = {
   identityPersistence: ResolvedIdentityPersistence
   roomId: string
   baseRoomId: string
-  fingerprint: string | null
   isAdmin: boolean
   roles: string[]
 }

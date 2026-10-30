@@ -467,10 +467,10 @@ tab alone:
 
 - **Self-certifying IDs**: Each tab generates a fresh ECDSA P-256 endpoint
   keypair (`peerId`, a 20-character Base62 digest `sha256(pubJwk) mod 62²⁰`)
-  alongside the user's ECDSA P-256 identity keypair (`userId`, a 43-character
-  Base64url [RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) JWK
-  thumbprint). Because `peerId` and `userId` have distinct formats and lengths,
-  any `target` option unambiguously recognizes which one you passed.
+  alongside the user's ECDSA P-256 identity keypair (`userId`, a 22-character
+  Base62 digest `sha256(pubJwk) mod 62²²`). Because `peerId` and `userId` have
+  distinct lengths (`20` vs `22`), any `target` option unambiguously recognizes
+  which one you passed.
 - **Connection-bound handshake**: Before any peer or user join event fires, both
   sides exchange fresh cryptographic nonces and sign a transcript binding the
   `appId`, `roomId`, both `peerId`s, both `userId`s, and the WebRTC connection's
@@ -718,36 +718,36 @@ const {roomId} = await hostRoom.getSelf()
 ```
 
 When you pass `roles({selfAsAdmin: true})`, Trystero attaches a `~` separator
-and a 22-character Base62 suffix to your room name (like
-`'friday-quiz~9fX2kLm8pQr7vBn3wZy4xT'`) derived from the host's `userId`. Think
-of that suffix as a built-in digital ID badge for the host.
+and the host's 22-character Base62 `userId` to your room name (like
+`'friday-quiz~9fX2kLm8pQr7vBn3wZy4xT'`). Think of that suffix as a built-in
+digital ID badge for the host.
 
 When friends join using that self-certifying `roomId`, they simply include
 `use: [roles()]` in `joinRoom()`—their browsers automatically check the suffix
-and recognize the host's `userId` as the true admin (joining a fingerprinted
-`<roomId>~<fingerprint>` without `roles()` throws an error so misconfigured
-clients fail fast):
+and recognize the host's `userId` as the true admin (joining a self-certifying
+`<roomId>~<userId>` without `roles()` throws an error so misconfigured clients
+fail fast):
 
 ```js
 // Guests join using the shared roomId with use: [roles()]
 const guestRoom = joinRoom({appId: 'trivia-night', use: [roles()]}, roomId)
 ```
 
-> **Important:** A fingerprinted room's root admin authority is tied permanently
-> to the host's `userId` key. In browsers, Trystero's default `'local'` identity
-> persists this key automatically in `IndexedDB`. When running server-side
-> (Node, Bun, Deno) or without browser storage, pass a saved `UserIdentity`
-> (from `createUserIdentity()` / `importUserIdentity()`) instead of an ephemeral
-> `'none'` identity—otherwise closing the process discards the admin key and
-> leaves the fingerprinted room without a root admin. Trystero logs a warning if
-> `selfAsAdmin: true` is used with an ephemeral identity. With a `UserIdentity`,
-> you can also format the self-certifying room ID ahead of time as
-> `` `${baseRoomId}~${identity.fingerprint}` ``.
+> **Important:** A self-certifying room's root admin authority is tied
+> permanently to the host's `userId` key. In browsers, Trystero's default
+> `'local'` identity persists this key automatically in `IndexedDB`. When
+> running server-side (Node, Bun, Deno) or without browser storage, pass a saved
+> `UserIdentity` (from `createUserIdentity()` / `importUserIdentity()`) instead
+> of an ephemeral `'none'` identity—otherwise closing the process discards the
+> admin key and leaves the self-certifying room without a root admin. Trystero
+> logs a warning if `selfAsAdmin: true` is used with an ephemeral identity. With
+> a `UserIdentity`, you can also format the self-certifying room ID ahead of
+> time as `` `${baseRoomId}~${identity.userId}` ``.
 
 #### 2. Specifying admin `userId`s (fixed room names or co-admins)
 
 What if you want a permanent, memorable room name like `'main-stage'` without a
-`~<fingerprint>` suffix at the end—or want to designate additional co-admins?
+`~<userId>` suffix at the end—or want to designate additional co-admins?
 
 Pass `admins: [...]` with the trusted admin `userId`s to `roles()`. When an
 admin joins with their matching `identity`, they are automatically recognized as
@@ -757,7 +757,7 @@ signed by those `userId`s:
 ```js
 import {joinRoom, roles} from 'trystero'
 
-const HOST_USER_ID = 'tY8mK3pQvN2xR7wL9jB4cF6hZ1sD5gA0eU8iO2uP4yM'
+const HOST_USER_ID = 'tY8mK3pQvN2xR7wL9jB4cF'
 
 // Everyone (both the host and viewers) can use the exact same config!
 // If the local user's userId matches HOST_USER_ID, they are the admin;
@@ -772,7 +772,7 @@ const room = joinRoom(
 ```
 
 You can also combine `{selfAsAdmin: true, admins: [CO_HOST_USER_ID]}` to create
-a fingerprinted room while trusting additional co-admins from the start.
+a self-certifying room while trusting additional co-admins from the start.
 
 #### Restricting actions to admins or custom roles
 
@@ -865,14 +865,13 @@ can issue role certificates.
   never leave the user's device. Every privileged action, state update, role
   grant, or ban is signed with the sender's private key and verified by every
   peer before being accepted.
-- **Self-certifying room IDs**: Both a user's 43-character Base64url `userId`
-  and a self-certifying room's 22-character Base62 suffix
-  (`<baseRoomId>~<22-char-base62>`) are derived from the exact same SHA-256
-  thumbprint of the user's P-256 public key. When you create a room with
-  `roles({selfAsAdmin: true})`, Trystero encodes your `userId`'s SHA-256 digest
-  (`mod 62²²`, ~131 bits) into the room ID suffix after `~`. When peers
-  connect—or when the host rejoins with the same persistent identity—everyone
-  can mathematically verify from the `userId` alone who owns the room.
+- **Self-certifying room IDs**: A user's 22-character Base62 `userId` is derived
+  directly from the SHA-256 digest of their P-256 public key
+  (`sha256(pubJwk) mod 62²²`, ~131 bits). When you create a room with
+  `roles({selfAsAdmin: true})`, Trystero appends your `userId` directly onto the
+  room ID (`<baseRoomId>~<userId>`). When peers connect—or when the host rejoins
+  with the same persistent identity—everyone can mathematically verify from the
+  `userId` suffix alone who owns the room.
 - **2-tier role certificates**: Calling `room.grantRole()` issues a signed
   `RoleCertificate` binding the recipient's `subUserId` to the granted role(s).
   Because the certificate binds `subUserId`, a promoted user retains their roles
@@ -1495,12 +1494,10 @@ Returns an object with the following properties and methods:
   Returns a promise resolving to `SelfInfo` for the local participant in this
   room:
   - `peerId` - The 20-character Base62 endpoint ID.
-  - `userId` - The local user's 43-character Base64url user identity thumbprint.
-  - `roomId` - The full room ID (including the `~<22-char-base62-fingerprint>`
-    suffix when created with `roles({selfAsAdmin: true})`).
-  - `baseRoomId` - The base room name without the fingerprint suffix.
-  - `fingerprint` - The 22-character Base62 admin fingerprint from the room ID,
-    or `null`.
+  - `userId` - The local user's 22-character Base62 user ID.
+  - `roomId` - The full room ID (including the `~<userId>` suffix when created
+    with `roles({selfAsAdmin: true})`).
+  - `baseRoomId` - The base room name without the `~<userId>` suffix.
   - `isAdmin` - Boolean indicating whether the local user is a verified
     `'admin'`.
   - `roles` - Array of verified roles currently held by the local user.
@@ -1524,7 +1521,7 @@ Returns an object with the following properties and methods:
   (`{userId, connection, direct, hops, roles}`) for the individual peer
   connections present in the room (not including the local endpoint), keyed by
   `peerId`:
-  - `userId` - The 43-character Base64url user ID that owns this endpoint.
+  - `userId` - The 22-character Base62 user ID that owns this endpoint.
   - `connection` - The underlying
     [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)
     if the peer is a direct WebRTC neighbor, or `null` if the peer is routed
@@ -1816,14 +1813,14 @@ Creates the opt-in room authority plugin (`RoomPlugin<'roles', RolesPluginApi>`)
 for `joinRoom()`. Pass in `use: [roles(config)]`:
 
 - `roles()` - Enables role and state verification for a participant joining a
-  room (required when joining a self-certifying `<roomId>~<fingerprint>`).
+  room (required when joining a self-certifying `<roomId>~<userId>`).
 - `roles({selfAsAdmin: true})` - Makes the local user (`userId`) a root room
-  admin and appends `~<22-char-base62-fingerprint>` to `roomId`. Uses persistent
-  `'local'` identity by default in browsers; pair with a saved `UserIdentity`
-  when running outside browsers.
-- `roles({admins: [userId1, userId2]})` - Trusts the specified `userId`s (or
-  22-character Base62 fingerprints) as root room admins on either a fixed room
-  name or alongside `selfAsAdmin: true`.
+  admin and appends `~<userId>` to `roomId`. Uses persistent `'local'` identity
+  by default in browsers; pair with a saved `UserIdentity` when running outside
+  browsers.
+- `roles({admins: [userId1, userId2]})` - Trusts the specified 22-character
+  Base62 `userId`s as root room admins on either a fixed room name or alongside
+  `selfAsAdmin: true`.
 - `roles({maxClockSkewMs})` - Configures maximum tolerated future wall-clock
   skew in milliseconds for incoming signed authority records (default: `60000`,
   up to `86400000`).
@@ -1853,7 +1850,7 @@ inferred by TypeScript (`RoomWithPlugins`). See the
 ### `createUserIdentity()`
 
 Returns a promise resolving to a fresh self-certifying ECDSA P-256
-`UserIdentity` (`{userId, fingerprint, publicKey, signPubJwk, sign}`). Use
+`UserIdentity` (`{userId, publicKey, signPubJwk, sign}`). Use
 `exportUserIdentity(identity)` to serialize its private key material if you want
 to persist it in custom storage.
 

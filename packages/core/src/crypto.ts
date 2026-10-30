@@ -52,7 +52,7 @@ export const fromBase64Url = (b64url: string): Uint8Array => {
 export const base62Alphabet =
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 export const peerIdLength = 20
-export const fingerprintLength = 22
+export const userIdLength = 22
 const base64UrlRe = /^[A-Za-z0-9_-]+$/
 
 export const hash32 = (str: string): number => {

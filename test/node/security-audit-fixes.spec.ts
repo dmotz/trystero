@@ -226,7 +226,7 @@ void test('S1: multi-ring expander guarantees 100% reachability within deriveMax
 void test('S2: delegated or co-admin cannot demote root admin via cert replacement, revocation, or ban', async () => {
   const rootUser = await createUserIdentity()
   const modUser = await createUserIdentity()
-  const s2RoomId = `s2-room~${rootUser.fingerprint}`
+  const s2RoomId = `s2-room~${rootUser.userId}`
 
   const rootAuth = createRoomAuthority({
     selfId: 'root-ep',
@@ -1003,7 +1003,7 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
 void test('S10: AuthoritativeStateRecord binds userId in signature and validates userId/updatedBy shapes', async () => {
   const adminUser = await createUserIdentity()
   const otherUser = await createUserIdentity()
-  const s10RoomId = `s10-room~${adminUser.fingerprint}`
+  const s10RoomId = `s10-room~${adminUser.userId}`
   const auth = createRoomAuthority({
     selfId: 'admin-ep',
     appId: 's10-app',
@@ -1031,9 +1031,9 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
     }
   )
 
-  const rootFps = new Set([adminUser.fingerprint])
+  const rootUserIds = new Set([adminUser.userId])
   assert.equal(
-    await verifyStateRecord(rec, 's10-app', s10RoomId, ['admin'], rootFps),
+    await verifyStateRecord(rec, 's10-app', s10RoomId, ['admin'], rootUserIds),
     true
   )
 
@@ -1044,7 +1044,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
       's10-app',
       s10RoomId,
       ['admin'],
-      rootFps
+      rootUserIds
     ),
     false
   )
@@ -1054,7 +1054,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
       's10-app',
       s10RoomId,
       ['admin'],
-      rootFps
+      rootUserIds
     ),
     false
   )
@@ -1064,7 +1064,7 @@ void test('S11: multi-tab admin and multi-tab delegated moderator operate across
   const rootUser = await createUserIdentity()
   const modUser = await createUserIdentity()
   const targetUser = await createUserIdentity()
-  const s11RoomId = `s11-room~${rootUser.fingerprint}`
+  const s11RoomId = `s11-room~${rootUser.userId}`
 
   let sigFailures = 0
   const mkAuth = (
@@ -1114,7 +1114,7 @@ void test('S12: concurrent mutual bans/revocations between two delegated admins 
   const adminB = await createUserIdentity()
   const observer1User = await createUserIdentity()
   const observer2User = await createUserIdentity()
-  const s12RoomId = `s12-room~${rootUser.fingerprint}`
+  const s12RoomId = `s12-room~${rootUser.userId}`
 
   const mk = (
     selfId: string,
@@ -1248,7 +1248,7 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
       null
     let r2Reg: ((p: PeerHandle, id: string) => void | Promise<void>) | null =
       null
-    const s13RoomId = `s13-room~${adminUser.fingerprint}`
+    const s13RoomId = `s13-room~${adminUser.userId}`
     let senderRoomRef: Room | null = null
     let receiverRoomRef: Room | null = null
     const senderHs = createIdentityHandshake({
@@ -1619,7 +1619,7 @@ void test('S17: high-S P-256 signatures are rejected and revocation dedupe is im
   // Verify RoleRevocationRecord also rejects high-S and deduplicates by content
   const rootUser = await createUserIdentity()
   const targetUser = await createUserIdentity()
-  const s17RoomId = `s17-room~${rootUser.fingerprint}`
+  const s17RoomId = `s17-room~${rootUser.userId}`
   const auth = createRoomAuthority({
     selfId: 'root-s17',
     appId: 's17-app',
@@ -1660,7 +1660,7 @@ void test('S17: high-S P-256 signatures are rejected and revocation dedupe is im
       malleableRev,
       's17-app',
       s17RoomId,
-      new Set([rootUser.fingerprint])
+      new Set([rootUser.userId])
     ),
     false
   )
@@ -1916,7 +1916,7 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
 void test('D7: maxClockSkewMs configures clock tolerance and makeState causal epoch supersedes stale pre-rejoin state', async () => {
   const adminUser = await createUserIdentity()
   const guestUser = await createUserIdentity()
-  const d7RoomId = `d7-room~${adminUser.fingerprint}`
+  const d7RoomId = `d7-room~${adminUser.userId}`
 
   const strictGuest = createRoomAuthority({
     selfId: 'strict-guest',
@@ -2240,7 +2240,8 @@ void test('D13: SelfInfo and resolved UserIdentity surface persisted and identit
   })
   assert.equal(degradedIdentity.persisted, false)
   assert.equal(degradedIdentity.persistence, 'none')
-  assert.match(degradedIdentity.fingerprint, /^[0-9A-Za-z]{22}$/)
+  assert.match(degradedIdentity.userId, /^[0-9A-Za-z]{22}$/)
+  assert.equal('fingerprint' in degradedIdentity, false)
 
   const joinRoom = createTopicStrategy({
     init: () => Promise.resolve({}),
@@ -2282,7 +2283,7 @@ void test('D13: SelfInfo and resolved UserIdentity surface persisted and identit
   }
 })
 
-void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, computePayloadDigest tag separation & small-Blob parity, 12-byte GCM, 22-char fingerprint, unbiased genId, and Nostr kind dispersion', async () => {
+void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, computePayloadDigest tag separation & small-Blob parity, 12-byte GCM, 22-char Base62 userId, unbiased genId, and Nostr kind dispersion', async () => {
   // 1. signRoomAuth / verifyRoomAuth uses PBKDF2-HMAC-SHA256 with canonical JSON framing (no ':' collisions or single-SHA256 oracle)
   const validToken = await signRoomAuth(
     'pa:ss',
@@ -2406,11 +2407,11 @@ void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, compute
     await computePayloadDigest(smallBytes, {m: 1})
   )
   const admin = await createUserIdentity()
-  assert.match(admin.fingerprint, /^[0-9A-Za-z]{22}$/)
+  assert.match(admin.userId, /^[0-9A-Za-z]{22}$/)
   const blobAuth = createRoomAuthority({
     selfId: 'blob-admin-peer',
     appId: 'blob-app',
-    initialRoomId: `blob-room~${admin.fingerprint}`,
+    initialRoomId: `blob-room~${admin.userId}`,
     admin: {selfAsAdmin: true},
     getLocalUserIdentity: async () => admin
   })
@@ -2418,7 +2419,7 @@ void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, compute
   const blobCert = await blobAuth.issueRoleCertificate(admin.userId, ['admin'])
   const blobEnv = await signActionAuth(admin.sign, admin.signPubJwk, blobCert, {
     appId: 'blob-app',
-    roomId: `blob-room~${admin.fingerprint}`,
+    roomId: `blob-room~${admin.userId}`,
     namespace: 'media',
     peerId: 'blob-admin-peer',
     seq: 1,
@@ -2427,13 +2428,13 @@ void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, compute
   })
   const blobVerified = await verifyActionAuth(blobEnv, {
     appId: 'blob-app',
-    roomId: `blob-room~${admin.fingerprint}`,
+    roomId: `blob-room~${admin.userId}`,
     namespace: 'media',
     peerId: 'blob-admin-peer',
     expectedUserId: admin.userId,
     data: smallBytes,
     requiredRoles: ['admin'],
-    rootFingerprints: new Set([admin.fingerprint])
+    rootUserIds: new Set([admin.userId])
   })
   assert.equal(blobVerified.valid, true)
 

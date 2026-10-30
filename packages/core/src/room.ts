@@ -1081,7 +1081,6 @@ export default <
           identityPersistence,
           roomId: auth.roomId,
           baseRoomId: auth.baseRoomId,
-          fingerprint: auth.fingerprint,
           isAdmin: auth.isAdmin,
           roles: auth.roles
         }
@@ -1093,7 +1092,6 @@ export default <
         identityPersistence,
         roomId: effectiveRoomId,
         baseRoomId: initialRoomId,
-        fingerprint: null,
         isAdmin: false,
         roles: []
       }
