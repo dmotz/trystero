@@ -23,12 +23,12 @@ export type WsRelayRoomConfig = BaseRoomConfig & {
   relayConfig: WsRelayConfig
 }
 
-export type WsRelayClientMessage =
+type WsRelayClientMessage =
   | {type: 'subscribe'; topic: string}
   | {type: 'unsubscribe'; topic: string}
   | {type: 'publish'; topic: string; payload: StrategyMessage}
 
-export type WsRelayServerMessage = {
+type WsRelayServerMessage = {
   topic: string
   payload: StrategyMessage
 }
@@ -153,7 +153,53 @@ export {
   importUserIdentity,
   roles,
   scale,
-  setRelayConnectivity
+  setRelayConnectivity,
+  type ActionProgressContext,
+  type ActionProgressHandler,
+  type ActionReceiveContext,
+  type ActionReceiveHandler,
+  type AddMediaOptions,
+  type AuthoritativeState,
+  type DataPayload,
+  type JoinError,
+  type JoinRoomCallbacks,
+  type JsonValue,
+  type MessageAction,
+  type MessageActionConfig,
+  type MessageContext,
+  type PeerInfo,
+  type PeerJoinContext,
+  type PeerLeaveContext,
+  type PeerMediaContext,
+  type PeerResult,
+  type PeerTarget,
+  type RelayConnectivity,
+  type RemoveMediaOptions,
+  type RequestAction,
+  type RequestActionConfig,
+  type RequestContext,
+  type RequestManyOptions,
+  type RequestOptions,
+  type RoleCertificate,
+  type RolesConfig,
+  type RolesPluginApi,
+  type Room,
+  type RoomPlugin,
+  type RoomWithPlugins,
+  type ScaleConfig,
+  type ScalePluginApi,
+  type SelfInfo,
+  type SendOptions,
+  type StateChangeContext,
+  type StateConfig,
+  type TopologyMode,
+  type TopologyRoute,
+  type TopologySnapshot,
+  type TopologyStats,
+  type TurnServerConfig,
+  type UserIdentity,
+  type UserIdentityConfig,
+  type UserInfo,
+  type UserJoinContext,
+  type UserLeaveContext
 } from '@trystero-p2p/core'
-
-export type * from '@trystero-p2p/core'

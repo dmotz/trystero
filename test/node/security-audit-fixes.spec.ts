@@ -82,7 +82,7 @@ import {
   toBase64,
   toJson
 } from '../../packages/core/src/utils.ts'
-import {createEvent} from '../../packages/nostr/src/index.ts'
+import {createEvent, createSigner} from '../../packages/nostr/src/protocol.ts'
 import {
   LinkedPeer,
   linkPeers,
@@ -2501,11 +2501,14 @@ void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, compute
     `expected unbiased first-8 frequency near 800, got ${firstEightCount}`
   )
 
+  const signer = createSigner()
   const kinds = new Set<number>()
   let above24000 = 0
   for (let i = 0; i < 60; i++) {
     const t = await hashTopic(`nostr-kind-dispersion-${i}`)
-    const ev = JSON.parse(await createEvent(t, 'ping'))[1] as {kind: number}
+    const ev = JSON.parse(await createEvent(t, 'ping', signer))[1] as {
+      kind: number
+    }
     assert.ok(ev.kind >= 20_000 && ev.kind < 30_000)
     kinds.add(ev.kind)
     if (ev.kind >= 24_000) {

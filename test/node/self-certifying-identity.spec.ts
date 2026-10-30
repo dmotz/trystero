@@ -1886,6 +1886,144 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       false,
       `packages/${pkg} must not export createAdminRoom`
     )
+    assert.equal(
+      'createEvent' in mod,
+      false,
+      `packages/${pkg} must not leak Nostr createEvent`
+    )
+    assert.equal(
+      'subscribe' in mod,
+      false,
+      `packages/${pkg} must not leak dead subscribe helper`
+    )
+  }
+
+  // Importing trystero / @trystero-p2p/nostr must not invoke CSPRNG / keygen at import time
+  execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+        import assert from 'node:assert/strict'
+        import {resolve} from 'node:path'
+
+        let rngCalls = 0
+        const origGetRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto)
+        globalThis.crypto.getRandomValues = array => {
+          rngCalls += 1
+          return origGetRandomValues(array)
+        }
+
+        await import(resolve('packages/nostr/dist/index.mjs'))
+        await import(resolve('packages/trystero/dist/index.mjs'))
+        assert.equal(rngCalls, 0, 'importing nostr/trystero must not run CSPRNG keygen')
+      `
+    ],
+    {stdio: 'pipe'}
+  )
+
+  for (const strategyPkg of [
+    'nostr',
+    'mqtt',
+    'torrent',
+    'firebase',
+    'supabase',
+    'ws-relay'
+  ]) {
+    const strategyDts = readFileSync(
+      resolve(process.cwd(), `packages/${strategyPkg}/dist/index.d.mts`),
+      'utf8'
+    )
+    assert.equal(
+      strategyDts.includes('export type *'),
+      false,
+      `packages/${strategyPkg}/dist/index.d.mts must not wildcard re-export core types`
+    )
+    const exportedNames = new Set<string>()
+    for (const m of strategyDts.matchAll(
+      /^export (?:type|interface|declare const) (\w+)\b/gm
+    )) {
+      if (m[1]) {
+        exportedNames.add(m[1])
+      }
+    }
+    for (const m of strategyDts.matchAll(/^export \{([^}]+)\}/gm)) {
+      for (const part of (m[1] ?? '').split(',')) {
+        const cleaned = part
+          .trim()
+          .replace(/^type\s+/, '')
+          .split(/\s+as\s+/)
+          .at(-1)
+          ?.trim()
+        if (cleaned) {
+          exportedNames.add(cleaned)
+        }
+      }
+    }
+
+    for (const leaked of [
+      'ActionOptions',
+      'AuthoritativeStateRecord',
+      'BaseRelayConfig',
+      'BaseRoomConfig',
+      'InferPluginApi',
+      'InternalAction',
+      'JoinErrorHandler',
+      'JoinRoom',
+      'JsonPrimitive',
+      'KernelRolesProvider',
+      'KernelScaleProvider',
+      'MaybePromise',
+      'OfferRecord',
+      'PeerBanRecord',
+      'PeerHandle',
+      'PeerHandlers',
+      'ResolvedIdentityPersistence',
+      'RoleRevocationRecord',
+      'RoomKernel',
+      'Signal',
+      'SignalPeer',
+      'SocketClient',
+      'StrategyAdapter',
+      'StrategyContext',
+      'StrategyMessage',
+      'StrategyOnMessage',
+      'TargetPeers',
+      'TopicPublishContext',
+      'TopicStrategyAdapter',
+      'TopicSubscriptionContext',
+      'UserIdentityPersistence',
+      'WsRelayClientMessage',
+      'WsRelayServerMessage',
+      'createEvent',
+      'subscribe'
+    ]) {
+      assert.equal(
+        exportedNames.has(leaked),
+        false,
+        `${leaked} must not be exported from packages/${strategyPkg}/dist/index.d.mts`
+      )
+    }
+    for (const kept of [
+      'Room',
+      'RoomWithPlugins',
+      'RoomPlugin',
+      'MessageAction',
+      'RequestAction',
+      'SendOptions',
+      'AuthoritativeState',
+      'UserIdentity',
+      'SelfInfo',
+      'PeerInfo',
+      'UserInfo'
+    ]) {
+      assert.equal(
+        exportedNames.has(kept),
+        true,
+        `${kept} must remain exported from packages/${strategyPkg}/dist/index.d.mts`
+      )
+    }
   }
 
   const indexDts = readFileSync(

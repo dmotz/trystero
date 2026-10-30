@@ -4,7 +4,25 @@ import {readFile, writeFile} from 'node:fs/promises'
 import {createServer} from 'node:http'
 import WebSocket, {WebSocketServer} from 'ws'
 import {chromium, type Browser} from 'playwright'
-import {createEvent, subscribe} from '@trystero-p2p/nostr'
+import {
+  createEvent,
+  createSigner,
+  subscribeSince,
+  tag,
+  topicToKind
+} from '../packages/nostr/src/protocol.ts'
+
+const probeSigner = createSigner()
+const subscribe = (subId: string, topic: string): string =>
+  JSON.stringify([
+    'REQ',
+    subId,
+    {
+      kinds: [topicToKind(topic)],
+      since: subscribeSince(),
+      ['#' + tag]: [topic]
+    }
+  ])
 
 // NIP-66: https://github.com/nostr-protocol/nips/blob/master/66.md
 // Health estimates use fresh monitor agreement and two live round trips,
@@ -192,10 +210,10 @@ const discover = (url = discoveryUrl, deadlineMs = 30_000): Promise<Report[]> =>
 const probe = async (url: string): Promise<number> => {
   const topic = randomUUID()
   const subId = randomUUID()
-  const payload = await createEvent(topic, randomUUID())
+  const payload = await createEvent(topic, randomUUID(), probeSigner)
   const event = JSON.parse(payload)[1]
   // Match test:relays too: reject relays that require an existing listener.
-  const preflight = await createEvent(randomUUID(), randomUUID())
+  const preflight = await createEvent(randomUUID(), randomUUID(), probeSigner)
   const preflightId = JSON.parse(preflight)[1].id
   const start = performance.now()
   const reader = new WebSocket(url)

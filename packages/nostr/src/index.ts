@@ -1,8 +1,6 @@
-import {schnorr} from '@noble/secp256k1'
 import {
   createRelayManager,
   createTopicStrategy,
-  encodeBytes,
   fromJson,
   genId,
   getRelays,
@@ -13,17 +11,18 @@ import {
   type JoinRoomConfig,
   type SocketClient
 } from '@trystero-p2p/core'
-
-const toHex = (bytes: Uint8Array): string =>
-  Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+import {
+  createEvent,
+  createSigner,
+  eventMsgType,
+  subscribeSince,
+  tag,
+  topicToKind,
+  type NostrSigner
+} from './protocol'
 
 const relayManager = createRelayManager<SocketClient>(client => client.socket)
 const defaultRedundancy = 5
-const tag = 'x'
-const eventMsgType = 'EVENT'
-const {secretKey, publicKey} = schnorr.keygen()
-const pubkey = toHex(publicKey)
-const kindCache: Record<string, number> = {}
 const maxTopicsPerSubscription = 250
 
 // Newcomers announce immediately and wake subscribed incumbents, so the fast
@@ -38,9 +37,33 @@ type RelayBackoffState = {
   untilMs: number
 }
 
+type RoomSignerState = {
+  signer?: NostrSigner
+  refs: number
+}
+
+type AnnouncementRecord = {
+  payload: string
+  getSigner: () => NostrSigner
+}
+
+const roomSigners: Record<string, RoomSignerState> = {}
 const relayBackoffs = new WeakMap<SocketClient, RelayBackoffState>()
-const announcementMessages = relayManager.scoped<string>()
+const announcementMessages = relayManager.scoped<AnnouncementRecord>()
 const retiredRelays = new WeakSet<SocketClient>()
+
+const getRoomKey = (rootTopic: string, selfTopic: string): string =>
+  `${rootTopic}\0${selfTopic}`
+
+const getRoomSigner = (key: string): NostrSigner => {
+  const state = roomSigners[key]
+
+  if (!state) {
+    return createSigner()
+  }
+
+  return (state.signer ??= createSigner())
+}
 
 const backoffRelay = (client: SocketClient): number => {
   const previous = relayBackoffs.get(client)
@@ -87,88 +110,6 @@ const retireRelay = (client: SocketClient): boolean => {
 }
 
 export type NostrRoomConfig = JoinRoomConfig
-
-const subscribeClockSkewSeconds = 60
-
-const now = (): number => Math.floor(Date.now() / 1000)
-
-const subscribeSince = (): number =>
-  Math.max(0, now() - subscribeClockSkewSeconds)
-
-const sha256TopicRe = /^[A-Za-z0-9_-]{43}$/
-
-const deriveTopicKind = (topic: string): number => {
-  if (sha256TopicRe.test(topic)) {
-    const bin = atob(topic.slice(0, 8).replace(/-/g, '+').replace(/_/g, '/'))
-    let val = 0
-    for (let i = 0; i < 6; i++) {
-      val = val * 256 + bin.charCodeAt(i)
-    }
-    return (val % 10_000) + 20_000
-  }
-  const bytes = encodeBytes(topic)
-  let h = 0x811c9dc5
-  for (let i = 0; i < bytes.byteLength; i++) {
-    h = Math.imul(h ^ bytes[i]!, 0x01000193)
-  }
-  h ^= h >>> 16
-  h = Math.imul(h, 0x85ebca6b)
-  h ^= h >>> 13
-  h = Math.imul(h, 0xc2b2ae35)
-  return (((h ^ (h >>> 16)) >>> 0) % 10_000) + 20_000
-}
-
-const topicToKind = (topic: string): number =>
-  (kindCache[topic] ??= deriveTopicKind(topic))
-
-export const createEvent = async (
-  topic: string,
-  content: string
-): Promise<string> => {
-  const payload = {
-    kind: topicToKind(topic),
-    tags: [[tag, topic]],
-    created_at: now(),
-    content,
-    pubkey
-  }
-
-  const id = new Uint8Array(
-    await crypto.subtle.digest(
-      'SHA-256',
-      encodeBytes(
-        toJson([
-          0,
-          payload.pubkey,
-          payload.created_at,
-          payload.kind,
-          payload.tags,
-          payload.content
-        ])
-      ) as BufferSource
-    )
-  )
-
-  return toJson([
-    eventMsgType,
-    {
-      ...payload,
-      id: toHex(id),
-      sig: toHex(await schnorr.signAsync(id, secretKey))
-    }
-  ])
-}
-
-export const subscribe = (subId: string, topic: string): string =>
-  toJson([
-    'REQ',
-    subId,
-    {
-      kinds: [topicToKind(topic)],
-      since: subscribeSince(),
-      ['#' + tag]: [topic]
-    }
-  ])
 
 type TopicHandler = (topic: string, data: string) => void
 
@@ -329,8 +270,8 @@ const resubscribeOnReconnect = (client: SocketClient): void => {
 
 const replayAnnouncements = (client: SocketClient): void => {
   Object.entries(announcementMessages.forRelay(client)).forEach(
-    ([topic, payload]) => {
-      void publishMessage(client, topic, payload, true)
+    ([topic, {payload, getSigner}]) => {
+      void publishMessage(client, topic, payload, true, getSigner)
     }
   )
 }
@@ -339,7 +280,8 @@ const publishMessage = async (
   client: SocketClient,
   topic: string,
   payload: string,
-  isAnnouncement: boolean
+  isAnnouncement: boolean,
+  getSigner: () => NostrSigner
 ) => {
   if (retiredRelays.has(client) || client.isClosed) {
     return isAnnouncement ? stopAnnouncing : undefined
@@ -356,7 +298,8 @@ const publishMessage = async (
     topic,
     isAnnouncement
       ? toJson({...fromJson<Record<string, unknown>>(payload), nonce: genId(8)})
-      : payload
+      : payload,
+    getSigner()
   )
   if (isAnnouncement && !batchers[client.url]?.topics.has(topic)) {
     return nextAnnounce(steadyAnnounceIntervalMs)
@@ -512,11 +455,27 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
     }),
 
   subscribeTopic: (client, topic, onMessage, context) => {
+    const key = getRoomKey(context.rootTopic, context.selfTopic)
+    ;(roomSigners[key] ??= {refs: 0}).refs += 1
+    let didReleaseSigner = false
     const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
 
     batchAdd(client, topic, handler)
 
     const cleanup = () => {
+      if (!didReleaseSigner) {
+        didReleaseSigner = true
+        const state = roomSigners[key]
+
+        if (state) {
+          state.refs -= 1
+
+          if (state.refs <= 0) {
+            delete roomSigners[key]
+          }
+        }
+      }
+
       if (batchers[client.url]?.topics.get(topic) === handler) {
         batchRemove(client, topic)
       }
@@ -530,17 +489,29 @@ export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
       : cleanup
   },
 
-  publishTopic: (client, topic, msg, {kind}) => {
+  publishTopic: (client, topic, msg, {kind, rootTopic, selfTopic}) => {
     const payload = typeof msg === 'string' ? msg : toJson(msg)
+    const key = getRoomKey(rootTopic, selfTopic)
+    const getSigner = () => getRoomSigner(key)
+
     if (kind === 'announce') {
-      announcementMessages.forRelay(client)[topic] = payload
+      announcementMessages.forRelay(client)[topic] = {payload, getSigner}
     }
-    return publishMessage(client, topic, payload, kind === 'announce')
+
+    return publishMessage(
+      client,
+      topic,
+      payload,
+      kind === 'announce',
+      getSigner
+    )
   }
 })
 
 export const getRelaySockets: () => Record<string, WebSocket> =
   relayManager.getSockets
+
+export type {JoinRoomConfig}
 
 export {
   clearUserIdentity,
@@ -550,7 +521,56 @@ export {
   importUserIdentity,
   roles,
   scale,
-  setRelayConnectivity
+  setRelayConnectivity,
+  type ActionProgressContext,
+  type ActionProgressHandler,
+  type ActionReceiveContext,
+  type ActionReceiveHandler,
+  type AddMediaOptions,
+  type AuthoritativeState,
+  type DataPayload,
+  type JoinError,
+  type JoinRoomCallbacks,
+  type JsonValue,
+  type MessageAction,
+  type MessageActionConfig,
+  type MessageContext,
+  type PeerInfo,
+  type PeerJoinContext,
+  type PeerLeaveContext,
+  type PeerMediaContext,
+  type PeerResult,
+  type PeerTarget,
+  type RelayConfig,
+  type RelayConnectivity,
+  type RemoveMediaOptions,
+  type RequestAction,
+  type RequestActionConfig,
+  type RequestContext,
+  type RequestManyOptions,
+  type RequestOptions,
+  type RoleCertificate,
+  type RolesConfig,
+  type RolesPluginApi,
+  type Room,
+  type RoomPlugin,
+  type RoomWithPlugins,
+  type ScaleConfig,
+  type ScalePluginApi,
+  type SelfInfo,
+  type SendOptions,
+  type StateChangeContext,
+  type StateConfig,
+  type TopologyMode,
+  type TopologyRoute,
+  type TopologySnapshot,
+  type TopologyStats,
+  type TurnServerConfig,
+  type UserIdentity,
+  type UserIdentityConfig,
+  type UserInfo,
+  type UserJoinContext,
+  type UserLeaveContext
 } from '@trystero-p2p/core'
 
 export const defaultRelayUrls: string[] = [
@@ -584,5 +604,3 @@ export const defaultRelayUrls: string[] = [
   'relay.routstr.com',
   'testr.nymble.world'
 ].map(url => 'wss://' + url)
-
-export type * from '@trystero-p2p/core'
