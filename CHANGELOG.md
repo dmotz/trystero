@@ -29,22 +29,22 @@
   `joinRoom({appId, use: [roles(...)]})` (`roles()`,
   `roles({selfAsAdmin: true})`, and `roles({admins: [...]})`) for zero-trust
   public-key room administration unified with user identity (`userId`). Passing
-  `roles({selfAsAdmin: true})` appends a `~` separator and 16-character Base62
-  fingerprint suffix derived from the host's `userId` to the room ID
-  (`<roomId>~<fingerprint>`) so guests automatically verify the room creator
-  from the invite room ID alone (when joining with `use: [roles()]`), and the
-  host automatically regains admin authority when rejoining with the same
-  persistent `userId`. Joining a fingerprinted room ID without `roles()` throws
-  an error. Apps that do not import `roles()` tree-shake the entire authority
-  plugin out of their bundle.
+  `roles({selfAsAdmin: true})` appends a `~` separator and the host's
+  22-character Base62 `userId` to the room ID (`<roomId>~<userId>`) so guests
+  automatically verify the room creator from the invite room ID alone (when
+  joining with `use: [roles()]`), and the host automatically regains admin
+  authority when rejoining with the same persistent `userId`. Joining a
+  self-certifying `<roomId>~<userId>` room ID without `roles()` throws an error.
+  Apps that do not import `roles()` tree-shake the entire authority plugin out
+  of their bundle.
 - Added `room.ready` (resolving once the local endpoint identity is initialized
   and any configured `use` plugins have attached their methods to `room`),
   `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`, `room.ban()`,
   `room.isBanned()` (on rooms configured with `roles()`), and expanded
   `room.getSelf()` (returning
-  `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`), plus
-  top-level helper `definePlugin()` (for authoring custom/3rd-party room plugins
-  with TypeScript return-type inference via `use: [...]`).
+  `{peerId, userId, roomId, baseRoomId, isAdmin, roles}`), plus top-level helper
+  `definePlugin()` (for authoring custom/3rd-party room plugins with TypeScript
+  return-type inference via `use: [...]`).
 - Actions now accept a `roles` option (`makeAction(name, {roles})`) to restrict
   sending or requesting to `'admin'` or specific custom roles, with the sender's
   verified `roles` included in `onMessage` and `onRequest` contexts.
@@ -65,9 +65,8 @@
   peer now has both a lazily generated self-certifying 20-character Base62
   endpoint `peerId` (derived from its ECDSA P-256 public key and verified with
   DTLS fingerprint binding during the direct WebRTC handshake, plus signed
-  descriptors across multi-hop overlays) and a persistent 43-character Base64url
-  `userId` ([RFC 7638](https://www.rfc-editor.org/rfc/rfc7638.html) public-key
-  thumbprint).
+  descriptors across multi-hop overlays) and a persistent 22-character Base62
+  `userId` (derived from its ECDSA P-256 public key).
 - Added `identity` to room config (`'local'` default in browsers stored in
   IndexedDB as a non-extractable `CryptoKey` across tabs and future visits,
   `'none'` for ephemeral runtime, or a custom `UserIdentity` / loader function),
