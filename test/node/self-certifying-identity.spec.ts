@@ -864,7 +864,7 @@ void test(
       },
       roomId
     )
-    honestRoom.onJoinError(err => honestErrors.push(err))
+    honestRoom.onError(err => honestErrors.push(err))
     honestRoom.onPeerJoin(ctx => honestJoins.push(ctx))
 
     const mitmRoom = makeJoinRoom('peer-mitm')(
@@ -874,7 +874,7 @@ void test(
       },
       roomId
     )
-    mitmRoom.onJoinError(err => mitmErrors.push(err))
+    mitmRoom.onError(err => mitmErrors.push(err))
 
     try {
       await waitFor(
@@ -883,10 +883,12 @@ void test(
       )
       const allErrors = [...honestErrors, ...mitmErrors]
       assert.ok(
-        allErrors.some(e =>
-          /DTLS fingerprint mismatch|peer identity verification failed/.test(
-            e.error
-          )
+        allErrors.some(
+          e =>
+            e.code === 'handshake-failed' &&
+            /DTLS fingerprint mismatch|peer identity verification failed/.test(
+              e.message
+            )
         ),
         'DTLS fingerprint mismatch must fail identity handshake'
       )
@@ -1007,7 +1009,7 @@ void test(
       },
       roomId
     )
-    aliceTab2.onJoinError(err => aliceTab2Errors.push(err))
+    aliceTab2.onError(err => aliceTab2Errors.push(err))
 
     await waitFor(
       () =>
@@ -1030,11 +1032,12 @@ void test(
       },
       roomId
     )
-    intruderRoom.onJoinError(err => intruderErrors.push(err))
+    intruderRoom.onError(err => intruderErrors.push(err))
 
     try {
       await waitFor(() => intruderErrors.length > 0, 3_000)
-      assert.equal(intruderErrors[0].error, 'room full')
+      assert.equal(intruderErrors[0].code, 'room-full')
+      assert.equal(intruderErrors[0].message, 'room full')
     } finally {
       await Promise.all([
         hostRoom.leave().catch(() => {}),
@@ -1147,6 +1150,10 @@ void test(
       assert.equal(adminTopicState.getMeta()?.peerId, 'peer-alice-2')
       assert.equal(adminTopicState.getMeta()?.userId, aliceUser.userId)
 
+      const adminErrors: any[] = []
+      const attackerTab1Errors: any[] = []
+      adminRoom.onError(err => adminErrors.push(err))
+
       // Attacker joins, gets banned by userId, and then tries to evade the ban by opening a new tab with a fresh peerId
       attackerTab1 = makeJoinRoom('peer-attacker-1')(
         {
@@ -1157,9 +1164,17 @@ void test(
         },
         authInfo.roomId
       )
+      attackerTab1.onError(err => attackerTab1Errors.push(err))
       await waitFor(() => 'peer-attacker-1' in adminRoom.getPeers(), 3_000)
       await adminRoom.ban(attackerUser.userId, {reason: 'disruptor'})
-      await waitFor(() => !('peer-attacker-1' in adminRoom.getPeers()), 3_000)
+      await waitFor(
+        () =>
+          !('peer-attacker-1' in adminRoom.getPeers()) &&
+          attackerTab1Errors.length > 0,
+        3_000
+      )
+      assert.equal(attackerTab1Errors[0].code, 'banned')
+      assert.equal(attackerTab1Errors[0].reason, 'disruptor')
       await attackerTab1.leave()
 
       const attackerTab2Errors: any[] = []
@@ -1172,12 +1187,19 @@ void test(
         },
         authInfo.roomId
       )
-      attackerTab2.onJoinError(err => attackerTab2Errors.push(err))
+      attackerTab2.onError(err => attackerTab2Errors.push(err))
 
       await waitFor(() => attackerTab2Errors.length > 0, 3_000)
       assert.ok(
-        attackerTab2Errors.some(e => /peer banned/.test(e.error)),
-        'banned userId opening a new tab must be rejected during handshake'
+        attackerTab2Errors.some(
+          e => e.code === 'banned' && e.reason === 'disruptor'
+        ),
+        'banned userId opening a new tab must be rejected during handshake with reason'
+      )
+      assert.deepEqual(
+        adminErrors,
+        [],
+        'admin enforcing a ban must not receive banned error'
       )
       assert.equal('peer-attacker-2' in adminRoom.getPeers(), false)
 
@@ -1194,7 +1216,7 @@ void test(
         },
         authInfo.roomId
       )
-      limiterRoom.onJoinError(err => limiterErrors.push(err))
+      limiterRoom.onError(err => limiterErrors.push(err))
 
       await wait(200)
       assert.deepEqual(limiterErrors, [])

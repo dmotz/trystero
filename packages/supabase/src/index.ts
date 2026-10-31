@@ -97,9 +97,12 @@ const createChannelEntry = (
   topic: string
 ): ChannelEntry => {
   let resolveReady: ((chan: RealtimeChannel) => void) | null = null
-  const ready = new Promise<RealtimeChannel>(res => {
+  let rejectReady: ((err: Error) => void) | null = null
+  const ready = new Promise<RealtimeChannel>((res, rej) => {
     resolveReady = res
+    rejectReady = rej
   })
+  void ready.catch(() => {})
 
   const channel = client.channel(getChannelName(topic), {
     config: {broadcast: {self: false}}
@@ -115,7 +118,23 @@ const createChannelEntry = (
 
   let didSubscribe = false
 
-  channel.subscribe(status => {
+  channel.subscribe((status, err) => {
+    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      if (!didSubscribe) {
+        const cache = getChannelCache(client)
+        if (cache.channels[topic] === entry) {
+          delete cache.channels[topic]
+        }
+        void client.removeChannel(channel)
+        rejectReady?.(
+          err instanceof Error ? err : new Error(`Supabase channel ${status}`)
+        )
+        resolveReady = null
+        rejectReady = null
+      }
+      return
+    }
+
     if (status !== 'SUBSCRIBED') {
       return
     }
@@ -124,6 +143,7 @@ const createChannelEntry = (
       didSubscribe = true
       resolveReady?.(channel)
       resolveReady = null
+      rejectReady = null
       return
     }
 

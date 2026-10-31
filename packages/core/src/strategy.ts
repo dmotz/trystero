@@ -26,6 +26,7 @@ import {
   all,
   entries,
   getConfiguredPlugins,
+  getSocketInitialFailure,
   keys,
   libName,
   log,
@@ -44,10 +45,10 @@ import {
 } from './utils'
 import type {
   BaseRoomConfig,
-  JoinError,
   JoinRoom,
   JoinRoomConfig,
   PeerHandle,
+  RoomError,
   RoomPlugin,
   RoomWithPlugins,
   Signal,
@@ -92,7 +93,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     if (extra.length > 0 && extra[0] !== undefined) {
       throw mkErr(
-        'joinRoom takes 2 arguments; register join error listeners via room.onJoinError(fn)'
+        'joinRoom takes 2 arguments; register error listeners via room.onError(fn)'
       )
     }
 
@@ -147,24 +148,28 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     let didLeaveRoom = false
     let isLeavingRoom = false
     let didReportSetupError = false
+    let didReportRelayError = false
     let effectiveRoomId = roomId
     const bridgeRef: {current?: RoomSignalingBridge | undefined} = {}
-    const emitJoinError = (details: JoinError): void => {
+    const emitError = (error: RoomError): void => {
       if (!didLeaveRoom) {
-        bridgeRef.current?.emitJoinError(details)
+        bridgeRef.current?.emitError(error)
       }
     }
     const userIdentityP = resolveUserIdentity(appId, roomId, config).catch(
-      async err => {
+      err => {
         didReportSetupError = true
-        if (!didLeaveRoom) {
-          emitJoinError({
-            error: toErrorMessage(err, 'identity resolution failed'),
-            appId,
-            peerId: await selfIdP,
-            roomId: effectiveRoomId
-          })
-        }
+        queueMicrotask(() => {
+          if (!didLeaveRoom) {
+            emitError({
+              code: 'identity-failed',
+              message: toErrorMessage(err, 'identity resolution failed'),
+              appId,
+              roomId: effectiveRoomId,
+              cause: err
+            })
+          }
+        })
         throw err
       }
     )
@@ -176,6 +181,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       | undefined
     for (const plugin of plugins) {
       if (plugin.resolveRoomId) {
+        const pluginName = plugin.name
         const resP = plugin.resolveRoomId({appId, roomId, userIdentityP})
         if (resP) {
           resolvedRoomIdP = resP.then(
@@ -183,14 +189,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
               preResolvedPlugins.set(plugin, res.state)
               return res
             },
-            async err => {
+            err => {
               if (!didReportSetupError && !didLeaveRoom) {
                 didReportSetupError = true
-                emitJoinError({
-                  error: toErrorMessage(err, 'room resolution failed'),
-                  appId,
-                  peerId: await selfIdP,
-                  roomId: effectiveRoomId
+                queueMicrotask(() => {
+                  if (!didLeaveRoom) {
+                    emitError({
+                      code: 'plugin-failed',
+                      plugin: pluginName,
+                      message: toErrorMessage(err, 'room resolution failed'),
+                      appId,
+                      roomId: effectiveRoomId,
+                      cause: err
+                    })
+                  }
                 })
               }
               throw err
@@ -363,7 +375,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       toPlain,
       toCipher,
       isLeaving: () => didLeaveRoom || isLeavingRoom,
-      onJoinError: emitJoinError,
+      onError: emitError,
       offerManager,
       encryptOffer,
       initPeer,
@@ -393,8 +405,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     if (!didInit) {
       const initRes = init(config)
-      initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(value =>
-        Promise.resolve(value)
+      initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(
+        value => {
+          const p = Promise.resolve(value)
+          void p.catch(noOp)
+          return p
+        }
       )
       didInit = true
     }
@@ -406,17 +422,70 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const announceTimeouts: Array<ReturnType<typeof setTimeout> | undefined> =
       []
 
+    const totalRelays = initPromises.length
+    const relayBootStates = new Map<number, 'ok' | 'failed'>()
+    let anyRelayBootHealthy = false
+    let lastRelayBootError: unknown
+    const reportAllRelaysFailed = (cause: unknown): void => {
+      if (didReportRelayError || didReportSetupError || didLeaveRoom) {
+        return
+      }
+      didReportRelayError = true
+      queueMicrotask(() => {
+        if (!didLeaveRoom) {
+          emitError({
+            code: 'relay-failed',
+            message: toErrorMessage(cause, 'all signaling relays failed'),
+            appId,
+            roomId: effectiveRoomId,
+            ...(cause !== undefined ? {cause} : {})
+          })
+        }
+      })
+    }
+    const markRelayHealthy = (i: number): void => {
+      anyRelayBootHealthy = true
+      relayBootStates.set(i, 'ok')
+    }
+    const markRelayFailed = (i: number, err: unknown): void => {
+      if (anyRelayBootHealthy || relayBootStates.has(i)) {
+        return
+      }
+      relayBootStates.set(i, 'failed')
+      lastRelayBootError = err
+      if (totalRelays > 0 && relayBootStates.size === totalRelays) {
+        reportAllRelaysFailed(lastRelayBootError)
+      }
+    }
+
+    initPromises.forEach((relayP, i) => {
+      const socketFailureP = getSocketInitialFailure(relayP)
+      if (socketFailureP) {
+        void socketFailureP.then(err => {
+          if (err) {
+            markRelayFailed(i, err)
+          }
+        })
+      }
+    })
+
     const unsubFns = initPromises.map(async (relayP, i) => {
+      let rootTopic: string
+      let selfTopic: string
       try {
-        const [relay, rootTopic, selfTopic] = await all([
-          relayP,
-          rootTopicP,
-          selfTopicP
-        ])
+        ;[rootTopic, selfTopic] = await all([rootTopicP, selfTopicP])
+      } catch {
+        return noOp
+      }
+      if (didLeaveRoom) {
+        return noOp
+      }
+      try {
+        const relay = await relayP
         if (didLeaveRoom) {
           return noOp
         }
-        return await subscribe(
+        const unsub = await subscribe(
           relay,
           rootTopic,
           selfTopic,
@@ -429,10 +498,17 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             ),
           strategyContext
         )
-      } catch {
+        markRelayHealthy(i)
+        return unsub
+      } catch (err) {
+        markRelayFailed(i, err)
         return noOp
       }
     })
+
+    const initialAnnounceOutcomes = new Map<number, 'ok' | 'failed'>()
+    let anyInitialAnnounceSucceeded = false
+    let lastInitialAnnounceError: unknown
 
     if (!isPassive) {
       void all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
@@ -451,6 +527,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           let announceResult: Awaited<
             ReturnType<StrategyAdapter<TRelay, TConfig>['announce']>
           > = undefined
+          const isInitialAnnounce = !initialAnnounceOutcomes.has(i)
 
           try {
             announceResult = await announce(
@@ -460,6 +537,10 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
               strategyContext
             )
             announceErrorStreaks[i] = 0
+            if (isInitialAnnounce) {
+              anyInitialAnnounceSucceeded = true
+              initialAnnounceOutcomes.set(i, 'ok')
+            }
           } catch (error) {
             if (didLeaveRoom) {
               return
@@ -475,6 +556,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             }
 
             announceErrorStreaks[i] = errorStreak + 1
+            if (isInitialAnnounce) {
+              initialAnnounceOutcomes.set(i, 'failed')
+              lastInitialAnnounceError = error
+              if (
+                !anyInitialAnnounceSucceeded &&
+                totalRelays > 0 &&
+                initialAnnounceOutcomes.size +
+                  [...relayBootStates.values()].filter(s => s === 'failed')
+                    .length >=
+                  totalRelays
+              ) {
+                reportAllRelaysFailed(lastInitialAnnounceError)
+              }
+            }
           }
 
           if (didLeaveRoom) {
@@ -659,14 +754,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         announceTimeouts.length = 0
         releaseOccupiedRoom()
         ;(leavingRoomCleanups[appId] ??= {})[roomId] = cleanupRoom
-      },
-      onHandshakeError: (peerId: string, error: string) =>
-        emitJoinError({
-          error: error.replace(/^handshake failed: /, ''),
-          appId,
-          peerId,
-          roomId: effectiveRoomId
-        })
+      }
     }
 
     occupiedRooms[appId] ??= {}

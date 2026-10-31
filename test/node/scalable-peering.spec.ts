@@ -4877,7 +4877,7 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     }),
     connectPeer: () => {},
     disconnectPeer: () => {},
-    onJoinError: undefined,
+    onError: undefined,
     onPeerDiscovered: () => {
       discoveredCount++
     }

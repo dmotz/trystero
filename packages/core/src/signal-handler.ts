@@ -248,10 +248,10 @@ const hasTurnServer = (config: BaseRoomConfig): boolean => {
 
 const getSdpExchangeConnectionError = (
   peerId: string,
-  config: BaseRoomConfig
+  turnConfigured: boolean
 ): string =>
   `could not connect to peer ${peerId} after exchanging SDP; ${
-    hasTurnServer(config)
+    turnConfigured
       ? 'verify TURN server URLs and credentials'
       : 'configure TURN via turnConfig or rtcConfig.iceServers'
   }`
@@ -269,10 +269,13 @@ const reportSdpExchangeConnectionFailure = (
   }
 
   state.connectionErrorReported = true
-  ctx.onJoinError?.({
-    error: getSdpExchangeConnectionError(peerId, ctx.config),
-    appId: ctx.appId,
+  const turnConfigured = hasTurnServer(ctx.config)
+  ctx.onError?.({
+    code: 'peer-connect-failed',
     peerId,
+    turnConfigured,
+    message: getSdpExchangeConnectionError(peerId, turnConfigured),
+    appId: ctx.appId,
     roomId: ctx.roomId
   })
 }
@@ -817,12 +820,15 @@ const handleOffer = async (
 
   try {
     plainOffer = await ctx.toPlain({type: 'offer', sdp: offer}, peerId, offerId)
-  } catch {
-    ctx.onJoinError?.({
-      error: badPasswordMsg('offer'),
-      appId: ctx.appId,
+  } catch (err) {
+    ctx.onError?.({
+      code: 'decrypt-failed',
       peerId,
-      roomId: ctx.roomId
+      stage: 'offer',
+      message: badPasswordMsg('offer'),
+      appId: ctx.appId,
+      roomId: ctx.roomId,
+      cause: err
     })
     return
   }
@@ -1054,7 +1060,7 @@ const handleAnswer = async (
       peerId,
       offerId
     )
-  } catch {
+  } catch (err) {
     if (peer) {
       ctx.offerManager.reclaimLeased(peer)
       if (!peer.isDead) {
@@ -1062,11 +1068,14 @@ const handleAnswer = async (
       }
     }
 
-    ctx.onJoinError?.({
-      error: badPasswordMsg('answer'),
-      appId: ctx.appId,
+    ctx.onError?.({
+      code: 'decrypt-failed',
       peerId,
-      roomId: ctx.roomId
+      stage: 'answer',
+      message: badPasswordMsg('answer'),
+      appId: ctx.appId,
+      roomId: ctx.roomId,
+      cause: err
     })
     return
   }

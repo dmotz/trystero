@@ -632,7 +632,7 @@ room. For example, you might be building:
 
 To set an advisory per-peer limit on how many unique users (`userId`s, including
 the local user) can be in a peer's room view at once, pass `limit` in your
-`joinRoom()` config and listen for `'room full'` via `room.onJoinError()`:
+`joinRoom()` config and listen for `'room-full'` via `room.onError()`:
 
 ```js
 const room = joinRoom(
@@ -643,8 +643,8 @@ const room = joinRoom(
   'match-42'
 )
 
-room.onJoinError(({error}) => {
-  if (error === 'room full') {
+room.onError(err => {
+  if (err.code === 'room-full') {
     showBanner('Sorry, this match is already full!')
   }
 })
@@ -653,7 +653,7 @@ room.onJoinError(({error}) => {
 When a peer's room view is already at capacity:
 
 - Any extra user (`userId`) who tries to connect is refused by that peer before
-  activation, receives `error: 'room full'` in `onJoinError`, and has that peer
+  activation, receives `{code: 'room-full'}` in `onError`, and has that peer
   link closed.
 - Because `limit` counts unique `userId`s rather than raw tabs, an admitted
   player who refreshes the page or opens another tab shares their existing seat.
@@ -673,15 +673,15 @@ When a peer's room view is already at capacity:
 - **No self-eviction or unverified `'room full'` propagation**: A peer never
   evicts itself and never drops connections to other peers just because a remote
   peer claims `'room full'`. A `'room full'` response only closes that single
-  peer link and reports `onJoinError` for that peer. For authoritative roster
-  enforcement backed by a cryptographic trust root, use
+  peer link and reports `onError` (`{code: 'room-full'}`) for that peer. For
+  authoritative roster enforcement backed by a cryptographic trust root, use
   [`roles()`](#room-admins-roles-and-authoritative-state).
 - **Password privacy**: In password-protected rooms (`config.password`), SDP
   offers and answers are encrypted and authenticated with the PBKDF2-derived
   room key _before_ any WebRTC data channel opens or room capacity is checked.
-  Users with the wrong password fail signaling decryption (`onJoinError` with
-  `reason: 'decrypt'`) rather than receiving `'room full'`, so outsiders cannot
-  probe whether a private room is full.
+  Users with the wrong password fail signaling decryption (`onError` with
+  `code: 'decrypt-failed'`) rather than receiving `'room-full'`, so outsiders
+  cannot probe whether a private room is full.
 - **Multi-hop rooms**: When `scale()` is enabled, local capacity checks also
   account for verified multi-hop overlay peers.
 
@@ -870,8 +870,10 @@ await room.revokeRole(userId, 'moderator')
 await room.ban(maliciousUserId, {reason: 'spam'})
 ```
 
-Revoked or banned admins cannot issue new moderation commands. Only root admins
-can issue role certificates.
+Revoked or banned admins cannot issue new moderation commands, and banned users
+receive `{code: 'banned', reason}` via `room.onError()` (both when kicked
+mid-session and if they try to rejoin). Only root admins can issue role
+certificates.
 
 <details>
   <summary>How it works behind the scenes</summary>
@@ -1378,7 +1380,7 @@ the same namespace will return the same room instance.
     per-peer cap on the number of unique users (`userId`s) in the peer's room
     view at once (including the local user). When a peer's view is at capacity,
     additional joiners with a new `userId` are rejected on that peer link before
-    activation and receive `error: 'room full'` via `onJoinError`. See
+    activation and receive `{code: 'room-full'}` via `room.onError()`. See
     [room size limits](#room-size-limits) for more details.
 
   - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
@@ -1600,7 +1602,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   from the room (requires `'admin'` role). Immediately disconnects all endpoints
   belonging to that peer or user, removes any roles they held, and blocks future
   connection offers or messages from them.
-  - `options.reason` - **(optional)** Optional reason string for the ban.
+  - `options.reason` - **(optional)** Optional reason string for the ban (also
+    surfaced to the banned user via `room.onError()` as
+    `{code: 'banned', reason}`).
 
 - ### `isBanned(targetId)`
 
@@ -1735,18 +1739,62 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   )
   ```
 
-- ### `onJoinError(callback, [options])`
+- ### `onError(callback, [options])`
 
-  Subscribes a listener called when room join fails due to an incorrect
-  password, when a peer's room view is at capacity
-  (`details.error === 'room full'`), when peer identity verification fails, or
-  when peers exchange SDP but WebRTC still cannot establish a direct connection
-  (which usually means TURN servers are needed or misconfigured; see
-  [Troubleshooting connection issues](#troubleshooting-connection-issues)).
-  Returns an `Unsubscribe` function.
-  - `callback({appId, roomId, peerId, error})` - Called with details describing
-    the failure.
+  Subscribes a listener for asynchronous room, signaling, admission, moderation,
+  plugin, and peer transport errors and returns an `Unsubscribe` function.
+  Caller-initiated operations that return a `Promise` (such as `action.send()`,
+  `action.request()`, `room.addStream()`, `state.set()`, or `room.ping()`)
+  report failures by rejecting their returned `Promise` rather than duplicating
+  into `onError`.
+  - `callback(error)` - Called with a discriminated `RoomError` object
+    (`{code, message, appId, roomId, cause?, ...}`). Switch on `error.code` to
+    inspect structured fields:
+    - `'room-full'` (`{peerId}`) - Refused during admission because the remote
+      peer's room view has reached `config.limit`.
+    - `'banned'` (`{peerId?, reason?}`) - Disconnected mid-session or refused
+      during handshake because an admin banned the local user (`reason` contains
+      `options.reason` from `room.ban()` when provided).
+    - `'decrypt-failed'` (`{peerId, stage: 'offer' | 'answer'}`) - Signaling
+      payload failed decryption (usually an incorrect room `password`).
+    - `'peer-connect-failed'` (`{peerId, turnConfigured}`) - Peers exchanged SDP
+      over signaling, but WebRTC ICE could not establish a direct connection
+      (usually means TURN servers are needed or misconfigured; see
+      [Troubleshooting connection issues](#troubleshooting-connection-issues)).
+    - `'relay-failed'` - All configured signaling relays failed initial
+      connection or subscription without a single relay succeeding (individual
+      relay blips in a redundant pool are retried quietly without firing
+      `onError`).
+    - `'identity-failed'` - Loading or initializing the local `identity` failed.
+    - `'plugin-failed'` (`{plugin?}`) - A room plugin failed during
+      `resolveRoomId` or `setup`.
+    - `'handshake-failed'` (`{peerId}`) - Peer identity/DTLS verification or
+      admission handshake failed.
+    - `'peer-error'` (`{peerId}`) - An active peer connection encountered an
+      unrecoverable wire protocol or transport error and was disconnected.
   - `options` - **(optional)** `{once?: boolean, signal?: AbortSignal}`.
+
+  Example:
+
+  ```js
+  room.onError(err => {
+    switch (err.code) {
+      case 'room-full':
+        showBanner('This room is full.')
+        break
+      case 'banned':
+        showBanner(`Removed from room${err.reason ? `: ${err.reason}` : ''}`)
+        break
+      case 'decrypt-failed':
+        showBanner('Incorrect room password.')
+        break
+      case 'peer-connect-failed':
+      case 'relay-failed':
+        console.warn(err.message)
+        break
+    }
+  })
+  ```
 
 - ### `makeAction(actionId, [config])`
 

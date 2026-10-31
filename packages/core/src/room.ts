@@ -23,6 +23,7 @@ import {
   selfCertifyingRoomRegex,
   selfCertRoomRolesErr,
   toError,
+  toErrorMessage,
   warnEphemeralAdmin,
   warnNoPeer
 } from './utils'
@@ -43,8 +44,8 @@ import {createMediaManager, type InternalMediaMeta} from './media'
 import type {
   AddMediaOptions,
   DataPayload,
-  JoinError,
   KernelRolesProvider,
+  KernelRoomErrorInput,
   KernelScaleProvider,
   PeerHandle,
   PeerHandshake,
@@ -52,6 +53,7 @@ import type {
   PeerLeaveContext,
   RemoveMediaOptions,
   Room,
+  RoomError,
   RoomKernel,
   RoomPlugin,
   RoomWithPlugins,
@@ -96,7 +98,7 @@ export type RoomSignalingBridge = {
     verified: VerifiedPeerIdentity
   ) => void
   getPeerHandle: (peerId: string) => PeerHandle | undefined
-  emitJoinError: (details: JoinError) => void
+  emitError: (error: RoomError) => void
 }
 
 const roomSignalingBridges = new WeakMap<Room, RoomSignalingBridge>()
@@ -119,7 +121,7 @@ type RoomOptions = {
   verifyPeerIdentity?: boolean
   maxReceiveBytes?: number
   onPeerHandshake?: PeerHandshake
-  onHandshakeError?: (peerId: string, error: string) => void
+  onHandshakeError?: (peerId: string, error: string, cause?: Error) => void
   handshakeTimeoutMs?: number
   onBeforeLeave?: () => void
 }
@@ -169,6 +171,10 @@ export default <
   const verifiedPeerIds = new Set<string>()
   const deferredHandshakeReady = new Map<string, HandshakeReadyPayload>()
   const rejectCloseTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const deferredBanDestroyPeers = new Map<
+    PeerHandle,
+    ReturnType<typeof setTimeout>
+  >()
   const activeUserPeers = new Map<string, Set<string>>()
   const pendingActionAuthorities = new Map<string, string[]>()
   const plugins = getConfiguredPlugins(roomOptions.use)
@@ -196,7 +202,19 @@ export default <
   const peerLeaveEmitter = createEventEmitter<[PeerLeaveContext]>('onPeerLeave')
   const userJoinEmitter = createEventEmitter<[UserJoinContext]>('onUserJoin')
   const userLeaveEmitter = createEventEmitter<[UserLeaveContext]>('onUserLeave')
-  const joinErrorEmitter = createEventEmitter<[JoinError]>('onJoinError')
+  const errorEmitter = createEventEmitter<[RoomError]>('onError')
+  let leavePromise: Promise<void> | null = null
+
+  const emitRoomError = (error: KernelRoomErrorInput): void => {
+    if (!leavePromise) {
+      errorEmitter.emit({
+        ...error,
+        appId,
+        roomId: effectiveRoomId
+      } as RoomError)
+    }
+  }
+
   let localUserId = ''
   const resolvedUserIdentityP = (
     userIdentityP ??
@@ -205,7 +223,16 @@ export default <
       initialRoomId,
       identity === undefined ? undefined : {identity},
       explicitSelfId
-    )
+    ).catch(err => {
+      queueMicrotask(() => {
+        emitRoomError({
+          code: 'identity-failed',
+          message: toErrorMessage(err, 'identity resolution failed'),
+          cause: err
+        })
+      })
+      throw err
+    })
   ).then(resolvedId => {
     localUserId = resolvedId.userId
     return resolvedId
@@ -316,16 +343,27 @@ export default <
   const getPeerRoles = (id = localSelfId): string[] =>
     rolesProvider?.getPeerRoles(id) ?? []
 
-  const reportHandshakeError = (peerId: string, error: string): void => {
+  const reportHandshakeError = (
+    peerId: string,
+    error: string,
+    cause?: Error
+  ): void => {
+    const cleanMsg = error.replace(/^handshake failed: /, '')
     if (onHandshakeError) {
-      onHandshakeError(peerId, error)
+      onHandshakeError(peerId, cleanMsg, cause)
+    }
+    if (
+      cleanMsg === peerBannedMsg ||
+      cause?.message === peerBannedMsg ||
+      isPeerBanned(peerId)
+    ) {
       return
     }
-    joinErrorEmitter.emit({
-      error: error.replace(/^handshake failed: /, ''),
-      appId,
+    emitRoomError({
+      code: 'handshake-failed',
       peerId,
-      roomId: effectiveRoomId
+      message: cleanMsg,
+      ...(cause !== undefined ? {cause} : {})
     })
   }
 
@@ -365,7 +403,6 @@ export default <
   }
 
   let unregisterBeforeUnloadCleanup: () => void = noOp
-  let leavePromise: Promise<void> | null = null
   let didReportRoomFull = false
 
   const iterate = (
@@ -402,8 +439,17 @@ export default <
     exitPeer(id, current, reason)
   }
 
-  const onPeerError = (id: string, error: Error): void =>
+  const onPeerError = (id: string, error: Error): void => {
+    if (peerMap[id] && error.message !== peerBannedMsg) {
+      emitRoomError({
+        code: 'peer-error',
+        peerId: id,
+        message: toErrorMessage(error, 'peer error'),
+        cause: error
+      })
+    }
     kickPeer(id, undefined, error)
+  }
 
   const mediaManager = createMediaManager({
     onPeerError,
@@ -559,7 +605,22 @@ export default <
     const wasActive = Boolean(activePeerMap[id]) || wasVirtual
 
     clearPeerState(id, err)
-    current.destroy()
+    if (reason === peerBannedErr && !leavePromise && !wasVirtual) {
+      current.setHandlers({
+        data: noOp,
+        stream: noOp,
+        close: noOp,
+        error: noOp
+      })
+      const timer = setTimeout(() => {
+        deferredBanDestroyPeers.delete(current)
+        current.destroy()
+      }, 40)
+      ;(timer as {unref?: () => void}).unref?.()
+      deferredBanDestroyPeers.set(current, timer)
+    } else {
+      current.destroy()
+    }
     scaleProvider?.removeDirectPeer(id, current, err)
 
     if (wasActive) {
@@ -593,6 +654,11 @@ export default <
 
       try {
         scaleProvider?.destroy()
+        for (const [peer, timer] of deferredBanDestroyPeers.entries()) {
+          clearTimeout(timer)
+          peer.destroy()
+        }
+        deferredBanDestroyPeers.clear()
         entries(peerMap).forEach(([id, peer]) => {
           peer.destroy()
           clearPeerState(id, roomLeftErr)
@@ -607,7 +673,7 @@ export default <
         peerLeaveEmitter.clear()
         userJoinEmitter.clear()
         userLeaveEmitter.clear()
-        joinErrorEmitter.clear()
+        errorEmitter.clear()
         mediaManager.clearListeners()
         actionManager.clearListeners()
         try {
@@ -679,6 +745,7 @@ export default <
     resolveSendTarget,
     resolveRequestTarget,
     kickPeer: (peerId, reason) => kickPeer(peerId, undefined, reason),
+    emitError: err => emitRoomError(err),
     makeAction,
     makeInternalAction: makeActionInternal,
     deliverRawData: (originPeerId, data) => {
@@ -772,6 +839,7 @@ export default <
   const pluginApis: Record<string, unknown> = {}
   let didRunPluginSetup = false
   let pluginSetupError: unknown = null
+  let failedPluginName: string | undefined
   const runPluginSetup = (): void => {
     if (didRunPluginSetup) {
       if (pluginSetupError) {
@@ -780,9 +848,11 @@ export default <
       return
     }
     didRunPluginSetup = true
+    let activePluginName: string | undefined
     try {
       const seenPluginApiKeys = new Set<string>()
       for (const plugin of plugins) {
+        activePluginName = plugin.name
         const preState = preResolvedPlugins?.get(plugin)
         const api = plugin.setup(kernel, preState)
         if (api && typeof api === 'object') {
@@ -800,6 +870,7 @@ export default <
           Object.assign(pluginApis, api)
         }
       }
+      activePluginName = undefined
       if (!rolesProvider && selfCertifyingRoomRegex.test(initialRoomId)) {
         throw selfCertRoomRolesErr
       }
@@ -811,6 +882,7 @@ export default <
         }
       }
     } catch (err) {
+      failedPluginName = activePluginName
       pluginSetupError = err
       throw err
     }
@@ -825,6 +897,12 @@ export default <
       try {
         runPluginSetup()
       } catch (err) {
+        emitRoomError({
+          code: 'plugin-failed',
+          ...(failedPluginName !== undefined ? {plugin: failedPluginName} : {}),
+          message: toErrorMessage(err, 'plugin setup failed'),
+          cause: err
+        })
         onSelfLeave()
         throw err
       }
@@ -857,9 +935,21 @@ export default <
       return
     }
     const errObj = err === peerBannedMsg ? peerBannedErr : roomFullErr
+    const banReason =
+      err === peerBannedMsg
+        ? (rolesProvider?.getBanReason?.(getPeerUserId(id)) ??
+          rolesProvider?.getBanReason?.(id))
+        : undefined
     handshakeManager.clearPeer(id, errObj)
     void handshakeReadyAction
-      .send({ok: false, err}, id)
+      .send(
+        {
+          ok: false,
+          err,
+          ...(banReason !== undefined ? {reason: banReason} : {})
+        },
+        id
+      )
       .catch(noOp)
       .finally(() => {
         const closeNow = (): void => {
@@ -982,14 +1072,37 @@ export default <
           !(keys(activePeerMap).length > 0 && isAlreadyFullForPeer(id))
         ) {
           didReportRoomFull = true
-          reportHandshakeError(id, roomFullMsg)
+          if (onHandshakeError) {
+            onHandshakeError(id, roomFullMsg, roomFullErr)
+          }
+          emitRoomError({
+            code: 'room-full',
+            peerId: id,
+            message: roomFullMsg
+          })
         }
         exitPeer(id, peerMap[id], roomFullErr)
         return
       }
       if (data.err === peerBannedMsg) {
+        if (!handshakeManager.getPeer(id) || isDirectPeer(id)) {
+          return
+        }
+        const reason =
+          typeof data.reason === 'string' && data.reason.length <= 512
+            ? data.reason
+            : undefined
+        const msg = reason ? `${peerBannedMsg}: ${reason}` : peerBannedMsg
         handshakeManager.clearPeer(id, peerBannedErr)
-        reportHandshakeError(id, peerBannedMsg)
+        if (onHandshakeError) {
+          onHandshakeError(id, msg, peerBannedErr)
+        }
+        emitRoomError({
+          code: 'banned',
+          peerId: id,
+          ...(reason !== undefined ? {reason} : {}),
+          message: msg
+        })
         kickPeer(id, peerMap[id], peerBannedErr)
         return
       }
@@ -1055,6 +1168,14 @@ export default <
       close: () => exitPeer(id, peer, peerDisconnectedErr),
       error: (err: Error) => {
         logErr('peer', err)
+        if (peerMap[id] === peer) {
+          emitRoomError({
+            code: 'peer-error',
+            peerId: id,
+            message: toErrorMessage(err, 'peer error'),
+            cause: err
+          })
+        }
         exitPeer(id, peer, err)
       }
     })
@@ -1211,8 +1332,7 @@ export default <
     onPeerStream: (handler, options) =>
       mediaManager.onPeerStream(handler, options),
 
-    onJoinError: (handler, options) =>
-      joinErrorEmitter.subscribe(handler, options)
+    onError: (handler, options) => errorEmitter.subscribe(handler, options)
   }
 
   lockMethods(roomInstance, [
@@ -1221,7 +1341,7 @@ export default <
     'onUserJoin',
     'onUserLeave',
     'onPeerStream',
-    'onJoinError'
+    'onError'
   ])
 
   roomInstanceRef = roomInstance
@@ -1257,7 +1377,11 @@ export default <
     },
     getPeerHandle: peerId =>
       handshakeManager.getPeer(peerId) ?? peerMap[peerId],
-    emitJoinError: details => joinErrorEmitter.emit(details)
+    emitError: err => {
+      if (!leavePromise) {
+        errorEmitter.emit(err)
+      }
+    }
   })
 
   return roomInstance as RoomWithPlugins<TPlugins>

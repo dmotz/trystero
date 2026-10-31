@@ -309,7 +309,7 @@ void test('S2: delegated or co-admin cannot demote root admin via cert replaceme
   assert.equal(rootAuth.getPeerRoles('root-ep').includes('admin'), true)
 })
 
-void test('S3: identity or plugin resolution failure reports onJoinError with zero unhandled rejections in Node', async () => {
+void test('S3: identity or plugin resolution failure reports onError with zero unhandled rejections in Node', async () => {
   const script = `
     import {createTopicStrategy, definePlugin, roles} from './packages/core/dist/index.mjs'
 
@@ -340,7 +340,7 @@ void test('S3: identity or plugin resolution failure reports onJoinError with ze
       },
       's3-room-1'
     )
-    room1.onJoinError(d => joinErrors.push(d.error))
+    room1.onError(d => joinErrors.push(d))
 
     const badPlugin = definePlugin('bad', {
       resolveRoomId: async () => { throw new Error('boom-plugin') },
@@ -354,7 +354,7 @@ void test('S3: identity or plugin resolution failure reports onJoinError with ze
       },
       's3-room-2'
     )
-    room2.onJoinError(d => joinErrors.push(d.error))
+    room2.onError(d => joinErrors.push(d))
 
     await new Promise(r => setTimeout(r, 120))
     await Promise.all([
@@ -363,7 +363,18 @@ void test('S3: identity or plugin resolution failure reports onJoinError with ze
     ])
     await new Promise(r => setTimeout(r, 50))
 
-    if (unhandled !== 0 || joinErrors.length !== 2) {
+    const idErr = joinErrors.find(e => e.code === 'identity-failed')
+    const plugErr = joinErrors.find(e => e.code === 'plugin-failed')
+
+    if (
+      unhandled !== 0 ||
+      joinErrors.length !== 2 ||
+      !idErr ||
+      idErr.roomId !== 's3-room-1' ||
+      !plugErr ||
+      plugErr.plugin !== 'bad' ||
+      plugErr.roomId !== 's3-room-2'
+    ) {
       console.error({unhandled, joinErrors})
       process.exit(2)
     }
@@ -953,6 +964,7 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
     },
     err => joinErrors.push(err)
   )
+  victimRoom.onError(err => joinErrors.push(err.code))
   const legitRoom = makeVerifiedRoom(legitEp, legitUser, f => {
     legitReg = f
   })
@@ -983,9 +995,9 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
     await dummyAttacker.leave()
 
     assert.equal(
-      joinErrors.includes('room full'),
+      joinErrors.includes('room full') || joinErrors.includes('room-full'),
       false,
-      'unauthenticated room-full hsready must not trigger onJoinError'
+      'unauthenticated room-full hsready must not trigger onError'
     )
 
     // Legitimate peer connects and completes verified identity handshake cleanly
@@ -1377,7 +1389,7 @@ void test('S14: signal-handler drops invalid peerIds before allocating peerState
     announceIntervals: [],
     announceIntervalMs: 5_000,
     selfId: 'K'.repeat(20),
-    onJoinError: undefined
+    onError: undefined
   })(0)
 
   const invalidIds = [
@@ -1463,7 +1475,7 @@ void test('S15: undecryptable offers allocate 0 RTCPeerConnections and announce 
     announceIntervals: [],
     announceIntervalMs: 60_000,
     selfId: '0'.repeat(20),
-    onJoinError: undefined
+    onError: undefined
   })(0)
 
   // 1. 50 undecryptable offers must allocate ZERO answer RTCPeerConnections
@@ -1744,7 +1756,7 @@ void test('D2: signaling ciphertexts bind type|peerId|offerId via AAD and reject
     announceIntervals: [],
     announceIntervalMs: 5_000,
     selfId: 'K'.repeat(20),
-    onJoinError: undefined
+    onError: undefined
   })(0)
 
   await receive('self', {peerId: 'L'.repeat(20), offer: ct}, () => {})

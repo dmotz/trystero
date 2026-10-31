@@ -61,7 +61,7 @@
   (including the local user). When a peer's view is at capacity, additional
   joiners with a new `userId` are rejected on that peer link during handshake
   before triggering `onPeerJoin` on existing members and receive
-  `error: 'room full'` via `room.onJoinError()`.
+  `{code: 'room-full'}` via `room.onError()`.
 - 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every
   peer now has both a lazily generated self-certifying 20-character Base62
   endpoint `peerId` (derived from its ECDSA P-256 public key and verified with
@@ -107,7 +107,7 @@ method subscription API (`on*(handler, options?) => Unsubscribe`) instead of
 property assignment (`room.on* = fn`) or config-object callbacks:
 
 - `room.onUserJoin`, `room.onUserLeave`, `room.onPeerJoin`, `room.onPeerLeave`,
-  `room.onPeerStream`, `room.onJoinError`, `action.onMessage`,
+  `room.onPeerStream`, `room.onError`, `action.onMessage`,
   `action.onReceiveProgress`, and `state.onChange` support multiple independent
   listeners, return an idempotent `Unsubscribe` (`() => void`) function, and
   accept `{once?: boolean, signal?: AbortSignal}` options.
@@ -115,7 +115,13 @@ property assignment (`room.on* = fn`) or config-object callbacks:
   live-only by default; pass `{replay: true}` to synchronously emit currently
   active users, peers, streams, or non-initial state to a late subscriber.
 - `joinRoom(config, roomId)` now takes 2 arguments; the 3rd `{onJoinError}`
-  callbacks object has been replaced by `room.onJoinError(fn, options?)`.
+  callbacks object and `JoinError` have been replaced by
+  `room.onError(fn, options?)`, which emits a discriminated `RoomError` union
+  (`{code, message, appId, roomId, cause?, ...}`) covering `'room-full'`,
+  `'banned'` (including mid-session admin bans and optional `reason`),
+  `'decrypt-failed'`, `'peer-connect-failed'`, `'relay-failed'` (when all
+  configured relays fail initial bootstrap), `'identity-failed'`,
+  `'plugin-failed'`, `'handshake-failed'`, and `'peer-error'`.
 - `room.makeAction(namespace, config?)` accepts declarative config only (`kind`
   and `roles`); register handlers via `action.onMessage(fn)`,
   `action.onRequest(fn)`, `action.onReceive(fn)`, and
@@ -126,7 +132,8 @@ property assignment (`room.on* = fn`) or config-object callbacks:
   (`{prev, peerId, userId, roles, seq, timestamp, hash}`).
 - `RoomKernel` lifecycle hooks (`onPeerActivated`, `onPeerDeactivated`,
   `onRoomIdChanged`, `onLeave`) also return `Unsubscribe` and accept
-  `ListenerOptions` (`StatefulListenerOptions` on `onPeerActivated`).
+  `ListenerOptions` (`StatefulListenerOptions` on `onPeerActivated`), and
+  plugins can emit structured `RoomError`s via `kernel.emitError(error)`.
 - Room event handlers receive `{peerId, userId, ...}` context objects instead of
   a bare `peerId` string (with `stream` remaining first on `onPeerStream`):
 
@@ -138,7 +145,7 @@ room.onPeerLeave(({peerId, userId}) =>
   console.log(`${peerId} (${userId}) left`)
 )
 room.onPeerStream((stream, {peerId, userId, metadata}) => {})
-room.onJoinError(({error}) => console.error(error))
+room.onError(err => console.error(err.code, err.message))
 ```
 
 The media API has been streamlined around `MediaStream` as the unit of media

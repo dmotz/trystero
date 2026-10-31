@@ -4,7 +4,9 @@ import {
   createTopicStrategy,
   createUserIdentity,
   definePlugin,
-  roles
+  makeSocket,
+  roles,
+  type SocketClient
 } from '../../packages/core/src/index.ts'
 import createRoom, {
   getRoomSignalingBridge
@@ -13,12 +15,12 @@ import createStrategy from '../../packages/core/src/strategy.ts'
 import {joinRoom as joinSupabaseRoom} from '../../packages/supabase/src/index.ts'
 import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
 import type {
-  JoinError,
   PeerHandle,
   PeerJoinContext,
   PeerLeaveContext,
   PeerMediaContext,
   Room,
+  RoomError,
   RolesPluginApi,
   StateChangeContext,
   UserIdentity,
@@ -708,7 +710,7 @@ void test('ListenerOptions ({once, signal}): pre-aborted signals, mid-replay abo
 
     // Subscriptions still active when room.leave() runs clean up their 'abort' listeners
     roomA.onUserLeave(() => {}, {signal})
-    roomA.onJoinError(() => {}, {signal})
+    roomA.onError(() => {}, {signal})
     const act = roomA.makeAction('cleanup-act', {kind: 'request'})
     act.onRequest(() => 'ok', {signal})
     act.onReceive(() => true, {signal})
@@ -832,7 +834,7 @@ void test('Error isolation: throwing or async-rejecting listeners do not block s
   }
 })
 
-void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, non-function handlers, non-writable .on* methods, cached room.onJoinError, and reserved onJoinError plugin name', async () => {
+void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, non-function handlers, non-writable .on* methods, cached room.onError, and reserved onError plugin name', async () => {
   let storedRootTopic = ''
   let storedSubscriber:
     | ((
@@ -874,13 +876,13 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
             rtcPolyfill: MockRTCPeerConnection
           },
           'guardrail-room',
-          {onJoinError: () => {}}
+          {onError: () => {}}
         ),
-      /joinRoom takes 2 arguments; register join error listeners via room\.onJoinError/
+      /joinRoom takes 2 arguments; register error listeners via room\.onError/
     )
   }
 
-  // 2. Cached room instance returned by a 2nd joinRoom() call still supports room.onJoinError
+  // 2. Cached room instance returned by a 2nd joinRoom() call still supports room.onError
   const cfg = {
     appId: 'cached-join-err-app',
     password: 'correct-password',
@@ -893,10 +895,10 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
   try {
     await room1.getSelf()
     await waitFor(() => storedSubscriber !== null)
-    const errors1: JoinError[] = []
-    const errors2: JoinError[] = []
-    room1.onJoinError(err => errors1.push(err))
-    room2.onJoinError(err => errors2.push(err))
+    const errors1: RoomError[] = []
+    const errors2: RoomError[] = []
+    room1.onError(err => errors1.push(err))
+    room2.onError(err => errors2.push(err))
 
     assert.ok(storedSubscriber)
     await storedSubscriber(
@@ -911,7 +913,12 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
 
     assert.equal(errors1.length, 1)
     assert.equal(errors2.length, 1)
-    assert.match(errors1[0]!.error, /incorrect password/)
+    assert.equal(errors1[0]!.code, 'decrypt-failed')
+    if (errors1[0]!.code === 'decrypt-failed') {
+      assert.equal(errors1[0]!.stage, 'offer')
+      assert.equal(errors1[0]!.peerId, 'remote-peer')
+    }
+    assert.match(errors1[0]!.message, /incorrect password/)
 
     // 3. makeAction rejects event handlers passed in config
     for (const badConfig of [
@@ -931,6 +938,10 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
       () => room1.onUserJoin(null as never),
       /onUserJoin handler must be a function/
     )
+    assert.throws(
+      () => room1.onError(null as never),
+      /onError handler must be a function/
+    )
     const validMsgAction = room1.makeAction('valid-msg')
     assert.throws(
       () => validMsgAction.onMessage(null as never),
@@ -949,7 +960,7 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
       [room1, 'onPeerJoin'],
       [room1, 'onPeerLeave'],
       [room1, 'onPeerStream'],
-      [room1, 'onJoinError'],
+      [room1, 'onError'],
       [validMsgAction, 'onMessage'],
       [validMsgAction, 'onReceive'],
       [validMsgAction, 'onReceiveProgress'],
@@ -965,29 +976,36 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     await room1.leave()
   }
 
-  // 6. Plugin safety: 'onJoinError' is reserved, while custom plugins and makeState.onChange lock properly
+  // 6. Plugin safety: 'onError' is reserved, while custom plugins and makeState.onChange lock properly
   assert.throws(
-    () => definePlugin('onJoinError', {setup: () => ({})}),
-    /plugin name "onJoinError" is a reserved room property/
+    () => definePlugin('onError', {setup: () => ({})}),
+    /plugin name "onError" is a reserved room property/
   )
 
-  const shadowJoinErrPlugin = definePlugin('shadow-join-err', {
+  const shadowErrPlugin = definePlugin('shadow-on-err', {
     setup: () => ({
-      onJoinError: () => () => {}
+      onError: () => () => {}
     })
   })
+  const badPluginErrors: RoomError[] = []
   const badPluginRoom = joinTopic(
     {
       appId: 'plugin-guard-app',
-      use: [shadowJoinErrPlugin],
+      use: [shadowErrPlugin],
       rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'plugin-guard-room'
   )
+  badPluginRoom.onError(err => badPluginErrors.push(err))
   await assert.rejects(
     () => badPluginRoom.ready,
-    /cannot override reserved room property "onJoinError"/
+    /cannot override reserved room property "onError"/
   )
+  assert.equal(badPluginErrors.length, 1)
+  assert.equal(badPluginErrors[0]!.code, 'plugin-failed')
+  if (badPluginErrors[0]!.code === 'plugin-failed') {
+    assert.equal(badPluginErrors[0]!.plugin, 'shadow-on-err')
+  }
   await badPluginRoom.leave().catch(() => {})
 
   // Custom plugin + roles() work alongside locked .on* methods, and state.onChange is also locked
@@ -1130,6 +1148,250 @@ void test('RoomKernel lifecycle hooks return Unsubscribe and support {replay, on
       roomA.leave().catch(() => {}),
       roomB.leave().catch(() => {}),
       roomC.leave().catch(() => {})
+    ])
+  }
+})
+
+void test('Discriminated RoomError union: relay quorum failure vs partial relay failure, ws-relay socket failure, mid-session peer-error, and kernel.emitError', async () => {
+  // 1. Partial relay failure (2 of 3 fail, 1 succeeds) must NOT emit 'relay-failed'
+  const joinPartialFail = createStrategy({
+    init: () => [
+      Promise.reject(new Error('relay-0 down')),
+      Promise.resolve({id: 1}),
+      Promise.reject(new Error('relay-2 down'))
+    ],
+    subscribe: async () => () => {},
+    announce: () => {}
+  })
+  const partialErrors: RoomError[] = []
+  const partialRoom = joinPartialFail(
+    {
+      appId: 'partial-relay-app',
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'partial-room'
+  )
+  partialRoom.onError(err => partialErrors.push(err))
+  await new Promise(res => setTimeout(res, 80))
+  assert.deepEqual(
+    partialErrors,
+    [],
+    'partial relay pool failures must not spam onError when at least one relay is healthy'
+  )
+  await partialRoom.leave()
+
+  // 2. Total relay init/subscribe failure (all relays fail) emits 'relay-failed' once
+  const joinTotalFail = createStrategy({
+    init: () => [
+      Promise.reject(new Error('relay-a unreachable')),
+      Promise.reject(new Error('relay-b unreachable'))
+    ],
+    subscribe: async () => () => {},
+    announce: () => {}
+  })
+  const totalErrors: RoomError[] = []
+  const totalFailRoom = joinTotalFail(
+    {
+      appId: 'total-relay-app',
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'total-room'
+  )
+  totalFailRoom.onError(err => totalErrors.push(err))
+  await waitFor(() => totalErrors.length > 0, 2_000)
+  assert.equal(totalErrors.length, 1)
+  assert.equal(totalErrors[0]!.code, 'relay-failed')
+  assert.equal(totalErrors[0]!.appId, 'total-relay-app')
+  assert.equal(totalErrors[0]!.roomId, 'total-room')
+  assert.match(totalErrors[0]!.message, /unreachable/)
+  await totalFailRoom.leave()
+
+  // 3. Socket-backed strategy (makeSocket) emits 'relay-failed' only when ALL sockets fail initial connect
+  const origWebSocket = globalThis.WebSocket
+  const socketClients: SocketClient[] = []
+  const createdSockets: Array<{
+    url: string
+    readyState: number
+    onopen: (() => void) | null
+    onclose: (() => void) | null
+    onmessage: ((ev: {data: string}) => void) | null
+    send: () => void
+    close: () => void
+  }> = []
+  class ControlledWs {
+    url: string
+    readyState = 0
+    onopen: (() => void) | null = null
+    onclose: (() => void) | null = null
+    onmessage: ((ev: {data: string}) => void) | null = null
+    constructor(url: string) {
+      this.url = url
+      createdSockets.push(this)
+    }
+    send() {}
+    close() {
+      this.readyState = 3
+    }
+  }
+  const joinSocketStrategy = createTopicStrategy({
+    init: config =>
+      (config.relayConfig?.urls ?? []).map(url => {
+        const client = makeSocket(url, () => {})
+        socketClients.push(client)
+        return client.ready
+      }),
+    subscribeTopic: () => () => {},
+    publishTopic: () => {}
+  })
+  globalThis.WebSocket = ControlledWs as unknown as typeof WebSocket
+  try {
+    const wsErrors: RoomError[] = []
+    const wsRoom = joinSocketStrategy(
+      {
+        appId: 'ws-fail-app',
+        relayConfig: {
+          urls: [
+            `ws://dead-1-${Date.now()}.test`,
+            `ws://dead-2-${Date.now()}.test`
+          ]
+        },
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'ws-fail-room'
+    )
+    wsRoom.onError(err => wsErrors.push(err))
+    assert.equal(createdSockets.length, 2)
+    // First socket fails -> quorum still has a pending candidate, so 0 errors yet
+    createdSockets[0]!.onclose?.()
+    await turn()
+    assert.equal(wsErrors.length, 0)
+    // Second socket also fails -> all relays failed initial connect -> emits 'relay-failed'
+    createdSockets[1]!.onclose?.()
+    await waitFor(() => wsErrors.length === 1, 2_000)
+    assert.equal(wsErrors[0]!.code, 'relay-failed')
+    assert.match(wsErrors[0]!.message, /failed to connect to relay/)
+    await wsRoom.leave()
+  } finally {
+    for (const client of socketClients) {
+      client.close()
+    }
+    globalThis.WebSocket = origWebSocket
+  }
+
+  // 4. Mid-session peer transport fault & wire protocol fault emit 'peer-error', and kernel.emitError narrows cleanly
+  const customErrPlugin = definePlugin('err-emitter', {
+    setup: kernel => ({
+      triggerCustomHandshakeErr: (peerId: string) =>
+        kernel.emitError({
+          code: 'handshake-failed',
+          peerId,
+          message: 'custom plugin check failed'
+        })
+    })
+  })
+  const origConsoleError = console.error
+  console.error = () => {}
+  let regA: ((peer: PeerHandle, id: string) => void) | null = null
+  let regB: ((peer: PeerHandle, id: string) => void) | null = null
+  const roomA = createRoom(
+    f => {
+      regA = f
+    },
+    () => {},
+    () => {},
+    {
+      selfId: 'peer-a',
+      appId: 'peer-err-app',
+      roomId: 'peer-err-room',
+      use: [customErrPlugin]
+    }
+  )
+  const roomB = createRoom(
+    f => {
+      regB = f
+    },
+    () => {},
+    () => {},
+    {selfId: 'peer-b', appId: 'peer-err-app', roomId: 'peer-err-room'}
+  )
+
+  try {
+    await roomA.ready
+    const observed: string[] = []
+    roomA.onError(err => {
+      // Verify TypeScript discriminated union narrowing across all RoomError codes
+      switch (err.code) {
+        case 'room-full':
+          observed.push(`${err.code}:${err.peerId}`)
+          break
+        case 'banned':
+          observed.push(`${err.code}:${err.reason ?? 'no-reason'}`)
+          break
+        case 'relay-failed':
+        case 'identity-failed':
+          observed.push(err.code)
+          break
+        case 'plugin-failed':
+          observed.push(`${err.code}:${err.plugin ?? 'unknown'}`)
+          break
+        case 'decrypt-failed':
+          observed.push(`${err.code}:${err.stage}:${err.peerId}`)
+          break
+        case 'peer-connect-failed':
+          observed.push(`${err.code}:${err.peerId}:${err.turnConfigured}`)
+          break
+        case 'handshake-failed':
+        case 'peer-error':
+          observed.push(`${err.code}:${err.peerId}:${err.message}`)
+          break
+      }
+    })
+
+    const link = createLinkedHandlePair()
+    regA!(link.peerA, 'peer-b')
+    regB!(link.peerB, 'peer-a')
+    await waitFor(() => 'peer-b' in roomA.getPeers(), 2_000)
+
+    roomA.triggerCustomHandshakeErr('peer-x')
+    // Inject malformed wire frame (< 2 bytes) from peer-b -> triggers onPeerError ('peer-error') and kicks peer-b
+    link.peerB.sendData(new Uint8Array([99]))
+    await waitFor(() => !('peer-b' in roomA.getPeers()), 2_000)
+
+    // Reconnect a peer and trigger peer.handlers.error directly
+    let capturedHandlers: Parameters<PeerHandle['setHandlers']>[0] = {}
+    const faultyPeer: PeerHandle = {
+      connection: {} as RTCPeerConnection,
+      channel: null,
+      isDead: false,
+      getOffer: async () => undefined,
+      signal: async () => undefined,
+      sendData: () => {},
+      destroy() {
+        this.isDead = true
+      },
+      setHandlers(h) {
+        capturedHandlers = {...capturedHandlers, ...h}
+      },
+      addStream: () => {},
+      removeStream: () => {},
+      addTrack: () => {},
+      removeTrack: () => {},
+      replaceTrack: () => undefined
+    }
+    regA!(faultyPeer, 'peer-faulty')
+    capturedHandlers.error?.(new Error('sctp transport aborted'))
+
+    assert.deepEqual(observed, [
+      'handshake-failed:peer-x:custom plugin check failed',
+      'peer-error:peer-b:Trystero: invalid action frame',
+      'peer-error:peer-faulty:sctp transport aborted'
+    ])
+  } finally {
+    console.error = origConsoleError
+    await Promise.all([
+      roomA.leave().catch(() => {}),
+      roomB.leave().catch(() => {})
     ])
   }
 })

@@ -13,14 +13,44 @@ export type PeerTarget = string | string[] | null
 
 export type TargetPeers = PeerTarget | undefined
 
-export type JoinError = {
-  error: string
+export type RoomErrorBase = {
+  message: string
   appId: string
   roomId: string
-  peerId: string
+  cause?: unknown
 }
 
-export type JoinErrorHandler = (details: JoinError) => void
+export type RoomError =
+  | (RoomErrorBase & {code: 'room-full'; peerId: string})
+  | (RoomErrorBase & {code: 'banned'; peerId?: string; reason?: string})
+  | (RoomErrorBase & {code: 'relay-failed'})
+  | (RoomErrorBase & {code: 'identity-failed'})
+  | (RoomErrorBase & {code: 'plugin-failed'; plugin?: string})
+  | (RoomErrorBase & {
+      code: 'decrypt-failed'
+      peerId: string
+      stage: 'offer' | 'answer'
+    })
+  | (RoomErrorBase & {
+      code: 'peer-connect-failed'
+      peerId: string
+      turnConfigured: boolean
+    })
+  | (RoomErrorBase & {code: 'handshake-failed'; peerId: string})
+  | (RoomErrorBase & {code: 'peer-error'; peerId: string})
+
+export type RoomErrorCode = RoomError['code']
+
+export type RoomErrorHandler = (error: RoomError) => void
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never
+
+export type KernelRoomErrorInput = DistributiveOmit<
+  RoomError,
+  'appId' | 'roomId'
+>
 
 export type Unsubscribe = () => void
 
@@ -224,6 +254,7 @@ export type KernelRolesProvider = {
   getEffectiveRoomId: () => string
   getPeerRoles: (peerOrUserId?: string) => string[]
   isPeerBanned: (peerOrUserId: string) => boolean
+  getBanReason?: (peerOrUserId: string) => string | undefined
   registerPeerPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   canPeerSendAction: (
     peerId: string,
@@ -320,6 +351,7 @@ export type RoomKernel = {
     includePending?: boolean
   ) => string | undefined
   kickPeer: (peerId: string, reason?: Error) => void
+  emitError: (error: KernelRoomErrorInput) => void
   makeAction: Room['makeAction']
   makeInternalAction: <T extends DataPayload = DataPayload>(
     namespace: string,
@@ -651,10 +683,7 @@ export type Room = {
     handler: (stream: MediaStream, context: PeerMediaContext) => void,
     options?: StatefulListenerOptions
   ) => Unsubscribe
-  onJoinError: (
-    handler: JoinErrorHandler,
-    options?: ListenerOptions
-  ) => Unsubscribe
+  onError: (handler: RoomErrorHandler, options?: ListenerOptions) => Unsubscribe
 }
 
 export type SessionSignal = {
@@ -884,7 +913,7 @@ export type SignalContext = {
   toPlain: (signal: Signal, peerId: string, offerId: string) => Promise<Signal>
   toCipher: (signal: Signal, peerId: string, offerId: string) => Promise<Signal>
   isLeaving: () => boolean
-  onJoinError: JoinErrorHandler | undefined
+  onError: RoomErrorHandler | undefined
   offerManager: OfferManager
   encryptOffer: (
     peer: PeerHandle,

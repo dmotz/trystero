@@ -156,7 +156,9 @@ plugin can:
    `onPeerDeactivated`, `onRoomIdChanged`, `onLeave`).
 3. Return an object of methods (`TApi`) to merge onto the `Room` instance when
    `room.ready` resolves (cannot shadow reserved core `Room` properties or
-   duplicate another plugin's exported method name).
+   duplicate another plugin's exported method name). If `resolveRoomId` or
+   `setup` throws/rejects, Trystero surfaces
+   `{code: 'plugin-failed', plugin: name, message, cause}` via `room.onError`.
 
 ---
 
@@ -250,6 +252,7 @@ verification via `roles: ['admin', ...]`.
 | `kernel.resolveSendTarget(targets, includePending?)`   | `(targets: TargetPeers, includePending?: boolean) => TargetPeers`       | Resolves a `userId`, `peerId`, or array of IDs into concrete target `peerId`(s), fanning out a `userId` to all of that user's active tabs. |
 | `kernel.resolveRequestTarget(target, includePending?)` | `(target: string, includePending?: boolean) => string \| undefined`     | Resolves a `userId` or `peerId` to a single deterministic `peerId` for 1-to-1 requests.                                                    |
 | `kernel.kickPeer(peerId, reason?)`                     | `(peerId: string, reason?: Error) => void`                              | Immediately disconnects `peerId` and cleans up its state.                                                                                  |
+| `kernel.emitError(error)`                              | `(error: KernelRoomErrorInput) => void`                                 | Emits a structured `RoomError` (automatically populated with `appId` and effective `roomId`) to `room.onError` subscribers.                |
 
 ### Lifecycle Hooks
 

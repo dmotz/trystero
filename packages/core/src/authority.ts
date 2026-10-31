@@ -42,6 +42,7 @@ import {
   mkErr,
   noOp,
   peerBannedErr,
+  peerBannedMsg,
   posSafeIntErr,
   selfCertifyingRoomRegex,
   toBase64Url,
@@ -903,7 +904,11 @@ export type RoomAuthorityInit = {
     userId?: string
   ) => void
   onLocalRoleCertificate?: (cert: RoleCertificate | null) => void
-  onPeerBanned?: (userId: string) => void
+  onPeerBanned?: (
+    userId: string,
+    banRecord: PeerBanRecord,
+    fromPeerId?: string
+  ) => void
   onSignatureFailure?: (fromPeerId?: string) => void
 }
 
@@ -1026,7 +1031,9 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   const effectiveRoles = (cert: RoleCertificate): string[] =>
     effectiveRolesFromMap(cert, revocations)
 
-  const recomputeModerationState = (): {
+  const recomputeModerationState = (
+    fromPeerId?: string
+  ): {
     effectiveRevKeys: Set<string>
     effectiveBanSigs: Set<string>
   } => {
@@ -1107,9 +1114,9 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       }
     }
 
-    for (const bannedUid of bans.keys()) {
+    for (const [bannedUid, banRec] of bans.entries()) {
       if (!prevBannedUids.has(bannedUid)) {
-        init.onPeerBanned?.(bannedUid)
+        init.onPeerBanned?.(bannedUid, banRec, fromPeerId)
       }
     }
 
@@ -1188,6 +1195,20 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     )
   }
 
+  const getBanReason = (peerOrUserId: string): string | undefined => {
+    const uids = candidateUids(peerOrUserId)
+    if (uids.some(isRootUid)) {
+      return undefined
+    }
+    for (const uid of uids) {
+      const rec = bans.get(uid)
+      if (rec?.reason !== undefined) {
+        return rec.reason
+      }
+    }
+    return undefined
+  }
+
   const registerPeerPublicKey = (peerId: string, pubKey: JsonWebKey): void => {
     if (!peerId || !isValidJwk(pubKey)) {
       return
@@ -1198,8 +1219,9 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       }
       peerToUserId.set(peerId, rec.userId)
       init.onPeerPublicKey?.(peerId, rec.cleanJwk, rec.userId)
-      if (!isRootUid(rec.userId) && bans.has(rec.userId)) {
-        init.onPeerBanned?.(rec.userId)
+      const banRec = bans.get(rec.userId)
+      if (!isRootUid(rec.userId) && banRec) {
+        init.onPeerBanned?.(rec.userId, banRec, peerId)
       }
     })
   }
@@ -1378,7 +1400,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
         certs.set(ban.issuerUserId, ban.issuerCert)
       }
       rawBans.set(rawKey, ban)
-      const {effectiveBanSigs} = recomputeModerationState()
+      const {effectiveBanSigs} = recomputeModerationState(fromPeerId)
       if (!effectiveBanSigs.has(ban.sig)) {
         // If another admin ALREADY banned targetUserId earlier, ban is benignly redundant rather than invalid unless issuer itself lacked authority
         if (
@@ -1581,6 +1603,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     },
     getPeerRoles,
     isPeerBanned,
+    getBanReason,
     registerPeerPublicKey,
     verifyAndApplyCert,
     verifyAndApplyRevocation,
@@ -1950,12 +1973,23 @@ export const roles = (
         const entry = getPenaltyEntry(fromPeerId)
         entry.failures += 1
         if (entry.failures >= 8) {
-          kernel.kickPeer(
-            fromPeerId,
-            mkErr('excessive invalid authority records')
-          )
+          const err = mkErr('excessive invalid authority records')
+          kernel.emitError({
+            code: 'peer-error',
+            peerId: fromPeerId,
+            message: err.message,
+            cause: err
+          })
+          kernel.kickPeer(fromPeerId, err)
         }
       }
+
+      const rawAuth = kernel.makeInternalAction<JsonValue>('auth', {
+        maxPayloadBytes: 256 * 1024
+      })
+      const sendAuth = (msg: AuthControlMessage, targets?: string | string[]) =>
+        rawAuth.send(msg as unknown as JsonValue, targets)
+      let didReportSelfBan = false
 
       const authority = createRoomAuthority({
         selfId: kernel.selfId,
@@ -1974,13 +2008,39 @@ export const roles = (
         },
         onLocalRoleCertificate: cert =>
           kernel.getScaleProvider()?.setLocalRoleCertificate(cert),
-        onPeerBanned: bannedUid => {
+        onPeerBanned: (bannedUid, banRec, fromPeerId) => {
+          const localUid = kernel.getKnownPeerUserId(kernel.selfId)
+          if (
+            bannedUid === kernel.selfId ||
+            (localUid && bannedUid === localUid)
+          ) {
+            if (!didReportSelfBan) {
+              didReportSelfBan = true
+              kernel.emitError({
+                code: 'banned',
+                message: banRec.reason
+                  ? `${peerBannedMsg}: ${banRec.reason}`
+                  : peerBannedMsg,
+                ...(banRec.reason !== undefined ? {reason: banRec.reason} : {}),
+                ...(fromPeerId ? {peerId: fromPeerId} : {})
+              })
+            }
+            return
+          }
           kernel.getScaleProvider()?.markPeerBanned(bannedUid)
           const toKick = new Set<string>(kernel.getUserPeerIds(bannedUid))
           for (const pid of kernel.getAllPeerIds()) {
             if (authority.isPeerBanned(pid)) {
               toKick.add(pid)
             }
+          }
+          const activeKickTargets = [...toKick].filter(pid =>
+            kernel.isPeerActive(pid)
+          )
+          if (activeKickTargets.length > 0) {
+            void sendAuth({t: 'ban', ban: banRec}, activeKickTargets).catch(
+              noOp
+            )
           }
           for (const pid of toKick) {
             kernel.getScaleProvider()?.markPeerBanned(pid)
@@ -1989,12 +2049,6 @@ export const roles = (
         },
         onSignatureFailure: recordPeerAuthFailure
       })
-
-      const rawAuth = kernel.makeInternalAction<JsonValue>('auth', {
-        maxPayloadBytes: 256 * 1024
-      })
-      const sendAuth = (msg: AuthControlMessage, targets?: string | string[]) =>
-        rawAuth.send(msg as unknown as JsonValue, targets)
       const sendSync = async (peerId: string, force = false) => {
         if (!kernel.isPeerActive(peerId) || authority.isPeerBanned(peerId)) {
           return

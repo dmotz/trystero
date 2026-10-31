@@ -67,12 +67,24 @@ void test(
     const appId = `turn-offer-failure-${Date.now()}`
     const roomId = 'turn-offer-room'
     const joinRoom = createTestStrategy(subscribers)
-    const errors: string[] = []
+    const errors: Array<{
+      code: string
+      message: string
+      turnConfigured?: boolean
+    }> = []
     const room = joinRoom(
       {appId, rtcPolyfill: FailingRTCPeerConnection as any},
       roomId
     )
-    room.onJoinError(details => errors.push(details.error))
+    room.onError(err =>
+      errors.push({
+        code: err.code,
+        message: err.message,
+        ...(err.code === 'peer-connect-failed'
+          ? {turnConfigured: err.turnConfigured}
+          : {})
+      })
+    )
 
     try {
       const {peerId: selfId} = await room.getSelf()
@@ -118,9 +130,11 @@ void test(
       offerPeerConnection.failIce()
 
       await waitFor(() => errors.length > 0)
-      assert.match(errors[0], /could not connect to peer/)
-      assert.match(errors[0], /after exchanging SDP/)
-      assert.match(errors[0], /TURN/)
+      assert.equal(errors[0].code, 'peer-connect-failed')
+      assert.equal(errors[0].turnConfigured, false)
+      assert.match(errors[0].message, /could not connect to peer/)
+      assert.match(errors[0].message, /after exchanging SDP/)
+      assert.match(errors[0].message, /TURN/)
     } finally {
       await room.leave().catch(() => {})
     }
@@ -137,12 +151,24 @@ void test(
     const roomId = 'turn-answer-room'
     const remotePeerId = 'remote-peer'
     const joinRoom = createTestStrategy(subscribers)
-    const errors: string[] = []
+    const errors: Array<{
+      code: string
+      message: string
+      turnConfigured?: boolean
+    }> = []
     const room = joinRoom(
       {appId, rtcPolyfill: FailingRTCPeerConnection as any},
       roomId
     )
-    room.onJoinError(details => errors.push(details.error))
+    room.onError(err =>
+      errors.push({
+        code: err.code,
+        message: err.message,
+        ...(err.code === 'peer-connect-failed'
+          ? {turnConfigured: err.turnConfigured}
+          : {})
+      })
+    )
 
     try {
       await waitFor(() => subscribers.length >= 1)
@@ -174,9 +200,11 @@ void test(
       answerPeerConnection.failIce()
 
       await waitFor(() => errors.length > 0)
-      assert.match(errors[0], /could not connect to peer/)
-      assert.match(errors[0], /after exchanging SDP/)
-      assert.match(errors[0], /TURN/)
+      assert.equal(errors[0].code, 'peer-connect-failed')
+      assert.equal(errors[0].turnConfigured, false)
+      assert.match(errors[0].message, /could not connect to peer/)
+      assert.match(errors[0].message, /after exchanging SDP/)
+      assert.match(errors[0].message, /TURN/)
     } finally {
       await room.leave().catch(() => {})
     }

@@ -341,7 +341,7 @@ const probeTrystero = async (
                   deadlineMs
                 )
                 const room = joinRoom(config, 'probe')
-                room.onJoinError(({error}) => reject(new Error(error)))
+                room.onError(({message}) => reject(new Error(message)))
                 const action = room.makeAction<string, string>('relay-probe', {
                   kind: 'request'
                 })

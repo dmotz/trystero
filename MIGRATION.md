@@ -93,17 +93,22 @@ method subscriptions (`on*(fn, options?) => unsubscribe`) instead of property
 assignment (`room.on* = fn`) or config-object callbacks:
 
 - **Multi-listener subscriptions**: `room.onUserJoin`, `room.onUserLeave`,
-  `room.onPeerJoin`, `room.onPeerLeave`, `room.onPeerStream`,
-  `room.onJoinError`, `action.onMessage`, `action.onReceiveProgress`, and
-  `state.onChange` allow multiple independent listeners and return an idempotent
-  `Unsubscribe` function (`() => void`).
+  `room.onPeerJoin`, `room.onPeerLeave`, `room.onPeerStream`, `room.onError`,
+  `action.onMessage`, `action.onReceiveProgress`, and `state.onChange` allow
+  multiple independent listeners and return an idempotent `Unsubscribe` function
+  (`() => void`).
 - **Live-only by default, explicit `{replay: true}`**: `onUserJoin`,
   `onPeerJoin`, `onPeerStream`, and `state.onChange` no longer replay existing
   state implicitly on registration; pass `{replay: true}` when a late subscriber
   wants active users/peers/streams/state replayed synchronously. All `on*`
   methods also accept `{once?: boolean, signal?: AbortSignal}`.
-- **`joinRoom(config, roomId)` takes 2 arguments**: The 3rd `{onJoinError}`
-  callbacks argument has been promoted to `room.onJoinError(fn, options?)`.
+- **`joinRoom(config, roomId)` takes 2 arguments & structured `room.onError`**:
+  The 3rd `{onJoinError}` callbacks argument and unstructured `JoinError`
+  (`{error, appId, roomId, peerId}`) have been replaced by
+  `room.onError(fn, options?)`, which receives a discriminated `RoomError` union
+  keyed on `err.code` (`'room-full'`, `'banned'`, `'decrypt-failed'`,
+  `'peer-connect-failed'`, `'relay-failed'`, `'identity-failed'`,
+  `'plugin-failed'`, `'handshake-failed'`, and `'peer-error'`).
 - **Declarative `makeAction` config & single-handler `onRequest` /
   `onReceive`**: `makeAction(namespace, config)` accepts `{kind, roles}` only;
   register handlers via `action.onMessage(fn)`, `action.onRequest(fn)`,
@@ -141,7 +146,7 @@ room.onPeerLeave = peerId => {
 ```js
 const room = joinRoom(config, roomId)
 
-room.onJoinError(err => console.error(err))
+room.onError(err => console.error(err.code, err.message))
 
 const unsubJoin = room.onUserJoin(({userId}) => {
   console.log(`${userId} joined`)
@@ -359,8 +364,8 @@ const room = joinRoom(
   roomId
 )
 
-room.onJoinError(({error}) => {
-  if (error === 'room full') {
+room.onError(err => {
+  if (err.code === 'room-full') {
     showModal('This match already has 2 players!')
   }
 })

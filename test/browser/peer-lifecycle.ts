@@ -125,7 +125,7 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
           ([roomId, config]) =>
             new Promise(res => {
               const room = window.trystero.joinRoom(config, roomId)
-              room.onJoinError(res, {once: true})
+              room.onError(res, {once: true})
             }),
           [nextRoomNs, roomConfig]
         ),
@@ -138,14 +138,15 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
                   config,
                   roomId
                 ))
-                room.onJoinError(res, {once: true})
+                room.onError(res, {once: true})
               }),
             [nextRoomNs, {...roomConfig, password: 'waste'}]
           )
         )
       ])
 
-      expect(joinError.error).toMatch(/incorrect password/)
+      expect(joinError.code).toEqual('decrypt-failed')
+      expect(joinError.message).toMatch(/incorrect password/)
       expect(joinError.appId).toEqual(roomConfig.appId)
       expect(joinError.roomId).toEqual(nextRoomNs)
       expect(joinError.peerId).toMatch(new RegExp(`^${selfId1}|${selfId2}`))

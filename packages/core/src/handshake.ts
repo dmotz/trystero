@@ -41,6 +41,7 @@ export type HandshakeReadyPayload =
   | {
       ok: false
       err: 'room full' | 'peer banned'
+      reason?: string
     }
 
 export type VerifiedPeerIdentity = {
@@ -367,7 +368,7 @@ type HandshakeManagerDeps = {
   selfId?: string
   selfIdP?: Promise<string>
   onPeerHandshake?: PeerHandshake
-  onHandshakeError?: (peerId: string, error: string) => void
+  onHandshakeError?: (peerId: string, error: string, cause?: Error) => void
   handshakeTimeoutMs: number
   sendHandshakeData: (
     data: DataPayload,
@@ -447,7 +448,7 @@ export const createHandshakeManager = ({
 
     const error = toHandshakeErrorMessage(reason)
 
-    onHandshakeError?.(id, error)
+    onHandshakeError?.(id, error, reason)
     onFailure(id, peer, mkErr(error))
   }
 

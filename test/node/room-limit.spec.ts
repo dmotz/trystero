@@ -296,7 +296,7 @@ void test(
       },
       roomId
     )
-    hostRoom.onJoinError(err => hostErrors.push(err))
+    hostRoom.onError(err => hostErrors.push(err))
     hostRoom.onPeerJoin(({peerId}) => hostJoins.push(peerId))
     hostRoom.onPeerLeave(({peerId}) => hostLeaves.push(peerId))
 
@@ -317,7 +317,7 @@ void test(
         },
         roomId
       )
-      lateRoom.onJoinError(err => lateErrors.push(err))
+      lateRoom.onError(err => lateErrors.push(err))
       lateRoom.onPeerJoin(({peerId}) => lateJoins.push(peerId))
 
       await waitFor(() => lateErrors.length > 0, 3_000)
@@ -326,14 +326,15 @@ void test(
       assert.equal(
         lateErrors.length,
         1,
-        'rejected joiner should receive onJoinError once'
+        'rejected joiner should receive onError once'
       )
-      assert.equal(lateErrors[0].error, 'room full')
+      assert.equal(lateErrors[0].code, 'room-full')
+      assert.equal(lateErrors[0].message, 'room full')
       assert.equal(lateErrors[0].appId, appId)
       assert.equal(lateErrors[0].roomId, roomId)
       assert.equal(lateErrors[0].peerId, 'peer-host')
       assert.deepEqual(lateJoins, [])
-      assert.deepEqual(hostErrors, [], 'host must not receive onJoinError')
+      assert.deepEqual(hostErrors, [], 'host must not receive onError')
       assert.deepEqual(
         hostJoins,
         [],
@@ -360,7 +361,7 @@ void test(
         },
         roomId
       )
-      nextRoom.onJoinError(err => nextErrors.push(err))
+      nextRoom.onError(err => nextErrors.push(err))
 
       await wait(150)
       assert.deepEqual(nextErrors, [])
@@ -407,7 +408,7 @@ void test(
       },
       roomId
     )
-    roomA.onJoinError(err => errorsA.push(err))
+    roomA.onError(err => errorsA.push(err))
     roomA.onPeerJoin(({peerId}) => joinsA.push(peerId))
     roomA.onPeerLeave(({peerId}) => leavesA.push(peerId))
 
@@ -419,7 +420,7 @@ void test(
       },
       roomId
     )
-    roomB.onJoinError(err => errorsB.push(err))
+    roomB.onError(err => errorsB.push(err))
     roomB.onPeerJoin(({peerId}) => joinsB.push(peerId))
     roomB.onPeerLeave(({peerId}) => leavesB.push(peerId))
 
@@ -437,18 +438,15 @@ void test(
       },
       roomId
     )
-    roomC.onJoinError(err => errorsC.push(err))
+    roomC.onError(err => errorsC.push(err))
     roomC.onPeerJoin(({peerId}) => joinsC.push(peerId))
 
     await waitFor(() => errorsC.length > 0, 3_000)
     await wait(120)
 
-    assert.equal(
-      errorsC.length,
-      1,
-      'Peer C must receive onJoinError exactly once'
-    )
-    assert.equal(errorsC[0].error, 'room full')
+    assert.equal(errorsC.length, 1, 'Peer C must receive onError exactly once')
+    assert.equal(errorsC[0].code, 'room-full')
+    assert.equal(errorsC[0].message, 'room full')
     assert.equal(errorsC[0].appId, appId)
     assert.equal(errorsC[0].roomId, roomId)
     assert.ok(
@@ -456,8 +454,8 @@ void test(
       'rejecting peerId should be one of the existing members'
     )
     assert.deepEqual(joinsC, [], 'Peer C must not activate any peers')
-    assert.deepEqual(errorsA, [], 'Peer A must not receive onJoinError')
-    assert.deepEqual(errorsB, [], 'Peer B must not receive onJoinError')
+    assert.deepEqual(errorsA, [], 'Peer A must not receive onError')
+    assert.deepEqual(errorsB, [], 'Peer B must not receive onError')
     assert.deepEqual(
       joinsA,
       ['peer-b'],
@@ -485,7 +483,7 @@ void test(
       },
       roomId
     )
-    roomD.onJoinError(err => errorsD.push(err))
+    roomD.onError(err => errorsD.push(err))
     roomD.onPeerJoin(({peerId}) => joinsD.push(peerId))
 
     try {
@@ -539,7 +537,7 @@ void test(
         },
         roomId
       )
-      room.onJoinError(err => errors.push(err))
+      room.onError(err => errors.push(err))
       room.onPeerJoin(({peerId}) => joins.push(peerId))
       room.onPeerLeave(({peerId}) => leaves.push(peerId))
       stateByPeer.set(peerId, {room, errors, joins, leaves})
@@ -549,11 +547,15 @@ void test(
     try {
       await waitFor(
         () =>
-          Object.keys(stateByPeer.get('peer-1')!.room.getPeers()).length ===
-            1 &&
-          Object.keys(stateByPeer.get('peer-2')!.room.getPeers()).length ===
-            1 &&
-          stateByPeer.get('peer-5')!.errors.length > 0,
+          peerIds.every(
+            id =>
+              Object.keys(stateByPeer.get(id)!.room.getPeers()).length === 1 ||
+              stateByPeer.get(id)!.errors.length > 0
+          ) &&
+          peerIds.some(
+            id => Object.keys(stateByPeer.get(id)!.room.getPeers()).length === 1
+          ) &&
+          peerIds.some(id => stateByPeer.get(id)!.errors.length > 0),
         4_000
       )
 
@@ -572,28 +574,30 @@ void test(
         )
       }
 
-      assert.deepEqual(
-        Object.keys(stateByPeer.get('peer-1')!.room.getPeers()),
-        ['peer-2']
-      )
-      assert.deepEqual(
-        Object.keys(stateByPeer.get('peer-2')!.room.getPeers()),
-        ['peer-1']
-      )
-      assert.deepEqual(stateByPeer.get('peer-1')!.errors, [])
-      assert.deepEqual(stateByPeer.get('peer-2')!.errors, [])
-      assert.deepEqual(stateByPeer.get('peer-1')!.leaves, [])
-      assert.deepEqual(stateByPeer.get('peer-2')!.leaves, [])
+      const pairA = peerIds.find(
+        id => Object.keys(stateByPeer.get(id)!.room.getPeers()).length === 1
+      )!
+      assert.ok(pairA, 'at least one pair must form during burst join')
+      const pairB = Object.keys(stateByPeer.get(pairA)!.room.getPeers())[0]!
+      assert.deepEqual(Object.keys(stateByPeer.get(pairB)!.room.getPeers()), [
+        pairA
+      ])
+      assert.deepEqual(stateByPeer.get(pairA)!.errors, [])
+      assert.deepEqual(stateByPeer.get(pairB)!.errors, [])
+      assert.deepEqual(stateByPeer.get(pairA)!.leaves, [])
+      assert.deepEqual(stateByPeer.get(pairB)!.leaves, [])
 
-      // Clean up peer-3, peer-4, peer-5 and test a burst of newcomers (including a lower peerId 'peer-0')
-      // against the established pair (peer-1, peer-2)
+      // Clean up the other 3 peers and test a burst of newcomers (including a lower peerId 'peer-0')
+      // against the established pair (pairA, pairB)
       await Promise.all(
-        ['peer-3', 'peer-4', 'peer-5'].map(id =>
-          stateByPeer
-            .get(id)!
-            .room.leave()
-            .catch(() => {})
-        )
+        peerIds
+          .filter(id => id !== pairA && id !== pairB)
+          .map(id =>
+            stateByPeer
+              .get(id)!
+              .room.leave()
+              .catch(() => {})
+          )
       )
       await wait(60)
 
@@ -610,7 +614,7 @@ void test(
           },
           roomId
         )
-        room.onJoinError(err => errs.push(err))
+        room.onError(err => errs.push(err))
         newcomerRooms.set(newcomerId, room)
         burstNewcomers.push(room)
       }
@@ -640,22 +644,21 @@ void test(
           assert.equal(errs.length, 1)
         }
         if (errs.length === 1) {
-          assert.equal(errs[0].error, 'room full')
+          assert.equal(errs[0].code, 'room-full')
+          assert.equal(errs[0].message, 'room full')
         }
       }
-      // Existing pair (peer-1, peer-2) is never evicted by lower peerId 'peer-0'
-      assert.deepEqual(
-        Object.keys(stateByPeer.get('peer-1')!.room.getPeers()),
-        ['peer-2']
-      )
-      assert.deepEqual(
-        Object.keys(stateByPeer.get('peer-2')!.room.getPeers()),
-        ['peer-1']
-      )
-      assert.deepEqual(stateByPeer.get('peer-1')!.errors, [])
-      assert.deepEqual(stateByPeer.get('peer-2')!.errors, [])
-      assert.deepEqual(stateByPeer.get('peer-1')!.leaves, [])
-      assert.deepEqual(stateByPeer.get('peer-2')!.leaves, [])
+      // Existing pair (pairA, pairB) is never evicted by lower peerId 'peer-0'
+      assert.deepEqual(Object.keys(stateByPeer.get(pairA)!.room.getPeers()), [
+        pairB
+      ])
+      assert.deepEqual(Object.keys(stateByPeer.get(pairB)!.room.getPeers()), [
+        pairA
+      ])
+      assert.deepEqual(stateByPeer.get(pairA)!.errors, [])
+      assert.deepEqual(stateByPeer.get(pairB)!.errors, [])
+      assert.deepEqual(stateByPeer.get(pairA)!.leaves, [])
+      assert.deepEqual(stateByPeer.get(pairB)!.leaves, [])
     } finally {
       await Promise.all([
         ...[...stateByPeer.values()].map(({room}) =>
@@ -711,7 +714,7 @@ void test(
       },
       roomId
     )
-    guest2Room.onJoinError(err => guest2Errors.push(err))
+    guest2Room.onError(err => guest2Errors.push(err))
 
     try {
       await waitFor(
@@ -721,7 +724,8 @@ void test(
           Object.keys(guest2Room.getPeers()).includes('guest-1'),
         3_000
       )
-      assert.equal(guest2Errors[0].error, 'room full')
+      assert.equal(guest2Errors[0].code, 'room-full')
+      assert.equal(guest2Errors[0].message, 'room full')
       assert.equal(guest2Errors[0].peerId, 'host-peer')
       assert.deepEqual(Object.keys(hostRoom.getPeers()), ['guest-1'])
       assert.ok(Object.keys(guest1Room.getPeers()).includes('guest-2'))
@@ -782,11 +786,11 @@ void test(
       },
       roomId
     )
-    wrongPwRoom.onJoinError(err => wrongPwErrors.push(err))
+    wrongPwRoom.onError(err => wrongPwErrors.push(err))
 
     await waitFor(() => wrongPwErrors.length > 0, 3_000)
     assert.ok(
-      wrongPwErrors.every(e => e.error !== 'room full'),
+      wrongPwErrors.every(e => e.code === 'decrypt-failed'),
       'wrong-password peer must not learn that the room is full'
     )
     await wrongPwRoom.leave().catch(() => {})
@@ -802,12 +806,13 @@ void test(
       },
       roomId
     )
-    rightPwFullRoom.onJoinError(err => fullErrors.push(err))
+    rightPwFullRoom.onError(err => fullErrors.push(err))
 
     try {
       await waitFor(() => fullErrors.length > 0, 3_000)
       assert.equal(fullErrors.length, 1)
-      assert.equal(fullErrors[0].error, 'room full')
+      assert.equal(fullErrors[0].code, 'room-full')
+      assert.equal(fullErrors[0].message, 'room full')
     } finally {
       await Promise.all([
         roomA.leave().catch(() => {}),
@@ -859,12 +864,13 @@ void test(
       },
       roomId
     )
-    fifthRoom.onJoinError(err => fifthErrors.push(err))
+    fifthRoom.onError(err => fifthErrors.push(err))
 
     try {
       await waitFor(() => fifthErrors.length > 0, 3_000)
       assert.equal(fifthErrors.length, 1)
-      assert.equal(fifthErrors[0].error, 'room full')
+      assert.equal(fifthErrors[0].code, 'room-full')
+      assert.equal(fifthErrors[0].message, 'room full')
       for (const r of rooms) {
         assert.equal(Object.keys(r.getPeers()).length, 5)
       }

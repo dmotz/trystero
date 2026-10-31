@@ -294,6 +294,16 @@ export const setRelayConnectivity = (
   return relayConnectivity
 }
 
+const socketInitialFailureResolvers = new WeakMap<
+  Promise<unknown>,
+  () => Promise<Error | null>
+>()
+
+export const getSocketInitialFailure = (
+  ready: Promise<unknown>
+): Promise<Error | null> | undefined =>
+  socketInitialFailureResolvers.get(ready)?.()
+
 export const makeSocket = (
   url: string,
   onMessage: (data: string) => void,
@@ -302,13 +312,32 @@ export const makeSocket = (
   const client = {} as SocketClient
   let didOpen = false
   let isReconnectPending = false
+  let initialFailure: Error | null = null
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   let resolveReady: (_: SocketClient) => void = noOp
+  const initialFailureWaiters = new Set<(err: Error | null) => void>()
+
+  const settleInitialAttempt = (err: Error | null): void => {
+    initialFailureWaiters.forEach(waiter => waiter(err))
+    initialFailureWaiters.clear()
+  }
 
   client.url = url
   client.isClosed = false
   client.send = noOp
   client.ready = new Promise(res => (resolveReady = res))
+
+  socketInitialFailureResolvers.set(client.ready, () => {
+    if (didOpen || client.isClosed || isRelayOffline) {
+      return Promise.resolve(null)
+    }
+    if (initialFailure) {
+      return Promise.resolve(initialFailure)
+    }
+    return new Promise<Error | null>(res => {
+      initialFailureWaiters.add(res)
+    })
+  })
 
   if (relayConnectivity === 'auto') {
     attachOnlineWatcher()
@@ -351,7 +380,15 @@ export const makeSocket = (
       isReconnectPending = true
 
       if (isRelayOffline) {
+        if (!didOpen) {
+          settleInitialAttempt(null)
+        }
         return
+      }
+
+      if (!didOpen) {
+        initialFailure = mkErr(`failed to connect to relay ${client.url}`)
+        settleInitialAttempt(initialFailure)
       }
 
       const period = (socketRetryPeriods[url] ??= defaultRetryMs)
@@ -370,6 +407,8 @@ export const makeSocket = (
       const isReconnect = didOpen
 
       didOpen = true
+      initialFailure = null
+      settleInitialAttempt(null)
       resolveReady(client)
       socketRetryPeriods[url] = defaultRetryMs
 
@@ -418,6 +457,7 @@ export const makeSocket = (
 
   client.close = () => {
     client.isClosed = true
+    settleInitialAttempt(null)
     socketControllers.delete(controller)
     clearRetryTimer()
     const socket = client.socket
@@ -526,7 +566,7 @@ export const reservedRoomPropertyNames: Set<string> = new Set([
   'onUserJoin',
   'onUserLeave',
   'onPeerStream',
-  'onJoinError'
+  'onError'
 ])
 
 export const lockMethods = <T extends object>(
