@@ -397,17 +397,19 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
 })
 
 export const joinRoom: JoinRoom<TorrentRoomConfig> = ((
-  config,
-  roomId,
-  callbacks
+  config: TorrentRoomConfig,
+  roomId: string,
+  ...extra: unknown[]
 ) =>
-  joinRoomStrategy(
-    {
-      ...config,
-      trickleIce: config.trickleIce ?? false
-    },
+  (joinRoomStrategy as (...args: unknown[]) => unknown)(
+    config
+      ? {
+          ...config,
+          trickleIce: config.trickleIce ?? false
+        }
+      : config,
     roomId,
-    callbacks
+    ...extra
   )) as JoinRoom<TorrentRoomConfig>
 
 export const getRelaySockets: () => Record<string, WebSocket> =

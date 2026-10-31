@@ -138,10 +138,13 @@ const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
         10_000
       )
 
-      window[roomId].onPeerStream = (stream, {peerId, metadata: meta}) => {
-        clearTimeout(timeout)
-        res({peerId, meta, streamType: stream.constructor.name})
-      }
+      window[roomId].onPeerStream(
+        (stream, {peerId, metadata: meta}) => {
+          clearTimeout(timeout)
+          res({peerId, meta, streamType: stream.constructor.name})
+        },
+        {once: true}
+      )
 
       setTimeout(async () => {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -177,7 +180,7 @@ const verifyMessageActions = async ({page, page2, roomNs}) => {
     const messageAction = window[roomId].makeAction('message')
 
     return new Promise(res => {
-      messageAction.onMessage = res
+      messageAction.onMessage(data => res(data), {once: true})
       setTimeout(() => messageAction.send(message), 333)
     })
   }
@@ -221,27 +224,30 @@ const verifyRequestActions = async ({
   peer2Id
 }) => {
   const setupRequestActions = roomId => {
-    window[roomId].makeAction('is-even', {
-      kind: 'request',
-      onRequest: n => n % 2 === 0
-    })
+    window[roomId]
+      .makeAction('is-even', {
+        kind: 'request'
+      })
+      .onRequest(n => n % 2 === 0)
 
-    window[roomId].makeAction('request-rejects', {
-      kind: 'request',
-      onRequest: () => {
+    window[roomId]
+      .makeAction('request-rejects', {
+        kind: 'request'
+      })
+      .onRequest(() => {
         throw new Error('request denied')
-      }
-    })
+      })
 
     window[roomId].makeAction('late-request', {kind: 'request'})
 
-    window[roomId].makeAction('slow-request', {
-      kind: 'request',
-      onRequest: async value => {
+    window[roomId]
+      .makeAction('slow-request', {
+        kind: 'request'
+      })
+      .onRequest(async value => {
         await new Promise(res => setTimeout(res, 100))
         return value
-      }
-    })
+      })
   }
 
   await Promise.all([
@@ -283,9 +289,11 @@ const verifyRequestActions = async ({
 
   await new Promise(res => setTimeout(res, 50))
   await page2.evaluate(roomId => {
-    window[roomId].makeAction('late-request', {
-      kind: 'request'
-    }).onRequest = () => 'hello back'
+    window[roomId]
+      .makeAction('late-request', {
+        kind: 'request'
+      })
+      .onRequest(() => 'hello back')
   }, roomNs)
 
   expect(await lateRequest).toEqual('hello back')
@@ -355,16 +363,16 @@ const verifyActionIsolation = async ({page, page2, roomConfig, roomNs}) => {
     const sharedB = roomBRef.makeAction('shared')
 
     return Promise.all([
-      new Promise<string>(
-        res => (roomARef.onPeerJoin = ({peerId}) => res(peerId))
+      new Promise<string>(res =>
+        roomARef.onPeerJoin(({peerId}) => res(peerId), {once: true})
       ),
-      new Promise<string>(
-        res => (roomBRef.onPeerJoin = ({peerId}) => res(peerId))
+      new Promise<string>(res =>
+        roomBRef.onPeerJoin(({peerId}) => res(peerId), {once: true})
       )
     ]).then(([peerA, peerB]) =>
       Promise.all([
-        new Promise(res => (sharedA.onMessage = res)),
-        new Promise(res => (sharedB.onMessage = res)),
+        new Promise(res => sharedA.onMessage(data => res(data), {once: true})),
+        new Promise(res => sharedB.onMessage(data => res(data), {once: true})),
         sharedA.send({room: roomA, from: label}, {target: peerA}),
         sharedB.send({room: roomB, from: label}, {target: peerB})
       ]).then(([receivedA, receivedB]) => ({receivedA, receivedB}))
@@ -420,18 +428,21 @@ const verifyBinaryPayloads = async ({
     let senderCallCount = 0
     let receiverCallCount = 0
 
-    binaryAction.onReceiveProgress = p => {
+    binaryAction.onReceiveProgress(p => {
       receiverPercent = p
       receiverCallCount++
-    }
+    })
 
     return Promise.all([
       new Promise(res => {
-        binaryAction.onMessage = (payload, {metadata: receivedMeta}) =>
-          res([
-            new TextDecoder().decode(payload).slice(-message.length),
-            receivedMeta
-          ])
+        binaryAction.onMessage(
+          (payload, {metadata: receivedMeta}) =>
+            res([
+              new TextDecoder().decode(payload).slice(-message.length),
+              receivedMeta
+            ]),
+          {once: true}
+        )
       }),
 
       new Promise(res => setTimeout(res, 1233)).then(() =>

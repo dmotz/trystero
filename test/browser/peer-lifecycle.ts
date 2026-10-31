@@ -25,12 +25,44 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
       const [peer2Data, peer1Data] = values
       const [peer2Id, peer1Id] = [peer2Data[1], peer1Data[1]]
 
-      const disableAutoPong = ([roomId, prefix]) => {
-        const pingAction = window[roomId].makeAction(`${prefix}ping`, {
-          kind: 'request'
-        })
+      const dropOutgoingPings = prefix => {
+        const desc = Object.getOwnPropertyDescriptor(
+          RTCDataChannel.prototype,
+          'send'
+        )!
+        ;(window as any).__origDcSendDesc = desc
+        const pingHeader = new TextEncoder().encode(`${prefix}ping`)
+        RTCDataChannel.prototype.send = function (data: any) {
+          const bytes =
+            data instanceof ArrayBuffer
+              ? new Uint8Array(data)
+              : ArrayBuffer.isView(data)
+                ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+                : null
+          if (
+            bytes &&
+            bytes.byteLength > 2 + pingHeader.byteLength &&
+            pingHeader.every((b, i) => bytes[2 + i] === b) &&
+            bytes[2 + pingHeader.byteLength] === 0
+          ) {
+            return
+          }
+          return (desc.value as (this: RTCDataChannel, d: any) => void).call(
+            this,
+            data
+          )
+        }
+      }
 
-        pingAction.onRequest = () => new Promise(() => {})
+      const restoreOutgoingPings = () => {
+        if ((window as any).__origDcSendDesc) {
+          Object.defineProperty(
+            RTCDataChannel.prototype,
+            'send',
+            (window as any).__origDcSendDesc
+          )
+          delete (window as any).__origDcSendDesc
+        }
       }
 
       const pendingPing = ([roomId, id]) =>
@@ -42,14 +74,14 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
           })
         )
 
-      await page2.evaluate(disableAutoPong, [roomNs, internalActionPrefix])
+      await page.evaluate(dropOutgoingPings, internalActionPrefix)
 
       const disconnectedPing = page.evaluate(pendingPing, [roomNs, peer2Id])
 
       const peer1onLeaveId = page.evaluate(
         roomId =>
-          new Promise(
-            res => (window[roomId].onPeerLeave = ({peerId}) => res(peerId))
+          new Promise(res =>
+            window[roomId].onPeerLeave(({peerId}) => res(peerId), {once: true})
           ),
         roomNs
       )
@@ -67,6 +99,7 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
       await page2.evaluate(roomId => window[roomId].leave(), roomNs)
 
       const disconnectedPingResult = await disconnectedPing
+      await page.evaluate(restoreOutgoingPings)
 
       expect(disconnectedPingResult.status).toEqual('rejected')
       expect(disconnectedPingResult.message).toMatch(
@@ -90,23 +123,23 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
       const joinError = await Promise.race([
         page.evaluate(
           ([roomId, config]) =>
-            new Promise(res =>
-              window.trystero.joinRoom(config, roomId, {
-                onJoinError: res
-              })
-            ),
+            new Promise(res => {
+              const room = window.trystero.joinRoom(config, roomId)
+              room.onJoinError(res, {once: true})
+            }),
           [nextRoomNs, roomConfig]
         ),
 
         sleep(3333).then(() =>
           page2.evaluate(
             ([roomId, config]) =>
-              new Promise(
-                res =>
-                  (window[roomId] = window.trystero.joinRoom(config, roomId, {
-                    onJoinError: res
-                  }))
-              ),
+              new Promise(res => {
+                const room = (window[roomId] = window.trystero.joinRoom(
+                  config,
+                  roomId
+                ))
+                room.onJoinError(res, {once: true})
+              }),
             [nextRoomNs, {...roomConfig, password: 'waste'}]
           )
         )

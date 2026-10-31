@@ -82,14 +82,13 @@ void test('ordinary messages preserve types, metadata, empty values and exact UT
   t.after(pair.close)
   const received = []
   const proposed = []
-  const action = pair.right.makeAction('chat', {
-    onReceive: context => {
-      proposed.push(context)
-      return true
-    },
-    onMessage: (data, context) => {
-      received.push({data, context})
-    }
+  const action = pair.right.makeAction('chat')
+  const unsubReceive = action.onReceive(context => {
+    proposed.push(context)
+    return true
+  })
+  action.onMessage((data, context) => {
+    received.push({data, context})
   })
   const send = pair.left.makeAction('chat').send
   for (const value of [
@@ -121,7 +120,8 @@ void test('ordinary messages preserve types, metadata, empty values and exact UT
     pair.frames.some(frame => frame.kind === 1),
     false
   )
-  action.onReceive = () => false
+  unsubReceive()
+  action.onReceive(() => false)
   await send('rejected')
   assert.equal(received.length, 6)
   assert.equal(pair.disconnected(), false)
@@ -134,10 +134,8 @@ void test('files larger than the previous 64 MiB cap transfer with default setti
   payload[0] = 42
   payload[payload.length - 1] = 91
   let received: Uint8Array
-  pair.right.makeAction('file', {
-    onMessage: data => {
-      received = data as Uint8Array
-    }
+  pair.right.makeAction('file').onMessage(data => {
+    received = data as Uint8Array
   })
   await pair.left.makeAction('file').send(payload)
   assert.deepEqual(received!, payload)
@@ -149,15 +147,14 @@ void test('async receive policy rejects before any bulk data is sent', async t =
   const pair = linked()
   t.after(pair.close)
   let decide: (accept: boolean) => void
-  pair.right.makeAction('file', {
-    onMessage: () => assert.fail('rejected payload delivered'),
-    onReceive: ({byteLength, metadata}) => {
-      assert.equal(byteLength, 100_000)
-      assert.deepEqual(metadata, {name: 'sample.bin'})
-      return new Promise(resolve => {
-        decide = resolve
-      })
-    }
+  const fileAction = pair.right.makeAction('file')
+  fileAction.onMessage(() => assert.fail('rejected payload delivered'))
+  fileAction.onReceive(({byteLength, metadata}) => {
+    assert.equal(byteLength, 100_000)
+    assert.deepEqual(metadata, {name: 'sample.bin'})
+    return new Promise(resolve => {
+      decide = resolve
+    })
   })
   const sending = pair.left
     .makeAction('file')
@@ -181,15 +178,11 @@ void test('bulk offers queue automatically while small messages still pass', asy
   t.after(pair.close)
   let files = 0
   let messages = 0
-  pair.right.makeAction('file', {
-    onMessage: () => {
-      files++
-    }
+  pair.right.makeAction('file').onMessage(() => {
+    files++
   })
-  pair.right.makeAction('chat', {
-    onMessage: () => {
-      messages++
-    }
+  pair.right.makeAction('chat').onMessage(() => {
+    messages++
   })
   const file = pair.left.makeAction('file')
   await Promise.all([
@@ -220,9 +213,10 @@ void test('missing handlers retain only offers and registration applies the rece
     pair.frames.map(frame => frame.kind),
     [1]
   )
-  const file = pair.right.makeAction('file', {onReceive: () => false})
+  const file = pair.right.makeAction('file')
+  file.onReceive(() => false)
   await assert.rejects(sending, {kind: 'rejected'})
-  assert.equal(file.onMessage, null)
+  assert.equal(typeof file.onMessage, 'function')
   assert.equal(
     pair.frames.some(frame => frame.kind === 2),
     false
@@ -241,9 +235,9 @@ void test('bulk data waits at the sender until a message handler is attached', a
     [1]
   )
   let received
-  file.onMessage = data => {
+  file.onMessage(data => {
     received = data
-  }
+  })
   await sending
   assert.deepEqual(received, payload)
 })
@@ -288,10 +282,8 @@ void test('oversized proposals are refused and a peer remains usable', async t =
   const pair = linked(32_000)
   t.after(pair.close)
   let calls = 0
-  pair.right.makeAction('file', {
-    onMessage: () => {
-      calls++
-    }
+  pair.right.makeAction('file').onMessage(() => {
+    calls++
   })
   const action = pair.left.makeAction('file')
   await assert.rejects(
@@ -321,24 +313,24 @@ void test('request policies unwrap metadata, responses are gated, and missing ha
   const pair = linked()
   t.after(pair.close)
   const remote = pair.right.makeAction('ask', {
-    kind: 'request',
-    onReceive: ({metadata}) => {
-      assert.deepEqual(metadata, {name: 'question'})
-      return true
-    },
-    onRequest: () => new Uint8Array(100_000)
+    kind: 'request'
   })
+  remote.onReceive(({metadata}) => {
+    assert.deepEqual(metadata, {name: 'question'})
+    return true
+  })
+  const unsubRequest = remote.onRequest(() => new Uint8Array(100_000))
   const request = pair.left.makeAction('ask', {
-    kind: 'request',
-    onReceive: ({byteLength}) => byteLength < 200_000
+    kind: 'request'
   })
+  request.onReceive(({byteLength}) => byteLength < 200_000)
   const result = await request.request('hello', {
     target: 'right',
     metadata: {name: 'question'},
     timeoutMs: 1_000
   })
   assert.equal((result as Uint8Array).length, 100_000)
-  remote.onRequest = null
+  unsubRequest()
   await assert.rejects(
     request.request('waiting', {
       target: 'right',
@@ -370,10 +362,8 @@ void test('Blob sending reads slices, and abort releases an accepted receive buf
   t.after(pair.close)
   const file = pair.left.makeAction('file')
   let delivered = 0
-  pair.right.makeAction('file', {
-    onMessage: () => {
-      delivered++
-    }
+  pair.right.makeAction('file').onMessage(() => {
+    delivered++
   })
   const blob = new Blob([new Uint8Array(24_000)])
   blob.arrayBuffer = async () => {
@@ -400,14 +390,15 @@ void test('Blob sending reads slices, and abort releases an accepted receive buf
 void test('a rejected response fails its request even without an explicit timeout', async t => {
   const pair = linked()
   t.after(pair.close)
-  pair.right.makeAction('ask', {
-    kind: 'request',
-    onRequest: () => new Uint8Array(100_000)
-  })
+  pair.right
+    .makeAction('ask', {
+      kind: 'request'
+    })
+    .onRequest(() => new Uint8Array(100_000))
   const action = pair.left.makeAction('ask', {
-    kind: 'request',
-    onReceive: async () => false
+    kind: 'request'
   })
+  action.onReceive(async () => false)
   await assert.rejects(action.request('hello', {target: 'right'}), {
     kind: 'rejected'
   })
@@ -458,10 +449,8 @@ void test('cursor sends need no receipt and ready inline receives allocate no ti
   const pair = linked()
   t.after(pair.close)
   let calls = 0
-  pair.right.makeAction('cursor', {
-    onMessage: () => {
-      calls++
-    }
+  pair.right.makeAction('cursor').onMessage(() => {
+    calls++
   })
   const send = pair.left.makeAction('cursor').send
   const timer = t.mock.method(globalThis, 'setTimeout')
@@ -520,25 +509,22 @@ void test('async inline policies preserve per-action order and cannot stall anot
   let approve: (value: boolean) => void
   const received: number[] = []
   let calls = 0
-  pair.right.makeAction('ordered', {
-    onReceive: ({kind, signal}) => {
-      assert.equal(kind, 'message')
-      assert.equal(signal.aborted, false)
-      return ++calls === 1
-        ? new Promise(resolve => {
-            approve = resolve
-          })
-        : true
-    },
-    onMessage: data => {
-      received.push(data as number)
-    }
+  const ordered = pair.right.makeAction('ordered')
+  ordered.onReceive(({kind, signal}) => {
+    assert.equal(kind, 'message')
+    assert.equal(signal.aborted, false)
+    return ++calls === 1
+      ? new Promise(resolve => {
+          approve = resolve
+        })
+      : true
+  })
+  ordered.onMessage(data => {
+    received.push(data as number)
   })
   let cursors = 0
-  pair.right.makeAction('cursor', {
-    onMessage: () => {
-      cursors++
-    }
+  pair.right.makeAction('cursor').onMessage(() => {
+    cursors++
   })
   await pair.left.makeAction('ordered').send(1)
   await pair.left.makeAction('ordered').send(2)
@@ -608,10 +594,8 @@ void test('large typed arrays are snapshotted once before admission', async t =>
   const pair = linked()
   t.after(pair.close)
   let received: Uint8Array
-  pair.right.makeAction('file', {
-    onMessage: data => {
-      received = data as Uint8Array
-    }
+  pair.right.makeAction('file').onMessage(data => {
+    received = data as Uint8Array
   })
   const bytes = new Uint8Array(24_000).fill(42)
   const sending = pair.left.makeAction('file').send(bytes)
@@ -624,14 +608,14 @@ void test('large typed arrays are snapshotted once before admission', async t =>
 void test('inline request refusal rejects without requiring a delivery receipt', async t => {
   const pair = linked()
   t.after(pair.close)
-  pair.right.makeAction('ask', {
-    kind: 'request',
-    onReceive: ({kind}) => {
-      assert.equal(kind, 'request')
-      return false
-    },
-    onRequest: () => assert.fail('rejected request delivered')
+  const ask = pair.right.makeAction('ask', {
+    kind: 'request'
   })
+  ask.onReceive(({kind}) => {
+    assert.equal(kind, 'request')
+    return false
+  })
+  ask.onRequest(() => assert.fail('rejected request delivered'))
   const action = pair.left.makeAction('ask', {kind: 'request'})
   await assert.rejects(
     action.request('hello', {target: 'right', timeoutMs: 1000}),
@@ -644,13 +628,12 @@ void test('progress callback exceptions do not lose completed messages', async t
   t.after(pair.close)
   t.mock.method(console, 'error', () => {})
   let messages = 0
-  pair.right.makeAction('file', {
-    onReceiveProgress: () => {
-      throw new Error('application callback')
-    },
-    onMessage: () => {
-      messages++
-    }
+  const file = pair.right.makeAction('file')
+  file.onReceiveProgress(() => {
+    throw new Error('application callback')
+  })
+  file.onMessage(() => {
+    messages++
   })
   const send = pair.left.makeAction('file').send
   await send('small')
@@ -828,10 +811,9 @@ for (const saturation of ['policies', 'transfers'] as const) {
       onPeerError: (_id, error) => assert.fail(error)
     })
     if (saturation === 'policies') {
-      manager.makeAction('file', {
-        onMessage: () => {},
-        onReceive: () => new Promise(resolve => approvals.push(resolve))
-      })
+      const file = manager.makeAction('file')
+      file.onMessage(() => {})
+      file.onReceive(() => new Promise(resolve => approvals.push(resolve)))
     }
     t.after(() => {
       for (let peer = 0; peer < 16; peer++) {
@@ -867,8 +849,9 @@ for (const saturation of ['policies', 'transfers'] as const) {
     void pending.catch(() => {})
     await reply()
     assert.equal(await pending, 'ok')
-    echo.onReceive = () =>
+    echo.onReceive(() =>
       assert.fail('application policy exceeded global quota')
+    )
     const limited = echo.request('limited', {target: 'honest', timeoutMs: 100})
     const rejection = assert.rejects(limited, {kind: 'rejected'})
     await reply()
@@ -879,10 +862,9 @@ for (const saturation of ['policies', 'transfers'] as const) {
 void test('receiver-rejected bulk offers do not send a redundant cancel frame back', async t => {
   const pair = linked()
   t.after(pair.close)
-  pair.right.makeAction('file', {
-    onMessage: () => {},
-    onReceive: () => false
-  })
+  const file = pair.right.makeAction('file')
+  file.onMessage(() => {})
+  file.onReceive(() => false)
   await assert.rejects(
     pair.left.makeAction('file').send(new Uint8Array(24_000)),
     {kind: 'rejected'}
@@ -919,10 +901,8 @@ void test('queued bulk transfers do not expire while an active transfer makes pr
     }
   }
   const received: number[] = []
-  pair.right.makeAction('file', {
-    onMessage: data => {
-      received.push((data as Uint8Array).byteLength)
-    }
+  pair.right.makeAction('file').onMessage(data => {
+    received.push((data as Uint8Array).byteLength)
   })
   const file = pair.left.makeAction('file')
   const first = file.send(new PacedBlob([new Uint8Array(chunkSize * 3)]))

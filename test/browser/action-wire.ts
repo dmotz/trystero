@@ -15,10 +15,11 @@ withStrategyBrowserPair(
             {...config, passive: true, maxReceiveBytes: 1024},
             roomId
           )
-          window[roomId].makeAction('upload', {
-            kind: 'request',
-            onRequest: () => 'ok'
-          })
+          window[roomId]
+            .makeAction('upload', {
+              kind: 'request'
+            })
+            .onRequest(() => 'ok')
         },
         [roomId, roomConfig]
       )
@@ -79,29 +80,27 @@ withStrategyBrowserPair(
           duringFile: 0,
           progress: 0,
           signal: null,
-          approve: null
+          approve: null,
+          unsubReceive: null
         })
-        window[roomId].makeAction('cursor', {
-          onMessage: data => {
-            state.cursors.push(data)
-            if (state.progress > 0 && state.progress < 1) {
-              state.duringFile++
-            }
+        window[roomId].makeAction('cursor').onMessage(data => {
+          state.cursors.push(data)
+          if (state.progress > 0 && state.progress < 1) {
+            state.duringFile++
           }
         })
-        window[roomId].makeAction('file', {
-          onReceive: ({signal}) => {
-            state.signal = signal
-            return new Promise(resolve => {
-              state.approve = resolve
-            })
-          },
-          onReceiveProgress: progress => {
-            state.progress = progress
-          },
-          onMessage: data => {
-            state.files.push([data.byteLength, data[0], data[data.length - 1]])
-          }
+        const fileAction = window[roomId].makeAction('file')
+        state.unsubReceive = fileAction.onReceive(({signal}) => {
+          state.signal = signal
+          return new Promise(resolve => {
+            state.approve = resolve
+          })
+        })
+        fileAction.onReceiveProgress(progress => {
+          state.progress = progress
+        })
+        fileAction.onMessage(data => {
+          state.files.push([data.byteLength, data[0], data[data.length - 1]])
         })
       }, roomId)
       await page.evaluate(
@@ -156,7 +155,10 @@ withStrategyBrowserPair(
       ).toBeGreaterThan(0)
 
       await page2.evaluate(roomId => {
-        window[roomId].makeAction('file').onReceive = () => false
+        window.__wireTest.unsubReceive?.()
+        window.__wireTest.unsubReceive = window[roomId]
+          .makeAction('file')
+          .onReceive(() => false)
       }, roomId)
       expect(
         await page.evaluate(
@@ -177,12 +179,17 @@ withStrategyBrowserPair(
 
       await page2.evaluate(roomId => {
         window.__wireTest.signal = null
-        window[roomId].makeAction('file').onReceive = ({signal}) => {
-          window.__wireTest.signal = signal
-          return new Promise(resolve =>
-            signal.addEventListener('abort', () => resolve(false), {once: true})
-          )
-        }
+        window.__wireTest.unsubReceive?.()
+        window.__wireTest.unsubReceive = window[roomId]
+          .makeAction('file')
+          .onReceive(({signal}) => {
+            window.__wireTest.signal = signal
+            return new Promise(resolve =>
+              signal.addEventListener('abort', () => resolve(false), {
+                once: true
+              })
+            )
+          })
       }, roomId)
       await page.evaluate(
         ([roomId, target]) => {
@@ -230,18 +237,19 @@ withStrategyBrowserPair(
       ])
       await page.evaluate(roomId => {
         window.__responseApprovals = []
-        window[roomId].makeAction('file', {
-          onMessage: () => {},
-          onReceive: () =>
-            new Promise(resolve => window.__responseApprovals.push(resolve))
-        })
+        const fileAction = window[roomId].makeAction('file')
+        fileAction.onMessage(() => {})
+        fileAction.onReceive(
+          () => new Promise(resolve => window.__responseApprovals.push(resolve))
+        )
       }, roomId)
       await page2.evaluate(
         ([roomId, target]) => {
-          window[roomId].makeAction('echo', {
-            kind: 'request',
-            onRequest: value => value
-          })
+          window[roomId]
+            .makeAction('echo', {
+              kind: 'request'
+            })
+            .onRequest(value => value)
           const file = window[roomId].makeAction('file')
           window.__blockedFiles = Promise.all(
             Array.from({length: 8}, () =>
@@ -261,11 +269,11 @@ withStrategyBrowserPair(
           async ([roomId, target]) => {
             const echo = window[roomId].makeAction('echo', {kind: 'request'})
             const first = await echo.request('hello', {target, timeoutMs: 2000})
-            echo.onReceive = () => true
+            const unsubReceive = echo.onReceive(() => true)
             const limited = await echo
               .request('limited', {target, timeoutMs: 2000})
               .catch(error => error.kind)
-            echo.onReceive = null
+            unsubReceive()
             const last = await echo.request('again', {target, timeoutMs: 2000})
             window.__responseApprovals.forEach(approve => approve(false))
             return [first, limited, last]

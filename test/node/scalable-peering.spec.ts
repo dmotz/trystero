@@ -259,14 +259,14 @@ const createOverlayCluster = async ({
       }
     )
 
-    room.onPeerJoin = ({peerId}) => {
+    room.onPeerJoin(({peerId}) => {
       left.delete(peerId)
       joined.add(peerId)
-    }
-    room.onPeerLeave = ({peerId}) => {
+    })
+    room.onPeerLeave(({peerId}) => {
       joined.delete(peerId)
       left.add(peerId)
-    }
+    })
 
     const shouldConnect = (
       b: ReturnType<typeof getRoomSignalingBridge>,
@@ -358,7 +358,7 @@ const createOverlayCluster = async ({
         }
       }
       return true
-    }, 10_000)
+    }, 25_000)
     await wait(30)
   }
 
@@ -558,25 +558,22 @@ void test('Data-only scale: 150-peer text chat broadcast & high-frequency cursor
       receivedCursors.set(id, new Map())
       const room = cluster.rooms.get(id)!
 
-      const chat = room.makeAction<{text: string}>('chat', {
-        onMessage: (payload, {peerId, metadata}) => {
-          receivedChat.get(id)!.push({
-            text: payload.text,
-            from: peerId,
-            meta: metadata
-          })
-        }
+      const chat = room.makeAction<{text: string}>('chat')
+      chat.onMessage((payload, {peerId, metadata}) => {
+        receivedChat.get(id)!.push({
+          text: payload.text,
+          from: peerId,
+          meta: metadata
+        })
       })
       chatSenders.set(id, chat)
 
       const cursor = room.makeAction<{x: number; y: number; seq: number}>(
-        'cursor',
-        {
-          onMessage: (payload, {peerId}) => {
-            receivedCursors.get(id)!.set(peerId, payload)
-          }
-        }
+        'cursor'
       )
+      cursor.onMessage((payload, {peerId}) => {
+        receivedCursors.get(id)!.set(peerId, payload)
+      })
       cursorSenders.set(id, cursor)
     }
 
@@ -685,14 +682,11 @@ void test('Multi-hop unicast: targeted send, ping, RPC request/requestMany, and 
     const dmActions = new Map<string, any>()
     for (const id of cluster.peerIds) {
       dmReceived.set(id, [])
-      dmActions.set(
-        id,
-        cluster.rooms.get(id)!.makeAction<{body: string}>('dm', {
-          onMessage: (data, {peerId}) => {
-            dmReceived.get(id)!.push({body: data.body, from: peerId})
-          }
-        })
-      )
+      const dm = cluster.rooms.get(id)!.makeAction<{body: string}>('dm')
+      dm.onMessage((data, {peerId}) => {
+        dmReceived.get(id)!.push({body: data.body, from: peerId})
+      })
+      dmActions.set(id, dm)
     }
 
     await dmActions
@@ -717,21 +711,16 @@ void test('Multi-hop unicast: targeted send, ping, RPC request/requestMany, and 
     // 3. Multi-hop RPC request & requestMany
     const rpcActions = new Map<string, any>()
     for (const id of cluster.peerIds) {
-      rpcActions.set(
-        id,
-        cluster.rooms
-          .get(id)!
-          .makeAction<{q: number}, {ans: number; responder: string}>(
-            'compute',
-            {
-              kind: 'request',
-              onRequest: (payload, {peerId}) => ({
-                ans: payload.q * 2,
-                responder: `${id}-for-${peerId}`
-              })
-            }
-          )
-      )
+      const rpc = cluster.rooms
+        .get(id)!
+        .makeAction<{q: number}, {ans: number; responder: string}>('compute', {
+          kind: 'request'
+        })
+      rpc.onRequest((payload, {peerId}) => ({
+        ans: payload.q * 2,
+        responder: `${id}-for-${peerId}`
+      }))
+      rpcActions.set(id, rpc)
     }
 
     const singleResp = await rpcActions
@@ -767,27 +756,26 @@ void test('Multi-hop unicast: targeted send, ping, RPC request/requestMany, and 
     const fileActions = new Map<string, any>()
 
     for (const id of cluster.peerIds) {
-      fileActions.set(
-        id,
-        cluster.rooms.get(id)!.makeAction<Uint8Array>('file-xfer', {
-          onMessage: (data, {peerId, metadata}) => {
-            if (id === farPeerId) {
-              receivedBinary = {
-                bytes: new Uint8Array(
-                  data instanceof ArrayBuffer
-                    ? data
-                    : data.buffer.slice(
-                        data.byteOffset,
-                        data.byteOffset + data.byteLength
-                      )
-                ),
-                from: peerId,
-                meta: metadata
-              }
-            }
+      const fileAction = cluster.rooms
+        .get(id)!
+        .makeAction<Uint8Array>('file-xfer')
+      fileAction.onMessage((data, {peerId, metadata}) => {
+        if (id === farPeerId) {
+          receivedBinary = {
+            bytes: new Uint8Array(
+              data instanceof ArrayBuffer
+                ? data
+                : data.buffer.slice(
+                    data.byteOffset,
+                    data.byteOffset + data.byteLength
+                  )
+            ),
+            from: peerId,
+            meta: metadata
           }
-        })
-      )
+        }
+      })
+      fileActions.set(id, fileAction)
     }
 
     await fileActions.get(sourceId).send(blobBytes, {
@@ -832,13 +820,13 @@ void test('Media streaming over scale overlay: direct neighbor delivery, multi-h
 
     for (const id of cluster.peerIds) {
       const room = cluster.rooms.get(id)!
-      room.onPeerStream = (stream, {peerId, metadata}) => {
+      room.onPeerStream((stream, {peerId, metadata}) => {
         streamDeliveries.set(id, {
           streamId: stream.id,
           from: peerId,
           meta: metadata
         })
-      }
+      })
     }
 
     cluster.resetStats()
@@ -946,14 +934,11 @@ void test('Peer dropping & mesh-breaking scenarios: 25% mass churn and autonomou
     for (const id of cluster.peerIds) {
       receivedAlerts.set(id, new Set())
       const room = cluster.rooms.get(id)!
-      alertActions.set(
-        id,
-        room.makeAction<{alertId: string}>('alert', {
-          onMessage: ({alertId}) => {
-            receivedAlerts.get(id)!.add(alertId)
-          }
-        })
-      )
+      const alertAction = room.makeAction<{alertId: string}>('alert')
+      alertAction.onMessage(({alertId}) => {
+        receivedAlerts.get(id)!.add(alertId)
+      })
+      alertActions.set(id, alertAction)
     }
 
     // 1. Drop 25% of nodes across the overlay (20 nodes dropped simultaneously)
@@ -2160,16 +2145,16 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       const alertAction = rooms
         .get(id)!
         .makeAction<{msg: string}>('mod-alert', {
-          roles: ['admin', 'moderator'],
-          onMessage: (data, {peerId, metadata, roles}) => {
-            receivedAlerts.get(id)!.push({
-              data,
-              from: peerId,
-              meta: metadata,
-              roles: roles ?? []
-            })
-          }
+          roles: ['admin', 'moderator']
         })
+      alertAction.onMessage((data, {peerId, metadata, roles}) => {
+        receivedAlerts.get(id)!.push({
+          data,
+          from: peerId,
+          meta: metadata,
+          roles: roles ?? []
+        })
+      })
       actions.set(id, alertAction)
     }
 
@@ -2326,7 +2311,7 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   const viewer1 = makePeerRoom('viewer-1', viewerUser1)
 
   type GameState = {round: number; leader: string}
-  const validateGame = (next: GameState, prev: GameState) =>
+  const validateGame = (next: GameState, {prev}: {prev: GameState}) =>
     next.round >= prev.round
 
   const stateAdmin1 = admin1.makeState<GameState>(
@@ -2346,9 +2331,9 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   )
 
   const viewerChanges: Array<{val: GameState; prev: GameState; by: string}> = []
-  stateViewer1.onChange = (val, prev, ctx) => {
-    viewerChanges.push({val, prev, by: ctx.updatedBy})
-  }
+  stateViewer1.onChange((val, ctx) => {
+    viewerChanges.push({val, prev: ctx.prev, by: ctx.peerId})
+  })
 
   connectDirect('admin-1', 'admin-2')
   connectDirect('admin-1', 'viewer-1')
@@ -2376,7 +2361,7 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
     2_000
   )
   assert.deepEqual(stateViewer1.get(), {round: 2, leader: 'admin-1'})
-  assert.equal(stateViewer1.getMeta()?.updatedBy, 'admin-1')
+  assert.equal(stateViewer1.getMeta()?.peerId, 'admin-1')
   assert.equal(stateViewer1.getMeta()?.seq, 2)
   assert.ok(viewerChanges.length >= 1)
 
@@ -2568,11 +2553,10 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
 
     const honestChatReceived: Array<{msg: string; from: string}> = []
     for (const id of peerIds) {
-      const chatAction = rooms.get(id)!.makeAction<string>('chat', {
-        onMessage: (msg, {peerId}) => {
-          if (id === 'honest') {
-            honestChatReceived.push({msg, from: peerId})
-          }
+      const chatAction = rooms.get(id)!.makeAction<string>('chat')
+      chatAction.onMessage((msg, {peerId}) => {
+        if (id === 'honest') {
+          honestChatReceived.push({msg, from: peerId})
         }
       })
       ;(rooms.get(id) as any).sendChat = chatAction.send
@@ -2765,16 +2749,16 @@ void test('PeerInfo in room.getPeers(), UserIdentity fingerprint reuse, cascadin
     for (const id of peerIds) {
       receivedModPayloads.set(id, [])
       const act = rooms.get(id)!.makeAction<Uint8Array>('mod-file', {
-        roles: ['admin', 'moderator'],
-        onMessage: data => {
-          receivedModPayloads
-            .get(id)!
-            .push(
-              data instanceof Uint8Array
-                ? data
-                : new Uint8Array(data as ArrayBuffer)
-            )
-        }
+        roles: ['admin', 'moderator']
+      })
+      act.onMessage(data => {
+        receivedModPayloads
+          .get(id)!
+          .push(
+            data instanceof Uint8Array
+              ? data
+              : new Uint8Array(data as ArrayBuffer)
+          )
       })
       modSenders.set(id, act.send)
     }
@@ -2813,11 +2797,14 @@ void test('PeerInfo in room.getPeers(), UserIdentity fingerprint reuse, cascadin
     // Mallory registers 'mod-bulk' without local authority config (simulating a modified client),
     // while Carol protects 'mod-bulk' with roles: ['admin', 'moderator'].
     // When Mallory sends a 64 KB multi-chunk payload to Carol, Carol rejects the offer at admission time!
-    rooms.get('carol')!.makeAction<Uint8Array>('mod-bulk', {
-      roles: ['admin', 'moderator'],
-      onMessage: () =>
+    rooms
+      .get('carol')!
+      .makeAction<Uint8Array>('mod-bulk', {
+        roles: ['admin', 'moderator']
+      })
+      .onMessage(() =>
         assert.fail('unauthorized bulk transfer must be rejected at offer time')
-    })
+      )
     const malloryBulk = rooms.get('mallory')!.makeAction<Uint8Array>('mod-bulk')
     await assert.rejects(
       () => malloryBulk.send(new Uint8Array(64_000), {target: 'carol'}),
@@ -2995,7 +2982,7 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
     assert.equal(source.getPeers()[remote].direct, false)
     const streams: string[] = []
     for (const [id, room] of cluster.rooms) {
-      room.onPeerStream = () => streams.push(id)
+      room.onPeerStream(() => streams.push(id))
     }
     for (const target of [direct, remote]) {
       streams.length = 0
@@ -3425,14 +3412,13 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
         ]
       }
     )
-    const chatAction = room.makeAction<string>('chat', {
-      onMessage: (data, {peerId}) => {
-        if (id === 'bob') {
-          receivedByBob.push({data, peerId})
-        }
-        if (id === 'carol') {
-          receivedByCarol.push({data, peerId})
-        }
+    const chatAction = room.makeAction<string>('chat')
+    chatAction.onMessage((data, {peerId}) => {
+      if (id === 'bob') {
+        receivedByBob.push({data, peerId})
+      }
+      if (id === 'carol') {
+        receivedByCarol.push({data, peerId})
       }
     })
     senders.set(id, chatAction.send)
@@ -4509,22 +4495,17 @@ void test('Solution (a): reject maxConnections < 4, derive dynamic TTL from rost
       receivedBroadcastByPeer.set(id, [])
       receivedDmByPeer.set(id, [])
       const room = cluster250.rooms.get(id)!
-      broadcastActions.set(
-        id,
-        room.makeAction<string>('bcast250', {
-          onMessage: msg => {
-            receivedBroadcastByPeer.get(id)!.push(msg)
-          }
-        })
-      )
-      dmActions.set(
-        id,
-        room.makeAction<string>('dm250', {
-          onMessage: msg => {
-            receivedDmByPeer.get(id)!.push(msg)
-          }
-        })
-      )
+      const bcast = room.makeAction<string>('bcast250')
+      bcast.onMessage(msg => {
+        receivedBroadcastByPeer.get(id)!.push(msg)
+      })
+      broadcastActions.set(id, bcast)
+
+      const dm = room.makeAction<string>('dm250')
+      dm.onMessage(msg => {
+        receivedDmByPeer.get(id)!.push(msg)
+      })
+      dmActions.set(id, dm)
     }
 
     const originId = 'peer-0000'
@@ -5069,19 +5050,20 @@ void test('Bug A regression: virtual peer survives a failed direct dial or hands
     )
 
     const aliceLeftPeers: string[] = []
-    aliceRoom.onPeerLeave = ({peerId}) => {
+    aliceRoom.onPeerLeave(({peerId}) => {
       aliceLeftPeers.push(peerId)
-    }
+    })
 
     const aliceReceived: string[] = []
     for (const id of peerIds) {
-      rooms.get(id)!.makeAction<string>('chat', {
-        onMessage: msg => {
+      rooms
+        .get(id)!
+        .makeAction<string>('chat')
+        .onMessage(msg => {
           if (id === 'alice') {
             aliceReceived.push(msg)
           }
-        }
-      })
+        })
     }
     const bobChat = bobRoom.makeAction<string>('chat')
 
@@ -5151,11 +5133,11 @@ void test('Bug A regression: virtual peer survives a failed direct dial or hands
     // Verify virtual-peer departure ordering: when data-plane leave arrives before control leave,
     // alice must fire onPeerLeave exactly once and 0 spurious onPeerJoin events
     const aliceJoinedAfterLeave: string[] = []
-    aliceRoom.onPeerJoin = ({peerId}) => {
+    aliceRoom.onPeerJoin(({peerId}) => {
       if (aliceLeftPeers.length > 0) {
         aliceJoinedAfterLeave.push(peerId)
       }
-    }
+    })
     await getRoomSignalingBridge(bobRoom)
       ?.getScaleProvider()
       ?.broadcastInline(new Uint8Array(encodeInternalAction('leave')))

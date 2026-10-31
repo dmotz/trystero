@@ -50,17 +50,18 @@
   verified `roles` included in `onMessage` and `onRequest` contexts.
 - 🛡️ **Authoritative shared state** - added
   `room.makeState(namespace, initialValue, [config])` (enabled via `roles()`)
-  for official room state that any peer can read (`get()`, `onChange`,
+  for official room state that any peer can read (`get()`, `onChange()`,
   `getMeta()`) and only authorized roles (`config.roles`) can update (`set()`),
-  with optional custom `validate` rules. Existing peers automatically sync the
-  latest signed state snapshot to late joiners even after the admin has left the
-  room.
+  with optional custom `validate(next, context)` rules. `state.onChange` matches
+  React's `useSyncExternalStore` contract out of the box. Existing peers
+  automatically sync the latest signed state snapshot to late joiners even after
+  the admin has left the room.
 - 🚪 **Room size limits** - added `limit` to room config for a best-effort,
   advisory per-peer cap on the number of unique users in a peer's room view
   (including the local user). When a peer's view is at capacity, additional
   joiners with a new `userId` are rejected on that peer link during handshake
   before triggering `onPeerJoin` on existing members and receive
-  `error: 'room full'` via `onJoinError`.
+  `error: 'room full'` via `room.onJoinError()`.
 - 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every
   peer now has both a lazily generated self-certifying 20-character Base62
   endpoint `peerId` (derived from its ECDSA P-256 public key and verified with
@@ -101,15 +102,43 @@ const room = joinRoom({appId: 'my-app'}, 'room-1')
 const {peerId, userId} = await room.getSelf()
 ```
 
-Room event handlers now receive `{peerId, userId, ...}` context objects instead
-of a bare `peerId` string (with `stream` remaining first on `onPeerStream`):
+All room, action, and authoritative-state event listeners now use a unified
+method subscription API (`on*(handler, options?) => Unsubscribe`) instead of
+property assignment (`room.on* = fn`) or config-object callbacks:
+
+- `room.onUserJoin`, `room.onUserLeave`, `room.onPeerJoin`, `room.onPeerLeave`,
+  `room.onPeerStream`, `room.onJoinError`, `action.onMessage`,
+  `action.onReceiveProgress`, and `state.onChange` support multiple independent
+  listeners, return an idempotent `Unsubscribe` (`() => void`) function, and
+  accept `{once?: boolean, signal?: AbortSignal}` options.
+- `onUserJoin`, `onPeerJoin`, `onPeerStream`, and `state.onChange` are strictly
+  live-only by default; pass `{replay: true}` to synchronously emit currently
+  active users, peers, streams, or non-initial state to a late subscriber.
+- `joinRoom(config, roomId)` now takes 2 arguments; the 3rd `{onJoinError}`
+  callbacks object has been replaced by `room.onJoinError(fn, options?)`.
+- `room.makeAction(namespace, config?)` accepts declarative config only (`kind`
+  and `roles`); register handlers via `action.onMessage(fn)`,
+  `action.onRequest(fn)`, `action.onReceive(fn)`, and
+  `action.onReceiveProgress(fn)`. `onRequest` and `onReceive` enforce a single
+  active handler per action (call `unsubscribe()` before replacing).
+- `state.onChange((value, context) => ...)` and `config.validate(next, context)`
+  take 2 arguments with `StateChangeContext<T>`
+  (`{prev, peerId, userId, roles, seq, timestamp, hash}`).
+- `RoomKernel` lifecycle hooks (`onPeerActivated`, `onPeerDeactivated`,
+  `onRoomIdChanged`, `onLeave`) also return `Unsubscribe` and accept
+  `ListenerOptions` (`StatefulListenerOptions` on `onPeerActivated`).
+- Room event handlers receive `{peerId, userId, ...}` context objects instead of
+  a bare `peerId` string (with `stream` remaining first on `onPeerStream`):
 
 ```js
-room.onPeerJoin = ({peerId, userId, roles}) =>
+const offJoin = room.onPeerJoin(({peerId, userId, roles}) =>
   console.log(`${peerId} (${userId}) joined`)
-room.onPeerLeave = ({peerId, userId}) =>
+)
+room.onPeerLeave(({peerId, userId}) =>
   console.log(`${peerId} (${userId}) left`)
-room.onPeerStream = (stream, {peerId, userId, metadata}) => {}
+)
+room.onPeerStream((stream, {peerId, userId, metadata}) => {})
+room.onJoinError(({error}) => console.error(error))
 ```
 
 The media API has been streamlined around `MediaStream` as the unit of media

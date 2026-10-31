@@ -107,11 +107,11 @@ void test(
         () => {},
         () => {}
       )
-      const joinDirectA = new Promise(
-        resolve => (directRoomA.onPeerJoin = resolve)
+      const joinDirectA = new Promise(resolve =>
+        directRoomA.onPeerJoin(resolve, {once: true})
       )
-      const joinDirectB = new Promise(
-        resolve => (directRoomB.onPeerJoin = resolve)
+      const joinDirectB = new Promise(resolve =>
+        directRoomB.onPeerJoin(resolve, {once: true})
       )
       const {peerA: directPeerA, peerB: directPeerB} = linkPeers(
         new LinkedMediaPeer(),
@@ -127,14 +127,14 @@ void test(
         peerId: string
         metadata: unknown
       }> = []
-      directRoomB.onPeerStream = (stream, {peerId, metadata}) => {
+      directRoomB.onPeerStream((stream, {peerId, metadata}) => {
         streamEvents.push({
           streamId: stream.id,
           trackIds: stream.getTracks().map(t => t.id),
           peerId,
           metadata
         })
-      }
+      })
 
       await directRoomA.addStream(localStream as any, {
         target: 'peer-b',
@@ -244,8 +244,12 @@ void test(
         () => {},
         () => {}
       )
-      const joinA = new Promise(resolve => (roomA.onPeerJoin = resolve))
-      const joinB = new Promise(resolve => (roomB.onPeerJoin = resolve))
+      const joinA = new Promise(resolve =>
+        roomA.onPeerJoin(resolve, {once: true})
+      )
+      const joinB = new Promise(resolve =>
+        roomB.onPeerJoin(resolve, {once: true})
+      )
       const {peerA, peerB} = linkPeers(
         new LinkedMediaPeer(),
         new LinkedMediaPeer()
@@ -259,9 +263,9 @@ void test(
         peerId: string
         metadata: unknown
       }> = []
-      roomB.onPeerStream = (stream, {peerId, metadata}) => {
+      roomB.onPeerStream((stream, {peerId, metadata}) => {
         receivedStreams.push({streamId: stream.id, peerId, metadata})
-      }
+      })
 
       const avStream = {
         id: 'av-stream',
@@ -377,9 +381,9 @@ void test('receiveRemoteStream and receiveStreamMeta emit when receiver transcei
     isActive: () => true,
     onPeerError: () => {}
   })
-  media.onPeerStream = (stream, {metadata}) => {
+  media.onPeerStream((stream, {metadata}) => {
     emitted.push({streamId: stream.id, metadata})
-  }
+  })
 
   let receiverTracks = [
     {id: 'receiver-local-audio-uuid'} as unknown as MediaStreamTrack

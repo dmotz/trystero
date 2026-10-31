@@ -22,19 +22,22 @@ withStrategyBrowserPair(
         video.muted = true
         video.playsInline = true
         document.body.append(video)
-        window[roomId].onPeerStream = stream => {
+        window[roomId].onPeerStream(stream => {
           video.srcObject = stream
           void video.play().catch(() => {})
-        }
+        })
       }
 
       await page2.evaluate(prepareViewer, roomId)
       await page.evaluate(async roomId => {
         const stream = await navigator.mediaDevices.getUserMedia({video: true})
         window.__streamSwitchLocalStream = stream
-        window[roomId].onPeerJoin = ({peerId}) => {
-          void window[roomId].addStream(stream, {target: peerId})
-        }
+        window[roomId].onPeerJoin(
+          ({peerId}) => {
+            void window[roomId].addStream(stream, {target: peerId})
+          },
+          {replay: true}
+        )
       }, roomId)
       await expect
         .poll(
@@ -58,10 +61,10 @@ withStrategyBrowserPair(
             '#media-rejoin-video'
           )!
           video.srcObject = null
-          window[roomId].onPeerStream = stream => {
+          window[roomId].onPeerStream(stream => {
             video.srcObject = stream
             void video.play().catch(() => {})
-          }
+          })
         },
         [roomId, roomConfig]
       )

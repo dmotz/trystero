@@ -21,7 +21,7 @@ const room = joinRoom(
   roomId
 )
 
-room.onPeerJoin = peerId => {
+room.onPeerJoin(({peerId}) => {
   console.log(
     JSON.stringify({
       type: 'connected',
@@ -30,7 +30,7 @@ room.onPeerJoin = peerId => {
       connectionMs: Math.round(performance.now() - joinedAt)
     })
   )
-}
+})
 
 const shutdown = async (): Promise<void> => {
   await room.leave().catch(() => {})

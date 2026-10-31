@@ -39,9 +39,9 @@ for (const fault of ['wire', 'stream']) {
     peer.handlers.data(encodeInternalAction('hsready'))
     await waitFor(() => 'peer' in room.getPeers())
     let leaves = 0
-    room.onPeerLeave = () => {
+    room.onPeerLeave(() => {
       leaves++
-    }
+    })
     const request = room
       .makeAction('waiting', {kind: 'request'})
       .request('', {target: 'peer'})
@@ -84,16 +84,17 @@ for (const saturation of ['policies', 'transfers']) {
     const approvals: ((allow: boolean) => void)[] = []
     t.after(() => approvals.forEach(resolve => resolve(false)))
     if (saturation === 'policies') {
-      room.makeAction('file', {
-        onMessage: () => {},
-        onReceive: () => new Promise(resolve => approvals.push(resolve))
-      })
+      const file = room.makeAction('file')
+      file.onMessage(() => {})
+      file.onReceive(() => new Promise(resolve => approvals.push(resolve)))
     }
     for (let id = 0; id < (saturation === 'policies' ? 8 : 64); id++) {
       peer.handlers.data(fileOffer(id))
     }
     let streams = 0
-    room.onPeerStream = () => streams++
+    room.onPeerStream(() => {
+      streams++
+    })
     const track = {id: 'track'}
     const stream = {id: 'stream', getTracks: () => [track]}
     peer.handlers.data(metadataAction('stream', 's'))
@@ -130,10 +131,9 @@ void test('application policy saturation does not block new peer handshakes', as
   t.after(() => room.leave())
   const approvals: ((allow: boolean) => void)[] = []
   t.after(() => approvals.forEach(resolve => resolve(false)))
-  room.makeAction('file', {
-    onMessage: () => {},
-    onReceive: () => new Promise(resolve => approvals.push(resolve))
-  })
+  const file = room.makeAction('file')
+  file.onMessage(() => {})
+  file.onReceive(() => new Promise(resolve => approvals.push(resolve)))
   const join = id => {
     const peer = new MockPeer()
     connect(peer, id)
@@ -195,9 +195,9 @@ void test('room peer errors and handshake failures notify the remote peer to exi
     () => 'peer-b' in bad.roomA.getPeers() && 'peer-a' in bad.roomB.getPeers()
   )
   let remoteLeaves = 0
-  bad.roomB.onPeerLeave = () => {
+  bad.roomB.onPeerLeave(() => {
     remoteLeaves++
-  }
+  })
   // Trigger a room-level wire fault on bad.roomA; bad.roomB should also exit.
   bad.peerA.handlers.data(new Uint8Array(36).buffer)
   await waitFor(() => !('peer-a' in bad.roomB.getPeers()))

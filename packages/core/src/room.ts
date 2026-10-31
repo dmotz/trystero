@@ -1,10 +1,12 @@
 import {
+  createEventEmitter,
   entries,
   fromEntries,
   getConfiguredPlugins,
   internalActionPrefix,
   isBrowser,
   keys,
+  lockMethods,
   logErr,
   mkErr,
   noOp,
@@ -41,6 +43,7 @@ import {createMediaManager, type InternalMediaMeta} from './media'
 import type {
   AddMediaOptions,
   DataPayload,
+  JoinError,
   KernelRolesProvider,
   KernelScaleProvider,
   PeerHandle,
@@ -93,6 +96,7 @@ export type RoomSignalingBridge = {
     verified: VerifiedPeerIdentity
   ) => void
   getPeerHandle: (peerId: string) => PeerHandle | undefined
+  emitJoinError: (details: JoinError) => void
 }
 
 const roomSignalingBridges = new WeakMap<Room, RoomSignalingBridge>()
@@ -178,12 +182,21 @@ export default <
   let scaleTargetsChangedCallback: ((targetPeerIds: string[]) => void) | null =
     null
   let roomInstanceRef: Room | null = null
-  const peerActivatedListeners: Array<
-    (peerId: string, peer: PeerHandle) => void
-  > = []
-  const peerDeactivatedListeners: Array<(peerId: string) => void> = []
-  const roomIdChangedListeners: Array<(roomId: string) => void> = []
-  const leaveListeners: Array<() => void> = []
+  const peerActivatedEmitter = createEventEmitter<[string, PeerHandle]>(
+    'peer activated handler'
+  )
+  const peerDeactivatedEmitter = createEventEmitter<[string]>(
+    'peer deactivated handler'
+  )
+  const roomIdChangedEmitter = createEventEmitter<[string]>(
+    'room id changed handler'
+  )
+  const leaveEmitter = createEventEmitter<[]>('leave handler')
+  const peerJoinEmitter = createEventEmitter<[PeerJoinContext]>('onPeerJoin')
+  const peerLeaveEmitter = createEventEmitter<[PeerLeaveContext]>('onPeerLeave')
+  const userJoinEmitter = createEventEmitter<[UserJoinContext]>('onUserJoin')
+  const userLeaveEmitter = createEventEmitter<[UserLeaveContext]>('onUserLeave')
+  const joinErrorEmitter = createEventEmitter<[JoinError]>('onJoinError')
   let localUserId = ''
   const resolvedUserIdentityP = (
     userIdentityP ??
@@ -303,11 +316,17 @@ export default <
   const getPeerRoles = (id = localSelfId): string[] =>
     rolesProvider?.getPeerRoles(id) ?? []
 
-  const listeners = {
-    onPeerJoin: null as ((context: PeerJoinContext) => void) | null,
-    onPeerLeave: null as ((context: PeerLeaveContext) => void) | null,
-    onUserJoin: null as ((context: UserJoinContext) => void) | null,
-    onUserLeave: null as ((context: UserLeaveContext) => void) | null
+  const reportHandshakeError = (peerId: string, error: string): void => {
+    if (onHandshakeError) {
+      onHandshakeError(peerId, error)
+      return
+    }
+    joinErrorEmitter.emit({
+      error: error.replace(/^handshake failed: /, ''),
+      appId,
+      peerId,
+      roomId: effectiveRoomId
+    })
   }
 
   const notifyPeerActivated = (peerId: string): void => {
@@ -321,9 +340,9 @@ export default <
     }
     peers.add(peerId)
     const roles = getPeerRoles(peerId)
-    listeners.onPeerJoin?.({peerId, userId, roles})
+    peerJoinEmitter.emit({peerId, userId, roles})
     if (isFirstForUser && userId !== localUserId) {
-      listeners.onUserJoin?.({userId, peerId, roles})
+      userJoinEmitter.emit({userId, peerId, roles})
     }
   }
 
@@ -338,12 +357,10 @@ export default <
         isLastForUser = true
       }
     }
-    for (const cb of peerDeactivatedListeners) {
-      cb(peerId)
-    }
-    listeners.onPeerLeave?.({peerId, userId})
+    peerDeactivatedEmitter.emit(peerId)
+    peerLeaveEmitter.emit({peerId, userId})
     if (isLastForUser && userId !== localUserId) {
-      listeners.onUserLeave?.({userId, peerId})
+      userLeaveEmitter.emit({userId, peerId})
     }
   }
 
@@ -560,9 +577,7 @@ export default <
       entries(peerMap).forEach(([id]) => {
         handshakeManager.clearPeer(id, roomLeftErr)
       })
-      for (const cb of leaveListeners) {
-        cb()
-      }
+      leaveEmitter.emit()
       scaleProvider?.announceLeave()
       const leaveTargets = scaleProvider
         ? keys(peerMap).filter(id => !virtualPeerIds.has(id))
@@ -584,6 +599,17 @@ export default <
         })
         activeUserPeers.clear()
       } finally {
+        peerActivatedEmitter.clear()
+        peerDeactivatedEmitter.clear()
+        roomIdChangedEmitter.clear()
+        leaveEmitter.clear()
+        peerJoinEmitter.clear()
+        peerLeaveEmitter.clear()
+        userJoinEmitter.clear()
+        userLeaveEmitter.clear()
+        joinErrorEmitter.clear()
+        mediaManager.clearListeners()
+        actionManager.clearListeners()
         try {
           unregisterBeforeUnloadCleanup()
         } finally {
@@ -593,9 +619,9 @@ export default <
     })())
 
   const pingAction = makeAction<string, string>(`${internalActionPrefix}ping`, {
-    kind: 'request',
-    onRequest: () => ''
+    kind: 'request'
   })
+  pingAction.onRequest(() => '')
   const signalAction = makeActionInternal('signal')
   const streamMetaAction = makeActionInternal<InternalMediaMeta>('stream', {
     maxPayloadBytes: 64 * 1024
@@ -626,9 +652,7 @@ export default <
     setEffectiveRoomId: rid => {
       if (rid && rid !== effectiveRoomId) {
         effectiveRoomId = rid
-        for (const cb of roomIdChangedListeners) {
-          cb(rid)
-        }
+        roomIdChangedEmitter.emit(rid)
       }
     },
     getLocalUserIdentity: () => resolvedUserIdentityP,
@@ -686,18 +710,17 @@ export default <
     },
     getRolesProvider: () => rolesProvider,
     getScaleProvider: () => scaleProvider,
-    onPeerActivated: cb => {
-      peerActivatedListeners.push(cb)
-    },
-    onPeerDeactivated: cb => {
-      peerDeactivatedListeners.push(cb)
-    },
-    onRoomIdChanged: cb => {
-      roomIdChangedListeners.push(cb)
-    },
-    onLeave: cb => {
-      leaveListeners.push(cb)
-    },
+    onPeerActivated: (cb, options) =>
+      peerActivatedEmitter.subscribe(cb, options, () =>
+        entries(activePeerMap)
+          .filter(([id]) => !virtualPeerIds.has(id))
+          .map(([id, peer]): [string, PeerHandle] => [id, peer])
+      ),
+    onPeerDeactivated: (cb, options) =>
+      peerDeactivatedEmitter.subscribe(cb, options),
+    onRoomIdChanged: (cb, options) =>
+      roomIdChangedEmitter.subscribe(cb, options),
+    onLeave: (cb, options) => leaveEmitter.subscribe(cb, options),
     activateVirtualPeer: (peerId, vPeer) => {
       if (isPeerBanned(peerId) || isAlreadyFullForPeer(peerId)) {
         vPeer.destroy()
@@ -864,7 +887,7 @@ export default <
     selfId: localSelfId,
     selfIdP: localSelfIdP,
     ...(onPeerHandshake === undefined ? {} : {onPeerHandshake}),
-    ...(onHandshakeError === undefined ? {} : {onHandshakeError}),
+    onHandshakeError: reportHandshakeError,
     handshakeTimeoutMs,
     sendHandshakeData: handshakeDataAction.send,
     sendHandshakeReady: handshakeReadyAction.send,
@@ -887,9 +910,7 @@ export default <
       const alreadyJoined = virtualPeerIds.delete(id)
       activePeerMap[id] = peer
       scaleProvider?.addDirectPeer(id, peer)
-      for (const cb of peerActivatedListeners) {
-        cb(id, peer)
-      }
+      peerActivatedEmitter.emit(id, peer)
       if (limit !== undefined && getActiveUniqueUsers().size >= limit) {
         for (const pendingId of handshakeManager.getPendingIds()) {
           if (
@@ -961,14 +982,14 @@ export default <
           !(keys(activePeerMap).length > 0 && isAlreadyFullForPeer(id))
         ) {
           didReportRoomFull = true
-          onHandshakeError?.(id, roomFullMsg)
+          reportHandshakeError(id, roomFullMsg)
         }
         exitPeer(id, peerMap[id], roomFullErr)
         return
       }
       if (data.err === peerBannedMsg) {
         handshakeManager.clearPeer(id, peerBannedErr)
-        onHandshakeError?.(id, peerBannedMsg)
+        reportHandshakeError(id, peerBannedMsg)
         kickPeer(id, peerMap[id], peerBannedErr)
         return
       }
@@ -1149,72 +1170,59 @@ export default <
 
     ...pluginApis,
 
-    get onPeerJoin() {
-      return listeners.onPeerJoin
-    },
-
-    set onPeerJoin(handler) {
-      listeners.onPeerJoin = handler
-
-      if (handler) {
-        keys(activePeerMap).forEach(peerId =>
-          handler({
+    onPeerJoin: (handler, options) =>
+      peerJoinEmitter.subscribe(handler, options, () =>
+        keys(activePeerMap).map((peerId): [PeerJoinContext] => [
+          {
             peerId,
             userId: getPeerUserId(peerId),
             roles: getPeerRoles(peerId)
-          })
-        )
-      }
-    },
+          }
+        ])
+      ),
 
-    get onPeerLeave() {
-      return listeners.onPeerLeave
-    },
+    onPeerLeave: (handler, options) =>
+      peerLeaveEmitter.subscribe(handler, options),
 
-    set onPeerLeave(handler) {
-      listeners.onPeerLeave = handler
-    },
-
-    get onUserJoin() {
-      return listeners.onUserJoin
-    },
-
-    set onUserJoin(handler) {
-      listeners.onUserJoin = handler
-
-      if (handler) {
+    onUserJoin: (handler, options) =>
+      userJoinEmitter.subscribe(handler, options, () => {
+        const items: [UserJoinContext][] = []
         for (const [userId, peerIds] of activeUserPeers.entries()) {
           if (userId === localUserId) {
             continue
           }
           const firstPeerId = [...peerIds][0]
           if (firstPeerId) {
-            handler({
-              userId,
-              peerId: firstPeerId,
-              roles: getPeerRoles(userId)
-            })
+            items.push([
+              {
+                userId,
+                peerId: firstPeerId,
+                roles: getPeerRoles(userId)
+              }
+            ])
           }
         }
-      }
-    },
+        return items
+      }),
 
-    get onUserLeave() {
-      return listeners.onUserLeave
-    },
+    onUserLeave: (handler, options) =>
+      userLeaveEmitter.subscribe(handler, options),
 
-    set onUserLeave(handler) {
-      listeners.onUserLeave = handler
-    },
+    onPeerStream: (handler, options) =>
+      mediaManager.onPeerStream(handler, options),
 
-    get onPeerStream() {
-      return mediaManager.onPeerStream
-    },
-
-    set onPeerStream(handler) {
-      mediaManager.onPeerStream = handler
-    }
+    onJoinError: (handler, options) =>
+      joinErrorEmitter.subscribe(handler, options)
   }
+
+  lockMethods(roomInstance, [
+    'onPeerJoin',
+    'onPeerLeave',
+    'onUserJoin',
+    'onUserLeave',
+    'onPeerStream',
+    'onJoinError'
+  ])
 
   roomInstanceRef = roomInstance
 
@@ -1247,7 +1255,9 @@ export default <
         })
       }
     },
-    getPeerHandle: peerId => handshakeManager.getPeer(peerId) ?? peerMap[peerId]
+    getPeerHandle: peerId =>
+      handshakeManager.getPeer(peerId) ?? peerMap[peerId],
+    emitJoinError: details => joinErrorEmitter.emit(details)
   })
 
   return roomInstance as RoomWithPlugins<TPlugins>

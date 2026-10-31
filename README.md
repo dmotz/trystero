@@ -25,7 +25,7 @@ on top of WebRTC:
   of peers
 - 👑🛡️ Room admins, custom roles, peer banning, and shared state
 - 🏭⚡ Can run peers server-side on Node, Bun, and Deno
-- ⚛️🪝 React hooks
+- ⚛️🤝 Works seamlessly with React and external stores
 
 You can see what people are building with Trystero
 [here](https://github.com/jeremyckahn/awesome-trystero).
@@ -50,7 +50,7 @@ You can see what people are building with Trystero
   - [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)
   - [Scaling large rooms](#scaling-large-rooms)
   - [Custom room plugins](#custom-room-plugins)
-  - [React hooks](#react-hooks)
+  - [React](#react)
   - [Troubleshooting connection issues](#troubleshooting-connection-issues)
   - [Running server-side (Node, Bun, Deno)](#running-server-side-node-bun-deno)
   - [Self-hosted WebSocket relay](#self-hosted-websocket-relay)
@@ -58,7 +58,7 @@ You can see what people are building with Trystero
   - [Supabase setup](#supabase-setup)
   - [Firebase setup](#firebase-setup)
 - [API](#api)
-  - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
+  - [`joinRoom(config, roomId)`](#joinroomconfig-roomid)
   - [`roles([config])`](#rolesconfig)
   - [`scale([config])`](#scaleconfig)
   - [`definePlugin(name, spec)`](#definepluginname-spec)
@@ -155,7 +155,7 @@ Supabase, it should be your project URL.
 Listen for users joining the room:
 
 ```js
-room.onUserJoin = ({userId}) => console.log(`${userId} joined`)
+const offJoin = room.onUserJoin(({userId}) => console.log(`${userId} joined`))
 ```
 
 > **Tip:** Because tabs in the same browser profile share your `userId` by
@@ -165,17 +165,24 @@ room.onUserJoin = ({userId}) => console.log(`${userId} joined`)
 Listen for users leaving the room:
 
 ```js
-room.onUserLeave = ({userId}) => console.log(`${userId} left`)
+room.onUserLeave(({userId}) => console.log(`${userId} left`))
 ```
 
 Listen for users sending their audio/video streams:
 
 ```js
-room.onPeerStream = (stream, {userId}) =>
-  (userElements[userId].video.srcObject = stream)
+room.onPeerStream(
+  (stream, {userId}) => (userElements[userId].video.srcObject = stream)
+)
 ```
 
-To unsubscribe from events, leave the room:
+Every `on*` method allows multiple independent listeners, returns an
+`unsubscribe()` function (`offJoin()`), and accepts `{once, signal}` options
+(plus `{replay: true}` on `onUserJoin`, `onPeerJoin`, `onPeerStream`, and
+`state.onChange` when a late subscriber wants existing room state replayed
+immediately).
+
+To disconnect and clean up all room subscriptions at once, leave the room:
 
 ```js
 room.leave()
@@ -212,19 +219,19 @@ drink.send({drink: 'negroni', withIce: true}, {target: friendId})
 drink.send({drink: 'mezcal', withIce: false})
 
 // listen for drinks sent to you
-drink.onMessage = (data, {userId}) =>
+drink.onMessage((data, {userId}) =>
   console.log(
     `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${userId}`
   )
+)
 ```
 
 Actions can also use request/response semantics:
 
 ```js
-const isEven = room.makeAction('is-even', {
-  kind: 'request',
-  onRequest: n => n % 2 === 0
-})
+const isEven = room.makeAction('is-even', {kind: 'request'})
+
+isEven.onRequest(n => n % 2 === 0)
 
 const result = await isEven.request(42, {
   target: friendId,
@@ -236,10 +243,9 @@ To ask multiple users at once, use `requestMany()`. It resolves with a labeled
 result for every target, while `onResult` lets you react as each user answers:
 
 ```js
-const availability = room.makeAction('availability', {
-  kind: 'request',
-  onRequest: ({date}) => calendar.isFree(date)
-})
+const availability = room.makeAction('availability', {kind: 'request'})
+
+availability.onRequest(({date}) => calendar.isFree(date))
 
 const results = await availability.requestMany(
   {date: '2026-05-04'},
@@ -277,8 +283,9 @@ canvas.toBlob(blob => pic.send(blob))
 
 // binary data is received as raw ArrayBuffers so your handling code should
 // interpret it in a way that makes sense
-pic.onMessage = (data, {userId}) =>
-  (imgs[userId].src = URL.createObjectURL(new Blob([data])))
+pic.onMessage(
+  (data, {userId}) => (imgs[userId].src = URL.createObjectURL(new Blob([data])))
+)
 ```
 
 Let's say we want users to be able to name themselves:
@@ -288,16 +295,17 @@ const idsToNames = {}
 const name = room.makeAction('name')
 
 // tell new users your name when they connect
-room.onUserJoin = ({userId}) => name.send('Oedipa', {target: userId})
+room.onUserJoin(({userId}) => name.send('Oedipa', {target: userId}))
 
 // listen for users naming themselves
-name.onMessage = (value, {userId}) => (idsToNames[userId] = value)
+name.onMessage((value, {userId}) => (idsToNames[userId] = value))
 
 // tell all users at once when your name changes
 nameInput.addEventListener('change', e => name.send(e.target.value))
 
-room.onUserLeave = ({userId}) =>
+room.onUserLeave(({userId}) =>
   console.log(`${idsToNames[userId] || 'a weird stranger'} left`)
+)
 ```
 
 > Actions are smart and handle serialization and chunking for you behind the
@@ -325,10 +333,10 @@ const selfStream = await navigator.mediaDevices.getUserMedia({
 room.addStream(selfStream)
 
 // send stream to users who join later
-room.onUserJoin = ({userId}) => room.addStream(selfStream, {target: userId})
+room.onUserJoin(({userId}) => room.addStream(selfStream, {target: userId}))
 
 // handle streams from other users
-room.onPeerStream = (stream, {userId}) => {
+room.onPeerStream((stream, {userId}) => {
   // create an audio instance and set the incoming stream
   const audio = new Audio()
   audio.srcObject = stream
@@ -337,7 +345,7 @@ room.onPeerStream = (stream, {userId}) => {
   // add the audio to userAudios object if you want to address it for something
   // later (volume, etc.)
   userAudios[userId] = audio
-}
+})
 ```
 
 Doing the same with video is similar, just be sure to add incoming streams to
@@ -347,7 +355,7 @@ video elements in the DOM:
 const userVideos = {}
 const videoContainer = document.getElementById('videos')
 
-room.onPeerStream = (stream, {userId}) => {
+room.onPeerStream((stream, {userId}) => {
   let video = userVideos[userId]
 
   // if this user hasn't sent a stream before, create a video element
@@ -361,7 +369,7 @@ room.onPeerStream = (stream, {userId}) => {
 
   video.srcObject = stream
   userVideos[userId] = video
-}
+})
 ```
 
 ## User identity
@@ -497,11 +505,12 @@ simply pass a metadata argument in the sender action for your binary payload:
 ```js
 const file = room.makeAction('file')
 
-file.onMessage = (data, {userId, metadata}) =>
+file.onMessage((data, {userId, metadata}) =>
   console.log(
     `got a file (${metadata.name}) from ${userId} with type ${metadata.type}`,
     data
   )
+)
 
 file.send(buffer, {
   metadata: {name: 'The Courierʼs Tragedy', type: 'application/pdf'}
@@ -514,16 +523,19 @@ Incoming data is accepted automatically. Use `onReceive` to accept or decline
 payloads based on their size, sender, or metadata:
 
 ```js
-const file = room.makeAction('file', {
-  onReceive: ({byteLength}) => byteLength <= 100 * 1024 ** 2,
-  onMessage: (data, {metadata}) => saveFile(data, metadata.name)
-})
+const file = room.makeAction('file')
+
+const unsubReceive = file.onReceive(
+  ({byteLength}) => byteLength <= 100 * 1024 ** 2
+)
+file.onMessage((data, {metadata}) => saveFile(data, metadata.name))
 ```
 
 Return `true` or `false`, or a promise of either. Large payloads wait for
 approval before sending their contents; declined small messages are discarded
-after arrival. You can also assign `file.onReceive` later or set it to `null` to
-restore automatic acceptance.
+after arrival. Only one `onReceive` handler may be active per action at a time;
+call the returned unsubscribe function (`unsubReceive()`) to restore automatic
+acceptance.
 
 `byteLength` is the payload size in bytes (UTF-8 for strings/JSON), excluding
 metadata. The context's `signal` aborts when the transfer ends; use it to
@@ -566,10 +578,11 @@ Similarly you can listen for progress events as a receiver like this:
 ```js
 const file = room.makeAction('file')
 
-file.onReceiveProgress = (percent, {userId, metadata}) =>
+file.onReceiveProgress((percent, {userId, metadata}) =>
   console.log(
     `${percent * 100}% done receiving ${metadata.filename} from ${userId}`
   )
+)
 ```
 
 Notice that any metadata is sent with progress events so you can show the
@@ -619,7 +632,7 @@ room. For example, you might be building:
 
 To set an advisory per-peer limit on how many unique users (`userId`s, including
 the local user) can be in a peer's room view at once, pass `limit` in your
-`joinRoom()` config and listen for `'room full'` in `onJoinError`:
+`joinRoom()` config and listen for `'room full'` via `room.onJoinError()`:
 
 ```js
 const room = joinRoom(
@@ -627,15 +640,14 @@ const room = joinRoom(
     appId: 'chess-club',
     limit: 2 // advisory cap of 2 unique users in this peer's view (you + 1 opponent)
   },
-  'match-42',
-  {
-    onJoinError: ({error}) => {
-      if (error === 'room full') {
-        showBanner('Sorry, this match is already full!')
-      }
-    }
-  }
+  'match-42'
 )
+
+room.onJoinError(({error}) => {
+  if (error === 'room full') {
+    showBanner('Sorry, this match is already full!')
+  }
+})
 ```
 
 When a peer's room view is already at capacity:
@@ -782,10 +794,11 @@ send. Just pass `roles` when creating the action:
 
 ```js
 const announce = room.makeAction('announce', {
-  roles: ['admin', 'moderator'],
-  onMessage: (data, {userId, roles}) => {
-    console.log(`Verified ${roles.join(', ')} (${userId}) announced:`, data)
-  }
+  roles: ['admin', 'moderator']
+})
+
+announce.onMessage((data, {userId, roles}) => {
+  console.log(`Verified ${roles.join(', ')} (${userId}) announced:`, data)
 })
 
 // Only succeeds if the local user is an 'admin' or 'moderator'
@@ -818,7 +831,7 @@ const roundState = room.makeState(
   {
     roles: ['admin', 'host'],
     // Optional rule: prevent the round number from ever going backward
-    validate: (next, prev) => next.round >= prev.round
+    validate: (next, {prev}) => next.round >= prev.round
   }
 )
 
@@ -826,9 +839,12 @@ const roundState = room.makeState(
 console.log(roundState.get())
 
 // Listen for official state updates
-roundState.onChange = (value, prev, {userId, roles}) => {
-  console.log(`Updated by ${userId} (${roles}):`, value)
-}
+roundState.onChange((value, {prev, userId, roles}) => {
+  console.log(
+    `Updated from round ${prev.round} by ${userId} (${roles}):`,
+    value
+  )
+})
 
 // Only an 'admin' or 'host' can update the state
 await roundState.set(prev => ({round: prev.round + 1, phase: 'active'}))
@@ -1048,40 +1064,49 @@ await room.ready
 await room.syncNow({hello: 'world'})
 ```
 
-### React hooks
+### React
 
-Trystero functions are idempotent so they already work out of the box as React
-hooks.
-
-Here's a simple example component where each user syncs their favorite color to
-everyone else:
+In React apps, the cleanest pattern is to wire Trystero events in one place
+outside your components and subscribe via React's built-in
+`useSyncExternalStore` (or your preferred state library like Zustand or Jotai) —
+no `useEffect` needed:
 
 ```jsx
 import {joinRoom} from 'trystero'
-import {useState} from 'react'
+import {useSyncExternalStore} from 'react'
 
-const trysteroConfig = {appId: 'thurn-und-taxis'}
+const room = joinRoom({appId: 'thurn-und-taxis'}, 'lobby')
+const colorAction = room.makeAction('color')
 
-export default function App({roomId}) {
-  const room = joinRoom(trysteroConfig, roomId)
-  const colorAction = room.makeAction('color')
-  const [myColor, setMyColor] = useState('#c0ffee')
-  const [userColors, setUserColors] = useState({})
+let state = {myColor: '#c0ffee', userColors: {}}
+const listeners = new Set()
+const setState = patch => {
+  state = {...state, ...patch}
+  listeners.forEach(fn => fn())
+}
+const subscribe = fn => {
+  listeners.add(fn)
+  return () => listeners.delete(fn)
+}
+const getSnapshot = () => state
 
-  // whenever new users join the room, send my color to them:
-  room.onUserJoin = ({userId}) => colorAction.send(myColor, {target: userId})
+room.onUserJoin(({userId}) => colorAction.send(state.myColor, {target: userId}))
+room.onUserLeave(({userId}) => {
+  const {[userId]: _, ...userColors} = state.userColors
+  setState({userColors})
+})
+colorAction.onMessage((color, {userId}) =>
+  setState({userColors: {...state.userColors, [userId]: color}})
+)
 
-  // listen for users sending their colors and update the state accordingly:
-  colorAction.onMessage = (color, {userId}) =>
-    setUserColors(userColors => ({...userColors, [userId]: color}))
+const updateColor = e => {
+  const myColor = e.target.value
+  setState({myColor})
+  colorAction.send(myColor)
+}
 
-  const updateColor = e => {
-    const {value} = e.target
-
-    // when updating my own color, broadcast it to all users:
-    colorAction.send(value)
-    setMyColor(value)
-  }
+export default function App() {
+  const {myColor, userColors} = useSyncExternalStore(subscribe, getSnapshot)
 
   return (
     <>
@@ -1103,31 +1128,11 @@ export default function App({roomId}) {
 }
 ```
 
-Astute readers may notice the above example is simple and doesn't consider if we
-want to change the component's room ID or unmount it. For those scenarios you
-can use this simple `useRoom()` hook that unsubscribes from room events
-accordingly:
+Authoritative states created with `room.makeState()` already match React's
+external store contract (`subscribe(fn) => unsubscribe` + `get()`) directly:
 
-```js
-import {joinRoom} from 'trystero'
-import {useEffect, useRef} from 'react'
-
-export const useRoom = (roomConfig, roomId) => {
-  const roomRef = useRef(joinRoom(roomConfig, roomId))
-  const lastRoomIdRef = useRef(roomId)
-
-  useEffect(() => {
-    if (roomId !== lastRoomIdRef.current) {
-      roomRef.current.leave()
-      roomRef.current = joinRoom(roomConfig, roomId)
-      lastRoomIdRef.current = roomId
-    }
-
-    return () => roomRef.current.leave()
-  }, [roomConfig, roomId])
-
-  return roomRef.current
-}
+```jsx
+const round = useSyncExternalStore(roundState.onChange, roundState.get)
 ```
 
 ### Troubleshooting connection issues
@@ -1347,7 +1352,7 @@ known ahead of time.
 
 ## API
 
-### `joinRoom(config, roomId, [callbacks])`
+### `joinRoom(config, roomId)`
 
 Adds local user to room whereby other peers in the same namespace will open
 communication channels and send events. Calling `joinRoom()` multiple times with
@@ -1467,17 +1472,9 @@ the same namespace will return the same room instance.
 
 - `roomId` - A string to namespace peers and events within a room.
 
-- `callbacks` - **(optional)** Callback config object containing:
-  - `onJoinError(details)` - Called when room join fails due to an incorrect
-    password, when the room is at capacity (`details.error === 'room full'`),
-    when peer identity verification fails, or when peers exchange SDP but WebRTC
-    still cannot establish a direct connection. This last case usually means
-    TURN servers are needed or misconfigured (see
-    [Troubleshooting connection issues](#troubleshooting-connection-issues)).
-    `details` is an object containing `appId`, `roomId`, `peerId`, and `error`
-    describing the failure.
-
-Returns an object with the following properties and methods:
+Returns an object with the following properties and methods (all `on*` event
+subscription methods return an `Unsubscribe` function `() => void` and accept
+optional `{once?: boolean, signal?: AbortSignal}` options):
 
 - ### `ready`
 
@@ -1555,20 +1552,25 @@ Returns an object with the following properties and methods:
   - `initialValue` - Initial state value before any update is received.
   - `config.roles` - **(optional)** Role or array of roles allowed to update
     this state (defaults to `'admin'`).
-  - `config.validate(next, prev, context)` - **(optional)** Synchronous function
+  - `config.validate(next, context)` - **(optional)** Synchronous function
     returning `true` or `false` to validate state changes before they are sent
-    or accepted.
+    or accepted (`context` is
+    `{prev, peerId, userId, roles, seq, timestamp, hash}`).
 
   Returns an object with:
   - `get()` - Returns the current state value.
   - `set(nextOrUpdater)` - Broadcasts a new state value (or updater function
     `(prev) => next`). Rejects if the local user lacks permission or validation
     fails.
-  - `getMeta()` - Returns metadata about the latest update (`updatedBy`,
+  - `getMeta()` - Returns metadata about the latest update (`prev`, `peerId`,
     `userId`, `roles`, `seq`, `timestamp`, `hash`) or `null` if still at
     `initialValue`.
-  - `onChange` - Nullable callback `(value, prev, context) => void` called
-    whenever a verified state update arrives.
+  - `onChange(callback, [options])` - Subscribes `(value, context) => void`
+    whenever a verified state update arrives and returns an `Unsubscribe`
+    function (`context` matches `getMeta()`). Accepts
+    `{replay?: boolean, once?: boolean, signal?: AbortSignal}` (`replay`
+    defaults to `false`; when `{replay: true}` is set and `getMeta() !== null`,
+    synchronously invokes `callback` with the current value and metadata).
 
 - ### `grantRole(targetId, role)`
 
@@ -1646,92 +1648,115 @@ Returns an object with the following properties and methods:
   - `options.target` - **(optional)** If specified, the track is replaced only
     for the target `peerId` or `userId` (string) or list of IDs (array).
 
-- ### `onUserJoin`
+- ### `onUserJoin(callback, [options])`
 
-  A callback property that will be called when a remote user joins the room
-  (fires on their **first** connected instance, and does not fire again if that
-  same `userId` opens a second tab while already in the room). Assigning a new
-  function replaces the previous handler and replays currently active remote
-  users; assigning `null` clears it.
+  Subscribes a listener called when a remote user joins the room (fires on their
+  **first** connected instance, and does not fire again if that same `userId`
+  opens a second tab while already in the room) and returns an `Unsubscribe`
+  function. Live-only by default; pass `{replay: true}` to synchronously emit
+  currently active remote users to the new listener.
   - `callback({userId, peerId, roles})` - Called with the user's `userId`, the
     `peerId` of their joining instance, and their verified `roles`.
+  - `options` - **(optional)**
+    `{replay?: boolean, once?: boolean, signal?: AbortSignal}`.
 
   Example:
 
   ```js
-  room.onUserJoin = ({userId}) => console.log(`${userId} joined`)
+  const unsub = room.onUserJoin(({userId}) => console.log(`${userId} joined`))
   ```
 
-- ### `onUserLeave`
+- ### `onUserLeave(callback, [options])`
 
-  A callback property that will be called when a remote user leaves the room
-  (fires when their **last** remaining instance leaves, and does not fire if the
-  user still has another tab open in the room). Assigning a new function
-  replaces the previous handler; assigning `null` clears it.
+  Subscribes a listener called when a remote user leaves the room (fires when
+  their **last** remaining instance leaves, and does not fire if the user still
+  has another tab open in the room) and returns an `Unsubscribe` function.
   - `callback({userId, peerId})` - Called with the departing user's `userId` and
     the `peerId` of their last instance.
+  - `options` - **(optional)** `{once?: boolean, signal?: AbortSignal}`.
 
   Example:
 
   ```js
-  room.onUserLeave = ({userId}) => console.log(`${userId} left`)
+  room.onUserLeave(({userId}) => console.log(`${userId} left`))
   ```
 
-- ### `onPeerJoin`
+- ### `onPeerJoin(callback, [options])`
 
-  A lower-level callback property that will be called whenever an individual
-  peer connection (tab/device) joins the room. Assigning a new function replaces
-  the previous handler; assigning `null` clears it. Existing active peer
-  connections are immediately replayed to a newly assigned handler.
+  Subscribes a lower-level listener called whenever an individual peer
+  connection (tab/device) joins the room and returns an `Unsubscribe` function.
+  Live-only by default; pass `{replay: true}` to synchronously emit currently
+  active peer connections to the new listener.
   - `callback({peerId, userId, roles})` - Function to run whenever a peer
     endpoint joins, called with the endpoint's `peerId`, `userId`, and verified
     `roles`.
+  - `options` - **(optional)**
+    `{replay?: boolean, once?: boolean, signal?: AbortSignal}`.
 
   Example:
 
   ```js
-  room.onPeerJoin = ({peerId}) => console.log(`tab ${peerId} connected`)
+  room.onPeerJoin(({peerId}) => console.log(`tab ${peerId} connected`))
   ```
 
-- ### `onPeerLeave`
+- ### `onPeerLeave(callback, [options])`
 
-  A lower-level callback property that will be called whenever an individual
-  peer connection (tab/device) leaves the room. Assigning a new function
-  replaces the previous handler; assigning `null` clears it.
+  Subscribes a lower-level listener called whenever an individual peer
+  connection (tab/device) leaves the room and returns an `Unsubscribe` function.
   - `callback({peerId, userId})` - Function to run whenever a peer endpoint
     leaves, called with the endpoint's `peerId` and `userId`.
+  - `options` - **(optional)** `{once?: boolean, signal?: AbortSignal}`.
 
   Example:
 
   ```js
-  room.onPeerLeave = ({peerId}) => console.log(`tab ${peerId} disconnected`)
+  room.onPeerLeave(({peerId}) => console.log(`tab ${peerId} disconnected`))
   ```
 
-- ### `onPeerStream`
+- ### `onPeerStream(callback, [options])`
 
-  A callback property that will be called when a user sends a media stream (and
-  again if the sender re-announces the stream with updated `metadata`).
-  Assigning a new function replaces the previous handler; assigning `null`
-  clears it.
+  Subscribes a listener called when a user sends a media stream (and again if
+  the sender re-announces the stream with updated `metadata`) and returns an
+  `Unsubscribe` function. Live-only by default; pass `{replay: true}` to
+  synchronously emit currently active remote media streams and their latest
+  metadata.
   - `callback(stream, {userId, peerId, metadata})` - Function to run whenever a
     user sends a media stream, called with the `MediaStream` first and a context
     object containing `userId`, `peerId`, and optional `metadata` (see
     `addStream()` above for details).
+  - `options` - **(optional)**
+    `{replay?: boolean, once?: boolean, signal?: AbortSignal}`.
 
   Example:
 
   ```js
-  room.onPeerStream = (stream, {userId, metadata}) =>
+  room.onPeerStream((stream, {userId, metadata}) =>
     console.log(`got stream from ${userId}`, stream, metadata)
+  )
   ```
+
+- ### `onJoinError(callback, [options])`
+
+  Subscribes a listener called when room join fails due to an incorrect
+  password, when a peer's room view is at capacity
+  (`details.error === 'room full'`), when peer identity verification fails, or
+  when peers exchange SDP but WebRTC still cannot establish a direct connection
+  (which usually means TURN servers are needed or misconfigured; see
+  [Troubleshooting connection issues](#troubleshooting-connection-issues)).
+  Returns an `Unsubscribe` function.
+  - `callback({appId, roomId, peerId, error})` - Called with details describing
+    the failure.
+  - `options` - **(optional)** `{once?: boolean, signal?: AbortSignal}`.
 
 - ### `makeAction(actionId, [config])`
 
   Listen for and send custom data actions.
   - `actionId` - A string to register this action consistently among all users.
 
-  If `config.kind` is omitted, the action is a one-way message action. Passing
-  `kind: 'request'` creates a request/response action.
+  `config` accepts declarative action configuration only (`kind` and `roles`);
+  register handlers via the action's `on*` methods. If `config.kind` is omitted,
+  the action is a one-way message action. Passing `kind: 'request'` creates a
+  request/response action.
 
   Message actions expose:
   - `send(data, [options])` - Sends data to users and resolves when local
@@ -1740,10 +1765,14 @@ Returns an object with the following properties and methods:
     an in-progress send, pass an `AbortController`'s `signal` in the options
     (e.g. `send(data, {signal: controller.signal})`) and call
     `controller.abort()`.
-  - `onMessage` - Nullable callback property
-    `(data, {userId, peerId, metadata, roles}) => void` for received messages.
-  - `onReceiveProgress` - Nullable callback property
-    `(percent, {userId, peerId, metadata}) => void` for inbound progress.
+  - `onMessage(callback, [options])` - Multi-listener method subscribing
+    `(data, {userId, peerId, metadata, roles}) => void` for received messages
+    and returning an `Unsubscribe` function. Inbound messages arriving before
+    any listener is attached are buffered and drained in order to the first
+    subscriber.
+  - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
+    `(percent, {userId, peerId, metadata}) => void` for inbound progress and
+    returning an `Unsubscribe` function.
 
   Request actions expose:
   - `request(data, options)` - Sends to one user or tab (`options.target` can be
@@ -1753,17 +1782,21 @@ Returns an object with the following properties and methods:
   - `requestMany(data, options)` - Sends to many users or tabs
     (`options.targets` accepts `userId`s and/or `peerId`s) and resolves with
     labeled settled results (`{userId, peerId, status, value | error}`).
-  - `onRequest` - Nullable callback property
-    `(data, {userId, peerId, metadata, signal, roles}) => response` that returns
-    the response.
-  - `onReceiveProgress` - Nullable callback property
-    `(percent, {userId, peerId, metadata}) => void` for inbound progress.
+  - `onRequest(callback, [options])` - Single-handler method registering
+    `(data, {userId, peerId, metadata, signal, roles}) => response` and
+    returning an `Unsubscribe` function. Throws an error if called while an
+    `onRequest` handler is already active (unsubscribe first).
+  - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
+    `(percent, {userId, peerId, metadata}) => void` for inbound progress and
+    returning an `Unsubscribe` function.
 
-  Both kinds expose `onReceive`, a nullable callback accepting
-  `{byteLength, userId, peerId, metadata, kind, signal, roles}` and returning a
-  boolean or a promise of a boolean. It can also be provided in `config`. `kind`
-  is `'message'`, `'request'`, or `'response'`; request actions apply it to both
-  requests and responses. Responses have no metadata. See
+  Both kinds expose `onReceive(callback, [options])`, a single-handler method
+  accepting `{byteLength, userId, peerId, metadata, kind, signal, roles}`,
+  returning a boolean or a promise of a boolean, and returning an `Unsubscribe`
+  function (call `unsubscribe()` to restore automatic acceptance; throws if
+  another `onReceive` handler is already active). `kind` is `'message'`,
+  `'request'`, or `'response'`; request actions apply it to both requests and
+  responses. Responses have no metadata. See
   [receiving files](#receiving-files).
 
   Pass `config.roles` (`'admin'`, a custom role string, or an array of role
@@ -1784,11 +1817,11 @@ Returns an object with the following properties and methods:
 
   window.addEventListener('mousemove', e => cursor.send([e.clientX, e.clientY]))
 
-  cursor.onMessage = ([x, y], {userId}) => {
+  cursor.onMessage(([x, y], {userId}) => {
     const userCursor = cursorMap[userId]
     userCursor.style.left = x + 'px'
     userCursor.style.top = y + 'px'
-  }
+  })
   ```
 
 - ### `ping(targetId)`
@@ -1803,11 +1836,12 @@ Returns an object with the following properties and methods:
 
   ```js
   // log round-trip time every 2 seconds
-  room.onUserJoin = ({userId}) =>
+  room.onUserJoin(({userId}) =>
     setInterval(
       async () => console.log(`took ${await room.ping(userId)}ms`),
       2000
     )
+  )
   ```
 
 ### `roles([config])`

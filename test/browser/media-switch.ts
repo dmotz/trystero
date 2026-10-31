@@ -10,8 +10,11 @@ export const registerMediaSwitchTests = (strategy, overrides) =>
       const joinStreamSwitchRoom = ([roomId, config]) => {
         window[roomId] = window.trystero.joinRoom(config, roomId)
 
-        return new Promise(
-          res => (window[roomId].onPeerJoin = ({peerId}) => res(peerId))
+        return new Promise(res =>
+          window[roomId].onPeerJoin(({peerId}) => res(peerId), {
+            replay: true,
+            once: true
+          })
         )
       }
 
@@ -22,15 +25,18 @@ export const registerMediaSwitchTests = (strategy, overrides) =>
             10_000
           )
 
-          window[roomId].onPeerStream = (stream, {peerId, metadata: meta}) => {
-            clearTimeout(timeout)
-            res({
-              peerId,
-              meta,
-              streamType: stream.constructor.name,
-              trackCount: stream.getTracks().length
-            })
-          }
+          window[roomId].onPeerStream(
+            (stream, {peerId, metadata: meta}) => {
+              clearTimeout(timeout)
+              res({
+                peerId,
+                meta,
+                streamType: stream.constructor.name,
+                trackCount: stream.getTracks().length
+              })
+            },
+            {once: true}
+          )
 
           setTimeout(async () => {
             window.__streamSwitchLocalStream ??=

@@ -253,12 +253,12 @@ verification via `roles: ['admin', ...]`.
 
 ### Lifecycle Hooks
 
-| Hook                       | Signature                                                  | Description                                                                                               |
-| :------------------------- | :--------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------- |
-| `kernel.onPeerActivated`   | `(cb: (peerId: string, peer: PeerHandle) => void) => void` | Fires when a peer finishes handshakes and becomes active in the room (including virtual multi-hop peers). |
-| `kernel.onPeerDeactivated` | `(cb: (peerId: string) => void) => void`                   | Fires when an active peer leaves or disconnects.                                                          |
-| `kernel.onRoomIdChanged`   | `(cb: (roomId: string) => void) => void`                   | Fires if the effective room ID is updated after initialization.                                           |
-| `kernel.onLeave`           | `(cb: () => void) => void`                                 | Fires when `room.leave()` is called. Always clean up timers and external listeners here.                  |
+| Hook                       | Signature                                                                                            | Description                                                                                                                                |
+| :------------------------- | :--------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------- |
+| `kernel.onPeerActivated`   | `(cb: (peerId: string, peer: PeerHandle) => void, options?: StatefulListenerOptions) => Unsubscribe` | Fires when a direct WebRTC peer finishes handshakes and becomes active in the room. Pass `{replay: true}` to replay existing direct peers. |
+| `kernel.onPeerDeactivated` | `(cb: (peerId: string) => void, options?: ListenerOptions) => Unsubscribe`                           | Fires when an active peer leaves or disconnects.                                                                                           |
+| `kernel.onRoomIdChanged`   | `(cb: (roomId: string) => void, options?: ListenerOptions) => Unsubscribe`                           | Fires if the effective room ID is updated after initialization.                                                                            |
+| `kernel.onLeave`           | `(cb: () => void, options?: ListenerOptions) => Unsubscribe`                                         | Fires when `room.leave()` is called. Always clean up timers and external listeners here.                                                   |
 
 ---
 

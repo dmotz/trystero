@@ -2,9 +2,12 @@ import {
   actionRedefinedErr,
   all,
   authMetaKey,
+  createEventEmitter,
+  createSingleHandler,
   entries,
   insufficientAuthPrefix,
   internalActionPrefix,
+  lockMethods,
   logActionHandlerErr,
   mkErr,
   noActivePeerMsg,
@@ -13,7 +16,8 @@ import {
   peerDisconnectedMsg,
   resetTimer,
   toError,
-  toErrorMessage
+  toErrorMessage,
+  values
 } from './utils'
 import {
   createActionWireManager,
@@ -26,12 +30,16 @@ import {
   type InternalActionSender
 } from './action-wire'
 import type {
+  ActionMessageHandler,
+  ActionProgressContext,
   ActionProgressHandler,
   ActionReceiveHandler,
+  ActionRequestHandler,
   DataPayload,
   JsonValue,
   MessageAction,
   MessageActionConfig,
+  MessageContext,
   PeerHandle,
   PeerResult,
   RequestAction,
@@ -55,15 +63,18 @@ type PublicActionKind = 'message' | 'request'
 type PublicActionState = {
   kind: PublicActionKind
   requiredRoles: string[]
-  action: MessageAction | RequestAction
-  onReceive: ActionReceiveHandler | null
-  onReceiveProgress: ActionProgressHandler | null
+  action: unknown
+  syncReceive: () => void
+  clear: () => void
 }
 
 type PendingRequestWaiter = {
   controller: AbortController
   getReceive: () => ActionReceiveHandler | null
-  getReceiveProgress: () => ActionProgressHandler | null
+  emitReceiveProgress: (
+    progress: number,
+    context: ActionProgressContext
+  ) => void
   peerId: string
   resolve: (payload: DataPayload) => void
   reject: (error: Error) => void
@@ -199,6 +210,7 @@ export const createActionManager = ({
   ) => InternalAction<T>
   handleData: (id: string, data: ArrayBuffer) => void
   clearPeer: (id: string, error: Error) => void
+  clearListeners: () => void
 } => {
   const userIdOf = (peerId: string): string =>
     getPeerUserId ? getPeerUserId(peerId) : peerId
@@ -306,7 +318,7 @@ export const createActionManager = ({
     const waiter = parsed && pendingRequestWaiters[parsed.r]
 
     if (waiter && waiter.peerId === id && parsed?.e === undefined) {
-      waiter.getReceiveProgress()?.(progress, {
+      waiter.emitReceiveProgress(progress, {
         peerId: id,
         userId: userIdOf(id)
       })
@@ -341,10 +353,18 @@ export const createActionManager = ({
     R extends DataPayload = DataPayload
   >(
     type: string,
-    config?: MessageActionConfig<T> | RequestActionConfig<T, R>
+    config?: MessageActionConfig | RequestActionConfig
   ): MessageAction<T> | RequestAction<T, R> => {
-    if (config && 'onRequest' in config && config.kind !== 'request') {
-      throw mkErr('request actions must use kind: "request"')
+    if (
+      config &&
+      ('onMessage' in config ||
+        'onRequest' in config ||
+        'onReceive' in config ||
+        'onReceiveProgress' in config)
+    ) {
+      throw mkErr(
+        'makeAction config does not accept event handlers; subscribe via action.on*(fn)'
+      )
     }
 
     const kind = config?.kind ?? 'message'
@@ -367,17 +387,21 @@ export const createActionManager = ({
       if (hasAuthority && existingState.requiredRoles.length === 0) {
         existingState.requiredRoles = requiredRoles
         registerActionAuthority?.(type, requiredRoles)
+        existingState.syncReceive()
       }
 
       return existingState.action as MessageAction<T> | RequestAction<T, R>
     }
 
+    const progressEmitter =
+      createEventEmitter<[number, ActionProgressContext]>('progress handler')
+
     const state: PublicActionState = {
       kind,
       requiredRoles,
-      action: null as unknown as MessageAction | RequestAction,
-      onReceive: config?.onReceive ?? null,
-      onReceiveProgress: config?.onReceiveProgress ?? null
+      action: null,
+      syncReceive: noOp,
+      clear: noOp
     }
 
     const toProgressHandler = (
@@ -397,6 +421,9 @@ export const createActionManager = ({
       peerId: string,
       metadata?: JsonValue
     ): void => {
+      if (!progressEmitter.hasListeners()) {
+        return
+      }
       const requestMetadata =
         state.kind === 'request' ? getRequestMetadata(metadata) : null
       const rawUserMeta = requestMetadata ? requestMetadata.m : metadata
@@ -405,14 +432,13 @@ export const createActionManager = ({
         state.requiredRoles.length > 0
       )
 
-      state.onReceiveProgress?.(
+      progressEmitter.emit(
         progress,
         withMetadata({peerId, userId: userIdOf(peerId)}, cleanMeta)
       )
     }
 
     const setReceive = (handler: ActionReceiveHandler | null): void => {
-      state.onReceive = handler
       const hasRoleGuard =
         state.requiredRoles.length > 0 && Boolean(verifyActionOffer)
       if (!handler && !hasRoleGuard) {
@@ -478,106 +504,109 @@ export const createActionManager = ({
         )
       })
     }
-    setReceive(state.onReceive)
+
+    const receiveSlot = createSingleHandler<ActionReceiveHandler>(
+      'onReceive',
+      handler => setReceive(handler)
+    )
+    state.syncReceive = () => setReceive(receiveSlot.get())
+    state.syncReceive()
 
     rawAction.onProgress(dispatchReceiveProgress)
 
     if (kind === 'message') {
-      let onMessage =
-        (config as MessageActionConfig<T> | undefined)?.onMessage ?? null
-
       const receiveMessage = (
         payload: DataPayload,
         peerId: string,
         metadata?: JsonValue
       ): void => {
-        void Promise.resolve()
-          .then(async () => {
-            let effectiveMetadata = metadata
-            let roles = getPeerRoles?.(peerId)
-            if (state.requiredRoles.length > 0 && verifyActionPayload) {
-              const verified = await verifyActionPayload(
-                type,
-                peerId,
-                state.requiredRoles,
-                payload,
-                metadata
-              )
-              if (!verified.valid) {
-                onUnauthorizedAction?.(type, peerId)
-                return
-              }
-              effectiveMetadata = verified.userMetadata
-              roles = verified.roles
-            }
+        if (state.requiredRoles.length === 0 || !verifyActionPayload) {
+          const roles = getPeerRoles?.(peerId)
+          const ctx: MessageContext = withMetadata(
+            {peerId, userId: userIdOf(peerId)},
+            metadata
+          )
+          if (roles && roles.length > 0) {
+            ctx.roles = roles
+          }
+          messageEmitter.emit(payload as T, ctx)
+          return
+        }
 
-            const handler = onMessage
-            if (!handler) {
+        void verifyActionPayload(
+          type,
+          peerId,
+          state.requiredRoles,
+          payload,
+          metadata
+        )
+          .then(verified => {
+            if (!verified.valid) {
+              onUnauthorizedAction?.(type, peerId)
               return
             }
-            const ctx = withMetadata(
-              {peerId, userId: userIdOf(peerId)},
-              effectiveMetadata
-            )
-            if (roles && roles.length > 0) {
-              ;(ctx as {roles?: string[]}).roles = roles
+            if (!messageEmitter.hasListeners()) {
+              return
             }
-            await handler(payload as T, ctx)
+            const ctx: MessageContext = withMetadata(
+              {peerId, userId: userIdOf(peerId)},
+              verified.userMetadata
+            )
+            if (verified.roles.length > 0) {
+              ctx.roles = verified.roles
+            }
+            messageEmitter.emit(payload as T, ctx)
           })
           .catch(logActionHandlerErr)
       }
 
-      const action = {
-        send: async (data: T, options: SendOptions = {}) => {
-          const wireMetadata =
-            state.requiredRoles.length > 0 && signActionPayload
-              ? await signActionPayload(
-                  type,
-                  state.requiredRoles,
-                  data,
-                  options.metadata
-                )
-              : options.metadata
-          const resolvedTarget = resolveSendTarget
-            ? resolveSendTarget(options.target)
-            : options.target
-          await rawAction.send(
-            data,
-            resolvedTarget,
-            wireMetadata,
-            toProgressHandler(options.onProgress, options.metadata),
-            options.signal
-          )
-        },
+      const messageEmitter = createEventEmitter<[T, MessageContext]>(
+        'action handler',
+        active => rawAction.onMessage(active ? receiveMessage : null)
+      )
 
-        get onMessage() {
-          return onMessage
-        },
+      const action = lockMethods(
+        {
+          send: async (data: T, options: SendOptions = {}) => {
+            const wireMetadata =
+              state.requiredRoles.length > 0 && signActionPayload
+                ? await signActionPayload(
+                    type,
+                    state.requiredRoles,
+                    data,
+                    options.metadata
+                  )
+                : options.metadata
+            const resolvedTarget = resolveSendTarget
+              ? resolveSendTarget(options.target)
+              : options.target
+            await rawAction.send(
+              data,
+              resolvedTarget,
+              wireMetadata,
+              toProgressHandler(options.onProgress, options.metadata),
+              options.signal
+            )
+          },
 
-        set onMessage(handler) {
-          onMessage = handler
-          rawAction.onMessage(handler ? receiveMessage : null)
-        },
+          onMessage: (handler: ActionMessageHandler<T>, options) =>
+            messageEmitter.subscribe(handler, options),
 
-        get onReceive() {
-          return state.onReceive
-        },
-        set onReceive(handler) {
-          setReceive(handler)
-        },
+          onReceive: (handler, options) => receiveSlot.set(handler, options),
 
-        get onReceiveProgress() {
-          return state.onReceiveProgress
-        },
+          onReceiveProgress: (handler, options) =>
+            progressEmitter.subscribe(handler, options)
+        } satisfies MessageAction<T>,
+        ['onMessage', 'onReceive', 'onReceiveProgress']
+      )
 
-        set onReceiveProgress(handler) {
-          state.onReceiveProgress = handler
-        }
-      } satisfies MessageAction<T>
-
-      state.action = action as MessageAction
+      state.action = action
+      state.clear = () => {
+        messageEmitter.clear()
+        receiveSlot.clear()
+        progressEmitter.clear()
+      }
       publicActions[type] = state
-      rawAction.onMessage(onMessage ? receiveMessage : null)
 
       return action
     }
@@ -591,9 +620,6 @@ export const createActionManager = ({
       }
     })
 
-    let onRequest =
-      (config as RequestActionConfig<T, R> | undefined)?.onRequest ?? null
-
     const receiveRequest = (
       payload: DataPayload,
       peerId: string,
@@ -603,7 +629,6 @@ export const createActionManager = ({
       if (!parsed) {
         return
       }
-      const handler = onRequest!
       const controller = new AbortController()
       let peerControllers = activeRequestControllers.get(peerId)
       if (!peerControllers) {
@@ -611,36 +636,57 @@ export const createActionManager = ({
         activeRequestControllers.set(peerId, peerControllers)
       }
       peerControllers.add(controller)
-      void Promise.resolve()
-        .then(async () => {
-          let userMeta = parsed.m
-          let roles = getPeerRoles?.(peerId)
-          if (state.requiredRoles.length > 0 && verifyActionPayload) {
-            const verified = await verifyActionPayload(
-              type,
-              peerId,
-              state.requiredRoles,
-              payload,
-              parsed.m
-            )
-            if (!verified.valid) {
-              onUnauthorizedAction?.(type, peerId)
-              throw mkErr(`${insufficientAuthPrefix} for request`)
-            }
-            userMeta = verified.userMetadata
-            roles = verified.roles
+
+      const runHandler = async (): Promise<R> => {
+        if (state.requiredRoles.length > 0 && verifyActionPayload) {
+          const verified = await verifyActionPayload(
+            type,
+            peerId,
+            state.requiredRoles,
+            payload,
+            parsed.m
+          )
+          if (!verified.valid) {
+            onUnauthorizedAction?.(type, peerId)
+            throw mkErr(`${insufficientAuthPrefix} for request`)
+          }
+          const handler = requestSlot.get()
+          if (!handler) {
+            throw mkErr('no active request handler')
           }
           const ctx = {
-            ...withMetadata({peerId, userId: userIdOf(peerId)}, userMeta),
+            ...withMetadata(
+              {peerId, userId: userIdOf(peerId)},
+              verified.userMetadata
+            ),
             signal: controller.signal,
-            ...(roles && roles.length > 0 ? {roles} : {})
+            ...(verified.roles.length > 0 ? {roles: verified.roles} : {})
           }
           const response = await handler(payload as T, ctx)
           if (response === undefined) {
             throw mkErr('request handler returned undefined')
           }
           return response
-        })
+        }
+
+        const handler = requestSlot.get()
+        if (!handler) {
+          throw mkErr('no active request handler')
+        }
+        const roles = getPeerRoles?.(peerId)
+        const ctx = {
+          ...withMetadata({peerId, userId: userIdOf(peerId)}, parsed.m),
+          signal: controller.signal,
+          ...(roles && roles.length > 0 ? {roles} : {})
+        }
+        const response = await handler(payload as T, ctx)
+        if (response === undefined) {
+          throw mkErr('request handler returned undefined')
+        }
+        return response
+      }
+
+      void runHandler()
         .then(
           response => responseAction.send(response, peerId, {r: parsed.r}),
           error =>
@@ -659,6 +705,11 @@ export const createActionManager = ({
           controller.abort()
         })
     }
+
+    const requestSlot = createSingleHandler<ActionRequestHandler<T, R>>(
+      'onRequest',
+      handler => rawAction.onMessage(handler ? receiveRequest : null)
+    )
 
     const requestOne = async (data: T, options: RequestOptions): Promise<R> => {
       const {target, metadata, onProgress, signal, timeoutMs} = options
@@ -683,8 +734,9 @@ export const createActionManager = ({
       const responsePromise = new Promise<DataPayload>((resolve, reject) => {
         const waiter: PendingRequestWaiter = {
           controller,
-          getReceive: () => state.onReceive,
-          getReceiveProgress: () => state.onReceiveProgress,
+          getReceive: () => receiveSlot.get(),
+          emitReceiveProgress: (progress, ctx) =>
+            progressEmitter.emit(progress, ctx),
           peerId: resolvedTarget,
           resolve,
           reject,
@@ -791,42 +843,39 @@ export const createActionManager = ({
         return results
       },
 
-      get onRequest() {
-        return onRequest
-      },
+      onRequest: (handler: ActionRequestHandler<T, R>, options) =>
+        requestSlot.set(handler, options),
 
-      set onRequest(handler) {
-        onRequest = handler
-        rawAction.onMessage(handler ? receiveRequest : null)
-      },
+      onReceive: (handler, options) => receiveSlot.set(handler, options),
 
-      get onReceive() {
-        return state.onReceive
-      },
-      set onReceive(handler) {
-        setReceive(handler)
-      },
-
-      get onReceiveProgress() {
-        return state.onReceiveProgress
-      },
-
-      set onReceiveProgress(handler) {
-        state.onReceiveProgress = handler
-      }
+      onReceiveProgress: (handler, options) =>
+        progressEmitter.subscribe(handler, options)
     } satisfies RequestAction<T, R>
 
-    state.action = action as unknown as RequestAction
-    publicActions[type] = state
-    rawAction.onMessage(onRequest ? receiveRequest : null)
+    const lockedAction = lockMethods(action, [
+      'onRequest',
+      'onReceive',
+      'onReceiveProgress'
+    ])
 
-    return action
+    state.action = lockedAction
+    state.clear = () => {
+      requestSlot.clear()
+      receiveSlot.clear()
+      progressEmitter.clear()
+    }
+    publicActions[type] = state
+
+    return lockedAction
   }
 
   return {
     makeAction: makeActionImpl as Room['makeAction'],
     makeInternalAction,
     handleData,
-    clearPeer
+    clearPeer,
+    clearListeners: () => {
+      values(publicActions).forEach(state => state.clear())
+    }
   }
 }

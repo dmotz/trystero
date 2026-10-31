@@ -215,9 +215,9 @@ const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
 const joins = new Map<string, JoinRoom<SupabaseRoomConfig>>()
 
 export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((
-  config,
-  roomId,
-  callbacks
+  config: SupabaseRoomConfig,
+  roomId: string,
+  ...extra: unknown[]
 ) => {
   const key = JSON.stringify([config?.appId, config?.relayConfig?.supabaseKey])
   let join = joins.get(key)
@@ -225,7 +225,7 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((
     join = createJoinRoom()
     joins.set(key, join)
   }
-  return join(config, roomId, callbacks)
+  return (join as (...args: unknown[]) => unknown)(config, roomId, ...extra)
 }) as JoinRoom<SupabaseRoomConfig>
 
 export {

@@ -319,7 +319,9 @@ const main = async strategy => {
           'room'
         )
         state.room = room
-        room.onPeerJoin = () => (state.joined = true)
+        room.onPeerJoin(() => {
+          state.joined = true
+        })
       }, params)
 
     await joinRoom(pages[0])

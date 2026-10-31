@@ -629,10 +629,10 @@ void test(
       },
       roomId
     )
-    roomBob.onPeerJoin = ctx => bobPeerJoins.push(ctx)
-    roomBob.onPeerLeave = ctx => bobPeerLeaves.push(ctx)
-    roomBob.onUserJoin = ctx => bobUserJoins.push(ctx)
-    roomBob.onUserLeave = ctx => bobUserLeaves.push(ctx)
+    roomBob.onPeerJoin(ctx => bobPeerJoins.push(ctx))
+    roomBob.onPeerLeave(ctx => bobPeerLeaves.push(ctx))
+    roomBob.onUserJoin(ctx => bobUserJoins.push(ctx))
+    roomBob.onUserLeave(ctx => bobUserLeaves.push(ctx))
 
     let roomAlice1: Room = null
     let roomAlice2: Room = null
@@ -725,15 +725,11 @@ void test(
       const chatBob = roomBob.makeAction<string>('chat')
       const alice1Msgs: any[] = []
       const alice2Msgs: any[] = []
-      roomAlice1.makeAction<string>('chat', {
-        onMessage: (data, ctx) => {
-          alice1Msgs.push({data, ...ctx})
-        }
+      roomAlice1.makeAction<string>('chat').onMessage((data, ctx) => {
+        alice1Msgs.push({data, ...ctx})
       })
-      roomAlice2.makeAction<string>('chat', {
-        onMessage: (data, ctx) => {
-          alice2Msgs.push({data, ...ctx})
-        }
+      roomAlice2.makeAction<string>('chat').onMessage((data, ctx) => {
+        alice2Msgs.push({data, ...ctx})
       })
 
       await chatBob.send('hello-alice-all-tabs', {
@@ -754,20 +750,22 @@ void test(
       const rpcBob = roomBob.makeAction<string, string>('rpc', {
         kind: 'request'
       })
-      roomAlice1.makeAction<string, string>('rpc', {
-        kind: 'request',
-        onRequest: (q, ctx) => {
+      roomAlice1
+        .makeAction<string, string>('rpc', {
+          kind: 'request'
+        })
+        .onRequest((q, ctx) => {
           alice1ReqCount++
           return `from-alice-1:${q}:${ctx.userId}`
-        }
-      })
-      roomAlice2.makeAction<string, string>('rpc', {
-        kind: 'request',
-        onRequest: (q, ctx) => {
+        })
+      roomAlice2
+        .makeAction<string, string>('rpc', {
+          kind: 'request'
+        })
+        .onRequest((q, ctx) => {
           alice2ReqCount++
           return `from-alice-2:${q}:${ctx.userId}`
-        }
-      })
+        })
 
       const rpcResponse = await rpcBob.request('ping-user', {
         target: aliceIdentity.userId
@@ -864,19 +862,19 @@ void test(
         appId,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
-      roomId,
-      {onJoinError: err => honestErrors.push(err)}
+      roomId
     )
-    honestRoom.onPeerJoin = ctx => honestJoins.push(ctx)
+    honestRoom.onJoinError(err => honestErrors.push(err))
+    honestRoom.onPeerJoin(ctx => honestJoins.push(ctx))
 
     const mitmRoom = makeJoinRoom('peer-mitm')(
       {
         appId,
         rtcPolyfill: MitmRTCPeerConnection as any
       },
-      roomId,
-      {onJoinError: err => mitmErrors.push(err)}
+      roomId
     )
+    mitmRoom.onJoinError(err => mitmErrors.push(err))
 
     try {
       await waitFor(
@@ -1007,9 +1005,9 @@ void test(
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
-      roomId,
-      {onJoinError: err => aliceTab2Errors.push(err)}
+      roomId
     )
+    aliceTab2.onJoinError(err => aliceTab2Errors.push(err))
 
     await waitFor(
       () =>
@@ -1030,9 +1028,9 @@ void test(
         limit: 2,
         rtcPolyfill: InMemoryRTCPeerConnection as any
       },
-      roomId,
-      {onJoinError: err => intruderErrors.push(err)}
+      roomId
     )
+    intruderRoom.onJoinError(err => intruderErrors.push(err))
 
     try {
       await waitFor(() => intruderErrors.length > 0, 3_000)
@@ -1119,12 +1117,13 @@ void test(
 
       // Alice Tab 2 can send on a moderator-gated action AND update a moderator-gated state!
       const modAlertsAtAdmin: any[] = []
-      adminRoom.makeAction<string>('mod-alert', {
-        roles: 'moderator',
-        onMessage: (msg, ctx) => {
+      adminRoom
+        .makeAction<string>('mod-alert', {
+          roles: 'moderator'
+        })
+        .onMessage((msg, ctx) => {
           modAlertsAtAdmin.push({msg, ...ctx})
-        }
-      })
+        })
       const modAlertTab2 = aliceTab2.makeAction<string>('mod-alert', {
         roles: 'moderator'
       })
@@ -1145,7 +1144,7 @@ void test(
 
       await tab2TopicState.set('updated-by-tab-2')
       await waitFor(() => adminTopicState.get() === 'updated-by-tab-2', 3_000)
-      assert.equal(adminTopicState.getMeta()?.updatedBy, 'peer-alice-2')
+      assert.equal(adminTopicState.getMeta()?.peerId, 'peer-alice-2')
       assert.equal(adminTopicState.getMeta()?.userId, aliceUser.userId)
 
       // Attacker joins, gets banned by userId, and then tries to evade the ban by opening a new tab with a fresh peerId
@@ -1171,9 +1170,9 @@ void test(
           use: [roles()],
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
-        authInfo.roomId,
-        {onJoinError: err => attackerTab2Errors.push(err)}
+        authInfo.roomId
       )
+      attackerTab2.onJoinError(err => attackerTab2Errors.push(err))
 
       await waitFor(() => attackerTab2Errors.length > 0, 3_000)
       assert.ok(
@@ -1193,9 +1192,9 @@ void test(
           limit: 1,
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
-        authInfo.roomId,
-        {onJoinError: err => limiterErrors.push(err)}
+        authInfo.roomId
       )
+      limiterRoom.onJoinError(err => limiterErrors.push(err))
 
       await wait(200)
       assert.deepEqual(limiterErrors, [])

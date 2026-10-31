@@ -51,7 +51,7 @@ const timeout = setTimeout(() => {
   void done('failure', 'timed out waiting for peer communication')
 }, 60_000)
 
-room.onPeerJoin = ({peerId}) => {
+room.onPeerJoin(({peerId}) => {
   if (role !== 'initiator' || sentPing) {
     return
   }
@@ -61,9 +61,9 @@ room.onPeerJoin = ({peerId}) => {
     void ping.send('hello-from-initiator', {target: peerId}).catch(() => {})
   send()
   pingTimer = setInterval(send, 1_500)
-}
+})
 
-ping.onMessage = (payload, {peerId}) => {
+ping.onMessage((payload, {peerId}) => {
   if (role !== 'responder') {
     return
   }
@@ -77,9 +77,9 @@ ping.onMessage = (payload, {peerId}) => {
     .send('pong-from-responder', {target: peerId})
     .then(() => done('success', 'received ping'))
     .catch(() => done('failure', 'failed sending pong'))
-}
+})
 
-pong.onMessage = payload => {
+pong.onMessage(payload => {
   if (role !== 'initiator') {
     return
   }
@@ -94,4 +94,4 @@ pong.onMessage = payload => {
   }
 
   void done('success', 'received pong')
-}
+})

@@ -338,9 +338,9 @@ void test('S3: identity or plugin resolution failure reports onJoinError with ze
         identity: async () => { throw new Error('boom-identity') },
         use: [roles({selfAsAdmin: true})]
       },
-      's3-room-1',
-      {onJoinError: d => joinErrors.push(d.error)}
+      's3-room-1'
     )
+    room1.onJoinError(d => joinErrors.push(d.error))
 
     const badPlugin = definePlugin('bad', {
       resolveRoomId: async () => { throw new Error('boom-plugin') },
@@ -352,9 +352,9 @@ void test('S3: identity or plugin resolution failure reports onJoinError with ze
         rtcPolyfill: DummyPc,
         use: [badPlugin]
       },
-      's3-room-2',
-      {onJoinError: d => joinErrors.push(d.error)}
+      's3-room-2'
     )
+    room2.onJoinError(d => joinErrors.push(d.error))
 
     await new Promise(r => setTimeout(r, 120))
     await Promise.all([
@@ -1314,9 +1314,9 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
     const recvBig = receiverRoom.makeAction<Uint8Array>('big-act', {
       roles: ['admin']
     })
-    recvBig.onMessage = data => {
+    recvBig.onMessage(data => {
       gotBytes = data.byteLength
-    }
+    })
 
     const {peerA: p1, peerB: p2} = linkHandles()
     void r1Reg!(p1, recvEp.peerId)

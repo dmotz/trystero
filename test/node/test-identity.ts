@@ -78,7 +78,7 @@ export const joinAsTestPeer = <TConfig extends BaseRoomConfig = JoinRoomConfig>(
   peerId: string,
   joinRoom: JoinRoom<TConfig>
 ): JoinRoom<TConfig> =>
-  ((config, roomId, callbacks) =>
+  ((config: TConfig, roomId: string, ...extra: unknown[]) =>
     withTestPeerId(peerId, () =>
-      joinRoom(config, roomId, callbacks)
+      (joinRoom as (...args: unknown[]) => unknown)(config, roomId, ...extra)
     )) as JoinRoom<TConfig>

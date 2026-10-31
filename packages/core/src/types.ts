@@ -22,6 +22,17 @@ export type JoinError = {
 
 export type JoinErrorHandler = (details: JoinError) => void
 
+export type Unsubscribe = () => void
+
+export type ListenerOptions = {
+  once?: boolean
+  signal?: AbortSignal
+}
+
+export type StatefulListenerOptions = ListenerOptions & {
+  replay?: boolean
+}
+
 export type HandshakePayload = {
   data: DataPayload
   metadata?: JsonValue
@@ -40,10 +51,6 @@ export type PeerHandshake = (
   receive: HandshakeReceiver,
   isInitiator: boolean
 ) => Promise<void>
-
-export type JoinRoomCallbacks = {
-  onJoinError?: JoinErrorHandler
-}
 
 export type TurnServerConfig = {
   urls: string | string[]
@@ -188,9 +195,10 @@ export type AuthoritativeStateRecord<T = JsonValue> = {
   hash: string
 }
 
-export type StateChangeContext = {
-  updatedBy: string
-  userId?: string
+export type StateChangeContext<T = JsonValue> = {
+  prev: T
+  peerId: string
+  userId: string
   roles: string[]
   seq: number
   timestamp: number
@@ -199,14 +207,17 @@ export type StateChangeContext = {
 
 export type StateConfig<T = JsonValue> = {
   roles?: string | string[]
-  validate?: (next: T, prev: T, context: StateChangeContext) => boolean
+  validate?: (next: T, context: StateChangeContext<T>) => boolean
 }
 
 export type AuthoritativeState<T = JsonValue> = {
   get: () => T
   set: (next: T | ((prev: T) => T)) => Promise<void>
-  getMeta: () => StateChangeContext | null
-  onChange: ((value: T, prev: T, context: StateChangeContext) => void) | null
+  getMeta: () => StateChangeContext<T> | null
+  onChange: (
+    handler: (value: T, context: StateChangeContext<T>) => void,
+    options?: StatefulListenerOptions
+  ) => Unsubscribe
 }
 
 export type KernelRolesProvider = {
@@ -320,11 +331,18 @@ export type RoomKernel = {
   getRolesProvider: () => KernelRolesProvider | null
   getScaleProvider: () => KernelScaleProvider | null
   onPeerActivated: (
-    listener: (peerId: string, peer: PeerHandle) => void
-  ) => void
-  onPeerDeactivated: (listener: (peerId: string) => void) => void
-  onRoomIdChanged: (listener: (roomId: string) => void) => void
-  onLeave: (listener: () => void) => void
+    listener: (peerId: string, peer: PeerHandle) => void,
+    options?: StatefulListenerOptions
+  ) => Unsubscribe
+  onPeerDeactivated: (
+    listener: (peerId: string) => void,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onRoomIdChanged: (
+    listener: (roomId: string) => void,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onLeave: (listener: () => void, options?: ListenerOptions) => Unsubscribe
   activateVirtualPeer: (peerId: string, vPeer: PeerHandle) => boolean
   deactivateVirtualPeer: (peerId: string, reason?: Error) => void
 }
@@ -436,11 +454,30 @@ export type RequestManyOptions<R extends DataPayload = DataPayload> = {
   signal?: AbortSignal
 }
 
+export type ActionMessageHandler<T extends DataPayload = DataPayload> = (
+  data: T,
+  context: MessageContext
+) => void
+
+export type ActionRequestHandler<
+  T extends DataPayload = DataPayload,
+  R extends DataPayload = DataPayload
+> = (data: T, context: RequestContext) => R | Promise<R>
+
 export type MessageAction<T extends DataPayload = DataPayload> = {
   send: (data: T, options?: SendOptions) => Promise<void>
-  onMessage: ((data: T, context: MessageContext) => void | Promise<void>) | null
-  onReceiveProgress: ActionProgressHandler | null
-  onReceive: ActionReceiveHandler | null
+  onMessage: (
+    handler: ActionMessageHandler<T>,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onReceiveProgress: (
+    handler: ActionProgressHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onReceive: (
+    handler: ActionReceiveHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
 }
 
 export type RequestAction<
@@ -452,28 +489,28 @@ export type RequestAction<
     data: T,
     options: RequestManyOptions<R>
   ) => Promise<PeerResult<R>[]>
-  onRequest: ((data: T, context: RequestContext) => R | Promise<R>) | null
-  onReceiveProgress: ActionProgressHandler | null
-  onReceive: ActionReceiveHandler | null
+  onRequest: (
+    handler: ActionRequestHandler<T, R>,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onReceiveProgress: (
+    handler: ActionProgressHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onReceive: (
+    handler: ActionReceiveHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
 }
 
-export type MessageActionConfig<T extends DataPayload = DataPayload> = {
+export type MessageActionConfig = {
   kind?: 'message'
   roles?: string | string[]
-  onMessage?: (data: T, context: MessageContext) => void | Promise<void>
-  onReceiveProgress?: ActionProgressHandler
-  onReceive?: ActionReceiveHandler
 }
 
-export type RequestActionConfig<
-  T extends DataPayload = DataPayload,
-  R extends DataPayload = DataPayload
-> = {
+export type RequestActionConfig = {
   kind: 'request'
   roles?: string | string[]
-  onRequest?: (data: T, context: RequestContext) => R | Promise<R>
-  onReceiveProgress?: ActionProgressHandler
-  onReceive?: ActionReceiveHandler
 }
 
 export type AddMediaOptions = {
@@ -575,11 +612,11 @@ export type Room = {
   makeAction: {
     <T extends DataPayload = DataPayload>(
       namespace: string,
-      config?: MessageActionConfig<T>
+      config?: MessageActionConfig
     ): MessageAction<T>
     <T extends DataPayload = DataPayload, R extends DataPayload = DataPayload>(
       namespace: string,
-      config: RequestActionConfig<T, R>
+      config: RequestActionConfig
     ): RequestAction<T, R>
   }
   ping: (id: string) => Promise<number>
@@ -594,13 +631,30 @@ export type Room = {
     newTrack: MediaStreamTrack,
     options?: RemoveMediaOptions
   ) => Promise<void>
-  onPeerJoin: ((context: PeerJoinContext) => void) | null
-  onPeerLeave: ((context: PeerLeaveContext) => void) | null
-  onUserJoin: ((context: UserJoinContext) => void) | null
-  onUserLeave: ((context: UserLeaveContext) => void) | null
-  onPeerStream:
-    | ((stream: MediaStream, context: PeerMediaContext) => void)
-    | null
+  onPeerJoin: (
+    handler: (context: PeerJoinContext) => void,
+    options?: StatefulListenerOptions
+  ) => Unsubscribe
+  onPeerLeave: (
+    handler: (context: PeerLeaveContext) => void,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onUserJoin: (
+    handler: (context: UserJoinContext) => void,
+    options?: StatefulListenerOptions
+  ) => Unsubscribe
+  onUserLeave: (
+    handler: (context: UserLeaveContext) => void,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  onPeerStream: (
+    handler: (stream: MediaStream, context: PeerMediaContext) => void,
+    options?: StatefulListenerOptions
+  ) => Unsubscribe
+  onJoinError: (
+    handler: JoinErrorHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
 }
 
 export type SessionSignal = {
@@ -763,8 +817,7 @@ export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (<
     undefined
 >(
   config: TConfig & {use?: TPlugins},
-  roomId: string,
-  callbacks?: JoinRoomCallbacks
+  roomId: string
 ) => RoomWithPlugins<TPlugins>) & {
   readonly [joinRoomConfigBrand]?: TConfig
 }

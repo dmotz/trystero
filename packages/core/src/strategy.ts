@@ -44,8 +44,8 @@ import {
 } from './utils'
 import type {
   BaseRoomConfig,
+  JoinError,
   JoinRoom,
-  JoinRoomCallbacks,
   JoinRoomConfig,
   PeerHandle,
   RoomPlugin,
@@ -78,24 +78,25 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   let didInit = false
   let initPromises: Promise<TRelay>[] = []
 
-  return <
+  return (<
     const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
       undefined
   >(
     config: TConfig & {use?: TPlugins},
     roomId: string,
-    callbacks?: JoinRoomCallbacks
+    ...extra: unknown[]
   ): RoomWithPlugins<TPlugins> => {
     if (!config) {
       throw mkErr('config map required')
     }
 
-    if (callbacks && typeof callbacks !== 'object') {
-      throw mkErr('callbacks must be an object')
+    if (extra.length > 0 && extra[0] !== undefined) {
+      throw mkErr(
+        'joinRoom takes 2 arguments; register join error listeners via room.onJoinError(fn)'
+      )
     }
 
     const {appId} = config
-    const onJoinError = callbacks?.onJoinError
 
     if (!appId) {
       throw requiredErr('appId')
@@ -147,11 +148,17 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     let isLeavingRoom = false
     let didReportSetupError = false
     let effectiveRoomId = roomId
+    const bridgeRef: {current?: RoomSignalingBridge | undefined} = {}
+    const emitJoinError = (details: JoinError): void => {
+      if (!didLeaveRoom) {
+        bridgeRef.current?.emitJoinError(details)
+      }
+    }
     const userIdentityP = resolveUserIdentity(appId, roomId, config).catch(
       async err => {
         didReportSetupError = true
         if (!didLeaveRoom) {
-          onJoinError?.({
+          emitJoinError({
             error: toErrorMessage(err, 'identity resolution failed'),
             appId,
             peerId: await selfIdP,
@@ -179,7 +186,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             async err => {
               if (!didReportSetupError && !didLeaveRoom) {
                 didReportSetupError = true
-                onJoinError?.({
+                emitJoinError({
                   error: toErrorMessage(err, 'room resolution failed'),
                   appId,
                   peerId: await selfIdP,
@@ -226,8 +233,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       ? effectiveRoomIdP.then(rid => genKey(config.password ?? '', appId, rid))
       : genKey(config.password ?? '', appId, roomId)
     void key.catch(noOp)
-
-    const bridgeRef: {current?: RoomSignalingBridge | undefined} = {}
 
     const syncOverlayNeighbors = (): void => {
       const scaleProvider = bridgeRef.current?.getScaleProvider()
@@ -358,7 +363,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       toPlain,
       toCipher,
       isLeaving: () => didLeaveRoom || isLeavingRoom,
-      onJoinError,
+      onJoinError: emitJoinError,
       offerManager,
       encryptOffer,
       initPeer,
@@ -656,7 +661,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         ;(leavingRoomCleanups[appId] ??= {})[roomId] = cleanupRoom
       },
       onHandshakeError: (peerId: string, error: string) =>
-        onJoinError?.({
+        emitJoinError({
           error: error.replace(/^handshake failed: /, ''),
           appId,
           peerId,
@@ -713,5 +718,5 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     return (occupiedRooms[appId][roomId] =
       joinedRoom) as RoomWithPlugins<TPlugins>
-  }
+  }) as JoinRoom<TConfig>
 }

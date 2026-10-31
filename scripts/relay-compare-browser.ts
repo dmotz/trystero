@@ -50,11 +50,12 @@ process.on('message', message => {
         config,
         roomId
       ))
-      room.onPeerJoin = () =>
+      room.onPeerJoin(() =>
         (window as any).reportJoin(
           (window as any).isRejoining ? 'reconnected' : 'connected',
           performance.now() - (window as any).started
         )
+      )
     },
     message as {config: Record<string, unknown>; roomId: string}
   )

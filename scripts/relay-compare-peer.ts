@@ -61,11 +61,12 @@ process.on('message', message => {
   }
   started = performance.now()
   room = joinRoom({...config, rtcPolyfill: RTCPeerConnection}, roomId)
-  room.onPeerJoin = () =>
+  room.onPeerJoin(() =>
     process.send?.({
       type: isRejoining ? 'reconnected' : 'connected',
       ms: performance.now() - started
     })
+  )
 })
 
 process.on('SIGTERM', () => {

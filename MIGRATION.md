@@ -86,16 +86,47 @@ security footguns:
 
 ## Breaking Changes & Before / After Migration
 
-### 1. Presence Callbacks (`onUserJoin` / `onUserLeave` & `onPeerJoin` / `onPeerLeave`)
+### 1. Unified `on*(fn, options?) => Unsubscribe` Subscriptions & Presence
 
-Callback registration still uses property assignment, as in 0.26.x. The callback
-now receives a context object instead of a bare `peerId` string. Unless you
-specifically need to track individual browser tabs, migrate `onPeerJoin` /
-`onPeerLeave` to **`onUserJoin` / `onUserLeave`**.
+All event registration across `Room`, `makeAction`, and `makeState` now uses
+method subscriptions (`on*(fn, options?) => unsubscribe`) instead of property
+assignment (`room.on* = fn`) or config-object callbacks:
+
+- **Multi-listener subscriptions**: `room.onUserJoin`, `room.onUserLeave`,
+  `room.onPeerJoin`, `room.onPeerLeave`, `room.onPeerStream`,
+  `room.onJoinError`, `action.onMessage`, `action.onReceiveProgress`, and
+  `state.onChange` allow multiple independent listeners and return an idempotent
+  `Unsubscribe` function (`() => void`).
+- **Live-only by default, explicit `{replay: true}`**: `onUserJoin`,
+  `onPeerJoin`, `onPeerStream`, and `state.onChange` no longer replay existing
+  state implicitly on registration; pass `{replay: true}` when a late subscriber
+  wants active users/peers/streams/state replayed synchronously. All `on*`
+  methods also accept `{once?: boolean, signal?: AbortSignal}`.
+- **`joinRoom(config, roomId)` takes 2 arguments**: The 3rd `{onJoinError}`
+  callbacks argument has been promoted to `room.onJoinError(fn, options?)`.
+- **Declarative `makeAction` config & single-handler `onRequest` /
+  `onReceive`**: `makeAction(namespace, config)` accepts `{kind, roles}` only;
+  register handlers via `action.onMessage(fn)`, `action.onRequest(fn)`,
+  `action.onReceive(fn)`, and `action.onReceiveProgress(fn)`. Because a request
+  or transfer gate produces a single return value, `onRequest` and `onReceive`
+  enforce a single active handler at a time (call `unsubscribe()` before
+  replacing).
+- **`StateChangeContext<T>` (`makeState`)**:
+  `state.onChange((value, ctx) => ...)` and `config.validate(next, ctx)` now
+  take 2 arguments, with `prev` and `peerId` (renamed from `updatedBy`) inside
+  `ctx` (`{prev, peerId, userId, roles, seq, timestamp, hash}`).
+- **Presence context objects**: Presence callbacks receive
+  `{userId, peerId, ...}` instead of a bare `peerId` string. Unless you
+  specifically need to track individual browser tabs, migrate `onPeerJoin` /
+  `onPeerLeave` to **`onUserJoin` / `onUserLeave`**.
 
 #### Before (0.26.x)
 
 ```js
+const room = joinRoom(config, roomId, {
+  onJoinError: err => console.error(err)
+})
+
 room.onPeerJoin = peerId => {
   console.log(`${peerId} joined`)
 }
@@ -108,25 +139,29 @@ room.onPeerLeave = peerId => {
 #### After (0.27.0) — Recommended (User-level presence)
 
 ```js
-room.onUserJoin = ({userId}) => {
-  console.log(`${userId} joined`)
-}
+const room = joinRoom(config, roomId)
 
-room.onUserLeave = ({userId}) => {
+room.onJoinError(err => console.error(err))
+
+const unsubJoin = room.onUserJoin(({userId}) => {
+  console.log(`${userId} joined`)
+})
+
+room.onUserLeave(({userId}) => {
   console.log(`${userId} left`)
-}
+})
 ```
 
 #### After (0.27.0) — Connection/Tab-level presence (if needed)
 
 ```js
-room.onPeerJoin = ({peerId, userId, roles}) => {
+room.onPeerJoin(({peerId, userId, roles}) => {
   console.log(`Connection ${peerId} for user ${userId} joined`)
-}
+})
 
-room.onPeerLeave = ({peerId, userId}) => {
+room.onPeerLeave(({peerId, userId}) => {
   console.log(`Connection ${peerId} for user ${userId} left`)
-}
+})
 ```
 
 ---
@@ -166,9 +201,9 @@ await Promise.all(room.addStream(stream))
 #### After (0.27.0)
 
 ```js
-room.onPeerStream = (stream, {userId, metadata}) => {
+room.onPeerStream((stream, {userId, metadata}) => {
   attachVideo(stream, userId, metadata)
-}
+})
 
 await room.addStream(stream)
 ```
@@ -177,16 +212,18 @@ await room.addStream(stream)
 
 ### 3. Action Callbacks (`makeAction`)
 
-If you were already using the object-based `room.makeAction('type')` API, your
-existing `{peerId, metadata}` destructuring continues to work, and **`userId`**
-and **`roles`** are now automatically included in every callback context
-(`onMessage`, `onRequest`, `onReceive`, `onProgress`, `onReceiveProgress`).
+Register action listeners with `.on*(fn)` methods (`onMessage`, `onRequest`,
+`onReceive`, `onReceiveProgress`) rather than property assignment or passing
+handlers in `makeAction(namespace, config)`. Existing `{peerId, metadata}`
+destructuring continues to work, and **`userId`** and **`roles`** are
+automatically included in every callback context (`onMessage`, `onRequest`,
+`onReceive`, `onProgress`, `onReceiveProgress`).
 
 If you are migrating from a release before 0.25.0 and were still using the
 legacy tuple destructuring (`const [send, get] = room.makeAction(...)`), migrate
 to the object API:
 
-#### Before (Legacy Tuple API)
+#### Before (Legacy Tuple API / 0.26.x Property Setter)
 
 ```js
 const [sendMove, getMove] = room.makeAction('move')
@@ -205,9 +242,9 @@ const move = room.makeAction('move')
 // Target can be a userId, peerId, or array of either
 move.send({x: 10, y: 20}, {target: targetUserId})
 
-move.onMessage = (data, {userId, metadata, roles}) => {
+const unsubMove = move.onMessage((data, {userId, metadata, roles}) => {
   console.log(`Move from ${userId}:`, data)
-}
+})
 ```
 
 ---
@@ -319,15 +356,14 @@ const room = joinRoom(
     appId: 'chess-app',
     limit: 2 // Advisory cap of 2 unique users in this peer's view
   },
-  roomId,
-  {
-    onJoinError: ({error}) => {
-      if (error === 'room full') {
-        showModal('This match already has 2 players!')
-      }
-    }
-  }
+  roomId
 )
+
+room.onJoinError(({error}) => {
+  if (error === 'room full') {
+    showModal('This match already has 2 players!')
+  }
+})
 ```
 
 ---
@@ -362,7 +398,7 @@ const betAction = room.makeAction('bet', {roles: ['admin', 'player']})
 // Shared table state that only the admin can mutate
 const tableState = room.makeState('table', {pot: 0}, {roles: ['admin']})
 
-room.onUserJoin = async ({userId}) => {
+room.onUserJoin(async ({userId}) => {
   if (await isUserOnAllowlist(userId)) {
     // Issue a cryptographically signed role certificate broadcast to the whole room
     await room.grantRole(userId, 'player')
@@ -370,7 +406,7 @@ room.onUserJoin = async ({userId}) => {
     // Cryptographically ban the user across the entire mesh/overlay
     await room.ban(userId, {reason: 'Not on the table allowlist'})
   }
-}
+})
 ```
 
 ```js
@@ -388,9 +424,9 @@ await room.ready
 const betAction = room.makeAction('bet', {roles: ['admin', 'player']})
 const tableState = room.makeState('table', {pot: 0}, {roles: ['admin']})
 
-tableState.onChange = (value, previousValue, {userId}) => {
-  console.log(`Table updated by ${userId}:`, value)
-}
+tableState.onChange((value, {prev, userId}) => {
+  console.log(`Table updated from ${prev.pot} by ${userId}:`, value)
+})
 
 // Inspect current roles when updating your UI
 const myRoles = room.getRoles()
@@ -467,14 +503,14 @@ shared state.
 ```js
 const hello = room.makeAction('hello', {kind: 'request'})
 
-hello.onRequest = async (req, {userId}) => {
+hello.onRequest(async (req, {userId}) => {
   return {appVersion: '2.1.0', supportedFeatures: ['voice', 'canvas']}
-}
+})
 
-room.onUserJoin = async ({userId}) => {
+room.onUserJoin(async ({userId}) => {
   const info = await hello.request({appVersion: '2.1.0'}, {target: userId})
   if (info.appVersion !== '2.1.0') {
     console.warn(`User ${userId} is on a different version: ${info.appVersion}`)
   }
-}
+})
 ```

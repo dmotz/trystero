@@ -340,14 +340,13 @@ const probeTrystero = async (
                     ),
                   deadlineMs
                 )
-                const room = joinRoom(config, 'probe', {
-                  onJoinError: ({error}) => reject(new Error(error))
-                })
+                const room = joinRoom(config, 'probe')
+                room.onJoinError(({error}) => reject(new Error(error)))
                 const action = room.makeAction<string, string>('relay-probe', {
-                  kind: 'request',
-                  onRequest: data => data
+                  kind: 'request'
                 })
-                room.onPeerJoin = ({peerId}) => {
+                action.onRequest(data => data)
+                room.onPeerJoin(({peerId}) => {
                   phase = 'waiting for action response'
                   console.log(
                     'relay-probe: peer connected; sending action request'
@@ -360,7 +359,7 @@ const probeTrystero = async (
                         resolve({selfId, peerId, response})
                       }, reject)
                   )
-                }
+                })
               })
             } finally {
               clearTimeout(timer!)

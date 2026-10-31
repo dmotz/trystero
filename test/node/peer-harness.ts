@@ -449,8 +449,8 @@ export const createJoinedRooms = async () => {
     () => {},
     () => {}
   )
-  const joinA = new Promise(resolve => (roomA.onPeerJoin = resolve))
-  const joinB = new Promise(resolve => (roomB.onPeerJoin = resolve))
+  const joinA = new Promise(resolve => roomA.onPeerJoin(resolve, {once: true}))
+  const joinB = new Promise(resolve => roomB.onPeerJoin(resolve, {once: true}))
   const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
 
   assert.ok(registerPeerA, 'expected first room to register its peer callback')

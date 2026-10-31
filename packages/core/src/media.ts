@@ -1,12 +1,22 @@
 import {maxQueuedDataFrames} from './data-limits'
-import {all, mkErr, toJson, warn} from './utils'
+import {
+  all,
+  createEventEmitter,
+  entries,
+  keys,
+  mkErr,
+  toJson,
+  warn
+} from './utils'
 import type {
   AddMediaOptions,
   JsonValue,
   MediaIdentityCache,
   PeerHandle,
   PeerMediaContext,
-  TargetPeers
+  StatefulListenerOptions,
+  TargetPeers,
+  Unsubscribe
 } from './types'
 import type {InternalActionSender} from './action-wire'
 
@@ -129,9 +139,11 @@ export const createMediaManager = ({
   receiveStreamMeta: (meta: unknown, peerId: string) => void
   receiveRemoteStream: (peerId: string, stream: MediaStream) => void
   clearPeer: (peerId: string) => void
-  onPeerStream:
-    | ((stream: MediaStream, context: PeerMediaContext) => void)
-    | null
+  clearListeners: () => void
+  onPeerStream: (
+    handler: (stream: MediaStream, context: PeerMediaContext) => void,
+    options?: StatefulListenerOptions
+  ) => Unsubscribe
 } => {
   const pendingStreamMetas: Record<string, PendingMediaMeta[]> = {}
   const peerMediaCaches: Record<string, MediaIdentityCache> = {}
@@ -140,6 +152,13 @@ export const createMediaManager = ({
     WeakMap<MediaStream, Map<MediaStreamTrack, string>>
   > = {}
   const peerEmittedStreams: Record<string, WeakMap<MediaStream, string>> = {}
+  const peerActiveStreams: Record<
+    string,
+    Map<MediaStream, {metadata?: JsonValue; hadTracks: boolean}>
+  > = {}
+  const streamEmitter = createEventEmitter<[MediaStream, PeerMediaContext]>(
+    'peer stream handler'
+  )
   const localMedia = createMediaIdentityCache()
   const localStreamMetas = new WeakMap<MediaStream, JsonValue | undefined>()
   const localStreamRawTracks = new WeakMap<MediaStream, Set<MediaStreamTrack>>()
@@ -200,6 +219,23 @@ export const createMediaManager = ({
     queue.push(parsed)
   }
 
+  const isRemoteStreamActive = (
+    stream: MediaStream,
+    hadTracks: boolean
+  ): boolean => {
+    if ('active' in stream && stream.active === false) {
+      return false
+    }
+    const tracks = stream.getTracks?.()
+    if (!tracks) {
+      return true
+    }
+    if (hadTracks && tracks.length === 0) {
+      return false
+    }
+    return tracks.length === 0 || !tracks.every(t => t?.readyState === 'ended')
+  }
+
   const emitStream = (
     id: string,
     key: string,
@@ -222,12 +258,17 @@ export const createMediaManager = ({
         ? {peerId: id, userId}
         : {peerId: id, userId, metadata}
 
+    ;(peerActiveStreams[id] ??= new Map()).set(stream, {
+      ...(metadata === undefined ? {} : {metadata}),
+      hadTracks: (stream.getTracks?.().length ?? 0) > 0
+    })
+
     const emittedMap = (peerEmittedStreams[id] ??= new WeakMap())
     const metaSig = metadata === undefined ? '' : `m:${toJson(metadata)}`
     const prevSig = emittedMap.get(stream)
     if (prevSig === undefined || prevSig !== metaSig) {
       emittedMap.set(stream, metaSig)
-      manager.onPeerStream?.(stream, ctx)
+      streamEmitter.emit(stream, ctx)
     }
   }
 
@@ -420,9 +461,40 @@ export const createMediaManager = ({
       delete peerMediaCaches[id]
       delete peerSyncedStreams[id]
       delete peerEmittedStreams[id]
+      delete peerActiveStreams[id]
     },
 
-    onPeerStream: null
+    clearListeners: () => {
+      streamEmitter.clear()
+      keys(peerActiveStreams).forEach(id => {
+        delete peerActiveStreams[id]
+      })
+    },
+
+    onPeerStream: (handler, options) =>
+      streamEmitter.subscribe(handler, options, () => {
+        const items: [MediaStream, PeerMediaContext][] = []
+        for (const [id, streamMap] of entries(peerActiveStreams)) {
+          if (!isActive(id)) {
+            delete peerActiveStreams[id]
+            continue
+          }
+          const userId = getPeerUserId ? getPeerUserId(id) : id
+          for (const [stream, info] of streamMap.entries()) {
+            if (!isRemoteStreamActive(stream, info.hadTracks)) {
+              streamMap.delete(stream)
+              continue
+            }
+            items.push([
+              stream,
+              info.metadata === undefined
+                ? {peerId: id, userId}
+                : {peerId: id, userId, metadata: info.metadata}
+            ])
+          }
+        }
+        return items
+      })
   }
 
   return manager

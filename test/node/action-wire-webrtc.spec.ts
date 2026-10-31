@@ -77,11 +77,10 @@ void test(
     )
 
     const received: unknown[] = []
-    const file = right.makeAction('file', {
-      onReceive: ({byteLength}) => byteLength <= 300_000,
-      onMessage: data => {
-        received.push(data)
-      }
+    const file = right.makeAction('file')
+    const unsubReceive = file.onReceive(({byteLength}) => byteLength <= 300_000)
+    file.onMessage(data => {
+      received.push(data)
     })
     const send = left.makeAction('file').send
     const payload = new Uint8Array(256_000).fill(42)
@@ -89,7 +88,7 @@ void test(
     await waitFor(() => received.length === 1)
     assert.deepEqual(received, [payload])
     await assert.rejects(send(new Uint8Array(400_000)), {kind: 'rejected'})
-    file.onReceive = null
+    unsubReceive()
     await send('still connected')
     await waitFor(() => received.length === 2)
     assert.equal(received.at(-1), 'still connected')

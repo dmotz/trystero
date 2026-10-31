@@ -7,21 +7,27 @@ export const joinEagerRoom = ([roomId, config, payload]) => {
   let sendInterval = null
 
   return new Promise(res => {
-    eagerAction.onMessage = (payload, ctx) => {
-      clearInterval(sendInterval)
-      res([payload, ctx.peerId, ctx.metadata])
-    }
-    window[roomId].onPeerJoin = ({peerId}) => {
-      if (!didSend) {
-        const send = () =>
-          eagerAction.send(payload, {target: peerId}).catch(() => {})
+    eagerAction.onMessage(
+      (received, ctx) => {
+        clearInterval(sendInterval)
+        res([received, ctx.peerId, ctx.metadata])
+      },
+      {once: true}
+    )
+    window[roomId].onPeerJoin(
+      ({peerId}) => {
+        if (!didSend) {
+          const send = () =>
+            eagerAction.send(payload, {target: peerId}).catch(() => {})
 
-        send()
-        sendInterval = setInterval(send, 333)
-        window[roomId].__eagerSendInterval = sendInterval
-        didSend = true
-      }
-    }
+          send()
+          sendInterval = setInterval(send, 333)
+          window[roomId].__eagerSendInterval = sendInterval
+          didSend = true
+        }
+      },
+      {replay: true}
+    )
   })
 }
 
@@ -37,15 +43,18 @@ export const joinRoomAndWaitForPeer = ([roomId, config, timeoutMs = 10_000]) =>
       return
     }
 
-    const timeout = setTimeout(
-      () => rej(new Error(`timed out joining ${roomId}`)),
-      timeoutMs
-    )
+    const timeout = setTimeout(() => {
+      unsub()
+      rej(new Error(`timed out joining ${roomId}`))
+    }, timeoutMs)
 
-    room.onPeerJoin = ({peerId}) => {
-      clearTimeout(timeout)
-      res(peerId)
-    }
+    const unsub = room.onPeerJoin(
+      ({peerId}) => {
+        clearTimeout(timeout)
+        res(peerId)
+      },
+      {once: true}
+    )
   })
 
 export const rejoinRoomAndWaitForPeer = async ([
@@ -65,15 +74,18 @@ export const rejoinRoomAndWaitForPeer = async ([
         return
       }
 
-      const timeout = setTimeout(
-        () => rej(new Error(`timed out joining ${roomId}`)),
-        timeoutMs
-      )
+      const timeout = setTimeout(() => {
+        unsub()
+        rej(new Error(`timed out joining ${roomId}`))
+      }, timeoutMs)
 
-      room.onPeerJoin = ({peerId}) => {
-        clearTimeout(timeout)
-        res(peerId)
-      }
+      const unsub = room.onPeerJoin(
+        ({peerId}) => {
+          clearTimeout(timeout)
+          res(peerId)
+        },
+        {once: true}
+      )
     })
 
   for (let attempt = 1; attempt <= attempts; attempt++) {

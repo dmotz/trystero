@@ -70,9 +70,9 @@ void test(
     const errors: string[] = []
     const room = joinRoom(
       {appId, rtcPolyfill: FailingRTCPeerConnection as any},
-      roomId,
-      {onJoinError: details => errors.push(details.error)}
+      roomId
     )
+    room.onJoinError(details => errors.push(details.error))
 
     try {
       const {peerId: selfId} = await room.getSelf()
@@ -140,9 +140,9 @@ void test(
     const errors: string[] = []
     const room = joinRoom(
       {appId, rtcPolyfill: FailingRTCPeerConnection as any},
-      roomId,
-      {onJoinError: details => errors.push(details.error)}
+      roomId
     )
+    room.onJoinError(details => errors.push(details.error))
 
     try {
       await waitFor(() => subscribers.length >= 1)

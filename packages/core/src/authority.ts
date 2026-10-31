@@ -30,6 +30,7 @@ import {
   authMetaKey,
   createBoundedCache,
   createBoundedSet,
+  createEventEmitter,
   definePlugin,
   encodeBytes,
   fingerprintRegex,
@@ -37,6 +38,7 @@ import {
   insufficientAuthPrefix,
   invalidP256KeyErr,
   keys,
+  lockMethods,
   mkErr,
   noOp,
   peerBannedErr,
@@ -818,14 +820,12 @@ export const compareStateRecords = (
 type StateSlot = {
   namespace: string
   value: JsonValue
+  prevValue: JsonValue
   record: AuthoritativeStateRecord | null
   requiredRoles: string[]
-  validate?:
-    | ((next: JsonValue, prev: JsonValue, ctx: StateChangeContext) => boolean)
-    | undefined
-  onChange:
-    | ((val: JsonValue, prev: JsonValue, ctx: StateChangeContext) => void)
-    | null
+  validate?: ((next: JsonValue, ctx: StateChangeContext) => boolean) | undefined
+  emitChange: (val: JsonValue, ctx: StateChangeContext) => void
+  clear: () => void
   api: unknown
   writeChain: Promise<void>
 }
@@ -883,6 +883,7 @@ export type RoomAuthority = Omit<
     targetId: string,
     options?: {reason?: string}
   ) => Promise<PeerBanRecord>
+  clearListeners: () => void
 }
 
 export type RoomAuthorityInit = {
@@ -1145,11 +1146,13 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     return res
   }
 
-  const toStateCtx = (
+  const toStateCtx = <T = JsonValue>(
     r: AuthoritativeStateRecord,
+    prev: T,
     roles = effectiveRoles(r.cert)
-  ): StateChangeContext => ({
-    updatedBy: r.updatedBy,
+  ): StateChangeContext<T> => ({
+    prev,
+    peerId: r.updatedBy,
     userId: r.userId,
     roles,
     seq: r.seq,
@@ -1449,14 +1452,15 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       }
       if (slot) {
         const prevVal = slot.value
-        const ctx = toStateCtx(rec, roles)
-        if (slot.validate && !slot.validate(rec.value, prevVal, ctx)) {
+        const ctx = toStateCtx(rec, prevVal, roles)
+        if (slot.validate && !slot.validate(rec.value, ctx)) {
           return failSig(fromPeerId)
         }
+        slot.prevValue = prevVal
         slot.record = rec
         slot.value = rec.value
         latestStates.set(rec.namespace, rec)
-        slot.onChange?.(rec.value, prevVal, ctx)
+        slot.emitChange(rec.value, ctx)
       } else {
         latestStates.set(rec.namespace, rec)
       }
@@ -1686,105 +1690,127 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
           ? [...config.roles]
           : [config.roles]
         : ['admin']
+      const changeEmitter =
+        createEventEmitter<[W, StateChangeContext<W>]>('state handler')
       const slot: StateSlot = {
         namespace,
         value: initialValue,
+        prevValue: initialValue,
         record: null,
         requiredRoles,
         ...(config?.validate
           ? {validate: config.validate as StateSlot['validate']}
           : {}),
-        onChange: null,
+        emitChange: (val, ctx) =>
+          changeEmitter.emit(val as W, ctx as StateChangeContext<W>),
+        clear: () => changeEmitter.clear(),
         api: null as unknown as AuthoritativeState<JsonValue>,
         writeChain: Promise.resolve()
       }
-      const api: AuthoritativeState<W> = {
-        get: () => slot.value as W,
-        set: (nextOrFn: W | ((prev: W) => W)) => {
-          const op = slot.writeChain.then(async () => {
-            await ensureResolved()
-            const myRoles = getPeerRoles(selfId)
-            if (!slot.requiredRoles.some(r => myRoles.includes(r))) {
-              throw mkErr(
-                `${insufficientAuthPrefix} to update state "${namespace}": requires [${slot.requiredRoles.join(', ')}]`
-              )
-            }
-            if (!localCert || !localUser) {
-              throw mkErr(
-                `missing local role certificate for state "${namespace}"`
-              )
-            }
-            const prevVal = slot.value as W
-            const nextVal =
-              typeof nextOrFn === 'function'
-                ? (nextOrFn as (prev: W) => W)(prevVal)
-                : nextOrFn
-            if (!hasFiniteNums(nextVal)) {
-              throw mkErr(
-                `state "${namespace}" value must contain only finite JSON numbers`
-              )
-            }
-            const nextEpoch = slot.record
-              ? (slot.record.epoch ?? 1)
-              : nextMonotonicTs()
-            const rec = await signStateRecord<W>(
-              localUser.sign,
-              localUser.signPubJwk,
-              localCert,
-              {
-                appId,
-                roomId: effectiveRoomId,
-                namespace,
-                seq: (slot.record?.seq ?? 0) + 1,
-                epoch: nextEpoch,
-                prevHash: slot.record?.hash ?? zeroHash,
-                updatedBy: selfId,
-                userId: localUser.userId,
-                value: nextVal
+      const api = lockMethods(
+        {
+          get: () => slot.value as W,
+          set: (nextOrFn: W | ((prev: W) => W)) => {
+            const op = slot.writeChain.then(async () => {
+              await ensureResolved()
+              const myRoles = getPeerRoles(selfId)
+              if (!slot.requiredRoles.some(r => myRoles.includes(r))) {
+                throw mkErr(
+                  `${insufficientAuthPrefix} to update state "${namespace}": requires [${slot.requiredRoles.join(', ')}]`
+                )
               }
-            )
-            const ctx = toStateCtx(rec, myRoles)
-            if (config?.validate && !config.validate(nextVal, prevVal, ctx)) {
-              throw mkErr(`state validation failed for "${namespace}"`)
-            }
-            if (slot.record && compareStateRecords(rec, slot.record) <= 0) {
+              if (!localCert || !localUser) {
+                throw mkErr(
+                  `missing local role certificate for state "${namespace}"`
+                )
+              }
+              const prevVal = slot.value as W
+              const nextVal =
+                typeof nextOrFn === 'function'
+                  ? (nextOrFn as (prev: W) => W)(prevVal)
+                  : nextOrFn
+              if (!hasFiniteNums(nextVal)) {
+                throw mkErr(
+                  `state "${namespace}" value must contain only finite JSON numbers`
+                )
+              }
+              const nextEpoch = slot.record
+                ? (slot.record.epoch ?? 1)
+                : nextMonotonicTs()
+              const rec = await signStateRecord<W>(
+                localUser.sign,
+                localUser.signPubJwk,
+                localCert,
+                {
+                  appId,
+                  roomId: effectiveRoomId,
+                  namespace,
+                  seq: (slot.record?.seq ?? 0) + 1,
+                  epoch: nextEpoch,
+                  prevHash: slot.record?.hash ?? zeroHash,
+                  updatedBy: selfId,
+                  userId: localUser.userId,
+                  value: nextVal
+                }
+              )
+              const ctx = toStateCtx<W>(rec, prevVal, myRoles)
+              if (config?.validate && !config.validate(nextVal, ctx)) {
+                throw mkErr(`state validation failed for "${namespace}"`)
+              }
+              if (slot.record && compareStateRecords(rec, slot.record) <= 0) {
+                broadcastState(rec)
+                return
+              }
+              const currentPrevVal = slot.value as W
+              const effectiveCtx =
+                currentPrevVal === prevVal
+                  ? ctx
+                  : toStateCtx<W>(rec, currentPrevVal, myRoles)
+              if (
+                currentPrevVal !== prevVal &&
+                config?.validate &&
+                !config.validate(nextVal, effectiveCtx)
+              ) {
+                throw mkErr(`state validation failed for "${namespace}"`)
+              }
+              slot.prevValue = currentPrevVal
+              slot.record = rec
+              slot.value = nextVal
+              latestStates.set(namespace, rec)
+              slot.emitChange(nextVal, effectiveCtx)
               broadcastState(rec)
-              return
-            }
-            const currentPrevVal = slot.value as W
-            if (
-              currentPrevVal !== prevVal &&
-              config?.validate &&
-              !config.validate(nextVal, currentPrevVal, ctx)
-            ) {
-              throw mkErr(`state validation failed for "${namespace}"`)
-            }
-            slot.record = rec
-            slot.value = nextVal
-            latestStates.set(namespace, rec)
-            slot.onChange?.(nextVal, currentPrevVal, ctx)
-            broadcastState(rec)
-          })
-          slot.writeChain = op.catch(noOp)
-          return op
-        },
-        getMeta: () => (slot.record ? toStateCtx(slot.record) : null),
-        get onChange() {
-          return slot.onChange as AuthoritativeState<W>['onChange']
-        },
-        set onChange(fn: AuthoritativeState<W>['onChange']) {
-          slot.onChange = fn as StateSlot['onChange']
-        }
-      }
+            })
+            slot.writeChain = op.catch(noOp)
+            return op
+          },
+          getMeta: () =>
+            slot.record
+              ? toStateCtx<W>(slot.record, slot.prevValue as W)
+              : null,
+          onChange: (handler, options) =>
+            changeEmitter.subscribe(handler, options, () =>
+              slot.record
+                ? [
+                    [
+                      slot.value as W,
+                      toStateCtx<W>(slot.record, slot.prevValue as W)
+                    ]
+                  ]
+                : []
+            )
+        } satisfies AuthoritativeState<W>,
+        ['onChange']
+      )
       slot.api = api
       stateSlots.set(namespace, slot)
       const prevRec = latestStates.get(namespace)
       if (prevRec) {
-        const ctx = toStateCtx(prevRec)
+        const ctx = toStateCtx(prevRec, slot.value)
         if (
           ctx.roles.some(r => requiredRoles.includes(r)) &&
-          (!slot.validate || slot.validate(prevRec.value, slot.value, ctx))
+          (!slot.validate || slot.validate(prevRec.value, ctx))
         ) {
+          slot.prevValue = slot.value
           slot.record = prevRec
           slot.value = prevRec.value
         }
@@ -1868,6 +1894,11 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       })
       await verifyAndApplyBan(ban)
       return ban
+    },
+    clearListeners: () => {
+      for (const slot of stateSlots.values()) {
+        slot.clear()
+      }
     }
   }
 }
@@ -2087,10 +2118,8 @@ export const roles = (
         }
       })
 
-      kernel.onPeerActivated(pid => void sendSync(pid, true))
-      for (const pid of kernel.getActivePeerIds()) {
-        void sendSync(pid, true)
-      }
+      kernel.onPeerActivated(pid => void sendSync(pid, true), {replay: true})
+      kernel.onLeave(() => authority.clearListeners())
 
       return {
         makeState: (ns, initVal, stateCfg) =>

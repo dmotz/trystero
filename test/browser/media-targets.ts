@@ -54,28 +54,26 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
             window.receivedPrivateMedia = []
             window.receivedBroadcasts = []
             window.receivedUnicasts = []
-            const bcastAction = room.makeAction('mhop-bcast', {
-              onMessage: (data, {peerId}) => {
-                window.receivedBroadcasts.push({data, peerId})
-              }
+            const bcastAction = room.makeAction('mhop-bcast')
+            bcastAction.onMessage((data, {peerId}) => {
+              window.receivedBroadcasts.push({data, peerId})
             })
-            const ucastAction = room.makeAction('mhop-ucast', {
-              onMessage: (data, {peerId}) => {
-                window.receivedUnicasts.push({data, peerId})
-              }
+            const ucastAction = room.makeAction('mhop-ucast')
+            ucastAction.onMessage((data, {peerId}) => {
+              window.receivedUnicasts.push({data, peerId})
             })
             const rpcAction = room.makeAction('mhop-rpc', {
-              kind: 'request',
-              onRequest: (payload, {peerId}) => ({
-                echo: payload,
-                from: peerId,
-                responder: selfId
-              })
+              kind: 'request'
             })
+            rpcAction.onRequest((payload, {peerId}) => ({
+              echo: payload,
+              from: peerId,
+              responder: selfId
+            }))
             window.sendMultiHopBroadcast = bcastAction.send
             window.sendMultiHopUnicast = ucastAction.send
             window.requestMultiHopRpc = rpcAction.request
-            room.onPeerStream = (stream, {peerId}) => {
+            room.onPeerStream((stream, {peerId}) => {
               window.receivedPrivateMedia.push(peerId)
               const video = document.createElement('video')
               video.autoplay = true
@@ -83,7 +81,7 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
               video.srcObject = stream
               document.body.append(video)
               void video.play()
-            }
+            })
             return selfId
           },
           {roomId, config}

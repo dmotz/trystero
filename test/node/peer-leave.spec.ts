@@ -19,11 +19,11 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
     id => strategyPeerLeaves.push(id),
     () => {}
   )
-  const joinPromise = new Promise(
-    resolve => (roomRef.onPeerJoin = ({peerId}) => resolve(peerId))
+  const joinPromise = new Promise(resolve =>
+    roomRef.onPeerJoin(({peerId}) => resolve(peerId), {once: true})
   )
 
-  roomRef.onPeerLeave = ({peerId}) => roomPeerLeaves.push(peerId)
+  roomRef.onPeerLeave(({peerId}) => roomPeerLeaves.push(peerId))
 
   const peer = new MockPeer()
 
@@ -52,8 +52,10 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
     const textActionA = roomA.makeAction('text-meta')
     const textActionB = roomB.makeAction('text-meta')
     const textReceived = new Promise(resolve => {
-      textActionB.onMessage = (payload, {peerId, metadata}) =>
-        resolve({payload, peerId, metadata})
+      textActionB.onMessage(
+        (payload, {peerId, metadata}) => resolve({payload, peerId, metadata}),
+        {once: true}
+      )
     })
 
     await textActionA.send('hello', {metadata: false})
@@ -67,8 +69,10 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
     const jsonActionA = roomA.makeAction('json-meta')
     const jsonActionB = roomB.makeAction('json-meta')
     const jsonReceived = new Promise(resolve => {
-      jsonActionB.onMessage = (payload, {peerId, metadata}) =>
-        resolve({payload, peerId, metadata})
+      jsonActionB.onMessage(
+        (payload, {peerId, metadata}) => resolve({payload, peerId, metadata}),
+        {once: true}
+      )
     })
 
     await jsonActionA.send({kind: 'object'}, {metadata: 0})
@@ -86,8 +90,10 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
     await tick()
 
     const queuedReceived = new Promise(resolve => {
-      queuedActionB.onMessage = (payload, {peerId, metadata}) =>
-        resolve({payload, peerId, metadata})
+      queuedActionB.onMessage(
+        (payload, {peerId, metadata}) => resolve({payload, peerId, metadata}),
+        {once: true}
+      )
     })
 
     await queuedSend
@@ -118,8 +124,8 @@ void test('Trystero: action creation uses action objects', async () => {
     const messageAction = roomRef.makeAction('default-message')
 
     assert.equal(roomRef.makeAction('default-message'), messageAction)
-    assert.equal(messageAction.onMessage, null)
-    assert.equal(messageAction.onReceiveProgress, null)
+    assert.equal(typeof messageAction.onMessage, 'function')
+    assert.equal(typeof messageAction.onReceiveProgress, 'function')
 
     const requestAction = roomRef.makeAction('question', {kind: 'request'})
 
@@ -132,7 +138,7 @@ void test('Trystero: action creation uses action objects', async () => {
         roomRef.makeAction('bad-request', {
           onRequest: () => true
         } as any),
-      /kind: "request"/
+      /makeAction config does not accept event handlers/
     )
     assert.throws(() => roomRef.makeAction('question'), /cannot be redefined/)
   } finally {
@@ -140,7 +146,7 @@ void test('Trystero: action creation uses action objects', async () => {
   }
 })
 
-void test('Trystero: room callback properties replace and clear handlers', async () => {
+void test('Trystero: room event methods fan out and unsubscribe cleanly', async () => {
   let registerPeer = null
   const joined = []
   const roomRef = room(
@@ -152,8 +158,13 @@ void test('Trystero: room callback properties replace and clear handlers', async
   )
 
   try {
-    roomRef.onPeerJoin = ({peerId}) => joined.push(`first:${peerId}`)
-    roomRef.onPeerJoin = ({peerId}) => joined.push(`second:${peerId}`)
+    const unsubFirst = roomRef.onPeerJoin(({peerId}) =>
+      joined.push(`first:${peerId}`)
+    )
+    const unsubSecond = roomRef.onPeerJoin(({peerId}) =>
+      joined.push(`second:${peerId}`)
+    )
+    unsubFirst()
 
     assert.ok(registerPeer, 'expected room to register its peer callback')
     const peer = new MockPeer()
@@ -165,9 +176,10 @@ void test('Trystero: room callback properties replace and clear handlers', async
 
     assert.deepEqual(joined, ['second:remote-peer'])
 
-    roomRef.onPeerJoin = null
-
-    assert.equal(roomRef.onPeerJoin, null)
+    unsubSecond()
+    assert.throws(() => {
+      ;(roomRef as any).onPeerJoin = null
+    }, TypeError)
   } finally {
     await roomRef.leave()
   }
@@ -178,20 +190,22 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
 
   try {
     const isEvenA = roomA.makeAction('is-even', {kind: 'request'})
-    roomB.makeAction('is-even', {
-      kind: 'request',
-      onRequest: value => (value as number) % 2 === 0
-    })
+    roomB
+      .makeAction('is-even', {
+        kind: 'request'
+      })
+      .onRequest(value => (value as number) % 2 === 0)
 
     assert.equal(await isEvenA.request(4, {target: 'peer-b'}), true)
 
     const rejectsA = roomA.makeAction('rejects', {kind: 'request'})
-    roomB.makeAction('rejects', {
-      kind: 'request',
-      onRequest: () => {
+    roomB
+      .makeAction('rejects', {
+        kind: 'request'
+      })
+      .onRequest(() => {
         throw new Error('no thanks')
-      }
-    })
+      })
 
     await assert.rejects(
       () => rejectsA.request('please', {target: 'peer-b'}),
@@ -206,7 +220,7 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
     })
 
     await tick()
-    lateB.onRequest = () => 'hello back'
+    lateB.onRequest(() => 'hello back')
 
     assert.equal(await lateResult, 'hello back')
 
@@ -254,13 +268,14 @@ void test('Trystero: request actions reject on abort and ignore late responses',
 
   try {
     const slowA = roomA.makeAction('slow-request', {kind: 'request'})
-    roomB.makeAction('slow-request', {
-      kind: 'request',
-      onRequest: async value => {
+    roomB
+      .makeAction('slow-request', {
+        kind: 'request'
+      })
+      .onRequest(async value => {
         await new Promise(res => setTimeout(res, 50))
         return value
-      }
-    })
+      })
     const controller = new AbortController()
     const pending = slowA.request('later', {
       target: 'peer-b',
@@ -287,9 +302,11 @@ void test('Trystero: incoming request context signal aborts when requesting peer
     let abortedPromise: Promise<void> | undefined
     const slowA = roomA.makeAction('disconnect-abort', {kind: 'request'})
 
-    roomB.makeAction('disconnect-abort', {
-      kind: 'request',
-      onRequest: (_value, context) => {
+    roomB
+      .makeAction('disconnect-abort', {
+        kind: 'request'
+      })
+      .onRequest((_value, context) => {
         requestSignal = context.signal
         abortedPromise = new Promise(resolve => {
           context.signal.addEventListener('abort', () => resolve(), {
@@ -301,8 +318,7 @@ void test('Trystero: incoming request context signal aborts when requesting peer
             once: true
           })
         })
-      }
-    })
+      })
 
     const pending = slowA.request('work', {target: 'peer-b'})
     await tick()
@@ -326,7 +342,7 @@ void test('Trystero: sendData throws during send or request reject with disconne
   try {
     const actionA = roomA.makeAction('broken-send')
     const reqA = roomA.makeAction('broken-req', {kind: 'request'})
-    roomB.makeAction('broken-req', {kind: 'request', onRequest: () => 'ok'})
+    roomB.makeAction('broken-req', {kind: 'request'}).onRequest(() => 'ok')
 
     peerA.sendData = () => {
       throw new Error('RTCDataChannel is not open')
