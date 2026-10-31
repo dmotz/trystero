@@ -191,7 +191,6 @@ void test('C3 regression: RoleRevocationRecord cannot be re-wrapped as a PeerBan
       forgedBanFromRevocation,
       scope.appId,
       scope.roomId,
-      new Set<string>(),
       new Set([root.userId])
     ),
     false,
@@ -236,7 +235,6 @@ void test('C3 regression: RoleRevocationRecord cannot be re-wrapped as a PeerBan
       forgedRevocationFromBan,
       scope.appId,
       scope.roomId,
-      new Set<string>(),
       new Set([root.userId])
     ),
     false,
@@ -308,7 +306,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       },
       scope.appId,
       scope.roomId,
-      new Set(),
       new Set([root.userId])
     ),
     false
@@ -328,7 +325,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       },
       scope.appId,
       scope.roomId,
-      new Set(),
       new Set([root.userId])
     ),
     false
@@ -349,7 +345,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
           peerId: target.peerId,
           data: 'hi',
           requiredRoles: ['admin'],
-          rootFingerprints: new Set(),
           rootUserIds: new Set([root.userId])
         }
       )
@@ -376,7 +371,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       scope.appId,
       scope.roomId,
       ['admin'],
-      new Set(),
       new Set([root.userId])
     ),
     false
@@ -390,7 +384,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
         },
         scope.appId,
         scope.roomId,
-        new Set(),
         new Set([root.userId])
       )
     ).valid,
@@ -452,7 +445,6 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       scope.appId,
       scope.roomId,
       ['admin'],
-      new Set(),
       new Set([root.userId])
     ),
     false,
@@ -613,7 +605,6 @@ void test('clock skew hardening and 2-tier authority enforcement: reject future-
       poisonRevocation,
       scope.appId,
       scope.roomId,
-      new Set(),
       new Set([root.userId])
     ),
     false,
@@ -702,7 +693,6 @@ void test('clock skew hardening and 2-tier authority enforcement: reject future-
         nonRootCert,
         scope.appId,
         scope.roomId,
-        new Set(),
         new Set([root.userId])
       )
     ).valid,

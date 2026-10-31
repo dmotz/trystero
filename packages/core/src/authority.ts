@@ -1,7 +1,6 @@
 import {ecdsaSign, normalizeLowSP256Signature, sha256} from './crypto'
 import {
   canonicalizePubJwk,
-  computeUserIdFingerprint,
   getVerifiedPubKeyRecord,
   isValidUserId,
   pubJwkToUncompressedBytes,
@@ -33,10 +32,8 @@ import {
   createEventEmitter,
   definePlugin,
   encodeBytes,
-  fingerprintRegex,
   fromBase64Url,
   insufficientAuthPrefix,
-  invalidP256KeyErr,
   keys,
   lockMethods,
   mkErr,
@@ -133,29 +130,22 @@ const verifySig = async (
   }
 }
 
-export const computePublicKeyFingerprint = async (
-  pubKey: JsonWebKey | string
-): Promise<string> => {
-  const rec = await getVerifiedPubKeyRecord(pubKey)
-  if (!rec) {
-    throw invalidP256KeyErr
-  }
-  return rec.fingerprint
-}
-
 export const parseSelfCertifyingRoomId = (
   roomId: string
-): {baseRoomId: string; fingerprint: string | null} => {
+): {baseRoomId: string; userId: string | null} => {
   const m = selfCertifyingRoomRegex.exec(roomId)
   return m?.[1] && m[2]
-    ? {baseRoomId: m[1], fingerprint: m[2]}
-    : {baseRoomId: roomId, fingerprint: null}
+    ? {baseRoomId: m[1], userId: m[2]}
+    : {baseRoomId: roomId, userId: null}
 }
 
-export const formatSelfCertifyingRoomId = (base: string, fp: string): string =>
-  `${parseSelfCertifyingRoomId(base).baseRoomId}~${fp}`
+export const formatSelfCertifyingRoomId = (
+  base: string,
+  userId: string
+): string => `${parseSelfCertifyingRoomId(base).baseRoomId}~${userId}`
 
 const normalizeRolesConfig = (config?: RolesConfig): RolesConfig => {
+  let admins: string[] | undefined
   if (isObj(config)) {
     for (const k of keys(config)) {
       if (k !== 'selfAsAdmin' && k !== 'admins' && k !== 'maxClockSkewMs') {
@@ -170,10 +160,28 @@ const normalizeRolesConfig = (config?: RolesConfig): RolesConfig => {
     ) {
       throw posSafeIntErr('maxClockSkewMs')
     }
+    if (config.admins !== undefined) {
+      if (!Array.isArray(config.admins)) {
+        throw mkErr('roles admins must be an array of userIds')
+      }
+      const validated: string[] = []
+      for (const raw of config.admins) {
+        const entry = typeof raw === 'string' ? raw.trim() : ''
+        if (!isValidUserId(entry)) {
+          throw mkErr(
+            `invalid admin userId "${String(raw)}"; expected a 22-character Base62 userId`
+          )
+        }
+        validated.push(entry)
+      }
+      if (validated.length) {
+        admins = validated
+      }
+    }
   }
   return {
     ...(config?.selfAsAdmin ? {selfAsAdmin: true} : {}),
-    ...(config?.admins?.length ? {admins: [...config.admins]} : {}),
+    ...(admins ? {admins} : {}),
     ...(config?.maxClockSkewMs !== undefined
       ? {maxClockSkewMs: config.maxClockSkewMs}
       : {})
@@ -245,8 +253,7 @@ export const verifyRoleCertificate = async (
   cert: RoleCertificate,
   appId: string,
   roomId: string,
-  rootFps: Set<string>,
-  rootUids?: Set<string>,
+  rootUserIds: Set<string>,
   clockSkewMs: number = defaultMaxClockSkewMs
 ): Promise<{valid: boolean; roles: string[]}> => {
   if (
@@ -258,7 +265,7 @@ export const verifyRoleCertificate = async (
     return {valid: false, roles: []}
   }
   const iss = await getVerifiedPubKeyRecord(cert.issuerPubKey)
-  if (!iss || (!rootFps.has(iss.fingerprint) && !rootUids?.has(iss.userId))) {
+  if (!iss || !rootUserIds.has(iss.userId)) {
     return {valid: false, roles: []}
   }
   return (await verifySig(cert.issuerPubKey, roleCertPayload(cert), cert.sig))
@@ -395,8 +402,7 @@ const verifyAdminRec = async (
   payload: string,
   appId: string,
   roomId: string,
-  rootFps: Set<string>,
-  rootUids?: Set<string>,
+  rootUserIds: Set<string>,
   clockSkewMs: number = defaultMaxClockSkewMs
 ): Promise<boolean> => {
   if (
@@ -417,8 +423,7 @@ const verifyAdminRec = async (
     rec.issuerCert,
     appId,
     roomId,
-    rootFps,
-    rootUids,
+    rootUserIds,
     clockSkewMs
   )
   return certRes.valid && (await verifySig(rec.signerPubKey, payload, rec.sig))
@@ -428,8 +433,7 @@ export const verifyRoleRevocation = async (
   rev: RoleRevocationRecord,
   appId: string,
   roomId: string,
-  rootFps: Set<string>,
-  rootUids?: Set<string>,
+  rootUserIds: Set<string>,
   clockSkewMs: number = defaultMaxClockSkewMs
 ): Promise<boolean> =>
   validateRoleRevocationShape(rev) &&
@@ -438,8 +442,7 @@ export const verifyRoleRevocation = async (
     revocationCanonicalPayload(rev),
     appId,
     roomId,
-    rootFps,
-    rootUids,
+    rootUserIds,
     clockSkewMs
   )
 
@@ -447,8 +450,7 @@ export const verifyPeerBan = async (
   ban: PeerBanRecord,
   appId: string,
   roomId: string,
-  rootFps: Set<string>,
-  rootUids?: Set<string>,
+  rootUserIds: Set<string>,
   clockSkewMs: number = defaultMaxClockSkewMs
 ): Promise<boolean> =>
   validatePeerBanShape(ban) &&
@@ -457,8 +459,7 @@ export const verifyPeerBan = async (
     banCanonicalPayload(ban),
     appId,
     roomId,
-    rootFps,
-    rootUids,
+    rootUserIds,
     clockSkewMs
   )
 
@@ -606,8 +607,7 @@ export type ActionVerifyParams = {
   expectedUserId?: string
   data: DataPayload
   requiredRoles: readonly string[]
-  rootFingerprints: Set<string>
-  rootUserIds?: Set<string>
+  rootUserIds: Set<string>
   skipDigestCheck?: boolean
   maxClockSkewMs?: number
 }
@@ -635,7 +635,6 @@ export const verifyActionAuth = async (
     env.cert,
     p.appId,
     p.roomId,
-    p.rootFingerprints,
     p.rootUserIds,
     p.maxClockSkewMs
   )
@@ -755,8 +754,7 @@ export const verifyStateRecord = async (
   appId: string,
   roomId: string,
   requiredRoles: readonly string[],
-  rootFps: Set<string>,
-  rootUids?: Set<string>,
+  rootUserIds: Set<string>,
   clockSkewMs: number = defaultMaxClockSkewMs
 ): Promise<boolean> => {
   if (
@@ -776,8 +774,7 @@ export const verifyStateRecord = async (
     rec.cert,
     appId,
     roomId,
-    rootFps,
-    rootUids,
+    rootUserIds,
     clockSkewMs
   )
   if (!certRes.valid || !requiredRoles.some(r => certRes.roles.includes(r))) {
@@ -963,17 +960,12 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   let localModSeq = 0
   let localActSeq = 0
   let effectiveRoomId = initialRoomId
-  let {baseRoomId, fingerprint} = parseSelfCertifyingRoomId(initialRoomId)
-  const rootFps = new Set<string>(fingerprint ? [fingerprint] : [])
-  const rootUids = new Set<string>()
+  let {baseRoomId, userId: roomAdminUserId} =
+    parseSelfCertifyingRoomId(initialRoomId)
+  const rootUserIds = new Set<string>(roomAdminUserId ? [roomAdminUserId] : [])
   let localUser: UserIdentity | null = null
-  for (const raw of admin.admins ?? []) {
-    const e = raw.trim()
-    if (fingerprintRegex.test(e)) {
-      rootFps.add(e)
-    } else if (e) {
-      rootUids.add(e)
-    }
+  for (const uid of admin.admins ?? []) {
+    rootUserIds.add(uid)
   }
 
   const failSig = (fromPeerId?: string): false => (
@@ -994,9 +986,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     return [...s]
   }
 
-  const isRootUid = (uid: string): boolean =>
-    rootUids.has(uid) ||
-    (isValidUserId(uid) && rootFps.has(computeUserIdFingerprint(uid)))
+  const isRootUid = (uid: string): boolean => rootUserIds.has(uid)
 
   const canIssuerRevokeTarget = (rev: RoleRevocationRecord): boolean => {
     if (!isRootUid(rev.targetUserId)) {
@@ -1143,8 +1133,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       cert,
       appId,
       effectiveRoomId,
-      rootFps,
-      rootUids,
+      rootUserIds,
       clockSkewMs
     )
     if (res.valid) {
@@ -1232,25 +1221,21 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       localUser = init.getLocalUserIdentity
         ? await init.getLocalUserIdentity()
         : null
-      const localFp = localUser
-        ? localUser.fingerprint || computeUserIdFingerprint(localUser.userId)
-        : null
-      if (!fingerprint && admin.selfAsAdmin && localUser && localFp) {
-        fingerprint = localFp
+      if (!roomAdminUserId && admin.selfAsAdmin && localUser) {
+        roomAdminUserId = localUser.userId
         baseRoomId = initialRoomId
-        effectiveRoomId = formatSelfCertifyingRoomId(initialRoomId, fingerprint)
-        rootFps.add(fingerprint)
-        rootUids.add(localUser.userId)
+        effectiveRoomId = formatSelfCertifyingRoomId(
+          initialRoomId,
+          roomAdminUserId
+        )
+        rootUserIds.add(roomAdminUserId)
         init.onRoomIdResolved?.(effectiveRoomId)
       }
       if (!localUser) {
         return
       }
       peerToUserId.set(selfId, localUser.userId)
-      if (
-        rootUids.has(localUser.userId) ||
-        (localFp !== null && rootFps.has(localFp))
-      ) {
+      if (rootUserIds.has(localUser.userId)) {
         const rootCert = await signRoleCertificate(
           localUser.sign,
           localUser.signPubJwk,
@@ -1596,7 +1581,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
         userId: localUser?.userId ?? resolveUid(selfId),
         roomId: effectiveRoomId,
         baseRoomId,
-        fingerprint,
         isAdmin: roles.includes('admin'),
         roles
       }
@@ -1934,15 +1918,12 @@ export const roles = (
     resolveRoomId: async ({roomId, userIdentityP}) => {
       if (
         normalized.selfAsAdmin &&
-        !parseSelfCertifyingRoomId(roomId).fingerprint &&
+        !parseSelfCertifyingRoomId(roomId).userId &&
         userIdentityP
       ) {
         const user = await userIdentityP
         return {
-          effectiveRoomId: formatSelfCertifyingRoomId(
-            roomId,
-            user.fingerprint || computeUserIdFingerprint(user.userId)
-          )
+          effectiveRoomId: formatSelfCertifyingRoomId(roomId, user.userId)
         }
       }
       return {effectiveRoomId: roomId}

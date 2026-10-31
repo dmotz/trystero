@@ -415,6 +415,8 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> = ((
 export const getRelaySockets: () => Record<string, WebSocket> =
   relayManager.getSockets
 
+export type {JoinRoomConfig}
+
 export {
   clearUserIdentity,
   createUserIdentity,
@@ -423,7 +425,63 @@ export {
   importUserIdentity,
   roles,
   scale,
-  setRelayConnectivity
+  setRelayConnectivity,
+  type ActionMessageHandler,
+  type ActionProgressContext,
+  type ActionProgressHandler,
+  type ActionReceiveContext,
+  type ActionReceiveHandler,
+  type ActionRequestHandler,
+  type AddMediaOptions,
+  type AuthoritativeState,
+  type DataPayload,
+  type JsonValue,
+  type ListenerOptions,
+  type MessageAction,
+  type MessageActionConfig,
+  type MessageContext,
+  type PeerInfo,
+  type PeerJoinContext,
+  type PeerLeaveContext,
+  type PeerMediaContext,
+  type PeerResult,
+  type PeerTarget,
+  type RelayConfig,
+  type RelayConnectivity,
+  type RemoveMediaOptions,
+  type RequestAction,
+  type RequestActionConfig,
+  type RequestContext,
+  type RequestManyOptions,
+  type RequestOptions,
+  type RoleCertificate,
+  type RolesConfig,
+  type RolesPluginApi,
+  type Room,
+  type RoomError,
+  type RoomErrorBase,
+  type RoomErrorCode,
+  type RoomErrorHandler,
+  type RoomPlugin,
+  type RoomWithPlugins,
+  type ScaleConfig,
+  type ScalePluginApi,
+  type SelfInfo,
+  type SendOptions,
+  type StateChangeContext,
+  type StateConfig,
+  type StatefulListenerOptions,
+  type TopologyMode,
+  type TopologyRoute,
+  type TopologySnapshot,
+  type TopologyStats,
+  type TurnServerConfig,
+  type Unsubscribe,
+  type UserIdentity,
+  type UserIdentityConfig,
+  type UserInfo,
+  type UserJoinContext,
+  type UserLeaveContext
 } from '@trystero-p2p/core'
 
 export const defaultRelayUrls: string[] = [
@@ -433,5 +491,3 @@ export const defaultRelayUrls: string[] = [
   'tracker.btorrent.xyz',
   'tracker.files.fm:7073/announce'
 ].map(url => 'wss://' + url)
-
-export type * from '@trystero-p2p/core'

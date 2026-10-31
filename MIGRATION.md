@@ -267,7 +267,7 @@ const unsubMove = move.onMessage((data, {userId, metadata, roles}) => {
   top-level `selfId` export has been removed so endpoint P-256 identity keys are
   generated lazily via WebCrypto without top-level `await`. Use
   `await room.getSelf()` to get your verified
-  `{peerId, userId, roomId, baseRoomId, fingerprint, isAdmin, roles}`.
+  `{peerId, userId, roomId, baseRoomId, isAdmin, roles}`.
 
 #### Before (0.26.x)
 
@@ -393,7 +393,7 @@ const room = joinRoom(
   'table-1'
 )
 
-// Wait for the room ID containing the admin public key fingerprint
+// Wait for the self-certifying room ID containing the admin's userId
 const {roomId: inviteRoomId} = await room.getSelf()
 shareInviteLink(`https://example.com/join#${inviteRoomId}`)
 
@@ -484,8 +484,7 @@ with `const serverIdentity = await importUserIdentity(savedUserKey)` and pass
 `identity: serverIdentity` when the backend joins the room with an RTC polyfill.
 Guests can trust its `userId` on a fixed room name using
 `use: [roles({admins: [serverIdentity.userId]})]`, or use a self-certifying room
-ID (`` `${baseRoomId}~${serverIdentity.fingerprint}` ``) along with
-`use: [roles()]`.
+ID (`` `${baseRoomId}~${serverIdentity.userId}` ``) along with `use: [roles()]`.
 
 The backend can issue roles with `room.grantRole()` while it is connected. There
 is no public standalone role-certificate import API in this beta.

@@ -7,7 +7,6 @@ import {
   ecdsaSign,
   ecdsaVerify,
   encodeBytes,
-  fingerprintLength,
   fromBase64Url,
   fromJson,
   isLowSP256Signature,
@@ -18,9 +17,10 @@ import {
   peerIdLength,
   sha256,
   toBase64Url,
-  toJson
+  toJson,
+  userIdLength
 } from './crypto'
-import {invalidP256KeyErr, noOp, requiredErr, warn} from './utils'
+import {invalidP256KeyErr, noOp, requiredErr, userIdRegex, warn} from './utils'
 import type {
   ResolvedIdentityPersistence,
   UserIdentity,
@@ -32,15 +32,14 @@ export {
   base62Alphabet,
   decodeBytes,
   encodeBytes,
-  fingerprintLength,
   fromBase64Url,
   peerIdLength,
-  toBase64Url
+  toBase64Url,
+  userIdLength
 }
 
 const base62Radix = 62n
 const peerIdRegex = new RegExp(`^[0-9A-Za-z]{${peerIdLength}}$`)
-const userIdRegex = /^[A-Za-z0-9_-]{43}$/
 
 const userKeyPrefix = `${libId}_uk_`
 const storagePrefix = `${libId}:user_identity:v1:`
@@ -51,9 +50,6 @@ const invalidKeyMaterialErr = mkErr(
 )
 const userIdMismatchErr = mkErr(
   'invalid custom user identity; userId does not match signPubJwk'
-)
-const fingerprintMismatchErr = mkErr(
-  'invalid custom user identity; fingerprint does not match userId'
 )
 const invalidCustomIdentityErr = mkErr(
   'invalid custom user identity; use "local", "none", loader, or importUserIdentity()'
@@ -147,7 +143,6 @@ export type VerifiedPubKeyRecord = {
   digest: Uint8Array
   peerId: string
   userId: string
-  fingerprint: string
 }
 
 const resolvedPubKeyCache = createBoundedCache<string, VerifiedPubKeyRecord>()
@@ -213,8 +208,7 @@ export const getVerifiedPubKeyRecord = (
         verifyKey,
         digest,
         peerId: encodeBase62(digest, peerIdLength),
-        userId: toBase64Url(digest),
-        fingerprint: encodeBase62(digest, fingerprintLength)
+        userId: encodeBase62(digest, userIdLength)
       }
       resolvedPubKeyCache.set(canonicalJwk, record)
       return record
@@ -254,14 +248,6 @@ export const isValidPeerId = (id: string): boolean =>
 
 export const isValidUserId = (id: string): boolean =>
   typeof id === 'string' && userIdRegex.test(id)
-
-export const computeUserIdFingerprint = (userId: string): string => {
-  const digest = isValidUserId(userId) ? fromBase64Url(userId) : null
-  if (!digest || digest.byteLength !== 32) {
-    throw mkErr('invalid userId')
-  }
-  return encodeBase62(digest, fingerprintLength)
-}
 
 export const verifyWithP256 = async (
   sigBytes: Uint8Array,
@@ -495,7 +481,6 @@ const buildUserIdentityFromKeys = async (
 
   const identity: UserIdentity = {
     userId,
-    fingerprint: rec.fingerprint,
     publicKey: encodedPub,
     signPubJwk,
     sign: (payload: Uint8Array) =>
@@ -685,7 +670,6 @@ const withPersistence = (
   persisted: boolean
 ): UserIdentity => ({
   userId: val.userId,
-  fingerprint: computeUserIdFingerprint(val.userId),
   publicKey: val.publicKey,
   signPubJwk: val.signPubJwk,
   sign: async (payload: Uint8Array) =>
@@ -698,12 +682,6 @@ const coerceCustomUserIdentity = async (
   val: unknown
 ): Promise<UserIdentity> => {
   if (isUserIdentityObjectStructural(val)) {
-    if (
-      val.fingerprint !== undefined &&
-      val.fingerprint !== computeUserIdFingerprint(val.userId)
-    ) {
-      throw fingerprintMismatchErr
-    }
     if (await verifyUserIdKey(val.userId, val.signPubJwk)) {
       return withPersistence(
         val,
@@ -745,12 +723,6 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
     return
   }
   if (isUserIdentityObjectStructural(raw)) {
-    if (
-      raw.fingerprint !== undefined &&
-      raw.fingerprint !== computeUserIdFingerprint(raw.userId)
-    ) {
-      throw fingerprintMismatchErr
-    }
     const cached = getCachedPubKeyRecord(raw.signPubJwk)
     if (cached && cached.userId !== raw.userId) {
       throw userIdMismatchErr
@@ -795,7 +767,6 @@ const buildUserIdentityFromIdbRecord = (
   rec: StoredIdbIdentityRecord
 ): UserIdentity => ({
   userId: rec.userId,
-  fingerprint: computeUserIdFingerprint(rec.userId),
   publicKey: rec.publicKey,
   signPubJwk: rec.signPubJwk,
   sign: (payload: Uint8Array) =>

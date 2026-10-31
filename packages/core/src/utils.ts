@@ -4,7 +4,6 @@ import {
   createBoundedSet,
   decodeBytes,
   encodeBytes,
-  fingerprintLength,
   fromBase64,
   fromBase64Url,
   fromJson,
@@ -15,7 +14,8 @@ import {
   toBase64,
   toBase64Url,
   toHex,
-  toJson
+  toJson,
+  userIdLength
 } from './crypto'
 import type {
   BaseRoomConfig,
@@ -542,12 +542,10 @@ export const createRelayManager = <TRelay extends object>(
 
 export const log = (...args: unknown[]): void => console.log(...args)
 
-export const fingerprintRegex: RegExp = new RegExp(
-  `^[0-9A-Za-z]{${fingerprintLength}}$`
-)
+export const userIdRegex: RegExp = new RegExp(`^[0-9A-Za-z]{${userIdLength}}$`)
 
 export const selfCertifyingRoomRegex: RegExp = new RegExp(
-  `^(.+)~([0-9A-Za-z]{${fingerprintLength}})$`
+  `^(.+)~([0-9A-Za-z]{${userIdLength}})$`
 )
 
 export const reservedRoomPropertyNames: Set<string> = new Set([

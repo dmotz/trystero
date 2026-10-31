@@ -129,8 +129,8 @@ announces to relays. Most plugins do not need this hook; use it only if your
 plugin needs to:
 
 - Transform or validate the room ID before topic subscription (for example,
-  `roles({selfAsAdmin: true})` appends a 22-character self-certifying
-  fingerprint `<roomId>~<fingerprint>`).
+  `roles({selfAsAdmin: true})` appends the host's 22-character Base62 `userId`
+  as `<roomId>~<userId>`).
 - Pre-compute asynchronous state from `userIdentityP` before peer handshakes
   begin.
 
@@ -227,19 +227,19 @@ verification via `roles: ['admin', ...]`.
 
 ### Room & Identity Properties
 
-| Member                              | Type                                          | Description                                                                                                         |
-| :---------------------------------- | :-------------------------------------------- | :------------------------------------------------------------------------------------------------------------------ |
-| `kernel.selfId`                     | `string`                                      | Local endpoint's self-certifying 20-character Base62 `peerId`.                                                      |
-| `kernel.appId`                      | `string`                                      | The `appId` passed to `joinRoom`.                                                                                   |
-| `kernel.initialRoomId`              | `string`                                      | The initial `roomId` passed to `joinRoom`.                                                                          |
-| `kernel.password`                   | `string`                                      | Room password string (`''` if none).                                                                                |
-| `kernel.getRoomId()`                | `() => string`                                | Returns the current effective room ID (including any fingerprint suffix).                                           |
-| `kernel.setEffectiveRoomId(id)`     | `(id: string) => void`                        | Updates the effective room ID and notifies `onRoomIdChanged` listeners.                                             |
-| `kernel.getLocalUserIdentity()`     | `() => Promise<UserIdentity>`                 | Resolves the local user's cryptographic `UserIdentity` (`{userId, fingerprint, publicKey, signPubJwk, sign, ...}`). |
-| `kernel.getPeerUserId(peerId)`      | `(peerId: string) => string`                  | Returns the verified `userId` for `peerId` (falls back to `peerId` if not yet known).                               |
-| `kernel.getKnownPeerUserId(peerId)` | `(peerId: string) => string \| undefined`     | Returns the verified `userId` for `peerId`, or `undefined` if unknown.                                              |
-| `kernel.getUserPeerIds(userId)`     | `(userId: string) => string[]`                | Returns all active `peerId`s (open tabs/connections) belonging to `userId`.                                         |
-| `kernel.getPeerPublicKey(peerId)`   | `(peerId: string) => JsonWebKey \| undefined` | Returns the verified ECDSA P-256 public JWK for `peerId`.                                                           |
+| Member                              | Type                                          | Description                                                                                            |
+| :---------------------------------- | :-------------------------------------------- | :----------------------------------------------------------------------------------------------------- |
+| `kernel.selfId`                     | `string`                                      | Local endpoint's self-certifying 20-character Base62 `peerId`.                                         |
+| `kernel.appId`                      | `string`                                      | The `appId` passed to `joinRoom`.                                                                      |
+| `kernel.initialRoomId`              | `string`                                      | The initial `roomId` passed to `joinRoom`.                                                             |
+| `kernel.password`                   | `string`                                      | Room password string (`''` if none).                                                                   |
+| `kernel.getRoomId()`                | `() => string`                                | Returns the current effective room ID (including any `~<userId>` suffix).                              |
+| `kernel.setEffectiveRoomId(id)`     | `(id: string) => void`                        | Updates the effective room ID and notifies `onRoomIdChanged` listeners.                                |
+| `kernel.getLocalUserIdentity()`     | `() => Promise<UserIdentity>`                 | Resolves the local user's cryptographic `UserIdentity` (`{userId, publicKey, signPubJwk, sign, ...}`). |
+| `kernel.getPeerUserId(peerId)`      | `(peerId: string) => string`                  | Returns the verified `userId` for `peerId` (falls back to `peerId` if not yet known).                  |
+| `kernel.getKnownPeerUserId(peerId)` | `(peerId: string) => string \| undefined`     | Returns the verified `userId` for `peerId`, or `undefined` if unknown.                                 |
+| `kernel.getUserPeerIds(userId)`     | `(userId: string) => string[]`                | Returns all active `peerId`s (open tabs/connections) belonging to `userId`.                            |
+| `kernel.getPeerPublicKey(peerId)`   | `(peerId: string) => JsonWebKey \| undefined` | Returns the verified ECDSA P-256 public JWK for `peerId`.                                              |
 
 ### Peer Inspection & Targeting
 

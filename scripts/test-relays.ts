@@ -2,13 +2,28 @@ import chalk from 'chalk'
 import mqtt from 'mqtt'
 import WebSocket from 'ws'
 import {genId} from '../packages/core/src/utils.ts'
-import {defaultRelayUrls as mqttRelays} from '@trystero-p2p/mqtt'
 import {
   createEvent,
-  defaultRelayUrls as nostrRelays,
-  subscribe
-} from '@trystero-p2p/nostr'
+  createSigner,
+  subscribeSince,
+  tag,
+  topicToKind
+} from '../packages/nostr/src/protocol.ts'
+import {defaultRelayUrls as mqttRelays} from '@trystero-p2p/mqtt'
+import {defaultRelayUrls as nostrRelays} from '@trystero-p2p/nostr'
 import {defaultRelayUrls as torrentRelays} from '@trystero-p2p/torrent'
+
+const nostrSigner = createSigner()
+const subscribeNostr = (subId: string, topic: string): string =>
+  JSON.stringify([
+    'REQ',
+    subId,
+    {
+      kinds: [topicToKind(topic)],
+      since: subscribeSince(),
+      ['#' + tag]: [topic]
+    }
+  ])
 
 const timeLimitMs = 5_000
 const maxConcurrency = 10
@@ -150,7 +165,7 @@ const testSocketRelay = async (
                 return
               }
 
-              socket.send(subscribe(subId, topic))
+              socket.send(subscribeNostr(subId, topic))
               return
             }
 
@@ -162,7 +177,7 @@ const testSocketRelay = async (
           }
         })
 
-        socket.send(await createEvent(topic, content))
+        socket.send(await createEvent(topic, content, nostrSigner))
       })
 
       socket.on('error', (error: Error) =>

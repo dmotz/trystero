@@ -16,7 +16,6 @@ import {
   roles
 } from '../../packages/core/src/index.ts'
 import {
-  computeUserIdFingerprint,
   derivePeerId,
   deriveUserId,
   getDefaultEndpointIdentity,
@@ -284,7 +283,7 @@ const createMemorySignalBus = () => {
   return {makeJoinRoom}
 }
 
-void test('Identity primitives: peerId is 20-char Base62, selfId is not exported, and userId is 43-char Base64url JWK thumbprint', async () => {
+void test('Identity primitives: peerId is 20-char Base62, userId is 22-char Base62, fingerprint is eliminated, and selfId is not exported', async () => {
   const {peerId: selfId} = await getDefaultEndpointIdentity()
   assert.equal(typeof selfId, 'string')
   assert.equal(selfId.length, 20)
@@ -292,12 +291,10 @@ void test('Identity primitives: peerId is 20-char Base62, selfId is not exported
 
   const user = await createUserIdentity()
   assert.equal(typeof user.userId, 'string')
-  assert.equal(user.userId.length, 43)
-  assert.match(user.userId, /^[0-9A-Za-z_-]{43}$/)
+  assert.equal(user.userId.length, 22)
+  assert.match(user.userId, /^[0-9A-Za-z]{22}$/)
   assert.notEqual(user.userId.length, selfId.length)
-  assert.equal(typeof user.fingerprint, 'string')
-  assert.match(user.fingerprint, /^[0-9A-Za-z]{22}$/)
-  assert.equal(user.fingerprint, computeUserIdFingerprint(user.userId))
+  assert.equal('fingerprint' in user, false)
 
   assert.equal(await deriveUserId(user.publicKey), user.userId)
   assert.equal(await verifyUserIdKey(user.userId, user.publicKey), true)
@@ -316,14 +313,15 @@ void test('Identity primitives: peerId is 20-char Base62, selfId is not exported
   assert.ok(exported.startsWith('trystero_uk_'))
   const importedFromStr = await importUserIdentity(exported)
   assert.equal('userKey' in importedFromStr, false)
+  assert.equal('fingerprint' in importedFromStr, false)
   assert.equal(importedFromStr.userId, user.userId)
-  assert.equal(importedFromStr.fingerprint, user.fingerprint)
   assert.deepEqual(importedFromStr.publicKey, user.publicKey)
 
   for (const droppedHelper of [
     'selfId',
     'createAdminRoom',
     'computePublicKeyFingerprint',
+    'computeUserIdFingerprint',
     'formatSelfCertifyingRoomId',
     'parseSelfCertifyingRoomId',
     'derivePeerId',
@@ -399,12 +397,28 @@ void test('Identity config validation & persistence modes: default local, none, 
       joinRoom(
         {
           appId: 'validation-app',
-          identity: {...tempUser, fingerprint: '0'.repeat(22)},
+          identity: {...tempUser, userId: '0'.repeat(22)},
           rtcPolyfill: InMemoryRTCPeerConnection as any
         },
         'room-1'
       ),
-    /fingerprint does not match userId/
+    /userId does not match signPubJwk/
+  )
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'validation-app',
+          identity: {...tempUser, userId: 'A'.repeat(43)},
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        'room-1'
+      ),
+    /invalid custom user identity/
+  )
+  assert.throws(
+    () => roles({admins: ['0'.repeat(20)]}),
+    /invalid admin userId.*expected a 22-character Base62 userId/
   )
 
   const sessionStore = new Map<string, string>()
@@ -1433,7 +1447,7 @@ void test('Plugin API safety: rejects reserved room property names, duplicate pl
   )
 })
 
-void test('Default local identity with IndexedDB: stores non-extractable CryptoKey without touching Web Storage, suppresses ephemeral admin warning, and reuses persistent fingerprint across rooms', async t => {
+void test('Default local identity with IndexedDB: stores non-extractable CryptoKey without touching Web Storage, suppresses ephemeral admin warning, and reuses persistent userId across rooms', async t => {
   for (const name of ['sessionStorage', 'localStorage', 'indexedDB']) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name)
     t.after(() => {
@@ -1609,11 +1623,11 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
   assert.equal(
     selfTab2.isAdmin,
     true,
-    'rejoining fingerprinted room with default browser identity must retain admin authority'
+    'rejoining self-certifying room with default browser identity must retain admin authority'
   )
   await roomTab2.leave()
 
-  // 2. Default persistent local identity derives consistent self-certifying room fingerprints across rooms
+  // 2. Default persistent local identity derives consistent self-certifying room IDs across rooms
   const hostRoom1 = joinRoom(
     {
       appId: 'my-admin-app',
@@ -1623,7 +1637,8 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
     'friday-quiz'
   )
   const hostSelf = await hostRoom1.getSelf()
-  assert.equal(hostSelf.roomId, `friday-quiz~${hostSelf.fingerprint}`)
+  assert.equal('fingerprint' in hostSelf, false)
+  assert.equal(hostSelf.roomId, `friday-quiz~${hostSelf.userId}`)
   assert.equal(hostSelf.isAdmin, true)
   await hostRoom1.leave()
 
@@ -1641,7 +1656,7 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
     hostSelf2.userId,
     'same appId must reuse persistent local identity across rooms'
   )
-  assert.equal(hostSelf.fingerprint, hostSelf2.fingerprint)
+  assert.equal(hostSelf2.roomId, `saturday-quiz~${hostSelf.userId}`)
   await hostRoom2.leave()
 
   const hostJoined = joinRoom(
@@ -1657,7 +1672,7 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
   assert.equal(
     rejoinedSelf.isAdmin,
     true,
-    'rejoining a fingerprinted room with default identity must retain admin authority'
+    'rejoining a self-certifying room with default identity must retain admin authority'
   )
   await hostJoined.leave()
 
@@ -1703,7 +1718,7 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
   assert.equal(
     postClearSelf.isAdmin,
     false,
-    'cleared identity must no longer hold admin authority in previous fingerprinted room'
+    'cleared identity must no longer hold admin authority in previous self-certifying room'
   )
   await postClearJoined.leave()
 
@@ -1907,6 +1922,153 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       false,
       `packages/${pkg} must not export createAdminRoom`
     )
+    assert.equal(
+      'createEvent' in mod,
+      false,
+      `packages/${pkg} must not leak Nostr createEvent`
+    )
+    assert.equal(
+      'subscribe' in mod,
+      false,
+      `packages/${pkg} must not leak dead subscribe helper`
+    )
+  }
+
+  // Importing trystero / @trystero-p2p/nostr must not invoke CSPRNG / keygen at import time
+  execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+        import assert from 'node:assert/strict'
+        import {resolve} from 'node:path'
+
+        let rngCalls = 0
+        const origGetRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto)
+        globalThis.crypto.getRandomValues = array => {
+          rngCalls += 1
+          return origGetRandomValues(array)
+        }
+
+        await import(resolve('packages/nostr/dist/index.mjs'))
+        await import(resolve('packages/trystero/dist/index.mjs'))
+        assert.equal(rngCalls, 0, 'importing nostr/trystero must not run CSPRNG keygen')
+      `
+    ],
+    {stdio: 'pipe'}
+  )
+
+  for (const strategyPkg of [
+    'nostr',
+    'mqtt',
+    'torrent',
+    'firebase',
+    'supabase',
+    'ws-relay'
+  ]) {
+    const strategyDts = readFileSync(
+      resolve(process.cwd(), `packages/${strategyPkg}/dist/index.d.mts`),
+      'utf8'
+    )
+    assert.equal(
+      strategyDts.includes('export type *'),
+      false,
+      `packages/${strategyPkg}/dist/index.d.mts must not wildcard re-export core types`
+    )
+    const exportedNames = new Set<string>()
+    for (const m of strategyDts.matchAll(
+      /^export (?:type|interface|declare const) (\w+)\b/gm
+    )) {
+      if (m[1]) {
+        exportedNames.add(m[1])
+      }
+    }
+    for (const m of strategyDts.matchAll(/^export \{([^}]+)\}/gm)) {
+      for (const part of (m[1] ?? '').split(',')) {
+        const cleaned = part
+          .trim()
+          .replace(/^type\s+/, '')
+          .split(/\s+as\s+/)
+          .at(-1)
+          ?.trim()
+        if (cleaned) {
+          exportedNames.add(cleaned)
+        }
+      }
+    }
+
+    for (const leaked of [
+      'ActionOptions',
+      'AuthoritativeStateRecord',
+      'BaseRelayConfig',
+      'BaseRoomConfig',
+      'InferPluginApi',
+      'InternalAction',
+      'JoinError',
+      'JoinErrorHandler',
+      'JoinRoom',
+      'JoinRoomCallbacks',
+      'JsonPrimitive',
+      'KernelRolesProvider',
+      'KernelRoomErrorInput',
+      'KernelScaleProvider',
+      'MaybePromise',
+      'OfferRecord',
+      'PeerBanRecord',
+      'PeerHandle',
+      'PeerHandlers',
+      'ResolvedIdentityPersistence',
+      'RoleRevocationRecord',
+      'RoomKernel',
+      'Signal',
+      'SignalPeer',
+      'SocketClient',
+      'StrategyAdapter',
+      'StrategyContext',
+      'StrategyMessage',
+      'StrategyOnMessage',
+      'TargetPeers',
+      'TopicPublishContext',
+      'TopicStrategyAdapter',
+      'TopicSubscriptionContext',
+      'UserIdentityPersistence',
+      'WsRelayClientMessage',
+      'WsRelayServerMessage',
+      'createEvent',
+      'subscribe'
+    ]) {
+      assert.equal(
+        exportedNames.has(leaked),
+        false,
+        `${leaked} must not be exported from packages/${strategyPkg}/dist/index.d.mts`
+      )
+    }
+    for (const kept of [
+      'Room',
+      'RoomError',
+      'RoomErrorCode',
+      'RoomErrorHandler',
+      'RoomWithPlugins',
+      'RoomPlugin',
+      'ListenerOptions',
+      'StatefulListenerOptions',
+      'Unsubscribe',
+      'MessageAction',
+      'RequestAction',
+      'SendOptions',
+      'AuthoritativeState',
+      'UserIdentity',
+      'SelfInfo',
+      'PeerInfo',
+      'UserInfo'
+    ]) {
+      assert.equal(
+        exportedNames.has(kept),
+        true,
+        `${kept} must remain exported from packages/${strategyPkg}/dist/index.d.mts`
+      )
+    }
   }
 
   const indexDts = readFileSync(

@@ -193,7 +193,7 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
     createUserIdentity()
   ])
   const appId = `multi-listener-${Date.now()}`
-  const effectiveRoomId = `fanout-room~${hostIdentity.fingerprint}`
+  const effectiveRoomId = `fanout-room~${hostIdentity.userId}`
 
   const makePeerRoom = (
     id: string,
@@ -392,7 +392,7 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     createUserIdentity()
   ])
   const appId = 'replay-semantics-app'
-  const roomId = `replay-room~${adminUser.fingerprint}`
+  const roomId = `replay-room~${adminUser.userId}`
 
   const makePeerRoom = (
     id: string,

@@ -181,3 +181,98 @@ void test('Trystero: late Nostr subscription cleanup preserves a replacement roo
     await second?.leave()
   }
 })
+
+void test('Trystero: nostr generates isolated per-room keypairs lazily and rotates after leave', async t => {
+  const originalSocket = globalThis.WebSocket
+  globalThis.WebSocket = MockWebSocket as any
+  t.after(() => {
+    globalThis.WebSocket = originalSocket
+  })
+  MockWebSocket.sockets.length = 0
+
+  const url = `wss://nostr-room-keys-${Date.now()}.test`
+  const config = {
+    appId: `nostr-room-keys-${Date.now()}`,
+    relayConfig: {urls: [url]}
+  }
+
+  const roomA = joinRoom(config, 'room-a')
+  const roomB = joinRoom(config, 'room-b')
+
+  try {
+    let socket
+    await waitFor(() => {
+      socket = MockWebSocket.sockets[0]
+      return socket?.sent.filter(msg => msg[0] === 'EVENT').length >= 2
+    })
+
+    const initialEvents = socket.sent
+      .filter(msg => msg[0] === 'EVENT')
+      .map(msg => msg[1])
+    const pubkeysByTopic = new Map<string, string>()
+
+    for (const ev of initialEvents) {
+      const topic = ev.tags.find((tag: string[]) => tag[0] === 'x')?.[1]
+      if (topic) {
+        pubkeysByTopic.set(topic, ev.pubkey)
+      }
+    }
+
+    assert.equal(pubkeysByTopic.size, 2)
+    const [pubkeyA, pubkeyB] = [...pubkeysByTopic.values()]
+    assert.notEqual(
+      pubkeyA,
+      pubkeyB,
+      'separate rooms must not share a Nostr pubkey'
+    )
+
+    // Reconnect replay for active rooms keeps each room's own pubkey
+    const beforeReplayCount = socket.sent.filter(
+      msg => msg[0] === 'EVENT'
+    ).length
+    socket.onopen?.()
+    await waitFor(
+      () =>
+        socket.sent.filter(msg => msg[0] === 'EVENT').length >=
+        beforeReplayCount + 2
+    )
+    const replayedEvents = socket.sent
+      .filter(msg => msg[0] === 'EVENT')
+      .slice(beforeReplayCount)
+      .map(msg => msg[1])
+
+    for (const ev of replayedEvents) {
+      const topic = ev.tags.find((tag: string[]) => tag[0] === 'x')?.[1]
+      assert.equal(ev.pubkey, pubkeysByTopic.get(topic))
+    }
+
+    // Leaving room-a and rejoining generates a fresh unlinkable pubkey
+    await roomA.leave()
+    const beforeRejoinCount = socket.sent.filter(
+      msg => msg[0] === 'EVENT'
+    ).length
+    const roomARejoined = joinRoom(config, 'room-a')
+    try {
+      await waitFor(
+        () =>
+          socket.sent.filter(msg => msg[0] === 'EVENT').length >=
+          beforeRejoinCount + 1
+      )
+      const rejoinEv = socket.sent
+        .filter(msg => msg[0] === 'EVENT')
+        .slice(beforeRejoinCount)
+        .map(msg => msg[1])[0]
+      assert.notEqual(
+        rejoinEv.pubkey,
+        pubkeyA,
+        'rejoining after leave() must rotate to a fresh Nostr pubkey'
+      )
+      assert.notEqual(rejoinEv.pubkey, pubkeyB)
+    } finally {
+      await roomARejoined.leave()
+    }
+  } finally {
+    await roomA.leave()
+    await roomB.leave()
+  }
+})
