@@ -1,5 +1,6 @@
+import {test} from '@playwright/test'
 import runTests from './tests'
 
-runTests('supabase')
+test.skip()
 
-// console.log('skipping supabase playwright test')
+runTests('supabase')

@@ -396,6 +396,7 @@ export const createActionWireManager = ({
                 }
                 if (
                   currentPeer !== peer ||
+                  peer.isDead ||
                   peer.channel?.readyState === 'closed'
                 ) {
                   throw disconnectedTransferErr()

@@ -73,14 +73,15 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
             window.sendMultiHopBroadcast = bcastAction.send
             window.sendMultiHopUnicast = ucastAction.send
             window.requestMultiHopRpc = rpcAction.request
+            const video = document.createElement('video')
+            video.autoplay = true
+            video.muted = true
+            video.playsInline = true
+            document.body.append(video)
             room.onPeerStream((stream, {peerId}) => {
               window.receivedPrivateMedia.push(peerId)
-              const video = document.createElement('video')
-              video.autoplay = true
-              video.muted = true
               video.srcObject = stream
-              document.body.append(video)
-              void video.play()
+              void video.play().catch(() => {})
             })
             return selfId
           },

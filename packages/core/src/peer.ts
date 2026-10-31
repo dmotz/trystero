@@ -3,7 +3,16 @@ import {
   maxQueuedDataFrames,
   pendingDataTimeoutMs
 } from './data-limits'
-import {all, alloc, candidateType, resetTimer, toError, warn} from './utils'
+import {
+  all,
+  alloc,
+  candidateType,
+  mkErr,
+  peerDisconnectedMsg,
+  resetTimer,
+  toError,
+  warn
+} from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
 
 const iceTimeout = 15_000
@@ -637,7 +646,15 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
     },
 
-    sendData: data => dataChannel?.send(data as unknown as never),
+    sendData: data => {
+      if (
+        pc.connectionState === 'closed' ||
+        dataChannel?.readyState === 'closed'
+      ) {
+        throw mkErr(peerDisconnectedMsg)
+      }
+      dataChannel?.send(data as unknown as never)
+    },
 
     destroy: () => {
       clearDisconnectedCloseTimer()

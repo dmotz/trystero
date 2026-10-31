@@ -1,43 +1,54 @@
 import {rmSync} from 'node:fs'
+import {createServer} from 'node:net'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {devices} from '@playwright/test'
 
 const minPort = 10_000
-const maxPort = 60_000
+
+const getFreePort = async (exclude: number[] = []): Promise<number> => {
+  for (;;) {
+    const port = await new Promise<number>((resolve, reject) => {
+      const server = createServer()
+      server.unref()
+      server.once('error', reject)
+      server.listen(0, () => {
+        const address = server.address()
+        const allocated =
+          address && typeof address === 'object' ? address.port : 0
+        server.close(err => (err ? reject(err) : resolve(allocated)))
+      })
+    })
+    if (port >= minPort && !exclude.includes(port)) {
+      return port
+    }
+  }
+}
+
 const configuredPort = Number(process.env['TRYSTERO_TEST_PORT'])
 const testPort =
   Number.isInteger(configuredPort) &&
   configuredPort >= minPort &&
   configuredPort <= 65_535
     ? configuredPort
-    : Math.floor(Math.random() * (maxPort - minPort + 1)) + minPort
+    : await getFreePort()
 
 const testUrl = `https://127.0.0.1:${testPort}/test`
 const defaultCompletionLogPath = join(
   tmpdir(),
   `trystero-test-completions-${process.cwd().replaceAll(/\W/g, '_')}.jsonl`
 )
-const randomPort = (except: number[] = []): number => {
-  let port = testPort
-
-  while (except.includes(port)) {
-    port = Math.floor(Math.random() * (maxPort - minPort + 1)) + minPort
-  }
-
-  return port
-}
 const configuredWsRelayPorts = (process.env['TRYSTERO_WS_RELAY_PORTS'] ?? '')
   .split(',')
   .map(Number)
   .filter(port => Number.isInteger(port) && port >= minPort && port <= 65_535)
 const wsRelayPorts =
   configuredWsRelayPorts.length > 0
-    ? configuredWsRelayPorts
-    : [randomPort([testPort])]
+    ? [...configuredWsRelayPorts]
+    : [await getFreePort([testPort])]
 
 if (wsRelayPorts.length === 1) {
-  wsRelayPorts.push(randomPort([testPort, ...wsRelayPorts]))
+  wsRelayPorts.push(await getFreePort([testPort, ...wsRelayPorts]))
 }
 
 process.env['TRYSTERO_TEST_PORT'] = String(testPort)
@@ -65,30 +76,36 @@ export default {
   reporter: [['list'], ['./test/connection-timing-reporter.ts']],
   use: {
     ignoreHTTPSErrors: true,
-    headless: true,
-    launchOptions: {
-      args: [
-        '--use-fake-ui-for-media-stream',
-        '--use-fake-device-for-media-stream',
-        '--disable-features=WebRtcHideLocalIpsWithMdns',
-        '--disable-setuid-sandbox',
-        '--no-sandbox'
-      ],
-      firefoxUserPrefs: {
-        'media.navigator.permission.disabled': true,
-        'media.navigator.streams.fake': true,
-        'media.peerconnection.ice.obfuscate_host_addresses': false
-      }
-    }
+    headless: true
   },
   projects: [
     {
       name: 'chromium',
-      use: {...devices['Desktop Chrome']}
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: {
+          args: [
+            '--use-fake-ui-for-media-stream',
+            '--use-fake-device-for-media-stream',
+            '--disable-features=WebRtcHideLocalIpsWithMdns',
+            '--disable-setuid-sandbox',
+            '--no-sandbox'
+          ]
+        }
+      }
     },
     {
       name: 'firefox',
-      use: {...devices['Desktop Firefox']}
+      use: {
+        ...devices['Desktop Firefox'],
+        launchOptions: {
+          firefoxUserPrefs: {
+            'media.navigator.permission.disabled': true,
+            'media.navigator.streams.fake': true,
+            'media.peerconnection.ice.obfuscate_host_addresses': false
+          }
+        }
+      }
     },
     {
       name: 'webkit',
