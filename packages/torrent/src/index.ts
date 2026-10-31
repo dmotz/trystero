@@ -396,6 +396,7 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
   }
 })
 
+// Remove `...extra` forwarding in 0.28.0 once createStrategy's 0.27 3rd-arg migration guard is retired.
 export const joinRoom: JoinRoom<TorrentRoomConfig> = ((
   config: TorrentRoomConfig,
   roomId: string,
@@ -449,6 +450,7 @@ export {
   type RelayConfig,
   type RelayConnectivity,
   type RemoveMediaOptions,
+  type ReplayListenerOptions,
   type RequestAction,
   type RequestActionConfig,
   type RequestContext,
@@ -470,7 +472,6 @@ export {
   type SendOptions,
   type StateChangeContext,
   type StateConfig,
-  type StatefulListenerOptions,
   type TopologyMode,
   type TopologyRoute,
   type TopologySnapshot,

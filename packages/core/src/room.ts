@@ -121,7 +121,6 @@ type RoomOptions = {
   verifyPeerIdentity?: boolean
   maxReceiveBytes?: number
   onPeerHandshake?: PeerHandshake
-  onHandshakeError?: (peerId: string, error: string, cause?: Error) => void
   handshakeTimeoutMs?: number
   onBeforeLeave?: () => void
 }
@@ -147,7 +146,6 @@ export default <
     userIdentityP,
     verifyPeerIdentity = false,
     onPeerHandshake,
-    onHandshakeError,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
     maxReceiveBytes,
     onBeforeLeave
@@ -349,9 +347,6 @@ export default <
     cause?: Error
   ): void => {
     const cleanMsg = error.replace(/^handshake failed: /, '')
-    if (onHandshakeError) {
-      onHandshakeError(peerId, cleanMsg, cause)
-    }
     if (
       cleanMsg === peerBannedMsg ||
       cause?.message === peerBannedMsg ||
@@ -1072,9 +1067,6 @@ export default <
           !(keys(activePeerMap).length > 0 && isAlreadyFullForPeer(id))
         ) {
           didReportRoomFull = true
-          if (onHandshakeError) {
-            onHandshakeError(id, roomFullMsg, roomFullErr)
-          }
           emitRoomError({
             code: 'room-full',
             peerId: id,
@@ -1094,9 +1086,6 @@ export default <
             : undefined
         const msg = reason ? `${peerBannedMsg}: ${reason}` : peerBannedMsg
         handshakeManager.clearPeer(id, peerBannedErr)
-        if (onHandshakeError) {
-          onHandshakeError(id, msg, peerBannedErr)
-        }
         emitRoomError({
           code: 'banned',
           peerId: id,
@@ -1316,7 +1305,7 @@ export default <
               {
                 userId,
                 peerId: firstPeerId,
-                roles: getPeerRoles(userId)
+                roles: getPeerRoles(firstPeerId)
               }
             ])
           }

@@ -396,7 +396,7 @@ void test('S4: solo occupant is never evicted by later joiners with lexicographi
     const errors = new Map<string, string[]>()
     const mk = (id: string) => {
       errors.set(id, [])
-      return createRoom(
+      const r = createRoom(
         f => regs.set(id, f),
         () => {},
         () => {},
@@ -404,10 +404,11 @@ void test('S4: solo occupant is never evicted by later joiners with lexicographi
           selfId: id,
           appId: 's4-app',
           roomId: `s4-room-${limit}`,
-          limit,
-          onHandshakeError: (_pid, err) => errors.get(id)!.push(err)
+          limit
         }
       )
+      r.onError(err => errors.get(id)!.push(err.message))
+      return r
     }
 
     const host = mk('zzz-solo-host')
@@ -949,10 +950,12 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
         limit: 2,
         verifyPeerIdentity: true,
         identity: user,
-        onPeerHandshake: idHs.compose(),
-        onHandshakeError: (_pid, err) => recordErr?.(err)
+        onPeerHandshake: idHs.compose()
       }
     )
+    if (recordErr) {
+      roomRef.onError(err => recordErr(err.message))
+    }
     return roomRef
   }
 

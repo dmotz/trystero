@@ -176,11 +176,21 @@ room.onPeerStream(
 )
 ```
 
-Every `on*` method allows multiple independent listeners, returns an
-`unsubscribe()` function (`offJoin()`), and accepts `{once, signal}` options
-(plus `{replay: true}` on `onUserJoin`, `onPeerJoin`, `onPeerStream`, and
-`state.onChange` when a late subscriber wants existing room state replayed
-immediately).
+Event listeners (`onUserJoin`, `onUserLeave`, `onPeerJoin`, `onPeerLeave`,
+`onPeerStream`, `onError`, `action.onMessage`, `action.onReceiveProgress`, and
+`state.onChange`) allow multiple independent subscriptions — calling `on*(fn)`
+twice with the same function registers two independent entries, each returning
+its own `unsubscribe()` function (`offJoin()`). Single-result handlers
+(`action.onRequest` and `action.onReceive`) allow one active handler at a time
+and also return an `unsubscribe()` function.
+
+All `on*` methods accept `{once, signal}` options, plus `{replay: true}` on
+`onUserJoin`, `onPeerJoin`, `onPeerStream`, and `state.onChange` to
+synchronously emit currently active state to a late subscriber (when combined
+with `{once: true}`, the first replayed item satisfies `once` and unsubscribes
+immediately). Unlike presence, media, and state replay, `action.onMessage`
+buffers inbound messages arriving while zero listeners are attached and drains
+them in order to the first subscriber.
 
 To disconnect and clean up all room subscriptions at once, leave the room:
 
@@ -1136,6 +1146,10 @@ external store contract (`subscribe(fn) => unsubscribe` + `get()`) directly:
 const round = useSyncExternalStore(roundState.onChange, roundState.get)
 ```
 
+> **SSR note:** In server-rendered frameworks like Next.js, guard module-scope
+> `joinRoom()` calls behind `typeof window !== 'undefined'` (or initialize the
+> room lazily on the client) so WebRTC setup only runs in the browser.
+
 ### Troubleshooting connection issues
 
 WebRTC is powerful but some networks simply don't allow direct P2P connections
@@ -1811,8 +1825,10 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     (e.g. `send(data, {signal: controller.signal})`) and call
     `controller.abort()`.
   - `onMessage(callback, [options])` - Multi-listener method subscribing
-    `(data, {userId, peerId, metadata, roles}) => void` for received messages
-    and returning an `Unsubscribe` function. Inbound messages arriving before
+    `(data, {userId, peerId, metadata, roles}) => void | Promise<void>` for
+    received messages and returning an `Unsubscribe` function. Delivered
+    synchronously on arrival by default, or asynchronously after signature
+    verification when `config.roles` is set. Inbound messages arriving before
     any listener is attached are buffered and drained in order to the first
     subscriber.
   - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
@@ -1829,8 +1845,10 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     labeled settled results (`{userId, peerId, status, value | error}`).
   - `onRequest(callback, [options])` - Single-handler method registering
     `(data, {userId, peerId, metadata, signal, roles}) => response` and
-    returning an `Unsubscribe` function. Throws an error if called while an
-    `onRequest` handler is already active (unsubscribe first).
+    returning an `Unsubscribe` function. Invoked synchronously upon request
+    arrival by default, or asynchronously after signature verification when
+    `config.roles` is set. Throws an error if called while an `onRequest`
+    handler is already active (unsubscribe first).
   - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
     `(percent, {userId, peerId, metadata}) => void` for inbound progress and
     returning an `Unsubscribe` function.

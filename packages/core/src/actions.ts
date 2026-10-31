@@ -9,6 +9,7 @@ import {
   internalActionPrefix,
   lockMethods,
   logActionHandlerErr,
+  logErr,
   mkErr,
   noActivePeerMsg,
   noOp,
@@ -409,11 +410,20 @@ export const createActionManager = ({
       metadata?: JsonValue
     ) =>
       handler
-        ? (progress: number, peerId: string) =>
-            handler(
+        ? (progress: number, peerId: string) => {
+            const res = handler(
               progress,
               withMetadata({peerId, userId: userIdOf(peerId)}, metadata)
             )
+            if (
+              res &&
+              typeof (res as PromiseLike<unknown>).then === 'function'
+            ) {
+              void Promise.resolve(res).catch(err =>
+                logErr('progress handler', err)
+              )
+            }
+          }
         : undefined
 
     const dispatchReceiveProgress = (
@@ -438,15 +448,19 @@ export const createActionManager = ({
       )
     }
 
-    const setReceive = (handler: ActionReceiveHandler | null): void => {
+    const setReceive = (): void => {
       const hasRoleGuard =
         state.requiredRoles.length > 0 && Boolean(verifyActionOffer)
-      if (!handler && !hasRoleGuard) {
+      if (!receiveSlot.get() && !hasRoleGuard) {
         rawAction.onReceive(null)
         return
       }
-      if (!hasRoleGuard && handler) {
+      if (!hasRoleGuard) {
         rawAction.onReceive(context => {
+          const gate = receiveSlot.get()
+          if (!gate) {
+            return true
+          }
           const requestMetadata =
             kind === 'request' ? getRequestMetadata(context.metadata) : null
           const rawUserMeta = requestMetadata
@@ -454,7 +468,7 @@ export const createActionManager = ({
             : context.metadata
           const cleanMeta = unwrapAuthUserMetadata(rawUserMeta, false)
           const roles = getPeerRoles?.(context.peerId)
-          return handler(
+          return gate(
             withMetadata(
               {
                 byteLength: context.byteLength,
@@ -486,10 +500,11 @@ export const createActionManager = ({
           onUnauthorizedAction?.(type, context.peerId)
           return false
         }
-        if (!handler) {
+        const gate = receiveSlot.get()
+        if (!gate) {
           return true
         }
-        return handler(
+        return gate(
           withMetadata(
             {
               byteLength: context.byteLength,
@@ -507,9 +522,9 @@ export const createActionManager = ({
 
     const receiveSlot = createSingleHandler<ActionReceiveHandler>(
       'onReceive',
-      handler => setReceive(handler)
+      () => setReceive()
     )
-    state.syncReceive = () => setReceive(receiveSlot.get())
+    state.syncReceive = setReceive
     state.syncReceive()
 
     rawAction.onProgress(dispatchReceiveProgress)
@@ -638,6 +653,8 @@ export const createActionManager = ({
       peerControllers.add(controller)
 
       const runHandler = async (): Promise<R> => {
+        let userMeta = parsed.m
+        let roles = getPeerRoles?.(peerId)
         if (state.requiredRoles.length > 0 && verifyActionPayload) {
           const verified = await verifyActionPayload(
             type,
@@ -650,32 +667,16 @@ export const createActionManager = ({
             onUnauthorizedAction?.(type, peerId)
             throw mkErr(`${insufficientAuthPrefix} for request`)
           }
-          const handler = requestSlot.get()
-          if (!handler) {
-            throw mkErr('no active request handler')
-          }
-          const ctx = {
-            ...withMetadata(
-              {peerId, userId: userIdOf(peerId)},
-              verified.userMetadata
-            ),
-            signal: controller.signal,
-            ...(verified.roles.length > 0 ? {roles: verified.roles} : {})
-          }
-          const response = await handler(payload as T, ctx)
-          if (response === undefined) {
-            throw mkErr('request handler returned undefined')
-          }
-          return response
+          userMeta = verified.userMetadata
+          roles = verified.roles
         }
 
         const handler = requestSlot.get()
         if (!handler) {
           throw mkErr('no active request handler')
         }
-        const roles = getPeerRoles?.(peerId)
         const ctx = {
-          ...withMetadata({peerId, userId: userIdOf(peerId)}, parsed.m),
+          ...withMetadata({peerId, userId: userIdOf(peerId)}, userMeta),
           signal: controller.signal,
           ...(roles && roles.length > 0 ? {roles} : {})
         }

@@ -234,6 +234,7 @@ const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
 
 const joins = new Map<string, JoinRoom<SupabaseRoomConfig>>()
 
+// Remove `...extra` forwarding in 0.28.0 once createStrategy's 0.27 3rd-arg migration guard is retired.
 export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((
   config: SupabaseRoomConfig,
   roomId: string,
@@ -277,6 +278,7 @@ export {
   type PeerResult,
   type PeerTarget,
   type RemoveMediaOptions,
+  type ReplayListenerOptions,
   type RequestAction,
   type RequestActionConfig,
   type RequestContext,
@@ -298,7 +300,6 @@ export {
   type SendOptions,
   type StateChangeContext,
   type StateConfig,
-  type StatefulListenerOptions,
   type TopologyMode,
   type TopologyRoute,
   type TopologySnapshot,

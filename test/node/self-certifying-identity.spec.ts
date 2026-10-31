@@ -2052,7 +2052,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       'RoomWithPlugins',
       'RoomPlugin',
       'ListenerOptions',
-      'StatefulListenerOptions',
+      'ReplayListenerOptions',
       'Unsubscribe',
       'MessageAction',
       'RequestAction',

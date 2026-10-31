@@ -22,9 +22,9 @@ import type {
   ListenerOptions,
   RelayConfig,
   RelayConnectivity,
+  ReplayListenerOptions,
   RoomPlugin,
   SocketClient,
-  StatefulListenerOptions,
   Unsubscribe
 } from './types'
 
@@ -572,11 +572,16 @@ export const lockMethods = <T extends object>(
   methodNames: readonly (keyof T & string)[]
 ): T => {
   for (const name of methodNames) {
+    const fn = target[name]
     Object.defineProperty(target, name, {
-      value: target[name],
-      writable: false,
+      get: () => fn,
+      set: () => {
+        throw new TypeError(
+          `${libName}: ${name} is a method; call ${name}(handler), which returns an unsubscribe function`
+        )
+      },
       enumerable: true,
-      configurable: false
+      configurable: true
     })
   }
   return target
@@ -585,7 +590,7 @@ export const lockMethods = <T extends object>(
 export type EventEmitter<Args extends unknown[]> = {
   subscribe: (
     handler: (...args: Args) => unknown,
-    options?: StatefulListenerOptions,
+    options?: ReplayListenerOptions,
     getReplayItems?: () => Iterable<Args>
   ) => Unsubscribe
   emit: (...args: Args) => void
@@ -615,7 +620,7 @@ export const createEventEmitter = <Args extends unknown[]>(
 
   const subscribe = (
     handler: (...args: Args) => unknown,
-    options?: StatefulListenerOptions,
+    options?: ReplayListenerOptions,
     getReplayItems?: () => Iterable<Args>
   ): Unsubscribe => {
     if (typeof handler !== 'function') {
@@ -732,7 +737,7 @@ export const createSingleHandler = <F extends (...args: any[]) => any>(
     }
     const call = ((...args: Parameters<F>): ReturnType<F> => {
       if (!active) {
-        throw mkErr(`${name} handler is no longer active`)
+        return undefined as ReturnType<F>
       }
       if (once) {
         unsub()

@@ -131,8 +131,8 @@ property assignment (`room.on* = fn`) or config-object callbacks:
   (`{prev, peerId, userId, roles, seq, timestamp, hash}`).
 - `RoomKernel` lifecycle hooks (`onPeerActivated`, `onPeerDeactivated`,
   `onRoomIdChanged`, `onLeave`) also return `Unsubscribe` and accept
-  `ListenerOptions` (`StatefulListenerOptions` on `onPeerActivated`), and
-  plugins can emit structured `RoomError`s via `kernel.emitError(error)`.
+  `ListenerOptions` (`ReplayListenerOptions` on `onPeerActivated`), and plugins
+  can emit structured `RoomError`s via `kernel.emitError(error)`.
 - Room event handlers receive `{peerId, userId, ...}` context objects instead of
   a bare `peerId` string (with `stream` remaining first on `onPeerStream`):
 

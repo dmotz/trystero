@@ -171,8 +171,7 @@ void test('room peer errors and handshake failures notify the remote peer to exi
         ? {
             onPeerHandshake: async () => {
               throw new Error('rejected handshake')
-            },
-            onHandshakeError: () => {}
+            }
           }
         : undefined
     )

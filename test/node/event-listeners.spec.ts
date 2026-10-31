@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import vm from 'node:vm'
 import test from './test.ts'
 import {
   createTopicStrategy,
@@ -6,12 +7,16 @@ import {
   definePlugin,
   makeSocket,
   roles,
+  type ReplayListenerOptions,
   type SocketClient
 } from '../../packages/core/src/index.ts'
+import {createActionManager} from '../../packages/core/src/actions.ts'
+import {createMediaManager} from '../../packages/core/src/media.ts'
 import createRoom, {
   getRoomSignalingBridge
 } from '../../packages/core/src/room.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
+import {createSingleHandler} from '../../packages/core/src/utils.ts'
 import {joinRoom as joinSupabaseRoom} from '../../packages/supabase/src/index.ts'
 import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
 import type {
@@ -953,7 +958,11 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
       /onRequest handler must be a function/
     )
 
-    // 5. Assigning to .on* methods throws TypeError (writable: false)
+    // 5. Assigning to .on* methods throws descriptive migration error in both strict and sloppy mode, while configurable: true allows spies
+    const sloppyAssign = (obj: unknown, prop: string): void => {
+      vm.runInNewContext('obj[prop] = function () {}', {obj, prop})
+    }
+
     for (const [obj, prop] of [
       [room1, 'onUserJoin'],
       [room1, 'onUserLeave'],
@@ -968,10 +977,42 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
       [validReqAction, 'onReceive'],
       [validReqAction, 'onReceiveProgress']
     ] as const) {
-      assert.throws(() => {
-        ;(obj as Record<string, unknown>)[prop] = () => {}
-      }, TypeError)
+      const expectedPattern = new RegExp(
+        `${prop} is a method; call ${prop}\\(handler\\), which returns an unsubscribe function`
+      )
+      assert.throws(
+        () => {
+          ;(obj as Record<string, unknown>)[prop] = () => {}
+        },
+        err => err instanceof TypeError && expectedPattern.test(err.message)
+      )
+      assert.throws(
+        () => {
+          sloppyAssign(obj, prop)
+        },
+        err => err instanceof TypeError && expectedPattern.test(err.message)
+      )
     }
+
+    // configurable: true lets test frameworks (vi.spyOn / Object.defineProperty) wrap and restore locked methods
+    const origDesc = Object.getOwnPropertyDescriptor(room1, 'onPeerJoin')!
+    assert.equal(origDesc.configurable, true)
+    let spyCalls = 0
+    const origOnPeerJoin = room1.onPeerJoin
+    Object.defineProperty(room1, 'onPeerJoin', {
+      value: (
+        ...args: Parameters<typeof origOnPeerJoin>
+      ): ReturnType<typeof origOnPeerJoin> => {
+        spyCalls++
+        return origOnPeerJoin(...args)
+      },
+      configurable: true,
+      writable: true
+    })
+    const spyUnsub = room1.onPeerJoin(() => {})
+    assert.equal(spyCalls, 1)
+    spyUnsub()
+    Object.defineProperty(room1, 'onPeerJoin', origDesc)
   } finally {
     await room1.leave()
   }
@@ -1028,7 +1069,7 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     const st = extRoom.makeState('s', 1)
     assert.throws(() => {
       ;(st as unknown as Record<string, unknown>)['onChange'] = () => {}
-    }, TypeError)
+    }, /onChange is a method; call onChange\(handler\)/)
   } finally {
     await extRoom.leave()
   }
@@ -1394,4 +1435,207 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
       roomB.leave().catch(() => {})
     ])
   }
+})
+
+void test('Unsubscribing or aborting onReceive during pending role offer verification admits transfer instead of rejecting', async () => {
+  // 1. Stale createSingleHandler wrapper call after unsubscribe returns undefined rather than throwing
+  const slot = createSingleHandler<() => boolean>('onReceive')
+  const unsubSlot = slot.set(() => false)
+  const capturedWrapper = slot.get()!
+  unsubSlot()
+  assert.equal(slot.get(), null)
+  assert.equal(capturedWrapper(), undefined)
+
+  // 2. Role-guarded bulk offer in flight while onReceive is unsubscribed / aborted
+  let offerEnteredResolve: (() => void) | null = null
+  let resolveOfferCheck:
+    | ((res: {
+        valid: boolean
+        roles: string[]
+        userMetadata?: {tag: string}
+      }) => void)
+    | null = null
+
+  const waitOfferEntered = () =>
+    new Promise<void>(resolve => {
+      offerEnteredResolve = resolve
+    })
+
+  const toRight = {
+    sendData: (bytes: Uint8Array) =>
+      right.handleData('left', bytes.slice().buffer),
+    destroy: () => {}
+  }
+  const toLeft = {
+    sendData: (bytes: Uint8Array) =>
+      left.handleData('right', bytes.slice().buffer),
+    destroy: () => {}
+  }
+
+  const left = createActionManager({
+    onPeerError: (id, err) => left.clearPeer(id, err),
+    getPeer: () => toRight as never,
+    getPeerIds: () => ['right'],
+    canReceiveFromPeer: () => true,
+    signActionPayload: async (_ns, _roles, _data, userMeta) => ({
+      m: userMeta ?? null
+    })
+  })
+
+  const right = createActionManager({
+    onPeerError: (id, err) => right.clearPeer(id, err),
+    getPeer: () => toLeft as never,
+    getPeerIds: () => ['left'],
+    canReceiveFromPeer: () => true,
+    verifyActionOffer: async () => {
+      offerEnteredResolve?.()
+      return new Promise(resolve => {
+        resolveOfferCheck = resolve
+      })
+    },
+    verifyActionPayload: async (_ns, _peerId, _roles, _data, wireMeta) => ({
+      valid: true,
+      roles: ['admin'],
+      userMetadata:
+        wireMeta && typeof wireMeta === 'object' && 'm' in wireMeta
+          ? (wireMeta as {m?: {tag: string}}).m
+          : undefined
+    })
+  })
+
+  try {
+    const sender = left.makeAction<Uint8Array>('guarded-upload', {
+      roles: 'admin'
+    })
+    const receiver = right.makeAction<Uint8Array>('guarded-upload', {
+      roles: 'admin'
+    })
+
+    const receivedSizes: number[] = []
+    receiver.onMessage(async data => {
+      await Promise.resolve()
+      receivedSizes.push(data.byteLength)
+    })
+
+    // Gate initially rejects everything, but we unsubscribe it while verifyActionOffer is pending
+    const abortCtrl = new AbortController()
+    let gateInvocations = 0
+    receiver.onReceive(
+      () => {
+        gateInvocations++
+        return false
+      },
+      {signal: abortCtrl.signal}
+    )
+
+    const entered = waitOfferEntered()
+    const payload = new Uint8Array(32 * 1024).fill(7)
+    const sendPromise = sender.send(payload, {metadata: {tag: 'ok'}})
+
+    await entered
+    // Abort the onReceive gate while verifyActionOffer is mid-flight -> restores automatic acceptance
+    abortCtrl.abort()
+    resolveOfferCheck!({
+      valid: true,
+      roles: ['admin'],
+      userMetadata: {tag: 'ok'}
+    })
+
+    await sendPromise
+    await waitFor(() => receivedSizes.length === 1, 1_000)
+    assert.equal(gateInvocations, 0)
+    assert.deepEqual(receivedSizes, [payload.byteLength])
+  } finally {
+    left.clearPeer('right', new Error('closed'))
+    right.clearPeer('left', new Error('closed'))
+  }
+})
+
+void test('Duplicate registration, async listener return types, ReplayListenerOptions, and eager remote stream pruning', async () => {
+  const pair = linkedActions()
+
+  try {
+    const sender = pair.left.makeAction<string>('dup-test')
+    const receiver = pair.right.makeAction<string>('dup-test')
+
+    // 1. Registering the exact same function twice creates 2 independent subscriptions
+    const hits: string[] = []
+    const sharedHandler = async (msg: string): Promise<void> => {
+      await Promise.resolve()
+      hits.push(msg)
+    }
+    const off1 = receiver.onMessage(sharedHandler)
+    const off2 = receiver.onMessage(sharedHandler)
+
+    await sender.send('first')
+    await waitFor(() => hits.length === 2, 1_000)
+    assert.deepEqual(hits, ['first', 'first'])
+
+    // Unsubscribing off1 removes only the first registration; off2 still fires
+    off1()
+    await sender.send('second')
+    await waitFor(() => hits.length === 3, 1_000)
+    assert.deepEqual(hits, ['first', 'first', 'second'])
+    off2()
+  } finally {
+    pair.close()
+  }
+
+  // 2. Eager remote stream pruning on track 'ended' event + ReplayListenerOptions type check
+  const trackListeners = new Map<string, Set<() => void>>()
+  let trackState: MediaStreamTrackState = 'live'
+  const liveTrack = {
+    id: 't-eager',
+    kind: 'video',
+    get readyState() {
+      return trackState
+    },
+    addEventListener: (evt: string, fn: () => void) => {
+      let set = trackListeners.get(evt)
+      if (!set) {
+        set = new Set()
+        trackListeners.set(evt, set)
+      }
+      set.add(fn)
+    },
+    removeEventListener: (evt: string, fn: () => void) => {
+      trackListeners.get(evt)?.delete(fn)
+    }
+  } as unknown as MediaStreamTrack
+
+  const remoteStream = makeStream('s-eager', [liveTrack], true)
+  const media = createMediaManager({
+    onPeerError: () => {},
+    iterate: () => [],
+    isActive: () => true,
+    getPeerUserId: id => `user-${id}`
+  })
+
+  media.receiveStreamMeta({k: 'k1', s: 's-eager', m: {cam: 1}}, 'peer-1')
+  media.receiveRemoteStream('peer-1', remoteStream)
+  assert.equal(trackListeners.get('ended')?.size, 1)
+
+  const replayOpts: ReplayListenerOptions = {replay: true}
+  const beforeEnd: string[] = []
+  media.onPeerStream(async s => {
+    beforeEnd.push(s.id)
+  }, replayOpts)()
+  assert.deepEqual(beforeEnd, ['s-eager'])
+
+  // Ending the track eagerly prunes peerActiveStreams and detaches its 'ended' listener immediately
+  trackState = 'ended'
+  for (const fn of Array.from(trackListeners.get('ended') ?? [])) {
+    fn()
+  }
+  assert.equal(
+    trackListeners.get('ended')?.size,
+    0,
+    'track ended listener must be detached immediately when stream becomes inactive'
+  )
+
+  const afterEnd: string[] = []
+  media.onPeerStream(s => {
+    afterEnd.push(s.id)
+  }, replayOpts)()
+  assert.deepEqual(afterEnd, [])
 })
