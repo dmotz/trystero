@@ -1402,3 +1402,180 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
     await Promise.all(gossipRooms.map(r => r.leave()))
   }
 })
+
+void test('Handshake ready enrichment resilience: hung state sign degrades to live sync, hot set() loop resolves on first batch, and 32 certified namespaces respect hsready cap', async () => {
+  // 1. Hung state sign() never blocks peer connectivity; value arrives once sign unblocks
+  {
+    const {makeJoinRoom} = createMemorySignalBus()
+    const baseId = await createUserIdentity()
+    let releaseStateSign!: () => void
+    const stateSignGate = new Promise<void>(r => {
+      releaseStateSign = r
+    })
+    const stalledIdentity: UserIdentity = {
+      ...baseId,
+      sign: async payload => {
+        if (decodeBytes(payload).includes(':state:')) {
+          await stateSignGate
+        }
+        return baseId.sign(payload)
+      }
+    }
+
+    const rA = makeJoinRoom('hs-stall-a')(
+      {appId: 'hs-resilience-app', rtcPolyfill, identity: stalledIdentity},
+      'stall-room'
+    )
+    const nameA = rA.makeUserState('name', '')
+    const pendingSet = nameA.set('DelayedAlice')
+
+    const t0 = Date.now()
+    const rB = makeJoinRoom('hs-stall-b')(
+      {appId: 'hs-resilience-app', rtcPolyfill},
+      'stall-room'
+    )
+    const nameB = rB.makeUserState('name', '')
+    const observedChanges: string[] = []
+    nameB.onChange((val, ctx) => {
+      if (ctx.userId === baseId.userId && val) {
+        observedChanges.push(val)
+      }
+    })
+
+    try {
+      await waitFor(
+        () =>
+          Object.keys(rA.getPeers()).length === 1 &&
+          Object.keys(rB.getPeers()).length === 1,
+        2_000
+      )
+      const connectMs = Date.now() - t0
+      assert.ok(
+        connectMs < 1_500,
+        `expected stalled state sign to degrade within deadline, took ${connectMs}ms`
+      )
+      assert.equal(nameB.has(baseId.userId), false)
+
+      releaseStateSign()
+      await pendingSet
+      await waitFor(() => nameB.get(baseId.userId) === 'DelayedAlice', 2_000)
+      assert.deepEqual(observedChanges, ['DelayedAlice'])
+    } finally {
+      releaseStateSign()
+      await Promise.all([rA.leave(), rB.leave()])
+    }
+  }
+
+  // 2. Continuous hot set() loop during handshake does not starve prepareHandshakeReady
+  {
+    const {makeJoinRoom} = createMemorySignalBus()
+    const baseHotId = await createUserIdentity()
+    const slowStepIdentity: UserIdentity = {
+      ...baseHotId,
+      sign: async payload => {
+        if (decodeBytes(payload).includes(':state:')) {
+          await wait(35)
+        }
+        return baseHotId.sign(payload)
+      }
+    }
+
+    const rHot = makeJoinRoom('hs-hot-a')(
+      {appId: 'hs-resilience-app', rtcPolyfill, identity: slowStepIdentity},
+      'hot-loop-room'
+    )
+    const cursorHot = rHot.makeUserState<number>('cursor', 0)
+    void cursorHot.set(1)
+    await wait(5)
+    const ticker = setInterval(() => {
+      void cursorHot.set(prev => prev + 1)
+    }, 10)
+
+    let joinObservedCursor = 0
+    const t0 = Date.now()
+    const rReader = makeJoinRoom('hs-hot-b')(
+      {appId: 'hs-resilience-app', rtcPolyfill},
+      'hot-loop-room'
+    )
+    const cursorReader = rReader.makeUserState<number>('cursor', 0)
+    rReader.onUserJoin(({userId}) => {
+      joinObservedCursor = cursorReader.get(userId)
+    })
+
+    try {
+      await waitFor(() => Object.keys(rReader.getPeers()).length === 1, 1_500)
+      const elapsed = Date.now() - t0
+      assert.ok(
+        elapsed < 380,
+        `expected single-batch stepP to resolve without waiting for 400ms deadline, took ${elapsed}ms`
+      )
+      assert.ok(
+        joinObservedCursor >= 1,
+        `expected pre-join cursor value >= 1 on onUserJoin, got ${joinObservedCursor}`
+      )
+      clearInterval(ticker)
+      await waitFor(
+        () =>
+          cursorReader.get(baseHotId.userId) ===
+          cursorHot.get(baseHotId.userId),
+        2_000
+      )
+    } finally {
+      clearInterval(ticker)
+      await Promise.all([rHot.leave(), rReader.leave()])
+    }
+  }
+
+  // 3. 32 certified user-state namespaces near quota cap never exceed @_hsready wire limit and converge completely
+  {
+    const {makeJoinRoom} = createMemorySignalBus()
+    const adminId = await createUserIdentity()
+    const nsNames = Array.from(
+      {length: maxUserStateNamespacesPerUser},
+      (_, i) =>
+        `certified-slot-${String(i).padStart(2, '0')}-${'x'.repeat(160)}`
+    )
+    const rAdmin = makeJoinRoom('hs-cap-admin')(
+      {
+        appId: 'hs-resilience-app',
+        rtcPolyfill,
+        identity: adminId,
+        use: [roles({admins: [adminId.userId]})]
+      },
+      'cap-room'
+    )
+    const adminSlots = nsNames.map(ns =>
+      rAdmin.makeUserState<string>(ns, '', {roles: ['admin']})
+    )
+    await rAdmin.ready
+    await Promise.all(
+      adminSlots.map((slot, i) => slot.set(`${i}:${'v'.repeat(1_950)}`))
+    )
+
+    const rPeer = makeJoinRoom('hs-cap-peer')(
+      {
+        appId: 'hs-resilience-app',
+        rtcPolyfill,
+        use: [roles({admins: [adminId.userId]})]
+      },
+      'cap-room'
+    )
+    const peerSlots = nsNames.map(ns =>
+      rPeer.makeUserState<string>(ns, '', {roles: ['admin']})
+    )
+
+    try {
+      await waitFor(
+        () =>
+          Object.keys(rPeer.getPeers()).length === 1 &&
+          peerSlots.every(
+            (slot, i) =>
+              slot.get(adminId.userId) === `${i}:${'v'.repeat(1_950)}`
+          ),
+        4_000
+      )
+    } finally {
+      await Promise.all([rAdmin.leave(), rPeer.leave()])
+    }
+  }
+})

@@ -41,6 +41,7 @@ import {
   isValidSig,
   keys,
   lockMethods,
+  logErr,
   mkErr,
   noOp,
   requiresRolesErr,
@@ -64,6 +65,7 @@ const maxLiveRecordBurst = 25
 const maxSyncRecordsPerBatch = 1_024
 const maxSyncChunkBytes: number = 180 * 1024
 const maxHandshakeStateBytes: number = 60 * 1024
+const handshakeStateDeadlineMs = 400
 const syncPullFanout = 2
 const syncPullTimeoutMs = 1_500
 
@@ -361,6 +363,7 @@ type Slot = {
   api: unknown
   ops: PendingOp[]
   flushP: Promise<void> | null
+  stepP: Promise<void> | null
 }
 
 type StagedHsItem = {
@@ -1044,7 +1047,7 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
     let curBytes = 0
     for (const rec of capped) {
       const wire = toWireRecord(rec, false)
-      const est = measureRecordBytes(rec) + (rec.cert ? 600 : 180)
+      const est = encodeBytes(toJson(wire)).byteLength + 120
       if (curR.length > 0 && curBytes + est > maxSyncChunkBytes) {
         chunks.push({p: curP, r: curR})
         curP = {}
@@ -1449,156 +1452,167 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
     const p = (async () => {
       try {
         while (slot.ops.length > 0) {
-          let ready: {selfId: string; user: UserIdentity; roomId: string}
-          let auth: {cert: RoleCertificate | null; roles: string[]}
+          let doneStep!: () => void
+          slot.stepP = new Promise<void>(r => {
+            doneStep = r
+          })
           try {
-            ready = await deps.ensureReady()
-            auth = await obtainWriteAuth(
-              slot.reqRoles,
-              slot.ns,
-              ready.user.userId
-            )
-          } catch (err) {
-            for (const op of slot.ops.splice(0)) {
-              op.rej(err)
+            let ready: {selfId: string; user: UserIdentity; roomId: string}
+            let auth: {cert: RoleCertificate | null; roles: string[]}
+            try {
+              ready = await deps.ensureReady()
+              auth = await obtainWriteAuth(
+                slot.reqRoles,
+                slot.ns,
+                ready.user.userId
+              )
+            } catch (err) {
+              for (const op of slot.ops.splice(0)) {
+                op.rej(err)
+              }
+              continue
             }
-            continue
-          }
 
-          const batch = slot.ops.splice(0)
-          if (!batch.length) {
-            continue
-          }
-          const uid = ready.user.userId
-          const entryKey = slot.kind === 's' ? '' : uid
-          const cur = getLiveEntry(slot, entryKey)
-          let simVal = cur ? cur.val : slot.init
-          let finalMode: 'set' | 'del' | null = null
-          let finalBytes = 0
-          const accepted: PendingOp[] = []
-          const tentativeTs = Math.max(Date.now(), lastSeenHlc + 1)
+            const batch = slot.ops.splice(0)
+            if (!batch.length) {
+              continue
+            }
+            const uid = ready.user.userId
+            const entryKey = slot.kind === 's' ? '' : uid
+            const cur = getLiveEntry(slot, entryKey)
+            let simVal = cur ? cur.val : slot.init
+            let finalMode: 'set' | 'del' | null = null
+            let finalBytes = 0
+            const accepted: PendingOp[] = []
+            const tentativeTs = Math.max(Date.now(), lastSeenHlc + 1)
 
-          for (const op of batch) {
-            if (op.del) {
-              if (!withinUserQuota(uid, slot, 32)) {
+            for (const op of batch) {
+              if (op.del) {
+                if (!withinUserQuota(uid, slot, 32)) {
+                  op.rej(mkErr(`state "${slot.ns}" exceeds user quota`))
+                  continue
+                }
+                simVal = slot.init
+                finalMode = 'del'
+                finalBytes = 32
+                accepted.push(op)
+                continue
+              }
+              let cand: JsonValue
+              try {
+                cand =
+                  typeof op.next === 'function'
+                    ? (op.next as (prev: JsonValue) => JsonValue)(simVal)
+                    : (op.next as JsonValue)
+              } catch (err) {
+                op.rej(err)
+                continue
+              }
+              if (!hasFiniteNums(cand)) {
+                op.rej(
+                  mkErr(
+                    `state "${slot.ns}" value must contain only finite JSON numbers`
+                  )
+                )
+                continue
+              }
+              const bytes = encodeBytes(toJson(cand)).byteLength
+              if (bytes > slot.maxBytes) {
+                op.rej(
+                  mkErr(
+                    `state "${slot.ns}" exceeds maxBytes (${slot.maxBytes})`
+                  )
+                )
+                continue
+              }
+              if (slot.kind === 'u' && !withinUserQuota(uid, slot, bytes)) {
                 op.rej(mkErr(`state "${slot.ns}" exceeds user quota`))
                 continue
               }
-              simVal = slot.init
-              finalMode = 'del'
-              finalBytes = 32
+              if (slot.validate) {
+                const simCtx =
+                  slot.kind === 's'
+                    ? {
+                        prev: simVal,
+                        peerId: ready.selfId,
+                        userId: uid,
+                        roles: [...auth.roles],
+                        timestamp: tentativeTs
+                      }
+                    : {
+                        prev: simVal,
+                        peerId: ready.selfId,
+                        userId: uid,
+                        roles: [...auth.roles],
+                        timestamp: tentativeTs,
+                        self: true,
+                        online: true,
+                        removed: false
+                      }
+                if (!slot.validate(cand, simCtx)) {
+                  op.rej(mkErr(`state validation failed for "${slot.ns}"`))
+                  continue
+                }
+              }
+              simVal = cand
+              finalMode = 'set'
+              finalBytes = bytes
               accepted.push(op)
+            }
+
+            if (!accepted.length || !finalMode) {
               continue
             }
-            let cand: JsonValue
+
+            let rec: AuthoritativeStateRecord
             try {
-              cand =
-                typeof op.next === 'function'
-                  ? (op.next as (prev: JsonValue) => JsonValue)(simVal)
-                  : (op.next as JsonValue)
+              rec = await signStateRecord(
+                ready.user.sign,
+                ready.user.signPubJwk,
+                {
+                  kind: slot.kind,
+                  appId: deps.appId,
+                  roomId: ready.roomId,
+                  ns: slot.ns,
+                  hlc: nextLocalHlc(slot.ns),
+                  peerId: ready.selfId,
+                  userId: uid,
+                  ...(finalMode === 'del' ? {del: true} : {val: simVal}),
+                  cert: auth.cert
+                }
+              )
+              verifiedSigCache.add(`${stateRecordPayload(rec)}\u0000${rec.sig}`)
             } catch (err) {
-              op.rej(err)
-              continue
-            }
-            if (!hasFiniteNums(cand)) {
-              op.rej(
-                mkErr(
-                  `state "${slot.ns}" value must contain only finite JSON numbers`
-                )
-              )
-              continue
-            }
-            const bytes = encodeBytes(toJson(cand)).byteLength
-            if (bytes > slot.maxBytes) {
-              op.rej(
-                mkErr(`state "${slot.ns}" exceeds maxBytes (${slot.maxBytes})`)
-              )
-              continue
-            }
-            if (slot.kind === 'u' && !withinUserQuota(uid, slot, bytes)) {
-              op.rej(mkErr(`state "${slot.ns}" exceeds user quota`))
-              continue
-            }
-            if (slot.validate) {
-              const simCtx =
-                slot.kind === 's'
-                  ? {
-                      prev: simVal,
-                      peerId: ready.selfId,
-                      userId: uid,
-                      roles: [...auth.roles],
-                      timestamp: tentativeTs
-                    }
-                  : {
-                      prev: simVal,
-                      peerId: ready.selfId,
-                      userId: uid,
-                      roles: [...auth.roles],
-                      timestamp: tentativeTs,
-                      self: true,
-                      online: true,
-                      removed: false
-                    }
-              if (!slot.validate(cand, simCtx)) {
-                op.rej(mkErr(`state validation failed for "${slot.ns}"`))
-                continue
+              for (const op of accepted) {
+                op.rej(err)
               }
+              continue
             }
-            simVal = cand
-            finalMode = 'set'
-            finalBytes = bytes
-            accepted.push(op)
-          }
 
-          if (!accepted.length || !finalMode) {
-            continue
-          }
-
-          let rec: AuthoritativeStateRecord
-          try {
-            rec = await signStateRecord(
-              ready.user.sign,
-              ready.user.signPubJwk,
-              {
-                kind: slot.kind,
-                appId: deps.appId,
-                roomId: ready.roomId,
-                ns: slot.ns,
-                hlc: nextLocalHlc(slot.ns),
-                peerId: ready.selfId,
-                userId: uid,
-                ...(finalMode === 'del' ? {del: true} : {val: simVal}),
-                cert: auth.cert
+            if (destroyed) {
+              for (const op of accepted) {
+                op.res()
               }
-            )
-            verifiedSigCache.add(`${stateRecordPayload(rec)}\u0000${rec.sig}`)
-          } catch (err) {
-            for (const op of accepted) {
-              op.rej(err)
+              continue
             }
-            continue
-          }
-
-          if (destroyed) {
+            if (!isRecordAuthorizedNow(rec, slot.reqRoles)) {
+              const err = mkErr(
+                `${insufficientAuthPrefix} to update state "${slot.ns}"`
+              )
+              for (const op of accepted) {
+                op.rej(err)
+              }
+              continue
+            }
+            if (commitEntry(slot, rec, auth.roles, finalBytes, true, true)) {
+              broadcastLiveRecord(rec)
+            }
             for (const op of accepted) {
               op.res()
             }
-            continue
-          }
-          if (!isRecordAuthorizedNow(rec, slot.reqRoles)) {
-            const err = mkErr(
-              `${insufficientAuthPrefix} to update state "${slot.ns}"`
-            )
-            for (const op of accepted) {
-              op.rej(err)
-            }
-            continue
-          }
-          if (commitEntry(slot, rec, auth.roles, finalBytes, true, true)) {
-            broadcastLiveRecord(rec)
-          }
-          for (const op of accepted) {
-            op.res()
+          } finally {
+            slot.stepP = null
+            doneStep()
           }
         }
       } finally {
@@ -1647,7 +1661,8 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
       clear: () => emitter.clear(),
       api: null,
       ops: [],
-      flushP: null
+      flushP: null,
+      stepP: null
     }
     const api = lockMethods(
       {
@@ -1725,7 +1740,8 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
       clear: () => emitter.clear(),
       api: null,
       ops: [],
-      flushP: null
+      flushP: null,
+      stepP: null
     }
     const resolveTargetUid = (id?: string): string | undefined => {
       if (id === undefined) {
@@ -1824,7 +1840,7 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
     for (const s of slots.values()) {
       if (
         s.kind === 'u' &&
-        (s.flushP ||
+        (s.stepP ||
           s.ops.length > 0 ||
           Boolean(localUid && getLiveEntry(s, localUid)))
       ) {
@@ -1836,45 +1852,62 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
       return undefined
     }
     return (async () => {
-      const flushes: Promise<void>[] = []
-      for (const s of slots.values()) {
-        if (s.kind === 'u') {
-          if (s.flushP) {
-            flushes.push(s.flushP)
-          } else if (s.ops.length > 0) {
-            flushes.push(flushSlot(s))
+      try {
+        const steps: Promise<void>[] = []
+        for (const s of slots.values()) {
+          if (s.kind === 'u') {
+            if (!s.stepP && s.ops.length > 0) {
+              void flushSlot(s)
+            }
+            if (s.stepP) {
+              steps.push(s.stepP)
+            }
           }
         }
-      }
-      if (flushes.length > 0) {
-        await Promise.allSettled(flushes)
-      }
-      const uid = deps.getLocalUserId()
-      if (!uid || destroyed || deps.isPeerBanned(peerId)) {
+        if (steps.length > 0) {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          await Promise.race([
+            Promise.allSettled(steps),
+            new Promise<void>(r => {
+              timer = setTimeout(r, handshakeStateDeadlineMs)
+              ;(timer as {unref?: () => void}).unref?.()
+            })
+          ])
+          if (timer !== undefined) {
+            clearTimeout(timer)
+          }
+        }
+        const uid = deps.getLocalUserId()
+        if (!uid || destroyed || deps.isPeerBanned(peerId)) {
+          return undefined
+        }
+        const p: Record<string, string> = {}
+        const r: WireStateRecord[] = []
+        let usedBytes = 0
+        for (const s of slots.values()) {
+          if (s.kind !== 'u') {
+            continue
+          }
+          const e = getLiveEntry(s, uid)
+          if (!e) {
+            continue
+          }
+          const wire = toWireRecord(e.rec, false)
+          const est = encodeBytes(toJson(wire)).byteLength + 120
+          if (usedBytes + est > maxHandshakeStateBytes) {
+            continue
+          }
+          p[e.rec.userId] = e.rec.pub
+          r.push(wire)
+          usedBytes += est
+        }
+        return r.length > 0
+          ? {ok: true as const, p, r: r as unknown as JsonValue[]}
+          : undefined
+      } catch (err) {
+        DEV: logErr('handshake state', err)
         return undefined
       }
-      const p: Record<string, string> = {}
-      const r: WireStateRecord[] = []
-      let usedBytes = 0
-      for (const s of slots.values()) {
-        if (s.kind !== 'u') {
-          continue
-        }
-        const e = getLiveEntry(s, uid)
-        if (!e) {
-          continue
-        }
-        const est = e.bytes + (e.rec.cert ? 600 : 180)
-        if (usedBytes + est > maxHandshakeStateBytes) {
-          continue
-        }
-        p[e.rec.userId] = e.rec.pub
-        r.push(toWireRecord(e.rec, false))
-        usedBytes += est
-      }
-      return r.length > 0
-        ? {ok: true as const, p, r: r as unknown as JsonValue[]}
-        : undefined
     })()
   }
 

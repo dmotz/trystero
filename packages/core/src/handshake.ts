@@ -385,6 +385,11 @@ type HandshakeManagerDeps = {
     peerId: string
   ) => Promise<void>
   onLocalHandshakePassed?: (peerId: string, peer: PeerHandle) => boolean
+  /**
+   * Optional best-effort enrichment hook for `@_hsready`. Returning undefined,
+   * throwing, or rejecting degrades cleanly to a plain `''` ready rather than
+   * failing the peer handshake.
+   */
   beforeSendHandshakeReady?: (
     peerId: string,
     peer: PeerHandle
@@ -493,12 +498,15 @@ export const createHandshakeManager = ({
       maybeActivatePeer(id, peer)
     }
 
-    const prep = beforeSendHandshakeReady?.(id, peer)
+    let prep: Promise<HandshakeReadyPayload | void> | undefined
+    try {
+      prep = beforeSendHandshakeReady?.(id, peer)
+    } catch {
+      prep = undefined
+    }
 
     if (prep) {
-      void prep.then(finishReady, err =>
-        failPeerHandshake(id, peer, toError(err, 'handshake ready prep failed'))
-      )
+      void prep.then(finishReady, () => finishReady())
       return
     }
 
