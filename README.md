@@ -20,10 +20,13 @@ on top of WebRTC:
 - ⏱🤞 Progress events and promises for data transfers
 - 🔐📝 Session data encryption
 - 🪪🔑 Self-certifying peer & user identities with multi-tab presence
+- 🗂️🔄 Built-in per-user state (`makeUserState`) and shared room state
+  (`makeState`)
 - 🚪🎟️ Room size limits for 1v1 matches and capped lobbies
 - 🕸️🚀 Experimental multi-hop scaling (`scale()`) for larger rooms with dozens
   of peers
-- 👑🛡️ Room admins, custom roles, peer banning, and shared state
+- 👑🛡️ Optional room admins, custom roles, peer banning, and authoritative state
+  (`roles()`)
 - 🏭⚡ Can run peers server-side on Node, Bun, and Deno
 - ⚛️🤝 Works seamlessly with React and external stores
 
@@ -40,6 +43,7 @@ You can see what people are building with Trystero
 - [Broadcast events](#broadcast-events)
 - [Audio and video](#audio-and-video)
 - [User identity](#user-identity)
+- [User state and shared state](#user-state-and-shared-state)
 - [Advanced](#advanced)
   - [Binary metadata](#binary-metadata)
   - [Receiving files](#receiving-files)
@@ -177,20 +181,21 @@ room.onPeerStream(
 ```
 
 Event listeners (`onUserJoin`, `onUserLeave`, `onPeerJoin`, `onPeerLeave`,
-`onPeerStream`, `onError`, `action.onMessage`, `action.onReceiveProgress`, and
-`state.onChange`) allow multiple independent subscriptions — calling `on*(fn)`
-twice with the same function registers two independent entries, each returning
-its own `unsubscribe()` function (`offJoin()`). Single-result handlers
-(`action.onRequest` and `action.onReceive`) allow one active handler at a time
-and also return an `unsubscribe()` function.
+`onPeerStream`, `onError`, `action.onMessage`, `action.onReceiveProgress`,
+`state.onChange`, and `userState.onChange`) allow multiple independent
+subscriptions — calling `on*(fn)` twice with the same function registers two
+independent entries, each returning its own `unsubscribe()` function
+(`offJoin()`). Single-result handlers (`action.onRequest` and
+`action.onReceive`) allow one active handler at a time and also return an
+`unsubscribe()` function.
 
 All `on*` methods accept `{once, signal}` options, plus `{replay: true}` on
-`onUserJoin`, `onPeerJoin`, `onPeerStream`, and `state.onChange` to
-synchronously emit currently active state to a late subscriber (when combined
-with `{once: true}`, the first replayed item satisfies `once` and unsubscribes
-immediately). Unlike presence, media, and state replay, `action.onMessage`
-buffers inbound messages arriving while zero listeners are attached and drains
-them in order to the first subscriber.
+`onUserJoin`, `onPeerJoin`, `onPeerStream`, `state.onChange`, and
+`userState.onChange` to synchronously emit currently active state to a late
+subscriber (when combined with `{once: true}`, the first replayed item satisfies
+`once` and unsubscribes immediately). Unlike presence, media, and state replay,
+`action.onMessage` buffers inbound messages arriving while zero listeners are
+attached and drains them in order to the first subscriber.
 
 To disconnect and clean up all room subscriptions at once, leave the room:
 
@@ -298,32 +303,17 @@ pic.onMessage(
 )
 ```
 
-Let's say we want users to be able to name themselves:
-
-```js
-const idsToNames = {}
-const name = room.makeAction('name')
-
-// tell new users your name when they connect
-room.onUserJoin(({userId}) => name.send('Oedipa', {target: userId}))
-
-// listen for users naming themselves
-name.onMessage((value, {userId}) => (idsToNames[userId] = value))
-
-// tell all users at once when your name changes
-nameInput.addEventListener('change', e => name.send(e.target.value))
-
-room.onUserLeave(({userId}) =>
-  console.log(`${idsToNames[userId] || 'a weird stranger'} left`)
-)
-```
-
 > Actions are smart and handle serialization and chunking for you behind the
 > scenes. This means you can send very large files and whatever data you send
 > will be received on the other side as the same type (a number as a number, a
 > string as a string, an object as an object, binary as binary, etc.). See
 > [receiving files](#receiving-files) for optional size limits and acceptance
 > callbacks.
+>
+> **Tip:** Need to track each user's display name, ready flag, or cursor, or
+> keep a shared room value synced to late joiners? Use
+> [`room.makeUserState()` and `room.makeState()`](#user-state-and-shared-state)
+> instead of maintaining manual maps over actions.
 
 ## Audio and video
 
@@ -502,6 +492,136 @@ tab alone:
   `CryptoKey`.
 
 </details>
+
+## User state and shared state
+
+Actions (`room.makeAction`) are ideal for **events, RPC requests, and file
+transfers**, whereas most multiplayer apps also need **current state** that
+automatically syncs to late joiners without manual bookkeeping. Trystero
+provides two state primitives right on `room`:
+
+| Primitive                           | Best for                                                      | Who can write                         | Synced to late joiners?                         |
+| ----------------------------------- | ------------------------------------------------------------- | ------------------------------------- | ----------------------------------------------- |
+| `room.makeAction(ns)`               | Chat messages, sound effects, 1-to-1 RPC, binary/file streams | Any member (or `roles`)               | No (ephemeral events)                           |
+| **`room.makeUserState(ns, init?)`** | Display names, avatars, cursors, ready flags, player loadouts | **Only that `userId`** (own slot)     | Yes (while present, or offline with `retain`)   |
+| **`room.makeState(ns, init?)`**     | Cooperative boards, shared timers, jam tempo, casual lobbies  | **Any room member** (without `roles`) | Yes (cached & relayed by remaining peers)       |
+| **`room.makeState` + `roles(...)`** | Official match phase, host scoreboard, moderated watch party  | **Only `'admin'` / specified roles**  | Yes (cryptographically verified against admins) |
+
+> **Rule of thumb:** Never store a `{[userId]: ...}` map inside an open
+> `makeState` (`players.set(prev => ({...prev, [me]: ...}))`)—simultaneous
+> updates from two users overwrite each other under last-writer-wins. Use
+> **`room.makeUserState`** whenever each participant owns their own entry.
+
+### Per-user state (`room.makeUserState`)
+
+`room.makeUserState(namespace, initialValue?, config?)` gives every user a
+cryptographically signed slot keyed by their `userId` (`initialValue` defaults
+to `null`). Only that user can update or clear their own state—even when state
+is relayed across hops or synced to newcomers by other peers:
+
+```js
+const name = room.makeUserState('name', 'a weird stranger')
+
+// Set your own name right after joining — automatically flushed before
+// onUserJoin fires on connected peers!
+name.set('Oedipa')
+
+// Already populated when a user joins
+room.onUserJoin(({userId}) => {
+  console.log(`${name.get(userId)} joined`)
+})
+
+// Still readable inside onUserLeave, then cleaned up automatically right after
+room.onUserLeave(({userId}) => {
+  console.log(`${name.get(userId)} left`)
+})
+
+// React to live updates and removals
+name.onChange((value, {userId, prev, removed}) => {
+  if (removed) {
+    console.log(`${prev} (${userId}) cleared or left`)
+  } else {
+    console.log(`${userId} is now known as ${value}`)
+  }
+})
+
+// Read a frozen { [userId]: value } map of everyone who has published (including yourself)
+console.log(name.getAll())
+```
+
+Key behaviors of `makeUserState`:
+
+- **Distinguishing "not published yet" from `null`**: `state.get(id?)` returns
+  `initialValue` (`null` by default) before a user publishes, while
+  `state.has(id?)` returns `false` until `.set(...)` is called (even if
+  `.set(null)` is called explicitly) and returns `false` again after
+  `await state.clear()` or eviction.
+- **Multi-tab safe**: Opening a second tab with the same `userId` does not
+  clobber state published from the first tab, updates sync across all of your
+  tabs, and presence-scoped state stays live until your **last** open tab
+  leaves.
+- **Automatic write coalescing**: Rapid synchronous or back-to-back `.set()`
+  calls (such as dragging a slider or cursor) automatically fold pending updates
+  while an ECDSA signature is in flight so bandwidth and CPU stay minimal.
+- **Presence-scoped by default, opt-in offline retention (`retain`)**: By
+  default, a user's entry lives while they are in the room and is evicted right
+  after `onUserLeave`. Pass `retain: true` (24-hour TTL, up to 256 offline
+  users) or `retain: {ttlMs, maxUsers}` when you want remaining peers—or an
+  always-on [`passive: true` server peer](#running-server-side-node-bun-deno)—to
+  keep and replay disconnected users' latest signed state when they rejoin or
+  when newcomers arrive (`getAll({onlineOnly: true})` filters to currently
+  connected users).
+
+### Shared room state (`room.makeState`)
+
+`room.makeState(namespace, initialValue?, config?)` synchronizes a single shared
+JSON value across the room (`initialValue` defaults to `null`), available
+synchronously right after `joinRoom()`:
+
+```js
+const playback = room.makeState('playback', {
+  trackUrl: 'https://example.com/song.mp3',
+  paused: true
+})
+
+playback.onChange((next, {prev, userId}) => {
+  console.log(`${userId} changed playback from`, prev, 'to', next)
+})
+
+// Update with a value or functional updater
+await playback.set(prev => ({...prev, paused: false}))
+```
+
+If a newcomer joins late—even after the person who last updated `playback` has
+left the room—remaining peers automatically sync the latest signed state to the
+newcomer.
+
+#### Security & trust caveats for open `makeState` (without `roles()`)
+
+When you do **not** pass `roles()` in `joinRoom()`, `makeState` runs in **open
+member mode**:
+
+- **Room membership is the trust boundary**: Any peer admitted to the room can
+  overwrite an open `makeState` namespace, though `getMeta().userId` is always
+  cryptographically authentic. In private rooms, set a strong room `password` so
+  outsiders cannot join.
+- **Whole-value last-writer-wins (LWW)**: Concurrent writes do not deep-merge
+  object fields—every peer deterministically converges to the highest bounded
+  Hybrid Logical Clock record `(hlc, userId, peerId, sig)`. Keep per-user fields
+  in `makeUserState`, and use a CRDT plugin (such as Yjs; see
+  [Custom room plugins](#custom-room-plugins)) if you need concurrent character-
+  or list-level merging.
+- **Bounded clock-skew window**: Peers reject state records dated more than
+  `maxClockSkewMs` (default: `60,000` ms) into the future, bounding how far a
+  misconfigured clock or griefing member in an open room can pin a timestamp.
+- **Upgrade to `roles()` for untrusted/public rooms**: Whenever untrusted
+  strangers can join and you need host-only state, custom writer roles, or peer
+  banning, pass `use: [roles(...)]` (see
+  [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)).
+  To prevent accidental privilege leaks, **loading `roles()` automatically makes
+  `makeState` default to `roles: ['admin']`** (fail-closed); pass `roles: '*'`
+  on any specific `makeState` namespace you intentionally want to keep open to
+  all unbanned members inside a `roles()` room.
 
 ## Advanced
 
@@ -819,31 +939,37 @@ If a regular user tries to call `announce.send(...)` from the browser console,
 Trystero blocks it locally—and even if they modified their client code to send a
 fake packet, every other peer in the room will automatically reject it.
 
-#### Keeping a shared "source of truth" (`room.makeState`)
+#### Authoritative shared state (`room.makeState` + `roles()`)
 
 Many apps need official room state that everyone can read, but only the host or
 authorized roles can update—like the current question in a quiz game, the active
 video URL in a watch party, or the current slide in a presentation.
 
-With `room.makeState()` (available after `await room.ready` when `roles()` is
-passed to `joinRoom()`), whenever an authorized user updates the state, every
-user in the room receives the verified update. Better yet, **if a new user joins
-the room late—or even after the host has closed their laptop and left—existing
-users in the room automatically sync the latest official state to the newcomer**
-without being able to tamper with it:
+When `roles()` is passed to `joinRoom()`, `room.makeState()` defaults to
+`roles: ['admin']` (fail-closed) and unlocks `config.roles` on both `makeState`
+and `makeUserState`. Both methods can be called synchronously right on `room`
+without waiting for `await room.ready`. Whenever an authorized user updates the
+state, every user in the room verifies their role certificate and applies the
+update—and **if a new user joins late, even after the host has closed their
+laptop and left, existing peers automatically sync the latest official state to
+the newcomer** without being able to tamper with it:
 
 ```js
-await room.ready
-
 const roundState = room.makeState(
   'round-state',
   {round: 1, phase: 'lobby'},
   {
     roles: ['admin', 'host'],
-    // Optional rule: prevent the round number from ever going backward
-    validate: (next, {prev}) => next.round >= prev.round
+    // Optional rule: reject invalid values locally and remotely
+    validate: next => next.round >= 1
   }
 )
+
+// You can also opt a specific shared state back into open writes inside a roles() room:
+const reactionWall = room.makeState('wall', {emoji: '👋'}, {roles: '*'})
+
+// Or restrict a per-user state namespace to specific roles (e.g. seated players only):
+const bet = room.makeUserState('bet', 0, {roles: ['admin', 'player']})
 
 // Anyone can read the current official state at any time
 console.log(roundState.get())
@@ -856,7 +982,7 @@ roundState.onChange((value, {prev, userId, roles}) => {
   )
 })
 
-// Only an 'admin' or 'host' can update the state
+// Only an 'admin' or 'host' can update roundState
 await roundState.set(prev => ({round: prev.round + 1, phase: 'active'}))
 ```
 
@@ -910,15 +1036,14 @@ certificates.
   delegated admins revoking or banning one another) are evaluated in a total
   causal order `(iat, recordType, sig)` so all peers converge to the exact same
   set of active roles and bans regardless of message arrival or sync order.
-- **Tamper-proof state syncing (`makeState`)**: Each state update is signed with
-  a causal session `epoch`, a monotonically increasing sequence number (`seq`),
-  and the SHA-256 hash of the previous state record (`prevHash`, verified for
-  successive updates within the same `epoch`). If an admin leaves and rejoins
-  later, a fresh monotonic `epoch` lets new writes supersede stale pre-rejoin
-  snapshots cleanly. Concurrent updates across co-admins converge
-  deterministically using last-writer-wins ordering
-  `(epoch, seq, ts, updatedBy, hash)`. Authority records tolerate up to
-  `maxClockSkewMs` (default: `60,000` ms) of future wall-clock skew across
+- **Tamper-proof state syncing (`makeState` & `makeUserState`)**: Shared and
+  per-user state updates share a unified signed envelope bound to `appId`,
+  `roomId`, `ns`, `userId`, `peerId`, a skew-bounded Hybrid Logical Clock
+  (`hlc`), and an inline `RoleCertificate` when role-gated. Concurrent updates
+  converge deterministically under `(hlc, userId, peerId, sig)`, late joiners
+  reconcile missing records via bounded 1-RTT digest pull sync, and `room.ban()`
+  immediately purges any state authored by the banned user. Records tolerate up
+  to `maxClockSkewMs` (default: `60,000` ms) of future wall-clock skew across
   devices.
 - **Edge filtering & private signaling**: In multi-hop topologies, immediate
   neighbors (Hop-1 relays) verify role certificates, signatures, and
@@ -960,10 +1085,10 @@ When you include `use: [scale()]` (which defaults to `'auto'` mode):
   temporarily reach ~2–3× under burst joins due to inbound soft ceilings and
   minimum-degree fallbacks) and routes small messages across hops.
 
-All of your code (`makeAction`, `makeState`, `addStream`, `replaceTrack`,
-`ping`, `onUserJoin`, `onUserLeave`, and `getUsers()`) works the exact same way
-no matter how many people are in the room or whether two users are connected
-directly or through other peers.
+All of your code (`makeAction`, `makeState`, `makeUserState`, `addStream`,
+`replaceTrack`, `ping`, `onUserJoin`, `onUserLeave`, and `getUsers()`) works the
+exact same way no matter how many people are in the room or whether two users
+are connected directly or through other peers.
 
 Media streams (`addStream` and `replaceTrack`) and large binary transfers (> 16
 KiB) automatically promote the target peer(s) to a direct 1-hop WebRTC
@@ -1077,58 +1202,43 @@ await room.syncNow({hello: 'world'})
 
 ### React
 
-In React apps, the cleanest pattern is to wire Trystero events in one place
-outside your components and subscribe via React's built-in
-`useSyncExternalStore` (or your preferred state library like Zustand or Jotai) —
-no `useEffect` needed:
+Both `room.makeUserState()` and `room.makeState()` implement React's
+`useSyncExternalStore` contract out of the box (`onChange` returns an
+`unsubscribe` function, and `userState.getAll` / `state.get` return
+reference-stable snapshots) — no `useEffect`, manual listener sets, or
+`onUserJoin` / `onUserLeave` bookkeeping needed:
 
 ```jsx
 import {joinRoom} from 'trystero'
 import {useSyncExternalStore} from 'react'
 
 const room = joinRoom({appId: 'thurn-und-taxis'}, 'lobby')
-const colorAction = room.makeAction('color')
+const userColor = room.makeUserState('color', '#c0ffee')
+const banner = room.makeState('banner', 'Welcome to the lobby!')
 
-let state = {myColor: '#c0ffee', userColors: {}}
-const listeners = new Set()
-const setState = patch => {
-  state = {...state, ...patch}
-  listeners.forEach(fn => fn())
-}
-const subscribe = fn => {
-  listeners.add(fn)
-  return () => listeners.delete(fn)
-}
-const getSnapshot = () => state
-
-room.onUserJoin(({userId}) => colorAction.send(state.myColor, {target: userId}))
-room.onUserLeave(({userId}) => {
-  const {[userId]: _, ...userColors} = state.userColors
-  setState({userColors})
-})
-colorAction.onMessage((color, {userId}) =>
-  setState({userColors: {...state.userColors, [userId]: color}})
-)
-
-const updateColor = e => {
-  const myColor = e.target.value
-  setState({myColor})
-  colorAction.send(myColor)
-}
+userColor.set('#c0ffee')
 
 export default function App() {
-  const {myColor, userColors} = useSyncExternalStore(subscribe, getSnapshot)
+  const myColor = useSyncExternalStore(userColor.onChange, () =>
+    userColor.get()
+  )
+  const allColors = useSyncExternalStore(userColor.onChange, userColor.getAll)
+  const title = useSyncExternalStore(banner.onChange, banner.get)
 
   return (
     <>
-      <h1>Trystero + React</h1>
+      <h1>{title}</h1>
 
       <h2>My color:</h2>
-      <input type="color" value={myColor} onChange={updateColor} />
+      <input
+        type="color"
+        value={myColor}
+        onChange={e => userColor.set(e.target.value)}
+      />
 
-      <h2>User colors:</h2>
+      <h2>Everyone in the room:</h2>
       <ul>
-        {Object.entries(userColors).map(([userId, color]) => (
+        {Object.entries(allColors).map(([userId, color]) => (
           <li key={userId} style={{backgroundColor: color}}>
             {userId}: {color}
           </li>
@@ -1137,13 +1247,6 @@ export default function App() {
     </>
   )
 }
-```
-
-Authoritative states created with `room.makeState()` already match React's
-external store contract (`subscribe(fn) => unsubscribe` + `get()`) directly:
-
-```jsx
-const round = useSyncExternalStore(roundState.onChange, roundState.get)
 ```
 
 > **SSR note:** In server-rendered frameworks like Next.js, guard module-scope
@@ -1208,10 +1311,20 @@ import {joinRoom} from 'trystero'
 import {RTCPeerConnection} from 'werift'
 
 const room = joinRoom(
-  {appId: 'your-app-id', rtcPolyfill: RTCPeerConnection},
+  {
+    appId: 'your-app-id',
+    rtcPolyfill: RTCPeerConnection,
+    passive: true // optional: act as a silent backup/state-relay peer
+  },
   'your-room-name'
 )
 ```
+
+> **Zero-schema state relay:** A `passive: true` peer automatically verifies,
+> caches, and syncs signed `makeState()` records and `retain`-enabled
+> `makeUserState()` records for newcomers—even if the server process never calls
+> `makeState()` or `makeUserState()` itself (while automatically evicting
+> non-retained presence state as soon as a user disconnects).
 
 ### Self-hosted WebSocket relay
 
@@ -1401,13 +1514,18 @@ the same namespace will return the same room instance.
     `256 * 1024 ** 2` (256 MiB). Must be a positive integer. Raise it for larger
     files or lower it to reduce memory use.
 
+  - `maxClockSkewMs` - **(optional)** Maximum tolerated future wall-clock skew
+    in milliseconds for signed state records (`makeState` and `makeUserState`).
+    Defaults to `60000` (60 seconds). Must be a positive integer.
+
   - `passive` - **(optional)** Boolean for backup or relay peers that should
     listen for active peers without broadcasting room presence announcements.
     Passive peers respond directly to active peers that announce or send offers,
-    so passive peers never discover or connect to each other. For BitTorrent,
-    passive rooms register with trackers as seeders (`left: 0`) without
-    generating outgoing offers, which avoids passive-to-passive discovery while
-    keeping tracker load low.
+    so passive peers never discover or connect to each other, and automatically
+    cache and sync signed `makeState` and retained `makeUserState` records. For
+    BitTorrent, passive rooms register with trackers as seeders (`left: 0`)
+    without generating outgoing offers, which avoids passive-to-passive
+    discovery while keeping tracker load low.
 
   - `identity` - **(optional)** Controls how the local user's `userId` is loaded
     and saved (see [User identity](#user-identity)):
@@ -1423,10 +1541,11 @@ the same namespace will return the same room instance.
   - `use` - **(optional)** Array of `RoomPlugin`s created with `roles()`,
     `scale()`, or `definePlugin()`. TypeScript automatically infers the extra
     methods added to the returned `Room` instance (`RoomWithPlugins`) from the
-    plugins passed in `use` (e.g. `makeState`, `grantRole`, `revokeRole`,
-    `getRoles`, `ban`, and `isBanned` from `roles()`, or `getTopology` from
-    `scale()`). Plugin methods attach to `room` when `await room.ready` (or
-    `await room.getSelf()`) resolves. See the
+    plugins passed in `use` (e.g. `grantRole`, `revokeRole`, `getRoles`, `ban`,
+    and `isBanned` from `roles()`, or `getTopology` from `scale()`, plus
+    unlocking `{roles}` config options on `makeAction`, `makeState`, and
+    `makeUserState` when `roles()` is included). Plugin methods attach to `room`
+    when `await room.ready` (or `await room.getSelf()`) resolves. See the
     [Plugin Authoring Guide](docs/plugins.md) for creating custom plugins.
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
@@ -1555,35 +1674,91 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   `messagesForwarded`, `duplicatesDropped`, `signatureFailures`,
   `treeReparents`).
 
-- ### `makeState(namespace, initialValue, [config])`
+- ### `makeState(namespace, [initialValue], [config])`
 
-  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
-  after `await room.ready`)_ Creates or retrieves a shared, admin-controlled
-  state container (`AuthoritativeState<T>`) that any peer can read and only
-  authorized roles can update.
-  - `namespace` - Unique name for this state within the room.
-  - `initialValue` - Initial state value before any update is received.
-  - `config.roles` - **(optional)** Role or array of roles allowed to update
-    this state (defaults to `'admin'`).
-  - `config.validate(next, context)` - **(optional)** Synchronous function
-    returning `true` or `false` to validate state changes before they are sent
-    or accepted (`context` is
-    `{prev, peerId, userId, roles, seq, timestamp, hash}`).
+  Creates or retrieves a shared JSON state container (`SharedState<T>`, also
+  exported as `AuthoritativeState<T>`) synchronously on `room`. Open to any room
+  member when `roles()` is not loaded; defaults to `roles: ['admin']`
+  (fail-closed) when `roles()` is included in `use: [...]`.
+  - `namespace` - Unique non-empty name (<= 256 chars) for this shared state
+    within the room.
+  - `initialValue` - **(optional)** Initial JSON value before any update is
+    received (defaults to `null`).
+  - `config.maxBytes` - **(optional)** Maximum UTF-8 serialized JSON byte size
+    per value (default: `16384`, maximum: `65536`).
+  - `config.validate(next, context)` - **(optional)** Synchronous predicate
+    returning `true` or `false` to validate candidate values locally and
+    remotely (`context` is `{prev, peerId, userId, roles, timestamp}`). Prefer
+    predicates on `next` (and author `roles` / `userId`) rather than strict
+    transitions on `prev` when multiple writers can update concurrently.
+  - `config.roles` - **(optional; requires `roles(...)` in `use`)** Role, array
+    of roles, or `'*'` (open to any unbanned member inside a `roles()` room).
+    Defaults to `['admin']` when `roles()` is loaded.
 
-  Returns an object with:
+  Returns a `SharedState<T>` object with:
   - `get()` - Returns the current state value.
-  - `set(nextOrUpdater)` - Broadcasts a new state value (or updater function
-    `(prev) => next`). Rejects if the local user lacks permission or validation
-    fails.
-  - `getMeta()` - Returns metadata about the latest update (`prev`, `peerId`,
-    `userId`, `roles`, `seq`, `timestamp`, `hash`) or `null` if still at
+  - `set(nextOrUpdater)` - Signs and broadcasts a new state value (or functional
+    updater `(prev) => next`), coalescing rapid concurrent local calls. Rejects
+    if the local user lacks permission, exceeds `maxBytes`, or fails `validate`.
+  - `getMeta()` - Returns metadata about the latest update
+    (`{prev, peerId, userId, roles, timestamp}`) or `null` if still at
     `initialValue`.
   - `onChange(callback, [options])` - Subscribes `(value, context) => void`
-    whenever a verified state update arrives and returns an `Unsubscribe`
+    whenever a verified state update is applied and returns an `Unsubscribe`
     function (`context` matches `getMeta()`). Accepts
-    `{replay?: boolean, once?: boolean, signal?: AbortSignal}` (`replay`
-    defaults to `false`; when `{replay: true}` is set and `getMeta() !== null`,
-    synchronously invokes `callback` with the current value and metadata).
+    `{replay?: boolean, once?: boolean, signal?: AbortSignal}` (when
+    `{replay: true}` is set and `getMeta() !== null`, synchronously invokes
+    `callback` with the current value and metadata).
+
+- ### `makeUserState(namespace, [initialValue], [config])`
+
+  Creates or retrieves a per-user JSON state container (`UserState<T>`)
+  synchronously on `room`, where each `userId` can only update or clear their
+  own cryptographically signed slot.
+  - `namespace` - Unique non-empty name (<= 256 chars) for this user state
+    within the room (up to `32` published namespaces and `64 KiB` total per
+    `userId`).
+  - `initialValue` - **(optional)** Fallback JSON value returned by `get(id?)`
+    when a user has not published or has cleared/left (defaults to `null`).
+  - `config.retain` - **(optional)** Presence-scoped (`false`) by default: a
+    user's entry remains readable _during_ `room.onUserLeave` callbacks and is
+    evicted immediately afterward. Pass `true`
+    (`{ttlMs: 86400000, maxUsers: 256}`) or
+    `{ttlMs?: number, maxUsers?: number}` to retain and relay offline users'
+    signed records across peers.
+  - `config.maxBytes` - **(optional)** Maximum UTF-8 serialized JSON byte size
+    per user entry (default: `16384`, maximum: `65536`).
+  - `config.validate(next, context)` - **(optional)** Synchronous predicate
+    returning `true` or `false` (`context` is
+    `{prev, peerId, userId, roles, timestamp, self, online, removed}`).
+  - `config.roles` - **(optional; requires `roles(...)` in `use`)** Role, array
+    of roles, or `'*'` restricting which users may publish to this user-state
+    namespace (open to any unbanned member by default, even when `roles()` is
+    loaded).
+
+  Returns a `UserState<T>` object with:
+  - `get([targetId])` - Returns the current value for `targetId` (`userId` or
+    `peerId`, or the local user if omitted), or `initialValue` if unpublished.
+  - `getAll([options])` - Returns a frozen, reference-stable
+    `Readonly<Record<string, T>>` keyed by `userId` for all published entries
+    (including the local user once published). Pass `{onlineOnly: true}` to
+    exclude retained offline users.
+  - `has([targetId])` - Returns `true` if `targetId` (or the local user if
+    omitted) currently has a published entry (distinguishing an explicit
+    `set(null)` from an unpublished `null` default).
+  - `set(nextOrUpdater)` - Signs and publishes the local user's value (or
+    functional updater `(prev) => next`), coalescing rapid local writes and
+    flushing initial values before `onUserJoin` fires on 1-hop peers.
+  - `clear()` - Publishes a signed tombstone removing the local user's entry
+    across peers and resetting `has()` to `false`.
+  - `getMeta([targetId])` - Returns `UserStateChangeContext<T>`
+    (`{prev, peerId, userId, roles, timestamp, self, online, removed}`) for
+    `targetId` (or the local user if omitted), or `null` if unpublished.
+  - `onChange(callback, [options])` - Subscribes `(value, context) => void`
+    (`value` is `undefined` when `context.removed === true` due to `clear()`,
+    presence departure, TTL/LRU eviction, or `ban()`) and returns an
+    `Unsubscribe` function. Accepts
+    `{replay?: boolean, once?: boolean, signal?: AbortSignal}`.
 
 - ### `grantRole(targetId, role)`
 
@@ -1611,8 +1786,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
   after `await room.ready`)_ Permanently bans `targetId` (`peerId` or `userId`)
   from the room (requires `'admin'` role). Immediately disconnects all endpoints
-  belonging to that peer or user, removes any roles they held, and blocks future
-  connection offers or messages from them.
+  belonging to that peer or user, removes any roles they held, purges any
+  `makeState` or `makeUserState` records authored by that user, and blocks
+  future connection offers or messages from them.
   - `options.reason` - **(optional)** Optional reason string for the ban (also
     surfaced to the banned user via `room.onError()` as
     `{code: 'banned', reason}`).

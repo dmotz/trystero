@@ -380,6 +380,10 @@ type HandshakeManagerDeps = {
     peerId: string
   ) => Promise<void>
   onLocalHandshakePassed?: (peerId: string, peer: PeerHandle) => boolean
+  beforeSendHandshakeReady?: (
+    peerId: string,
+    peer: PeerHandle
+  ) => Promise<void> | undefined
   onActivate: (peerId: string, peer: PeerHandle) => void
   onFailure: (peerId: string, peer: PeerHandle, reason: Error) => void
 }
@@ -401,6 +405,7 @@ export const createHandshakeManager = ({
   sendHandshakeData,
   sendHandshakeReady,
   onLocalHandshakePassed,
+  beforeSendHandshakeReady,
   onActivate,
   onFailure
 }: HandshakeManagerDeps): {
@@ -459,21 +464,40 @@ export const createHandshakeManager = ({
       return
     }
 
-    state.didLocalHandshakePass = true
     if (onLocalHandshakePassed && !onLocalHandshakePassed(id, peer)) {
       return
     }
 
-    void sendHandshakeReady('', id).catch(err =>
-      failPeerHandshake(
-        id,
-        peer,
-        mkErr(
-          `handshake ready send failed: ${toErrorMessage(err, 'send failed')}`
+    const finishReady = (): void => {
+      const cur = peerStates[id]
+
+      if (!cur || cur.peer !== peer || cur.isActive) {
+        return
+      }
+
+      cur.didLocalHandshakePass = true
+      void sendHandshakeReady('', id).catch(err =>
+        failPeerHandshake(
+          id,
+          peer,
+          mkErr(
+            `handshake ready send failed: ${toErrorMessage(err, 'send failed')}`
+          )
         )
       )
-    )
-    maybeActivatePeer(id, peer)
+      maybeActivatePeer(id, peer)
+    }
+
+    const prep = beforeSendHandshakeReady?.(id, peer)
+
+    if (prep) {
+      void prep.then(finishReady, err =>
+        failPeerHandshake(id, peer, toError(err, 'handshake ready prep failed'))
+      )
+      return
+    }
+
+    finishReady()
   }
 
   return {

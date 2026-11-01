@@ -196,6 +196,7 @@ export {
   type ScalePluginApi,
   type SelfInfo,
   type SendOptions,
+  type SharedState,
   type StateChangeContext,
   type StateConfig,
   type TopologyMode,
@@ -208,5 +209,10 @@ export {
   type UserIdentityConfig,
   type UserInfo,
   type UserJoinContext,
-  type UserLeaveContext
+  type UserLeaveContext,
+  type UserState,
+  type UserStateChangeContext,
+  type UserStateConfig,
+  type UserStateGetAllOptions,
+  type UserStateRetentionConfig
 } from '@trystero-p2p/core'

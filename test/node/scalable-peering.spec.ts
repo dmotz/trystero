@@ -2353,7 +2353,7 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   )
   assert.deepEqual(stateViewer1.get(), {round: 2, leader: 'admin-1'})
   assert.equal(stateViewer1.getMeta()?.peerId, 'admin-1')
-  assert.equal(stateViewer1.getMeta()?.seq, 2)
+  assert.equal(typeof stateViewer1.getMeta()?.timestamp, 'number')
   assert.ok(viewerChanges.length >= 1)
 
   // 3. Custom validate hook blocks regressive round update
@@ -2370,12 +2370,16 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   await wait(80)
   assert.deepEqual(stateAdmin1.get(), stateAdmin2.get())
   assert.deepEqual(stateViewer1.get(), stateAdmin1.get())
-  assert.equal(stateAdmin1.getMeta()?.hash, stateViewer1.getMeta()?.hash)
+  assert.equal(
+    stateAdmin1.getMeta()?.timestamp,
+    stateViewer1.getMeta()?.timestamp
+  )
+  assert.equal(stateAdmin1.getMeta()?.userId, stateViewer1.getMeta()?.userId)
 
   // 5. Both admins leave the room, then a late-joiner (viewer-2) connects ONLY to viewer-1!
   // viewer-2 must still receive and verify the signed authoritative state snapshot from viewer-1.
   const finalExpectedState = stateViewer1.get()
-  const finalExpectedHash = stateViewer1.getMeta()?.hash
+  const finalExpectedTs = stateViewer1.getMeta()?.timestamp
   await Promise.all([admin1.leave(), admin2.leave()])
 
   const viewer2 = makePeerRoom('viewer-2', viewerUser2)
@@ -2388,13 +2392,13 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
 
   await waitFor(() => stateViewer2.get().round === 3, 2_000)
   assert.deepEqual(stateViewer2.get(), finalExpectedState)
-  assert.equal(stateViewer2.getMeta()?.hash, finalExpectedHash)
+  assert.equal(stateViewer2.getMeta()?.timestamp, finalExpectedTs)
 
   // Verify compareStateRecords deterministic ordering
   assert.equal(
     compareStateRecords(
-      {seq: 2, ts: 100, updatedBy: 'a', hash: '11'} as any,
-      {seq: 1, ts: 200, updatedBy: 'b', hash: '22'} as any
+      {hlc: 200, userId: 'a', peerId: 'p1', sig: '11'} as any,
+      {hlc: 100, userId: 'b', peerId: 'p2', sig: '22'} as any
     ) > 0,
     true
   )
@@ -2877,7 +2881,7 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
 
     assert.equal(counterAdmin.get().count, 5)
     assert.deepEqual(counterAdmin.get().log, [1, 2, 3, 4, 5])
-    assert.equal(counterAdmin.getMeta()?.seq, 5)
+    assert.equal(typeof counterAdmin.getMeta()?.timestamp, 'number')
 
     await waitFor(() => counterMallory.get().count === 5, 2_000)
     assert.deepEqual(counterMallory.get().log, [1, 2, 3, 4, 5])
@@ -4184,7 +4188,8 @@ void test('Mutual edge confirmation, multi-neighbor disconnect eviction, descrip
       roomId: 'bare-room'
     }
   )
-  assert.equal((bareRoom as any).makeState, undefined)
+  assert.equal(typeof bareRoom.makeState, 'function')
+  assert.equal(typeof bareRoom.makeUserState, 'function')
   assert.equal((bareRoom as any).grantRole, undefined)
   assert.equal((bareRoom as any).revokeRole, undefined)
   assert.equal((bareRoom as any).getRoles, undefined)

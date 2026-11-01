@@ -116,10 +116,16 @@ assignment (`room.on* = fn`) or config-object callbacks:
   or transfer gate produces a single return value, `onRequest` and `onReceive`
   enforce a single active handler at a time (call `unsubscribe()` before
   replacing).
-- **`StateChangeContext<T>` (`makeState`)**:
-  `state.onChange((value, ctx) => ...)` and `config.validate(next, ctx)` now
-  take 2 arguments, with `prev` and `peerId` (renamed from `updatedBy`) inside
-  `ctx` (`{prev, peerId, userId, roles, seq, timestamp, hash}`).
+- **`StateChangeContext<T>` (`makeState`) & new `makeUserState`**:
+  `room.makeState(namespace, initialValue?, config?)` and
+  `room.makeUserState(namespace, initialValue?, config?)` are now synchronous
+  core `Room` methods (`initialValue` defaults to `null`). Without `roles()`,
+  `makeState` is open to any room member; when `roles()` is in `use`,
+  `makeState` defaults to `roles: ['admin']` (pass `roles: '*'` to opt a
+  namespace back into open member writes). `state.onChange((value, ctx) => ...)`
+  and `config.validate(next, ctx)` take 2 arguments, with `prev` and `peerId`
+  (renamed from `updatedBy`) inside `ctx`
+  (`{prev, peerId, userId, roles, timestamp}`).
 - **Presence context objects**: Presence callbacks receive
   `{userId, peerId, ...}` instead of a bare `peerId` string. Unless you
   specifically need to track individual browser tabs, migrate `onPeerJoin` /
@@ -424,14 +430,14 @@ const room = joinRoom(
   inviteRoomIdFromUrl
 )
 
-await room.ready
-
 const betAction = room.makeAction('bet', {roles: ['admin', 'player']})
 const tableState = room.makeState('table', {pot: 0}, {roles: ['admin']})
 
 tableState.onChange((value, {prev, userId}) => {
   console.log(`Table updated from ${prev.pot} by ${userId}:`, value)
 })
+
+await room.ready
 
 // Inspect current roles when updating your UI
 const myRoles = room.getRoles()
@@ -493,28 +499,28 @@ is no public standalone role-certificate import API in this beta.
 
 ### Scenario 5: App-Level Profile or Version Handshakes
 
-If you previously exchanged application versions or user profiles during
-`onPeerHandshake`, use a request action after a user joins. This exchanges
-application data after admission; it does not reject the connection before
-`onUserJoin`. Protect privileged actions with `roles` and use room passwords
-where appropriate.
-
-`makeState(namespace, initialValue, config)` holds one shared value per
-namespace, with admin-only writes by default. It is not a per-user writable
-key-value store. Use `state.set(value)` and `state.onChange` for authoritative
-shared state.
+If you previously exchanged user profiles, display names, or ready flags via
+`onPeerHandshake` or manual `makeAction` + `onUserJoin`/`onUserLeave` maps, use
+**`room.makeUserState()`**. Each user can only write to their own `userId` slot,
+initial values set after `joinRoom()` are flushed before `onUserJoin` fires on
+1-hop peers, and presence-scoped entries clean up automatically after
+`onUserLeave`:
 
 ```js
-const hello = room.makeAction('hello', {kind: 'request'})
+const profile = room.makeUserState('profile', null)
 
-hello.onRequest(async (req, {userId}) => {
-  return {appVersion: '2.1.0', supportedFeatures: ['voice', 'canvas']}
-})
+// Flushed during connection setup so peers can read it immediately in onUserJoin
+void profile.set({name: 'Oedipa', appVersion: '2.1.0'})
 
-room.onUserJoin(async ({userId}) => {
-  const info = await hello.request({appVersion: '2.1.0'}, {target: userId})
-  if (info.appVersion !== '2.1.0') {
+room.onUserJoin(({userId}) => {
+  const info = profile.get(userId)
+  if (info && info.appVersion !== '2.1.0') {
     console.warn(`User ${userId} is on a different version: ${info.appVersion}`)
   }
 })
 ```
+
+For one-to-one request/response checks after admission, you can also use a
+request action (`room.makeAction('hello', {kind: 'request'})`). Protect
+privileged actions and states with `roles()` and use room passwords where
+appropriate.

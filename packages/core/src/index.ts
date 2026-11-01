@@ -83,6 +83,7 @@ export type {
   ScalePluginApi,
   SelfInfo,
   SendOptions,
+  SharedState,
   Signal,
   SignalPeer,
   SocketClient,
@@ -107,5 +108,10 @@ export type {
   UserIdentityPersistence,
   UserInfo,
   UserJoinContext,
-  UserLeaveContext
+  UserLeaveContext,
+  UserState,
+  UserStateChangeContext,
+  UserStateConfig,
+  UserStateGetAllOptions,
+  UserStateRetentionConfig
 } from './types'

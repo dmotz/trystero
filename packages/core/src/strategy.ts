@@ -1,4 +1,3 @@
-import {isSelfAsAdminPlugin} from './authority'
 import {decrypt, encrypt, genKey, hashTopic} from './crypto'
 import {
   getDefaultEndpointIdentity,
@@ -27,6 +26,7 @@ import {
   entries,
   getConfiguredPlugins,
   getSocketInitialFailure,
+  isSelfAsAdminPlugin,
   keys,
   libName,
   log,
@@ -113,6 +113,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         config.maxReceiveBytes <= 0)
     ) {
       throw posSafeIntErr('maxReceiveBytes')
+    }
+
+    if (
+      config.maxClockSkewMs !== undefined &&
+      (!Number.isSafeInteger(config.maxClockSkewMs) ||
+        config.maxClockSkewMs <= 0)
+    ) {
+      throw posSafeIntErr('maxClockSkewMs')
     }
 
     if (
@@ -745,6 +753,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       ...(config.maxReceiveBytes === undefined
         ? {}
         : {maxReceiveBytes: config.maxReceiveBytes}),
+      ...(config.maxClockSkewMs === undefined
+        ? {}
+        : {maxClockSkewMs: config.maxClockSkewMs}),
       ...(composedPeerHandshake
         ? {onPeerHandshake: composedPeerHandshake}
         : {}),
@@ -780,7 +791,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         },
         () => cleanupRoom(false),
         roomOptions
-      )
+      ) as RoomWithPlugins<TPlugins>
     } catch (err) {
       didLeaveRoom = true
       announceTimeouts.forEach(resetTimer)

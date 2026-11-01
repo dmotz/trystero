@@ -355,18 +355,16 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     await verifyStateRecord(
       {
         v: 1,
+        k: 's',
         ...scope,
-        namespace: 's',
-        seq: 1,
-        prevHash: '00000000000000000000000000000000',
-        ts: 100,
-        updatedBy: delegate.peerId,
+        ns: 's',
+        hlc: 100,
+        peerId: delegate.peerId,
         userId: delegate.userId,
-        signerPubKey: {} as any,
+        pub: 'bad',
         cert: {} as any,
-        value: 1,
-        sig: 'AAAA',
-        hash: '00'
+        val: 1,
+        sig: 'AAAA'
       },
       scope.appId,
       scope.roomId,
@@ -410,33 +408,27 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     'stale certificate must return false from verifyAndApplyCert'
   )
 
-  // 4. State records: reject Infinity seq, enforce prevHash continuity, and compute deterministic hash from canonical payload
-  const stateRec1 = await signStateRecord(
-    delegate.sign,
-    delegate.signPubJwk,
-    newerCert,
-    {
-      ...scope,
-      namespace: 'cfg',
-      seq: 1,
-      prevHash: '00000000000000000000000000000000',
-      updatedBy: delegate.peerId,
-      userId: delegate.userId,
-      value: {step: 1}
-    }
-  )
+  // 4. State records: reject Infinity hlc, enforce hlc >= cert.iat, and reject tampered values
+  const stateRec1 = await signStateRecord(delegate.sign, delegate.signPubJwk, {
+    ...scope,
+    ns: 'cfg',
+    hlc: newerCert.iat + 10,
+    peerId: delegate.peerId,
+    userId: delegate.userId,
+    val: {step: 1},
+    cert: newerCert
+  })
   const infStateRec = await signStateRecord(
     delegate.sign,
     delegate.signPubJwk,
-    newerCert,
     {
       ...scope,
-      namespace: 'cfg',
-      seq: Number.POSITIVE_INFINITY,
-      prevHash: stateRec1.hash,
-      updatedBy: delegate.peerId,
+      ns: 'cfg',
+      hlc: Number.POSITIVE_INFINITY,
+      peerId: delegate.peerId,
       userId: delegate.userId,
-      value: {step: 999}
+      val: {step: 999},
+      cert: newerCert
     }
   )
   assert.equal(
@@ -448,28 +440,32 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
       new Set([root.userId])
     ),
     false,
-    'state record with seq: Infinity must be rejected'
+    'state record with hlc: Infinity must be rejected'
   )
   assert.equal(await authority.verifyAndApplyStateRecord(stateRec1), true)
 
-  const badPrevHashRec = await signStateRecord(
-    delegate.sign,
-    delegate.signPubJwk,
-    newerCert,
-    {
-      ...scope,
-      namespace: 'cfg',
-      seq: 2,
-      prevHash: 'deadbeefdeadbeefdeadbeefdeadbeef',
-      updatedBy: delegate.peerId,
-      userId: delegate.userId,
-      value: {step: 2}
-    }
+  const preCertRec = await signStateRecord(delegate.sign, delegate.signPubJwk, {
+    ...scope,
+    ns: 'cfg',
+    hlc: newerCert.iat - 1,
+    peerId: delegate.peerId,
+    userId: delegate.userId,
+    val: {step: 2},
+    cert: newerCert
+  })
+  assert.equal(
+    await authority.verifyAndApplyStateRecord(preCertRec),
+    false,
+    'state record backdated before cert.iat must be rejected'
   )
   assert.equal(
-    await authority.verifyAndApplyStateRecord(badPrevHashRec),
+    await authority.verifyAndApplyStateRecord({
+      ...stateRec1,
+      hlc: stateRec1.hlc + 1,
+      val: {step: 2}
+    }),
     false,
-    'sequential same-writer state update with mismatched prevHash must be rejected'
+    'tampered state record payload must be rejected'
   )
 
   // 5. Delegated admin cannot ban or revoke root admin even on a peer that has not yet seen the root cert
@@ -552,8 +548,8 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   assert.equal(validateActionAuthShape(null), false)
   assert.equal(
     validateStateRecordShape({
-      ...badPrevHashRec,
-      seq: Number.POSITIVE_INFINITY
+      ...stateRec1,
+      hlc: Number.POSITIVE_INFINITY
     }),
     false
   )
@@ -573,7 +569,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
   )
   assert.equal(
     await authority.verifyAndApplyStateRecord({
-      ...badPrevHashRec,
+      ...stateRec1,
       cert: {corrupted: true} as never
     }),
     false
@@ -634,16 +630,14 @@ void test('clock skew hardening and 2-tier authority enforcement: reject future-
   const futureState = await signStateRecord(
     delegate.sign,
     delegate.signPubJwk,
-    adminCert,
     {
       ...scope,
-      namespace: 'clock-test',
-      seq: 1,
-      prevHash: '00000000000000000000000000000000',
-      ts: Date.now() + 120_000,
-      updatedBy: delegate.peerId,
+      ns: 'clock-test',
+      hlc: Date.now() + 120_000,
+      peerId: delegate.peerId,
       userId: delegate.userId,
-      value: 'future'
+      val: 'future',
+      cert: adminCert
     }
   )
   assert.equal(await authority.verifyAndApplyStateRecord(futureState), false)

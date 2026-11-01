@@ -1,26 +1,35 @@
-import {ecdsaSign, normalizeLowSP256Signature, sha256} from './crypto'
+import {sha256} from './crypto'
 import {
   canonicalizePubJwk,
   getVerifiedPubKeyRecord,
   isValidUserId,
-  pubJwkToUncompressedBytes,
-  verifyWithP256
+  pubJwkToUncompressedBytes
 } from './identity'
-import {isValidSignalPeerId} from './signal-handler'
+import {
+  compareStateRecords,
+  createStateManager,
+  defaultMaxClockSkewMs,
+  signStateRecord,
+  signWith,
+  validateStateRecordShape,
+  verifySig,
+  verifyStateRecordSignature,
+  type StateManager,
+  type StateSignParams,
+  type StateSigner
+} from './state'
 import type {
   AuthoritativeState,
   AuthoritativeStateRecord,
   DataPayload,
   JsonValue,
   KernelRolesProvider,
-  MaybePromise,
   PeerBanRecord,
   RoleCertificate,
   RoleRevocationRecord,
   RolesConfig,
   RolesPluginApi,
   RoomPlugin,
-  StateChangeContext,
   StateConfig,
   UserIdentity,
   Widen
@@ -29,13 +38,11 @@ import {
   authMetaKey,
   createBoundedCache,
   createBoundedSet,
-  createEventEmitter,
   definePlugin,
   encodeBytes,
-  fromBase64Url,
   insufficientAuthPrefix,
+  isSelfAsAdminPlugin,
   keys,
-  lockMethods,
   mkErr,
   noOp,
   peerBannedErr,
@@ -43,21 +50,24 @@ import {
   posSafeIntErr,
   selfCertifyingRoomRegex,
   toBase64Url,
-  toHex,
   toJson
 } from './utils'
 
-type Signer = CryptoKey | ((payload: Uint8Array) => MaybePromise<Uint8Array>)
+export {
+  compareStateRecords,
+  isSelfAsAdminPlugin,
+  signStateRecord,
+  validateStateRecordShape,
+  type StateSignParams
+}
 
-const defaultMaxClockSkewMs = 60_000
+type Signer = StateSigner
+
 const maxSyncCerts = 128
 const maxSyncModerationRecords = 256
-const maxSyncStates = 128
 const maxStoredModerationRecords = 512
 const maxRevocationsPerPairRole = 4
-const zeroHash = '00000000000000000000000000000000'
 const digestChunkBytes = 256 * 1024
-const hex32Re = /^[0-9a-f]{32}$/
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
   Boolean(v && typeof v === 'object' && !Array.isArray(v))
@@ -81,53 +91,10 @@ const rootAdminProtectErr = (scope: string, verb: string) =>
 const canonTag = (tag: string, items: unknown[]): string =>
   toJson([`trystero:${tag}:v1`, ...items])
 
-const hasFiniteNums = (
-  v: unknown,
-  d = 0,
-  seen = new Set<object>()
-): boolean => {
-  if (d > 64) {
-    return false
-  }
-  if (v === null || typeof v === 'string' || typeof v === 'boolean') {
-    return true
-  }
-  if (typeof v === 'number') {
-    return Number.isFinite(v)
-  }
-  if (typeof v !== 'object' || seen.has(v)) {
-    return false
-  }
-  seen.add(v)
-  const list = Array.isArray(v) ? v : isObj(v) ? Object.values(v) : null
-  return Boolean(list?.every(x => hasFiniteNums(x, d + 1, seen)))
-}
-
 let lastIssuedTs = 0
 const nextMonotonicTs = (): number => {
   const now = Date.now()
   return (lastIssuedTs = now > lastIssuedTs ? now : lastIssuedTs + 1)
-}
-
-const signWith = async (signer: Signer, payload: string): Promise<string> => {
-  const b = encodeBytes(payload)
-  const s =
-    typeof signer === 'function'
-      ? normalizeLowSP256Signature(await signer(b))
-      : await ecdsaSign(signer, b as BufferSource)
-  return toBase64Url(s)
-}
-
-const verifySig = async (
-  pub: JsonWebKey | string,
-  payload: string,
-  sig: string
-): Promise<boolean> => {
-  try {
-    return await verifyWithP256(fromBase64Url(sig), encodeBytes(payload), pub)
-  } catch {
-    return false
-  }
 }
 
 export const parseSelfCertifyingRoomId = (
@@ -187,17 +154,6 @@ const normalizeRolesConfig = (config?: RolesConfig): RolesConfig => {
       : {})
   }
 }
-
-export const isSelfAsAdminPlugin = (use?: RoomPlugin | RoomPlugin[]): boolean =>
-  Boolean(
-    use &&
-    (Array.isArray(use) ? use : [use]).some(
-      p =>
-        isObj(p) &&
-        p['name'] === 'roles' &&
-        (p as Record<string, unknown>)['selfAsAdmin'] === true
-    )
-  )
 
 const roleCertPayload = (c: Omit<RoleCertificate, 'sig'>): string =>
   canonTag('role-cert', [
@@ -652,122 +608,21 @@ export const verifyActionAuth = async (
     : {valid: false, roles: []}
 }
 
-const canonicalizeJson = (val: JsonValue): string =>
-  val === null || typeof val !== 'object'
-    ? toJson(val)
-    : Array.isArray(val)
-      ? `[${val.map(canonicalizeJson).join(',')}]`
-      : `{${keys(val)
-          .sort()
-          .map(k => `${toJson(k)}:${canonicalizeJson(val[k] as JsonValue)}`)
-          .join(',')}}`
-
-const stateRecordPayload = (
-  r: Omit<AuthoritativeStateRecord, 'sig' | 'hash'>
-): string =>
-  canonTag('state-record', [
-    r.v,
-    r.appId,
-    r.roomId,
-    r.namespace,
-    r.seq,
-    r.prevHash,
-    r.ts,
-    r.updatedBy,
-    r.userId,
-    r.cert.sig,
-    canonicalizeJson(r.value),
-    ...(r.epoch === undefined ? [] : [r.epoch])
-  ])
-
-const computeStateHash = async (payload: string): Promise<string> =>
-  toHex((await sha256(payload)).subarray(0, 16))
-
-export const validateStateRecordShape = (
-  r: unknown
-): r is AuthoritativeStateRecord =>
-  isObj(r) &&
-  r['v'] === 1 &&
-  hasStrs(r, ['appId', 'roomId', 'namespace', 'updatedBy', 'userId']) &&
-  isValidSignalPeerId(r['updatedBy']) &&
-  isValidUserId(r['userId'] as string) &&
-  isPosInt(r['seq']) &&
-  (r['epoch'] === undefined || isPosInt(r['epoch'])) &&
-  typeof r['prevHash'] === 'string' &&
-  hex32Re.test(r['prevHash']) &&
-  isPosInt(r['ts']) &&
-  isValidJwk(r['signerPubKey']) &&
-  validateRoleCertificateShape(r['cert']) &&
-  r['value'] !== undefined &&
-  hasFiniteNums(r['value']) &&
-  isValidSig(r['sig']) &&
-  typeof r['hash'] === 'string' &&
-  hex32Re.test(r['hash'])
-
-export type StateSignParams<T = JsonValue> = {
-  appId: string
-  roomId: string
-  namespace: string
-  seq: number
-  epoch?: number
-  prevHash: string
-  ts?: number
-  updatedBy: string
-  userId?: string
-  value: T
-  now?: number
-}
-
-export const signStateRecord = async <T = JsonValue>(
-  signer: Signer,
-  pubJwk: JsonWebKey,
-  cert: RoleCertificate,
-  p: StateSignParams<T>
-): Promise<AuthoritativeStateRecord<T>> => {
-  const u: Omit<AuthoritativeStateRecord<T>, 'sig' | 'hash'> = {
-    v: 1,
-    appId: p.appId,
-    roomId: p.roomId,
-    namespace: p.namespace,
-    seq: p.seq,
-    ...(p.epoch === undefined ? {} : {epoch: p.epoch}),
-    prevHash: p.prevHash,
-    ts: p.ts ?? p.now ?? nextMonotonicTs(),
-    updatedBy: p.updatedBy,
-    userId: p.userId ?? cert.subUserId,
-    signerPubKey: toCleanJwk(pubJwk),
-    cert,
-    value: p.value
-  }
-  const canon = stateRecordPayload(
-    u as Omit<AuthoritativeStateRecord, 'sig' | 'hash'>
-  )
-  const [sig, hash] = await Promise.all([
-    signWith(signer, canon),
-    computeStateHash(canon)
-  ])
-  return {...u, sig, hash}
-}
-
 export const verifyStateRecord = async (
   rec: AuthoritativeStateRecord,
   appId: string,
   roomId: string,
-  requiredRoles: readonly string[],
-  rootUserIds: Set<string>,
+  requiredRoles: readonly string[] = ['admin'],
+  rootUserIds: Set<string> = new Set(),
   clockSkewMs: number = defaultMaxClockSkewMs
 ): Promise<boolean> => {
-  if (
-    !validateStateRecordShape(rec) ||
-    rec.appId !== appId ||
-    rec.roomId !== roomId ||
-    rec.ts > Date.now() + clockSkewMs ||
-    rec.cert.subUserId !== rec.userId
-  ) {
+  if (!(await verifyStateRecordSignature(rec, appId, roomId, clockSkewMs))) {
     return false
   }
-  const signer = await getVerifiedPubKeyRecord(rec.signerPubKey)
-  if (!signer || signer.userId !== rec.userId) {
+  if (!requiredRoles.length && !rec.cert) {
+    return true
+  }
+  if (!rec.cert) {
     return false
   }
   const certRes = await verifyRoleCertificate(
@@ -777,55 +632,11 @@ export const verifyStateRecord = async (
     rootUserIds,
     clockSkewMs
   )
-  if (!certRes.valid || !requiredRoles.some(r => certRes.roles.includes(r))) {
-    return false
-  }
-  const canon = stateRecordPayload(rec)
   return (
-    (await computeStateHash(canon)) === rec.hash &&
-    (await verifySig(rec.signerPubKey, canon, rec.sig))
+    certRes.valid &&
+    (!requiredRoles.length ||
+      requiredRoles.some(r => certRes.roles.includes(r)))
   )
-}
-
-export const compareStateRecords = (
-  a: AuthoritativeStateRecord,
-  b: AuthoritativeStateRecord
-): number => {
-  const ae = a.epoch ?? 0
-  const be = b.epoch ?? 0
-  if (ae !== be) {
-    return ae - be
-  }
-  if (a.seq !== b.seq) {
-    return a.seq - b.seq
-  }
-  if (a.ts !== b.ts) {
-    return a.ts - b.ts
-  }
-  const ak = a.userId || a.updatedBy
-  const bk = b.userId || b.updatedBy
-  return ak !== bk
-    ? ak < bk
-      ? -1
-      : 1
-    : a.hash < b.hash
-      ? -1
-      : a.hash > b.hash
-        ? 1
-        : 0
-}
-
-type StateSlot = {
-  namespace: string
-  value: JsonValue
-  prevValue: JsonValue
-  record: AuthoritativeStateRecord | null
-  requiredRoles: string[]
-  validate?: ((next: JsonValue, ctx: StateChangeContext) => boolean) | undefined
-  emitChange: (val: JsonValue, ctx: StateChangeContext) => void
-  clear: () => void
-  api: unknown
-  writeChain: Promise<void>
 }
 
 type AuthControlMessage =
@@ -835,12 +646,10 @@ type AuthControlMessage =
       certs?: RoleCertificate[]
       revocations?: RoleRevocationRecord[]
       bans?: PeerBanRecord[]
-      states?: AuthoritativeStateRecord[]
     }
   | {t: 'cert'; cert: RoleCertificate}
   | {t: 'revoke'; revocation: RoleRevocationRecord}
   | {t: 'ban'; ban: PeerBanRecord}
-  | {t: 'state'; record: AuthoritativeStateRecord}
 
 export type RoomAuthority = Omit<
   KernelRolesProvider,
@@ -866,8 +675,8 @@ export type RoomAuthority = Omit<
   makeState: <T extends JsonValue>(
     namespace: string,
     initialValue: T,
-    config: StateConfig<Widen<T>> | undefined,
-    broadcastState: (rec: AuthoritativeStateRecord) => void
+    config?: StateConfig<Widen<T>>,
+    broadcastState?: (rec: AuthoritativeStateRecord) => void
   ) => AuthoritativeState<Widen<T>>
   issueRoleCertificate: (
     targetId: string,
@@ -950,11 +759,15 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   const bans = new Map<string, PeerBanRecord>()
   const rawBans = new Map<string, PeerBanRecord>()
   const peerToUserId = new Map<string, string>()
-  const stateSlots = new Map<string, StateSlot>()
-  const latestStates = new Map<string, AuthoritativeStateRecord>()
   const lastSeenActionSeq = new Map<string, number>()
   const verifiedCertCache = createBoundedCache<string, string[]>(512)
   const verifiedActionSigCache = createBoundedSet(512)
+  const standaloneBroadcastCallbacks = new Map<
+    string,
+    (rec: AuthoritativeStateRecord) => void
+  >()
+  const standaloneRegisteredShared = new Set<string>()
+  let standaloneState: StateManager | null = null
 
   let localCert: RoleCertificate | null = null
   let localModSeq = 0
@@ -1106,6 +919,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
 
     for (const [bannedUid, banRec] of bans.entries()) {
       if (!prevBannedUids.has(bannedUid)) {
+        standaloneState?.purgeBannedUser(bannedUid)
         init.onPeerBanned?.(bannedUid, banRec, fromPeerId)
       }
     }
@@ -1141,20 +955,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     }
     return res
   }
-
-  const toStateCtx = <T = JsonValue>(
-    r: AuthoritativeStateRecord,
-    prev: T,
-    roles = effectiveRoles(r.cert)
-  ): StateChangeContext<T> => ({
-    prev,
-    peerId: r.updatedBy,
-    userId: r.userId,
-    roles,
-    seq: r.seq,
-    timestamp: r.ts,
-    hash: r.hash
-  })
 
   const getPeerRoles = (peerOrUserId = selfId): string[] => {
     const uids = candidateUids(peerOrUserId)
@@ -1399,79 +1199,147 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       return true
     }, fromPeerId)
 
+  const getStateWriteCert = async (
+    requiredRoles: readonly string[] | null,
+    namespace: string
+  ): Promise<{cert: RoleCertificate | null; roles: string[]}> => {
+    await ensureResolved()
+    const myRoles = getPeerRoles(selfId)
+    if (!requiredRoles || requiredRoles.length === 0) {
+      const cert =
+        localCert && !bans.has(localCert.subUserId) && myRoles.length
+          ? localCert
+          : null
+      return {cert, roles: myRoles}
+    }
+    if (!requiredRoles.some(r => myRoles.includes(r))) {
+      throw mkErr(
+        `${insufficientAuthPrefix} to update state "${namespace}": requires [${requiredRoles.join(', ')}]`
+      )
+    }
+    if (!localCert || !localUser) {
+      throw mkErr(`missing local role certificate for state "${namespace}"`)
+    }
+    return {cert: localCert, roles: myRoles}
+  }
+
+  const verifyStateRecordRoles = async (
+    rec: AuthoritativeStateRecord,
+    requiredRoles: readonly string[] | null,
+    fromPeerId?: string
+  ): Promise<{valid: boolean; roles: string[]}> => {
+    await ensureResolved()
+    if (isPeerBanned(rec.userId)) {
+      return {valid: false, roles: []}
+    }
+    if (rec.cert) {
+      if (
+        !validateRoleCertificateShape(rec.cert) ||
+        rec.cert.subUserId !== rec.userId ||
+        rec.hlc < rec.cert.iat
+      ) {
+        failSig(fromPeerId)
+        return {valid: false, roles: []}
+      }
+      const certRes = await verifyCertCached(rec.cert)
+      if (!certRes.valid) {
+        failSig(fromPeerId)
+        return {valid: false, roles: []}
+      }
+      if (!certs.has(rec.userId)) {
+        certs.set(rec.userId, rec.cert)
+      }
+      const roles = effectiveRoles(rec.cert)
+      if (
+        requiredRoles &&
+        requiredRoles.length > 0 &&
+        !requiredRoles.some(r => roles.includes(r))
+      ) {
+        return {valid: false, roles: []}
+      }
+      return {valid: true, roles}
+    }
+    if (requiredRoles && requiredRoles.length > 0) {
+      return {valid: false, roles: []}
+    }
+    return {valid: true, roles: getPeerRoles(rec.userId)}
+  }
+
+  const rolesProviderHooks: KernelRolesProvider = {
+    getEffectiveRoomId: () => effectiveRoomId,
+    getMaxClockSkewMs: () => clockSkewMs,
+    getPeerRoles,
+    isPeerBanned,
+    getBanReason,
+    registerPeerPublicKey,
+    getStateWriteCert,
+    verifyStateRecordRoles,
+    onPeerDescriptorCert: noOp,
+    canPeerSendAction: () => false,
+    signActionPayload: async () => null,
+    verifyActionOffer: async () => ({valid: false, roles: []}),
+    verifyActionPayload: async () => ({valid: false, roles: []}),
+    getAuthorityInfo: async () => ({
+      userId: '',
+      roomId: effectiveRoomId,
+      baseRoomId,
+      isAdmin: false,
+      roles: []
+    })
+  }
+
+  const getStandaloneState = (): StateManager =>
+    (standaloneState ??= createStateManager({
+      appId,
+      getRoomId: () => effectiveRoomId,
+      getSelfId: () => selfId,
+      getLocalUserId: () => localUser?.userId ?? '',
+      ensureReady: async () => {
+        await ensureResolved()
+        if (!localUser) {
+          throw mkErr('missing local user identity')
+        }
+        return {selfId, user: localUser, roomId: effectiveRoomId}
+      },
+      hasRolesPlugin: () => true,
+      getRolesProvider: () => rolesProviderHooks,
+      maxClockSkewMs: clockSkewMs,
+      isPeerActive: () => true,
+      isDirectPeer: () => true,
+      getDirectPeerIds: () => [],
+      isUserOnline: () => true,
+      getKnownPeerUserId: pid =>
+        peerToUserId.get(pid) ?? init.getPeerUserId?.(pid),
+      isPeerBanned,
+      getPeerRoles,
+      onBroadcastRecord: rec => {
+        standaloneBroadcastCallbacks.get(rec.ns)?.(rec)
+      },
+      onInvalidRecord: fromPeerId => {
+        failSig(fromPeerId)
+      }
+    }))
+
   const verifyAndApplyStateRecord = (
     rec: AuthoritativeStateRecord,
     fromPeerId?: string
   ): Promise<boolean> =>
     guardApply(async () => {
       if (
-        !validateStateRecordShape(rec) ||
-        rec.appId !== appId ||
-        rec.roomId !== effectiveRoomId ||
-        rec.ts > Date.now() + clockSkewMs ||
-        rec.cert.subUserId !== rec.userId ||
-        (rec.seq === 1 && rec.prevHash !== zeroHash) ||
-        isPeerBanned(rec.userId)
+        validateStateRecordShape(rec) &&
+        rec.k === 's' &&
+        !standaloneRegisteredShared.has(rec.ns)
       ) {
-        return failSig(fromPeerId)
-      }
-      const slot = stateSlots.get(rec.namespace)
-      const reqRoles = slot?.requiredRoles ?? ['admin']
-      const roles = effectiveRoles(rec.cert)
-      if (!roles.some(r => reqRoles.includes(r))) {
-        return failSig(fromPeerId)
-      }
-      const cur = slot?.record ?? latestStates.get(rec.namespace)
-      if (cur) {
-        if (compareStateRecords(rec, cur) <= 0) {
+        const roleCheck = await verifyStateRecordRoles(
+          rec,
+          ['admin'],
+          fromPeerId
+        )
+        if (!roleCheck.valid) {
           return false
         }
-        if (
-          (rec.epoch ?? 0) === (cur.epoch ?? 0) &&
-          (rec.userId === cur.userId || rec.updatedBy === cur.updatedBy) &&
-          rec.seq === cur.seq + 1 &&
-          rec.prevHash !== cur.hash
-        ) {
-          return failSig(fromPeerId)
-        }
       }
-      const signer = await getVerifiedPubKeyRecord(rec.signerPubKey)
-      if (!signer || signer.userId !== rec.userId) {
-        return failSig(fromPeerId)
-      }
-      const certRes = await verifyCertCached(rec.cert)
-      if (!certRes.valid) {
-        return failSig(fromPeerId)
-      }
-      const canon = stateRecordPayload(rec)
-      if (
-        (await computeStateHash(canon)) !== rec.hash ||
-        !(await verifySig(rec.signerPubKey, canon, rec.sig))
-      ) {
-        return failSig(fromPeerId)
-      }
-      const latestCur = slot?.record ?? latestStates.get(rec.namespace)
-      if (latestCur && compareStateRecords(rec, latestCur) <= 0) {
-        return false
-      }
-      if (!certs.has(rec.userId)) {
-        certs.set(rec.userId, rec.cert)
-      }
-      if (slot) {
-        const prevVal = slot.value
-        const ctx = toStateCtx(rec, prevVal, roles)
-        if (slot.validate && !slot.validate(rec.value, ctx)) {
-          return failSig(fromPeerId)
-        }
-        slot.prevValue = prevVal
-        slot.record = rec
-        slot.value = rec.value
-        latestStates.set(rec.namespace, rec)
-        slot.emitChange(rec.value, ctx)
-      } else {
-        latestStates.set(rec.namespace, rec)
-      }
-      return true
+      return getStandaloneState().verifyAndApplyStateRecord(rec, fromPeerId)
     }, fromPeerId)
 
   const verifyActionInternal = async (
@@ -1574,6 +1442,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
 
   return {
     getEffectiveRoomId: () => effectiveRoomId,
+    getMaxClockSkewMs: () => clockSkewMs,
     getAuthorityInfo: async () => {
       await ensureResolved()
       const roles = getPeerRoles(selfId)
@@ -1589,6 +1458,8 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     isPeerBanned,
     getBanReason,
     registerPeerPublicKey,
+    getStateWriteCert,
+    verifyStateRecordRoles,
     verifyAndApplyCert,
     verifyAndApplyRevocation,
     verifyAndApplyBan,
@@ -1659,13 +1530,11 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
         maxSyncModerationRecords
       )
       const banList = [...rawBans.values()].slice(0, maxSyncModerationRecords)
-      const stateList = [...latestStates.values()].slice(0, maxSyncStates)
       if (
         !forceFull &&
         !certList.length &&
         !revList.length &&
-        !banList.length &&
-        !stateList.length
+        !banList.length
       ) {
         return {t: 'sync' as const, pubKey: localUser.signPubJwk}
       }
@@ -1674,155 +1543,20 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
         pubKey: localUser.signPubJwk,
         ...(certList.length ? {certs: certList} : {}),
         ...(revList.length ? {revocations: revList} : {}),
-        ...(banList.length ? {bans: banList} : {}),
-        ...(stateList.length ? {states: stateList} : {})
+        ...(banList.length ? {bans: banList} : {})
       }
     },
     makeState: <T extends JsonValue>(
       namespace: string,
       initialValue: T,
-      config: StateConfig<Widen<T>> | undefined,
-      broadcastState: (rec: AuthoritativeStateRecord) => void
+      config?: StateConfig<Widen<T>>,
+      broadcastState?: (rec: AuthoritativeStateRecord) => void
     ): AuthoritativeState<Widen<T>> => {
-      type W = Widen<T>
-      if (!isStr(namespace)) {
-        throw mkErr('makeState requires a non-empty namespace string')
+      standaloneRegisteredShared.add(namespace)
+      if (broadcastState) {
+        standaloneBroadcastCallbacks.set(namespace, broadcastState)
       }
-      const existing = stateSlots.get(namespace)
-      if (existing) {
-        return existing.api as AuthoritativeState<W>
-      }
-      const requiredRoles = config?.roles
-        ? Array.isArray(config.roles)
-          ? [...config.roles]
-          : [config.roles]
-        : ['admin']
-      const changeEmitter =
-        createEventEmitter<[W, StateChangeContext<W>]>('state handler')
-      const slot: StateSlot = {
-        namespace,
-        value: initialValue,
-        prevValue: initialValue,
-        record: null,
-        requiredRoles,
-        ...(config?.validate
-          ? {validate: config.validate as StateSlot['validate']}
-          : {}),
-        emitChange: (val, ctx) =>
-          changeEmitter.emit(val as W, ctx as StateChangeContext<W>),
-        clear: () => changeEmitter.clear(),
-        api: null as unknown as AuthoritativeState<JsonValue>,
-        writeChain: Promise.resolve()
-      }
-      const api = lockMethods(
-        {
-          get: () => slot.value as W,
-          set: (nextOrFn: W | ((prev: W) => W)) => {
-            const op = slot.writeChain.then(async () => {
-              await ensureResolved()
-              const myRoles = getPeerRoles(selfId)
-              if (!slot.requiredRoles.some(r => myRoles.includes(r))) {
-                throw mkErr(
-                  `${insufficientAuthPrefix} to update state "${namespace}": requires [${slot.requiredRoles.join(', ')}]`
-                )
-              }
-              if (!localCert || !localUser) {
-                throw mkErr(
-                  `missing local role certificate for state "${namespace}"`
-                )
-              }
-              const prevVal = slot.value as W
-              const nextVal =
-                typeof nextOrFn === 'function'
-                  ? (nextOrFn as (prev: W) => W)(prevVal)
-                  : nextOrFn
-              if (!hasFiniteNums(nextVal)) {
-                throw mkErr(
-                  `state "${namespace}" value must contain only finite JSON numbers`
-                )
-              }
-              const nextEpoch = slot.record
-                ? (slot.record.epoch ?? 1)
-                : nextMonotonicTs()
-              const rec = await signStateRecord<W>(
-                localUser.sign,
-                localUser.signPubJwk,
-                localCert,
-                {
-                  appId,
-                  roomId: effectiveRoomId,
-                  namespace,
-                  seq: (slot.record?.seq ?? 0) + 1,
-                  epoch: nextEpoch,
-                  prevHash: slot.record?.hash ?? zeroHash,
-                  updatedBy: selfId,
-                  userId: localUser.userId,
-                  value: nextVal
-                }
-              )
-              const ctx = toStateCtx<W>(rec, prevVal, myRoles)
-              if (config?.validate && !config.validate(nextVal, ctx)) {
-                throw mkErr(`state validation failed for "${namespace}"`)
-              }
-              if (slot.record && compareStateRecords(rec, slot.record) <= 0) {
-                broadcastState(rec)
-                return
-              }
-              const currentPrevVal = slot.value as W
-              const effectiveCtx =
-                currentPrevVal === prevVal
-                  ? ctx
-                  : toStateCtx<W>(rec, currentPrevVal, myRoles)
-              if (
-                currentPrevVal !== prevVal &&
-                config?.validate &&
-                !config.validate(nextVal, effectiveCtx)
-              ) {
-                throw mkErr(`state validation failed for "${namespace}"`)
-              }
-              slot.prevValue = currentPrevVal
-              slot.record = rec
-              slot.value = nextVal
-              latestStates.set(namespace, rec)
-              slot.emitChange(nextVal, effectiveCtx)
-              broadcastState(rec)
-            })
-            slot.writeChain = op.catch(noOp)
-            return op
-          },
-          getMeta: () =>
-            slot.record
-              ? toStateCtx<W>(slot.record, slot.prevValue as W)
-              : null,
-          onChange: (handler, options) =>
-            changeEmitter.subscribe(handler, options, () =>
-              slot.record
-                ? [
-                    [
-                      slot.value as W,
-                      toStateCtx<W>(slot.record, slot.prevValue as W)
-                    ]
-                  ]
-                : []
-            )
-        } satisfies AuthoritativeState<W>,
-        ['onChange']
-      )
-      slot.api = api
-      stateSlots.set(namespace, slot)
-      const prevRec = latestStates.get(namespace)
-      if (prevRec) {
-        const ctx = toStateCtx(prevRec, slot.value)
-        if (
-          ctx.roles.some(r => requiredRoles.includes(r)) &&
-          (!slot.validate || slot.validate(prevRec.value, ctx))
-        ) {
-          slot.prevValue = slot.value
-          slot.record = prevRec
-          slot.value = prevRec.value
-        }
-      }
-      return api
+      return getStandaloneState().makeState(namespace, initialValue, config)
     },
     issueRoleCertificate: async (targetId, role) => {
       await ensureResolved()
@@ -1903,9 +1637,7 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       return ban
     },
     clearListeners: () => {
-      for (const slot of stateSlots.values()) {
-        slot.clear()
-      }
+      standaloneState?.destroy()
     }
   }
 }
@@ -2008,6 +1740,7 @@ export const roles = (
             }
             return
           }
+          kernel.purgeBannedUserState?.(bannedUid)
           kernel.getScaleProvider()?.markPeerBanned(bannedUid)
           const toKick = new Set<string>(kernel.getUserPeerIds(bannedUid))
           for (const pid of kernel.getAllPeerIds()) {
@@ -2063,8 +1796,7 @@ export const roles = (
             (Array.isArray(msg.revocations) &&
               msg.revocations.length > maxSyncModerationRecords) ||
             (Array.isArray(msg.bans) &&
-              msg.bans.length > maxSyncModerationRecords) ||
-            (Array.isArray(msg.states) && msg.states.length > maxSyncStates)
+              msg.bans.length > maxSyncModerationRecords)
           ) {
             recordPeerAuthFailure(fromPeerId)
           }
@@ -2102,14 +1834,6 @@ export const roles = (
                 bans.push(b)
               }
             }
-            for (const s of Array.isArray(msg.states)
-              ? msg.states.slice(0, maxSyncStates)
-              : []) {
-              if (isAuthAbusive(fromPeerId)) {
-                return
-              }
-              await authority.verifyAndApplyStateRecord(s, fromPeerId)
-            }
             if (certs.length || revocations.length || bans.length) {
               const others = kernel
                 .getAllPeerIds()
@@ -2133,8 +1857,6 @@ export const roles = (
           void authority.verifyAndApplyRevocation(msg.revocation, fromPeerId)
         } else if (msg.t === 'ban') {
           void authority.verifyAndApplyBan(msg.ban, fromPeerId)
-        } else if (msg.t === 'state') {
-          void authority.verifyAndApplyStateRecord(msg.record, fromPeerId)
         }
       })
 
@@ -2157,13 +1879,6 @@ export const roles = (
       kernel.onLeave(() => authority.clearListeners())
 
       return {
-        makeState: (ns, initVal, stateCfg) =>
-          authority.makeState(
-            ns,
-            initVal,
-            stateCfg,
-            rec => void sendAuth({t: 'state', record: rec}).catch(noOp)
-          ),
         grantRole: async (id, role) => {
           const cert = await authority.issueRoleCertificate(id, role)
           await sendAuth({t: 'cert', cert}).catch(noOp)
@@ -2179,7 +1894,10 @@ export const roles = (
           await sendAuth({t: 'ban', ban}).catch(noOp)
         },
         isBanned: id => authority.isPeerBanned(id)
-      }
+      } satisfies Omit<
+        RolesPluginApi,
+        'makeState' | 'makeUserState'
+      > as unknown as RolesPluginApi
     }
   })
   return normalized.selfAsAdmin ? {...plugin, selfAsAdmin: true} : plugin

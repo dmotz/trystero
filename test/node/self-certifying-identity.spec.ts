@@ -1815,13 +1815,23 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'isPassive() method must be removed from Room'
   )
   assert.equal(
-    'makeState' in room,
+    typeof room.makeState,
+    'function',
+    'makeState is synchronously available on Room before room.ready'
+  )
+  assert.equal(
+    typeof room.makeUserState,
+    'function',
+    'makeUserState is synchronously available on Room before room.ready'
+  )
+  assert.equal(
+    'grantRole' in room,
     false,
     'plugin methods attach when room.ready resolves'
   )
 
   await room.ready
-  assert.equal(typeof room.makeState, 'function')
+  assert.equal(typeof room.grantRole, 'function')
 
   const counter = room.makeState('counter', 0)
   await counter.set(1)
@@ -2057,7 +2067,13 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       'MessageAction',
       'RequestAction',
       'SendOptions',
+      'SharedState',
       'AuthoritativeState',
+      'UserState',
+      'UserStateConfig',
+      'UserStateChangeContext',
+      'UserStateRetentionConfig',
+      'UserStateGetAllOptions',
       'UserIdentity',
       'SelfInfo',
       'PeerInfo',

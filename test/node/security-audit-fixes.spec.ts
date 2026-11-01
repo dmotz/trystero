@@ -1029,22 +1029,15 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
   await auth.getAuthorityInfo()
   const cert = await auth.issueRoleCertificate(adminUser.userId, ['admin'])
 
-  const rec = await signStateRecord(
-    adminUser.sign,
-    adminUser.signPubJwk,
-    cert,
-    {
-      appId: 's10-app',
-      roomId: s10RoomId,
-      namespace: 'score',
-      seq: 1,
-      epoch: 1,
-      prevHash: '0'.repeat(32),
-      updatedBy: 'admin-ep',
-      userId: adminUser.userId,
-      value: {pts: 10}
-    }
-  )
+  const rec = await signStateRecord(adminUser.sign, adminUser.signPubJwk, {
+    appId: 's10-app',
+    roomId: s10RoomId,
+    ns: 'score',
+    peerId: 'admin-ep',
+    userId: adminUser.userId,
+    val: {pts: 10},
+    cert
+  })
 
   const rootUserIds = new Set([adminUser.userId])
   assert.equal(
@@ -1052,7 +1045,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
     true
   )
 
-  // Rewriting userId or injecting malformed updatedBy fails verification
+  // Rewriting userId or injecting malformed peerId fails verification
   assert.equal(
     await verifyStateRecord(
       {...rec, userId: otherUser.userId},
@@ -1065,7 +1058,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
   )
   assert.equal(
     await verifyStateRecord(
-      {...rec, updatedBy: 'bad peer id with spaces!'},
+      {...rec, peerId: 'bad peer id with spaces!'},
       's10-app',
       s10RoomId,
       ['admin'],
@@ -1966,24 +1959,21 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
   const futureRec = await signStateRecord(
     adminUser.sign,
     adminUser.signPubJwk,
-    adminCert,
     {
       appId: 'd7-app',
       roomId: d7RoomId,
-      namespace: 'clock',
-      seq: 1,
-      epoch: 10,
-      prevHash: '0'.repeat(32),
-      ts: Date.now() + 180_000,
-      updatedBy: 'admin-s1',
+      ns: 'clock',
+      hlc: Date.now() + 180_000,
+      peerId: 'admin-s1',
       userId: adminUser.userId,
-      value: 'skewed-ok'
+      val: 'skewed-ok',
+      cert: adminCert
     }
   )
   assert.equal(await strictGuest.verifyAndApplyStateRecord(futureRec), false)
   assert.equal(await tolerantGuest.verifyAndApplyStateRecord(futureRec), true)
 
-  // Session 1 reaches seq = 5, then admin reloads/rejoins as Session 2 (seq restarts at 1, higher causal epoch!)
+  // Session 1 performs 5 updates, then admin reloads/rejoins as Session 2 (higher HLC!)
   const staleHighSeq: AuthoritativeStateRecord[] = []
   const stateS1 = adminSession1.makeState('phase', 'init', undefined, rec =>
     staleHighSeq.push(rec)
@@ -1992,10 +1982,10 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
     await stateS1.set(`s1-step-${i}`)
   }
   const s1Final = staleHighSeq.at(-1)!
-  assert.equal(s1Final.seq, 5)
+  assert.equal(staleHighSeq.length, 5)
   assert.equal(await tolerantGuest.verifyAndApplyStateRecord(s1Final), true)
 
-  await wait(5)
+  await wait(10)
   const adminSession2 = createRoomAuthority({
     selfId: 'admin-s2',
     appId: 'd7-app',
@@ -2010,10 +2000,10 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
   )
   await stateS2.set('fresh-after-rejoin')
   const s2First = s2Published[0]!
-  assert.equal(s2First.seq, 1)
+  assert.equal(s2Published.length, 1)
   assert.ok(compareStateRecords(s2First, s1Final) > 0)
   assert.equal(await tolerantGuest.verifyAndApplyStateRecord(s2First), true)
-  // Replaying held old seq=5 record cannot override fresh rejoined epoch
+  // Replaying held old Session 1 record cannot override fresh rejoined HLC
   assert.equal(await tolerantGuest.verifyAndApplyStateRecord(s1Final), false)
 })
 

@@ -558,7 +558,7 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     assert.equal(postUpdateReplays[0]!.ctx.peerId, 'peer-admin')
     assert.equal(postUpdateReplays[0]!.ctx.userId, adminUser.userId)
     assert.deepEqual(postUpdateReplays[0]!.ctx.roles, ['admin'])
-    assert.equal(postUpdateReplays[0]!.ctx.seq, 1)
+    assert.equal(typeof postUpdateReplays[0]!.ctx.timestamp, 'number')
     unsubReplay()
     unsubStore()
 

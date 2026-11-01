@@ -551,6 +551,8 @@ export const selfCertifyingRoomRegex: RegExp = new RegExp(
 export const reservedRoomPropertyNames: Set<string> = new Set([
   'ready',
   'makeAction',
+  'makeState',
+  'makeUserState',
   'leave',
   'ping',
   'getPeers',
@@ -840,3 +842,14 @@ export const getConfiguredPlugins = (
   }
   return ordered
 }
+
+export const isSelfAsAdminPlugin = (use?: RoomPlugin | RoomPlugin[]): boolean =>
+  Boolean(
+    use &&
+    (Array.isArray(use) ? use : [use]).some(
+      p =>
+        Boolean(p && typeof p === 'object' && !Array.isArray(p)) &&
+        p.name === 'roles' &&
+        (p as Record<string, unknown>)['selfAsAdmin'] === true
+    )
+  )
