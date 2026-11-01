@@ -16,7 +16,7 @@ import {
 import {
   compareStateRecords,
   createStateManager,
-  maxUnregisteredSlots,
+  jwkToCompactPub,
   maxUserStateNamespacesPerUser,
   signStateRecord
 } from '../../packages/core/src/state.ts'
@@ -286,7 +286,7 @@ const createMemorySignalBus = () => {
   return {makeJoinRoom}
 }
 
-void test('TypeScript compile-time gating: roles option on makeState and makeUserState requires roles() plugin, and RoomWithPlugins remains assignable to Room', () => {
+void test('Role gating on makeState and makeUserState: runtime requires roles() plugin when omitted, and RoomWithPlugins remains assignable to Room', () => {
   const {makeJoinRoom} = createMemorySignalBus()
   const joinRoom = makeJoinRoom()
 
@@ -303,12 +303,10 @@ void test('TypeScript compile-time gating: roles option on makeState and makeUse
   assert.equal(implicitNullUser.get(), null)
 
   assert.throws(() => {
-    // @ts-expect-error roles option is disallowed at compile time when roles() plugin is not in use
     openRoom.makeState('bad-roles', 0, {roles: ['admin']})
   }, /requires roles\(\)/)
 
   assert.throws(() => {
-    // @ts-expect-error roles option is disallowed at compile time when roles() plugin is not in use
     openRoom.makeUserState('bad-user-roles', 0, {roles: ['admin']})
   }, /requires roles\(\)/)
 
@@ -572,7 +570,7 @@ void test('makeState + roles(): fail-closed admin default, roles: "*" open overr
   await Promise.all([hostRoom.leave(), modRoom.leave(), guestRoom.leave()])
 })
 
-void test('makeUserState semantics: null vs explicit default, has(), frozen reference-stable getAll({onlineOnly}), self inclusion, clear() tombstones, write coalescing, and multi-tab convergence', async () => {
+void test('makeUserState semantics: null vs explicit default, has(), frozen reference-stable getAll(), self inclusion, clear() tombstones, write coalescing, and multi-tab convergence', async () => {
   const {makeJoinRoom} = createMemorySignalBus()
   const aliceId = await createUserIdentity()
   const bobId = await createUserIdentity()
@@ -726,7 +724,7 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
   let nameAtPeerJoin = ''
   let nameAtUserJoin = ''
   let nameDuringUserLeave = ''
-  let onlineSnapHadGuestDuringLeave = true
+  let snapHadGuestDuringLeave = false
 
   room1.onPeerJoin(({userId}) => {
     if (userId === guestId.userId) {
@@ -741,11 +739,11 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
   room1.onUserLeave(({userId}) => {
     if (userId === guestId.userId) {
       nameDuringUserLeave = name1.get(userId)
-      onlineSnapHadGuestDuringLeave = userId in name1.getAll({onlineOnly: true})
+      snapHadGuestDuringLeave = userId in name1.getAll()
     }
   })
 
-  // Guest sets name synchronously right after joinRoom() -> flushed via @_ustate0 BEFORE @_hsready!
+  // Guest sets name synchronously right after joinRoom() -> piggybacked on @_hsready!
   const room2 = join2(
     {appId: 'order-app', rtcPolyfill, identity: guestId, limit: 2},
     'duel'
@@ -797,7 +795,7 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
   assert.equal(name2.has(extraId.userId), false)
   await room3.leave()
 
-  // Guest leaves -> readable DURING onUserLeave, excluded from onlineOnly, and evicted immediately after!
+  // Guest leaves -> readable DURING onUserLeave, and evicted immediately after!
   const leaveEvictions: Array<{prev: string; removed: boolean}> = []
   name1.onChange((val, ctx) => {
     if (ctx.userId === guestId.userId && ctx.removed) {
@@ -810,7 +808,7 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
   await waitFor(() => Object.keys(room1.getUsers()).length === 0)
 
   assert.equal(nameDuringUserLeave, 'GuestTwo')
-  assert.equal(onlineSnapHadGuestDuringLeave, false)
+  assert.equal(snapHadGuestDuringLeave, true)
   assert.equal(name1.has(guestId.userId), false)
   assert.equal(name1.get(guestId.userId), 'Stranger')
   assert.deepEqual(leaveEvictions, [{prev: 'GuestTwo', removed: true}])
@@ -818,104 +816,143 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
   await room1.leave()
 })
 
-void test('Offline retention (ttlMs & maxUsers) and zero-schema passive: true relay peer', async () => {
+void test('Idle-room silence, microtask-batched late registration re-pull, declared passive: true relay peer, and byte-paged >256 KiB sync', async () => {
   const {makeJoinRoom} = createMemorySignalBus()
-  const joinPassive = makeJoinRoom('relay-passive')
-  const joinU1 = makeJoinRoom('ret-u1')
-  const joinU2 = makeJoinRoom('ret-u2')
-  const joinU3 = makeJoinRoom('ret-u3')
-  const joinLate = makeJoinRoom('ret-late')
-
   const u1 = await createUserIdentity()
   const u2 = await createUserIdentity()
-  const u3 = await createUserIdentity()
 
-  // Always-on server peer joins with passive: true and NEVER registers makeState or makeUserState!
-  const passiveRelay = joinPassive(
-    {appId: 'retain-app', rtcPolyfill, passive: true},
+  // 1. Idle rooms (0 makeState / makeUserState calls) send ZERO @_state control frames on join
+  let stateFramesOnIdleJoin = 0
+  globalChannelSendObserver = payload => {
+    if (!(payload instanceof ArrayBuffer) || payload.byteLength < 36) {
+      return
+    }
+    const header = decodeBytes(new Uint8Array(payload, 2, 32)).replace(
+      /\0+$/,
+      ''
+    )
+    if (header === '@_state') {
+      stateFramesOnIdleJoin++
+    }
+  }
+
+  const idleA = makeJoinRoom('idle-a')(
+    {appId: 'simplified-sync-app', rtcPolyfill, identity: u1},
+    'idle-and-late'
+  )
+  const idleB = makeJoinRoom('idle-b')(
+    {appId: 'simplified-sync-app', rtcPolyfill, identity: u2},
+    'idle-and-late'
+  )
+
+  try {
+    await waitFor(
+      () =>
+        Object.keys(idleA.getUsers()).length === 1 &&
+        Object.keys(idleB.getUsers()).length === 1
+    )
+    await wait(50)
+    assert.equal(
+      stateFramesOnIdleJoin,
+      0,
+      'idle rooms with no registered state slots must send zero @_state frames'
+    )
+
+    // 2. Late registration after peers are already connected: A registers & writes, then B registers later and hydrates via batched re-pull
+    const sharedA = idleA.makeState('doc', 'init')
+    const nickA = idleA.makeUserState('nick', '')
+    await sharedA.set('written-before-B-registered')
+    await nickA.set('AliceLate')
+    await wait(30)
+
+    let pullsFromB = 0
+    globalChannelSendObserver = payload => {
+      if (!(payload instanceof ArrayBuffer) || payload.byteLength < 36) {
+        return
+      }
+      const header = decodeBytes(new Uint8Array(payload, 2, 32)).replace(
+        /\0+$/,
+        ''
+      )
+      if (header === '@_state') {
+        const body = decodeBytes(new Uint8Array(payload, 36))
+        if (body.includes('"t":"pull"')) {
+          pullsFromB++
+        }
+      }
+    }
+
+    const sharedB = idleB.makeState('doc', 'init')
+    const nickB = idleB.makeUserState('nick', '')
+
+    await waitFor(
+      () =>
+        sharedB.get() === 'written-before-B-registered' &&
+        nickB.get(u1.userId) === 'AliceLate'
+    )
+    assert.equal(
+      pullsFromB,
+      1,
+      'synchronous late makeState + makeUserState calls must coalesce into a single batched pull'
+    )
+  } finally {
+    globalChannelSendObserver = null
+    await Promise.all([idleA.leave(), idleB.leave()])
+  }
+
+  // 3. Declared-namespace passive: true relay peer persists shared state across empty rooms while presence-scoped userState evicts on leave, plus >256 KiB byte-paged sync
+  const passiveRelay = makeJoinRoom('relay-passive')(
+    {appId: 'simplified-sync-app', rtcPolyfill, passive: true},
     'persistent-room'
   )
+  passiveRelay.makeState('board', 'empty')
+  for (let i = 0; i < 6; i++) {
+    passiveRelay.makeState(`big-${i}`, '', {maxBytes: 64 * 1024})
+  }
   await passiveRelay.ready
 
-  // User 1 joins, publishes shared state + retained user state + ephemeral user state, then leaves
-  const room1 = joinU1(
-    {appId: 'retain-app', rtcPolyfill, identity: u1},
+  const room1 = makeJoinRoom('ret-u1')(
+    {appId: 'simplified-sync-app', rtcPolyfill, identity: u1},
     'persistent-room'
   )
   const board1 = room1.makeState('board', 'empty')
-  const bio1 = room1.makeUserState('bio', '', {
-    retain: {ttlMs: 350, maxUsers: 2}
-  })
   const cursor1 = room1.makeUserState<{x: number} | null>('cursor')
+  const bigChunk = 'x'.repeat(50 * 1024)
+  const bigWriters = Array.from({length: 6}, (_, i) =>
+    room1.makeState(`big-${i}`, '', {maxBytes: 64 * 1024})
+  )
 
-  await waitFor(() => Object.keys(room1.getUsers()).length === 1)
+  await waitFor(() => Object.keys(room1.getPeers()).length === 1)
   await board1.set('pinned-by-u1')
-  await bio1.set('u1-bio')
   await cursor1.set({x: 42})
-  await wait(40)
+  for (let i = 0; i < 6; i++) {
+    await bigWriters[i]!.set(`${i}:${bigChunk}`)
+  }
+  await wait(50)
   await room1.leave()
   await waitFor(() => Object.keys(passiveRelay.getUsers()).length === 0)
 
-  // Late joiner connects ONLY to the zero-schema passive relay and receives board + retained bio, NOT cursor!
-  const lateRoom = joinLate(
-    {appId: 'retain-app', rtcPolyfill},
+  const lateRoom = makeJoinRoom('ret-late')(
+    {appId: 'simplified-sync-app', rtcPolyfill},
     'persistent-room'
   )
   const boardLate = lateRoom.makeState('board', 'empty')
-  const bioLate = lateRoom.makeUserState('bio', '', {
-    retain: {ttlMs: 350, maxUsers: 2}
-  })
   const cursorLate = lateRoom.makeUserState<{x: number} | null>('cursor')
+  const bigReaders = Array.from({length: 6}, (_, i) =>
+    lateRoom.makeState(`big-${i}`, '', {maxBytes: 64 * 1024})
+  )
 
   await waitFor(
     () =>
-      boardLate.get() === 'pinned-by-u1' && bioLate.get(u1.userId) === 'u1-bio'
+      boardLate.get() === 'pinned-by-u1' &&
+      bigReaders.every((s, i) => s.get() === `${i}:${bigChunk}`),
+    5_000
   )
-  assert.equal(bioLate.getMeta(u1.userId)?.online, false)
-  assert.deepEqual(bioLate.getAll({onlineOnly: true}), {})
   assert.equal(
     cursorLate.has(u1.userId),
     false,
-    'presence-scoped user state must be evicted by passive relay when author disconnects'
+    'presence-scoped userState must be evicted when author disconnects'
   )
-
-  // maxUsers: 2 offline cap — u2 and u3 join, publish bios, and leave -> u1 (oldest offline) is evicted!
-  const room2 = joinU2(
-    {appId: 'retain-app', rtcPolyfill, identity: u2},
-    'persistent-room'
-  )
-  const bio2 = room2.makeUserState('bio', '', {
-    retain: {ttlMs: 350, maxUsers: 2}
-  })
-  await waitFor(() => Object.keys(room2.getUsers()).length >= 1)
-  await bio2.set('u2-bio')
-  await waitFor(() => bioLate.get(u2.userId) === 'u2-bio')
-  await room2.leave()
-  await waitFor(() => !lateRoom.getUsers()[u2.userId])
-
-  await wait(15)
-
-  const room3 = joinU3(
-    {appId: 'retain-app', rtcPolyfill, identity: u3},
-    'persistent-room'
-  )
-  const bio3 = room3.makeUserState('bio', '', {
-    retain: {ttlMs: 350, maxUsers: 2}
-  })
-  await waitFor(() => Object.keys(room3.getUsers()).length >= 1)
-  await bio3.set('u3-bio')
-  await waitFor(() => bioLate.get(u3.userId) === 'u3-bio')
-  await room3.leave()
-  await waitFor(() => !lateRoom.getUsers()[u3.userId])
-
-  // Offline count is now capped at maxUsers = 2 (u2 and u3 remain; u1 evicted)
-  assert.equal(bioLate.has(u1.userId), false)
-  assert.equal(bioLate.get(u2.userId), 'u2-bio')
-  assert.equal(bioLate.get(u3.userId), 'u3-bio')
-
-  // Wait for ttlMs (350ms) to expire offline retained entries
-  await waitFor(() => !bioLate.has(u2.userId) && !bioLate.has(u3.userId), 2_000)
-  assert.deepEqual(bioLate.getAll(), {})
 
   await Promise.all([lateRoom.leave(), passiveRelay.leave()])
 })
@@ -1022,66 +1059,113 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   mgrA.destroy()
   mgrB.destroy()
 
-  // 2. Unregistered shared namespace poisoning defense (validate + certified roles) & LRU cap
-  let invalidCount = 0
-  const mgrGuard = makeHarnessMgr(peerB, bob, () => {
-    invalidCount++
-  })
+  // 2. Unregistered namespaces drop silently without penalty, and lazy verify-before-relay catches forged direct signatures before relaying
+  const invalidFrom: Array<string | undefined> = []
+  const peerPubs: Record<string, string> = {
+    [peerA]: jwkToCompactPub(alice.signPubJwk),
+    [peerB]: jwkToCompactPub(bob.signPubJwk),
+    [peerM]: jwkToCompactPub(mallory.signPubJwk)
+  }
+  const makeLazyMgr = (
+    selfId: string,
+    user: UserIdentity,
+    onInvalid?: (from?: string) => void
+  ) =>
+    createStateManager({
+      appId,
+      getRoomId: () => roomId,
+      getSelfId: () => selfId,
+      getLocalUserId: () => user.userId,
+      ensureReady: async () => ({selfId, user, roomId}),
+      hasRolesPlugin: () => false,
+      getRolesProvider: () => null,
+      isPeerActive: () => true,
+      isDirectPeer: () => true,
+      getDirectPeerIds: () => [peerA, peerB, peerM].filter(p => p !== selfId),
+      isUserOnline: () => true,
+      getKnownPeerUserId: pid =>
+        pid === peerA
+          ? alice.userId
+          : pid === peerB
+            ? bob.userId
+            : mallory.userId,
+      getPeerUserPub: pid => peerPubs[pid],
+      isPeerBanned: () => false,
+      getPeerRoles: () => [],
+      makeInternalAction: <T extends JsonValue>(ns: string) => {
+        const key = `${selfId}:${ns}`
+        return {
+          send: async (data: T, targets?: string | string[] | null) => {
+            const list = targets
+              ? Array.isArray(targets)
+                ? targets
+                : [targets]
+              : [peerA, peerB, peerM].filter(p => p !== selfId)
+            for (const t of list) {
+              queueMicrotask(() => {
+                handlers.get(`${t}:${ns}`)?.(data, selfId)
+              })
+            }
+          },
+          onMessage: (fn: (data: T, peerId: string) => void) => {
+            handlers.set(key, fn as (raw: JsonValue, from: string) => void)
+            return () => handlers.delete(key)
+          },
+          onReceive: () => () => {},
+          onReceiveProgress: () => () => {}
+        } as never
+      },
+      ...(onInvalid ? {onInvalidRecord: onInvalid} : {})
+    })
 
-  const honestValid = await signStateRecord(alice.sign, alice.signPubJwk, {
+  const mgrGuard = makeLazyMgr(peerB, bob, from => {
+    invalidFrom.push(from)
+  })
+  const mgrNewcomer = makeLazyMgr(peerA, alice)
+
+  // Unregistered namespace record is dropped without incrementing invalidFrom
+  const unregRec = await signStateRecord(alice.sign, alice.signPubJwk, {
     kind: 's',
     appId,
     roomId,
-    ns: 'late-validated',
+    ns: 'unregistered-ns',
     hlc: fixedHlc,
     peerId: peerA,
     userId: alice.userId,
-    val: 10
+    val: 42
   })
-  assert.equal(await mgrGuard.verifyAndApplyStateRecord(honestValid), true)
+  assert.equal(await mgrGuard.verifyAndApplyStateRecord(unregRec), false)
+  assert.equal(invalidFrom.length, 0)
 
-  // Mallory sends 10 higher-HLC records that violate the future validator (val < 0)
-  for (let i = 1; i <= 10; i++) {
-    const poisoned = await signStateRecord(mallory.sign, mallory.signPubJwk, {
-      kind: 's',
-      appId,
-      roomId,
-      ns: 'late-validated',
-      hlc: fixedHlc + i,
-      peerId: peerM,
-      userId: mallory.userId,
-      val: -i
-    })
-    await mgrGuard.verifyAndApplyStateRecord(poisoned)
-  }
-
-  // When Bob finally registers makeState with validate(n => n >= 0), Alice's valid record (10) wins!
-  const lateValidated = mgrGuard.makeState('late-validated', 0, {
-    validate: n => n >= 0
-  })
-  assert.equal(lateValidated.get(), 10)
-
-  // Unregistered LRU cache bound: pushing maxUnregisteredSlots + 20 namespaces never evicts registered lateValidated
-  for (let i = 0; i < maxUnregisteredSlots + 20; i++) {
-    const filler = await signStateRecord(alice.sign, alice.signPubJwk, {
-      kind: 's',
-      appId,
-      roomId,
-      ns: `unreg-${i}`,
-      hlc: fixedHlc + i,
-      peerId: peerA,
-      userId: alice.userId,
-      val: i
-    })
-    await mgrGuard.verifyAndApplyStateRecord(filler)
-  }
-  assert.equal(lateValidated.get(), 10)
-  // Oldest unregistered slot ('unreg-0') was LRU-evicted, while newest ('unreg-275') survived
-  assert.equal(mgrGuard.makeState('unreg-0', -1).get(), -1)
-  assert.equal(
-    mgrGuard.makeState(`unreg-${maxUnregisteredSlots + 19}`, -1).get(),
-    maxUnregisteredSlots + 19
+  // Mallory sends a direct live 'rec' with valid identity binding (peerM + mallory.userId + mallory.pub) but a forged 86-char signature
+  const guardedSlot = mgrGuard.makeState('lazy-check', 'clean')
+  handlers.get(`${peerB}:state`)?.(
+    {
+      t: 'rec',
+      r: {
+        v: 1,
+        k: 's',
+        ns: 'lazy-check',
+        hlc: fixedHlc + 10,
+        peerId: peerM,
+        userId: mallory.userId,
+        pub: peerPubs[peerM]!,
+        val: 'forged-direct',
+        sig: 'A'.repeat(86)
+      }
+    },
+    peerM
   )
+  await waitFor(() => guardedSlot.get() === 'forged-direct')
+  assert.equal(invalidFrom.length, 0)
+
+  // Newcomer registers slot (triggering pull from Bob) -> Bob verifies signature before relaying, evicts forged entry, blames peerM, and never relays to newcomer!
+  const newcomerSlot = mgrNewcomer.makeState('lazy-check', 'clean')
+  await waitFor(() => guardedSlot.get() === 'clean')
+  await wait(30)
+  assert.equal(newcomerSlot.get(), 'clean')
+  assert.deepEqual(invalidFrom, [peerM])
+  mgrNewcomer.destroy()
 
   // 3. Per-user userState namespace cap (32 namespaces per user) enforced locally
   const mgrQuota = makeHarnessMgr(peerA, alice)
@@ -1183,7 +1267,6 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
         kickedUsers >= 1
     )
   } finally {
-    assert.equal(invalidCount, 0)
     mgrGuard.destroy()
     await Promise.all([victimRoom.leave(), attackerRoom.leave()])
   }
@@ -1200,6 +1283,7 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
       {appId: 'scale-sync-app', rtcPolyfill},
       'mesh-10'
     )
+    r.makeState('stage', 'ready')
     const n = r.makeUserState('name', '')
     void n.set(`User-${i}`)
     rooms.push(r)

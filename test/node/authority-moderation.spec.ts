@@ -21,6 +21,7 @@ import {
   validateStateRecordShape
 } from '../../packages/core/src/authority.ts'
 import {createUserIdentity} from '../../packages/core/src/identity.ts'
+import {createStateManager} from '../../packages/core/src/state.ts'
 
 const setup = async () => {
   const [root, delegate, target] = await Promise.all([
@@ -49,6 +50,28 @@ const setup = async () => {
     onSignatureFailure: () => {}
   })
   await authority.getAuthorityInfo()
+  const stateManager = createStateManager({
+    appId: scope.appId,
+    getRoomId: () => authority.getEffectiveRoomId(),
+    getSelfId: () => 'peer-owner',
+    getLocalUserId: () => root.userId,
+    ensureReady: async () => ({
+      selfId: 'peer-owner',
+      user: root,
+      roomId: authority.getEffectiveRoomId()
+    }),
+    hasRolesPlugin: () => true,
+    getRolesProvider: () => ({...authority, onPeerDescriptorCert: () => {}}),
+    isPeerActive: () => true,
+    isDirectPeer: () => true,
+    getDirectPeerIds: () => [],
+    isUserOnline: () => true,
+    getKnownPeerUserId: pid => peerUsers[pid],
+    isPeerBanned: id => authority.isPeerBanned(id),
+    getPeerRoles: id => authority.getPeerRoles(id)
+  })
+  stateManager.makeState('cfg', {})
+  stateManager.makeState('clock-test', '')
   const grant = async (identity: typeof delegate, roles: string[]) => {
     const cert = await signRoleCertificate(root.sign, root.signPubJwk, {
       ...scope,
@@ -60,6 +83,7 @@ const setup = async () => {
   }
   return {
     authority,
+    stateManager,
     root,
     delegate: {...delegate, peerId: 'peer-delegate'},
     target: {...target, peerId: 'peer-target'},
@@ -249,7 +273,8 @@ void test('C3 regression: RoleRevocationRecord cannot be re-wrapped as a PeerBan
 })
 
 void test('offer-time role spoofing via matching certId, malformed records, stale cert deduplication, state Infinity/prevHash/hash, and multi-device admin ban', async () => {
-  const {authority, root, delegate, target, scope, grant} = await setup()
+  const {authority, stateManager, root, delegate, target, scope, grant} =
+    await setup()
 
   // 1. Offer-time role spoofing: peer with stored 'speaker' cert sends offer with tampered wire cert (same certId, forged roles: ['admin'])
   const speakerCert = await grant(target, ['speaker'])
@@ -442,7 +467,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     false,
     'state record with hlc: Infinity must be rejected'
   )
-  assert.equal(await authority.verifyAndApplyStateRecord(stateRec1), true)
+  assert.equal(await stateManager.verifyAndApplyStateRecord(stateRec1), true)
 
   const preCertRec = await signStateRecord(delegate.sign, delegate.signPubJwk, {
     ...scope,
@@ -454,12 +479,12 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     cert: newerCert
   })
   assert.equal(
-    await authority.verifyAndApplyStateRecord(preCertRec),
+    await stateManager.verifyAndApplyStateRecord(preCertRec),
     false,
     'state record backdated before cert.iat must be rejected'
   )
   assert.equal(
-    await authority.verifyAndApplyStateRecord({
+    await stateManager.verifyAndApplyStateRecord({
       ...stateRec1,
       hlc: stateRec1.hlc + 1,
       val: {step: 2}
@@ -568,7 +593,7 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
     false
   )
   assert.equal(
-    await authority.verifyAndApplyStateRecord({
+    await stateManager.verifyAndApplyStateRecord({
       ...stateRec1,
       cert: {corrupted: true} as never
     }),
@@ -577,7 +602,8 @@ void test('offer-time role spoofing via matching certId, malformed records, stal
 })
 
 void test('clock skew hardening and 2-tier authority enforcement: reject future-dated records, floor re-granted cert iat above skewed revocations, and reject non-root cert issuance', async () => {
-  const {authority, root, delegate, target, scope, grant} = await setup()
+  const {authority, stateManager, root, delegate, target, scope, grant} =
+    await setup()
   const adminCert = await grant(delegate, ['admin'])
   await grant(target, ['player'])
   authority.registerPeerPublicKey(target.peerId, target.signPubJwk)
@@ -640,7 +666,7 @@ void test('clock skew hardening and 2-tier authority enforcement: reject future-
       cert: adminCert
     }
   )
-  assert.equal(await authority.verifyAndApplyStateRecord(futureState), false)
+  assert.equal(await stateManager.verifyAndApplyStateRecord(futureState), false)
 
   // 2. Re-granting a role via issueRoleCertificate floors iat above a revocation from a slightly fast clock
   const skewedRevocation = await signRoleRevocation(

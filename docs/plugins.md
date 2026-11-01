@@ -52,12 +52,12 @@ TypeScript automatically infers the return type of `joinRoom()`
 (`RoomWithPlugins`) from the plugins passed in `use`, merging each plugin's
 `TApi` (such as `room.getTopology()` from `scale()`, `room.grantRole()` /
 `room.revokeRole()` / `room.ban()` from `roles()`, or custom methods from
-third-party plugins) onto the returned `Room` type (and unlocking `{roles}`
-options on core `makeAction`, `makeState`, and `makeUserState` when `roles()` is
-present). Plugin `setup()` runs and attaches plugin methods onto `room` when
-`await room.ready` (or `await room.getSelf()`) resolves. If a plugin is not
-imported by the application, bundlers completely tree-shake it from the final
-bundle.
+third-party plugins) onto the returned `Room` type. Including `roles()` in `use`
+also enables `{roles}` authorization options on core `makeAction`, `makeState`,
+and `makeUserState`. Plugin `setup()` runs and attaches plugin methods onto
+`room` when `await room.ready` (or `await room.getSelf()`) resolves. If a plugin
+is not imported by the application, bundlers completely tree-shake it from the
+final bundle.
 
 ---
 

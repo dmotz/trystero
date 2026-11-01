@@ -57,6 +57,7 @@ import {
 import createRoom, {
   getRoomSignalingBridge
 } from '../../packages/core/src/room.ts'
+import {createStateManager} from '../../packages/core/src/state.ts'
 import {
   buildSignalAad,
   createSignalHandler,
@@ -1921,23 +1922,49 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
   }
 })
 
-void test('D7: maxClockSkewMs configures clock tolerance and makeState causal epoch supersedes stale pre-rejoin state', async () => {
+void test('D7: 60s fixed clock skew tolerance rejects far-future records and makeState causal HLC supersedes stale pre-rejoin state', async () => {
+  assert.throws(
+    () => roles({maxClockSkewMs: 300_000} as never),
+    /Unknown roles config option "maxClockSkewMs"/
+  )
+
   const adminUser = await createUserIdentity()
   const guestUser = await createUserIdentity()
   const d7RoomId = `d7-room~${adminUser.userId}`
+
+  const makePairedState = (
+    selfId: string,
+    user: typeof adminUser,
+    authority: ReturnType<typeof createRoomAuthority>,
+    onBroadcast?: (rec: AuthoritativeStateRecord) => void
+  ) =>
+    createStateManager({
+      appId: 'd7-app',
+      getRoomId: () => authority.getEffectiveRoomId(),
+      getSelfId: () => selfId,
+      getLocalUserId: () => user.userId,
+      ensureReady: async () => ({
+        selfId,
+        user,
+        roomId: authority.getEffectiveRoomId()
+      }),
+      hasRolesPlugin: () => true,
+      getRolesProvider: () => ({...authority, onPeerDescriptorCert: () => {}}),
+      isPeerActive: () => true,
+      isDirectPeer: () => true,
+      getDirectPeerIds: () => [],
+      isUserOnline: () => true,
+      getKnownPeerUserId: () => undefined,
+      isPeerBanned: id => authority.isPeerBanned(id),
+      getPeerRoles: id => authority.getPeerRoles(id),
+      ...(onBroadcast ? {onBroadcastRecord: onBroadcast} : {})
+    })
 
   const strictGuest = createRoomAuthority({
     selfId: 'strict-guest',
     appId: 'd7-app',
     initialRoomId: d7RoomId,
     admin: {},
-    getLocalUserIdentity: async () => guestUser
-  })
-  const tolerantGuest = createRoomAuthority({
-    selfId: 'tolerant-guest',
-    appId: 'd7-app',
-    initialRoomId: d7RoomId,
-    admin: {maxClockSkewMs: 300_000},
     getLocalUserIdentity: async () => guestUser
   })
   const adminSession1 = createRoomAuthority({
@@ -1949,14 +1976,31 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
   })
   await Promise.all([
     strictGuest.getAuthorityInfo(),
-    tolerantGuest.getAuthorityInfo(),
     adminSession1.getAuthorityInfo()
   ])
+
+  const guestState = makePairedState('strict-guest', guestUser, strictGuest)
+  guestState.makeState('clock', '')
+  guestState.makeState('phase', 'init')
 
   const adminCert = await adminSession1.issueRoleCertificate(adminUser.userId, [
     'admin'
   ])
-  const futureRec = await signStateRecord(
+  const nearFutureRec = await signStateRecord(
+    adminUser.sign,
+    adminUser.signPubJwk,
+    {
+      appId: 'd7-app',
+      roomId: d7RoomId,
+      ns: 'clock',
+      hlc: Date.now() + 30_000,
+      peerId: 'admin-s1',
+      userId: adminUser.userId,
+      val: 'within-60s-ok',
+      cert: adminCert
+    }
+  )
+  const farFutureRec = await signStateRecord(
     adminUser.sign,
     adminUser.signPubJwk,
     {
@@ -1966,24 +2010,25 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
       hlc: Date.now() + 180_000,
       peerId: 'admin-s1',
       userId: adminUser.userId,
-      val: 'skewed-ok',
+      val: 'beyond-60s-rejected',
       cert: adminCert
     }
   )
-  assert.equal(await strictGuest.verifyAndApplyStateRecord(futureRec), false)
-  assert.equal(await tolerantGuest.verifyAndApplyStateRecord(futureRec), true)
+  assert.equal(await guestState.verifyAndApplyStateRecord(farFutureRec), false)
+  assert.equal(await guestState.verifyAndApplyStateRecord(nearFutureRec), true)
 
   // Session 1 performs 5 updates, then admin reloads/rejoins as Session 2 (higher HLC!)
   const staleHighSeq: AuthoritativeStateRecord[] = []
-  const stateS1 = adminSession1.makeState('phase', 'init', undefined, rec =>
+  const s1Mgr = makePairedState('admin-s1', adminUser, adminSession1, rec =>
     staleHighSeq.push(rec)
   )
+  const stateS1 = s1Mgr.makeState('phase', 'init')
   for (let i = 1; i <= 5; i++) {
     await stateS1.set(`s1-step-${i}`)
   }
   const s1Final = staleHighSeq.at(-1)!
   assert.equal(staleHighSeq.length, 5)
-  assert.equal(await tolerantGuest.verifyAndApplyStateRecord(s1Final), true)
+  assert.equal(await guestState.verifyAndApplyStateRecord(s1Final), true)
 
   await wait(10)
   const adminSession2 = createRoomAuthority({
@@ -1995,16 +2040,17 @@ void test('D7: maxClockSkewMs configures clock tolerance and makeState causal ep
   })
   await adminSession2.getAuthorityInfo()
   const s2Published: AuthoritativeStateRecord[] = []
-  const stateS2 = adminSession2.makeState('phase', 'init', undefined, rec =>
+  const s2Mgr = makePairedState('admin-s2', adminUser, adminSession2, rec =>
     s2Published.push(rec)
   )
+  const stateS2 = s2Mgr.makeState('phase', 'init')
   await stateS2.set('fresh-after-rejoin')
   const s2First = s2Published[0]!
   assert.equal(s2Published.length, 1)
   assert.ok(compareStateRecords(s2First, s1Final) > 0)
-  assert.equal(await tolerantGuest.verifyAndApplyStateRecord(s2First), true)
+  assert.equal(await guestState.verifyAndApplyStateRecord(s2First), true)
   // Replaying held old Session 1 record cannot override fresh rejoined HLC
-  assert.equal(await tolerantGuest.verifyAndApplyStateRecord(s1Final), false)
+  assert.equal(await guestState.verifyAndApplyStateRecord(s1Final), false)
 })
 
 void test('D8: transient 250ms route churn does not flap virtual peer membership under default 1200ms unreachableGraceMs', async () => {

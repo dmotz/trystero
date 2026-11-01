@@ -111,7 +111,5 @@ export type {
   UserLeaveContext,
   UserState,
   UserStateChangeContext,
-  UserStateConfig,
-  UserStateGetAllOptions,
-  UserStateRetentionConfig
+  UserStateConfig
 } from './types'

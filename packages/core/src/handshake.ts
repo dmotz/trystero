@@ -39,6 +39,11 @@ const hsDomain = `${libId}-id-hs:v1`
 export type HandshakeReadyPayload =
   | string
   | {
+      ok: true
+      p: Record<string, string>
+      r: JsonValue[]
+    }
+  | {
       ok: false
       err: 'room full' | 'peer banned'
       reason?: string
@@ -383,7 +388,7 @@ type HandshakeManagerDeps = {
   beforeSendHandshakeReady?: (
     peerId: string,
     peer: PeerHandle
-  ) => Promise<void> | undefined
+  ) => Promise<HandshakeReadyPayload | void> | undefined
   onActivate: (peerId: string, peer: PeerHandle) => void
   onFailure: (peerId: string, peer: PeerHandle, reason: Error) => void
 }
@@ -468,7 +473,7 @@ export const createHandshakeManager = ({
       return
     }
 
-    const finishReady = (): void => {
+    const finishReady = (payload?: HandshakeReadyPayload | void): void => {
       const cur = peerStates[id]
 
       if (!cur || cur.peer !== peer || cur.isActive) {
@@ -476,7 +481,7 @@ export const createHandshakeManager = ({
       }
 
       cur.didLocalHandshakePass = true
-      void sendHandshakeReady('', id).catch(err =>
+      void sendHandshakeReady(payload || '', id).catch(err =>
         failPeerHandshake(
           id,
           peer,

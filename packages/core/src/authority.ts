@@ -7,19 +7,16 @@ import {
 } from './identity'
 import {
   compareStateRecords,
-  createStateManager,
   defaultMaxClockSkewMs,
   signStateRecord,
   signWith,
   validateStateRecordShape,
   verifySig,
   verifyStateRecordSignature,
-  type StateManager,
   type StateSignParams,
   type StateSigner
 } from './state'
 import type {
-  AuthoritativeState,
   AuthoritativeStateRecord,
   DataPayload,
   JsonValue,
@@ -30,33 +27,37 @@ import type {
   RolesConfig,
   RolesPluginApi,
   RoomPlugin,
-  StateConfig,
-  UserIdentity,
-  Widen
+  UserIdentity
 } from './types'
 import {
   authMetaKey,
   createBoundedCache,
   createBoundedSet,
+  createWindowCounter,
   definePlugin,
   encodeBytes,
   insufficientAuthPrefix,
+  isObj,
+  isPosSafeInt,
   isSelfAsAdminPlugin,
+  isStr,
+  isValidSig,
   keys,
   mkErr,
   noOp,
   peerBannedErr,
   peerBannedMsg,
-  posSafeIntErr,
   selfCertifyingRoomRegex,
   toBase64Url,
-  toJson
+  toJson,
+  validateRoleCertificateShape
 } from './utils'
 
 export {
   compareStateRecords,
   isSelfAsAdminPlugin,
   signStateRecord,
+  validateRoleCertificateShape,
   validateStateRecordShape,
   type StateSignParams
 }
@@ -69,15 +70,8 @@ const maxStoredModerationRecords = 512
 const maxRevocationsPerPairRole = 4
 const digestChunkBytes = 256 * 1024
 
-const isObj = (v: unknown): v is Record<string, unknown> =>
-  Boolean(v && typeof v === 'object' && !Array.isArray(v))
-const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0
 const hasStrs = (o: Record<string, unknown>, ks: string[]): boolean =>
   ks.every(k => isStr(o[k]))
-const isPosInt = (n: unknown): n is number =>
-  typeof n === 'number' && Number.isInteger(n) && n > 0
-const isValidSig = (s: unknown): s is string =>
-  typeof s === 'string' && s.length >= 64 && s.length <= 128
 const isValidJwk = (v: unknown): v is JsonWebKey =>
   isObj(v) && Boolean(pubJwkToUncompressedBytes(v as JsonWebKey))
 const toCleanJwk = (j: JsonWebKey): JsonWebKey => ({
@@ -115,17 +109,9 @@ const normalizeRolesConfig = (config?: RolesConfig): RolesConfig => {
   let admins: string[] | undefined
   if (isObj(config)) {
     for (const k of keys(config)) {
-      if (k !== 'selfAsAdmin' && k !== 'admins' && k !== 'maxClockSkewMs') {
+      if (k !== 'selfAsAdmin' && k !== 'admins') {
         throw mkErr(`Unknown roles config option "${k}"`)
       }
-    }
-    if (
-      config.maxClockSkewMs !== undefined &&
-      (typeof config.maxClockSkewMs !== 'number' ||
-        !Number.isSafeInteger(config.maxClockSkewMs) ||
-        config.maxClockSkewMs <= 0)
-    ) {
-      throw posSafeIntErr('maxClockSkewMs')
     }
     if (config.admins !== undefined) {
       if (!Array.isArray(config.admins)) {
@@ -148,10 +134,7 @@ const normalizeRolesConfig = (config?: RolesConfig): RolesConfig => {
   }
   return {
     ...(config?.selfAsAdmin ? {selfAsAdmin: true} : {}),
-    ...(admins ? {admins} : {}),
-    ...(config?.maxClockSkewMs !== undefined
-      ? {maxClockSkewMs: config.maxClockSkewMs}
-      : {})
+    ...(admins ? {admins} : {})
   }
 }
 
@@ -192,18 +175,6 @@ export const signRoleCertificate = async (
   }
   return {...u, sig: await signWith(signer, roleCertPayload(u))}
 }
-
-export const validateRoleCertificateShape = (
-  c: unknown
-): c is RoleCertificate =>
-  isObj(c) &&
-  c['v'] === 1 &&
-  hasStrs(c, ['certId', 'issuerPubKey', 'subUserId', 'appId', 'roomId']) &&
-  Array.isArray(c['roles']) &&
-  c['roles'].length > 0 &&
-  c['roles'].every(isStr) &&
-  isPosInt(c['iat']) &&
-  isValidSig(c['sig'])
 
 export const verifyRoleCertificate = async (
   cert: RoleCertificate,
@@ -264,8 +235,8 @@ export const banCanonicalPayload = (b: Omit<PeerBanRecord, 'sig'>): string =>
 const isAdminRecBase = (r: Record<string, unknown>): boolean =>
   r['v'] === 1 &&
   hasStrs(r, ['appId', 'roomId', 'issuerUserId', 'targetUserId']) &&
-  isPosInt(r['seq']) &&
-  isPosInt(r['ts']) &&
+  isPosSafeInt(r['seq']) &&
+  isPosSafeInt(r['ts']) &&
   validateRoleCertificateShape(r['issuerCert']) &&
   isValidJwk(r['signerPubKey']) &&
   isValidSig(r['sig'])
@@ -517,7 +488,7 @@ export const validateActionAuthShape = (e: unknown): e is ActionAuthEnvelope =>
   isObj(e) &&
   e['v'] === 1 &&
   hasStrs(e, ['appId', 'roomId', 'namespace', 'peerId', 'userId', 'digest']) &&
-  isPosInt(e['seq']) &&
+  isPosSafeInt(e['seq']) &&
   validateRoleCertificateShape(e['cert']) &&
   isValidJwk(e['signerPubKey']) &&
   isValidSig(e['sig'])
@@ -667,17 +638,7 @@ export type RoomAuthority = Omit<
     ban: PeerBanRecord,
     fromPeerId?: string
   ) => Promise<boolean>
-  verifyAndApplyStateRecord: (
-    rec: AuthoritativeStateRecord,
-    fromPeerId?: string
-  ) => Promise<boolean>
   buildSyncMessage: (forceFull?: boolean) => Promise<AuthControlMessage | null>
-  makeState: <T extends JsonValue>(
-    namespace: string,
-    initialValue: T,
-    config?: StateConfig<Widen<T>>,
-    broadcastState?: (rec: AuthoritativeStateRecord) => void
-  ) => AuthoritativeState<Widen<T>>
   issueRoleCertificate: (
     targetId: string,
     role: string | string[]
@@ -690,7 +651,6 @@ export type RoomAuthority = Omit<
     targetId: string,
     options?: {reason?: string}
   ) => Promise<PeerBanRecord>
-  clearListeners: () => void
 }
 
 export type RoomAuthorityInit = {
@@ -751,7 +711,7 @@ const compareModCausalOrder = (
 export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   const {selfId, appId, initialRoomId} = init
   const admin = normalizeRolesConfig(init.admin)
-  const clockSkewMs = admin.maxClockSkewMs ?? defaultMaxClockSkewMs
+  const clockSkewMs = defaultMaxClockSkewMs
   const certs = new Map<string, RoleCertificate>()
   const revocations = new Map<string, RoleRevocationRecord[]>()
   const rawRevocations = new Map<string, RoleRevocationRecord>()
@@ -762,12 +722,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   const lastSeenActionSeq = new Map<string, number>()
   const verifiedCertCache = createBoundedCache<string, string[]>(512)
   const verifiedActionSigCache = createBoundedSet(512)
-  const standaloneBroadcastCallbacks = new Map<
-    string,
-    (rec: AuthoritativeStateRecord) => void
-  >()
-  const standaloneRegisteredShared = new Set<string>()
-  let standaloneState: StateManager | null = null
 
   let localCert: RoleCertificate | null = null
   let localModSeq = 0
@@ -919,7 +873,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
 
     for (const [bannedUid, banRec] of bans.entries()) {
       if (!prevBannedUids.has(bannedUid)) {
-        standaloneState?.purgeBannedUser(bannedUid)
         init.onPeerBanned?.(bannedUid, banRec, fromPeerId)
       }
     }
@@ -1265,83 +1218,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     return {valid: true, roles: getPeerRoles(rec.userId)}
   }
 
-  const rolesProviderHooks: KernelRolesProvider = {
-    getEffectiveRoomId: () => effectiveRoomId,
-    getMaxClockSkewMs: () => clockSkewMs,
-    getPeerRoles,
-    isPeerBanned,
-    getBanReason,
-    registerPeerPublicKey,
-    getStateWriteCert,
-    verifyStateRecordRoles,
-    onPeerDescriptorCert: noOp,
-    canPeerSendAction: () => false,
-    signActionPayload: async () => null,
-    verifyActionOffer: async () => ({valid: false, roles: []}),
-    verifyActionPayload: async () => ({valid: false, roles: []}),
-    getAuthorityInfo: async () => ({
-      userId: '',
-      roomId: effectiveRoomId,
-      baseRoomId,
-      isAdmin: false,
-      roles: []
-    })
-  }
-
-  const getStandaloneState = (): StateManager =>
-    (standaloneState ??= createStateManager({
-      appId,
-      getRoomId: () => effectiveRoomId,
-      getSelfId: () => selfId,
-      getLocalUserId: () => localUser?.userId ?? '',
-      ensureReady: async () => {
-        await ensureResolved()
-        if (!localUser) {
-          throw mkErr('missing local user identity')
-        }
-        return {selfId, user: localUser, roomId: effectiveRoomId}
-      },
-      hasRolesPlugin: () => true,
-      getRolesProvider: () => rolesProviderHooks,
-      maxClockSkewMs: clockSkewMs,
-      isPeerActive: () => true,
-      isDirectPeer: () => true,
-      getDirectPeerIds: () => [],
-      isUserOnline: () => true,
-      getKnownPeerUserId: pid =>
-        peerToUserId.get(pid) ?? init.getPeerUserId?.(pid),
-      isPeerBanned,
-      getPeerRoles,
-      onBroadcastRecord: rec => {
-        standaloneBroadcastCallbacks.get(rec.ns)?.(rec)
-      },
-      onInvalidRecord: fromPeerId => {
-        failSig(fromPeerId)
-      }
-    }))
-
-  const verifyAndApplyStateRecord = (
-    rec: AuthoritativeStateRecord,
-    fromPeerId?: string
-  ): Promise<boolean> =>
-    guardApply(async () => {
-      if (
-        validateStateRecordShape(rec) &&
-        rec.k === 's' &&
-        !standaloneRegisteredShared.has(rec.ns)
-      ) {
-        const roleCheck = await verifyStateRecordRoles(
-          rec,
-          ['admin'],
-          fromPeerId
-        )
-        if (!roleCheck.valid) {
-          return false
-        }
-      }
-      return getStandaloneState().verifyAndApplyStateRecord(rec, fromPeerId)
-    }, fromPeerId)
-
   const verifyActionInternal = async (
     namespace: string,
     peerId: string,
@@ -1442,7 +1318,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
 
   return {
     getEffectiveRoomId: () => effectiveRoomId,
-    getMaxClockSkewMs: () => clockSkewMs,
     getAuthorityInfo: async () => {
       await ensureResolved()
       const roles = getPeerRoles(selfId)
@@ -1463,7 +1338,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     verifyAndApplyCert,
     verifyAndApplyRevocation,
     verifyAndApplyBan,
-    verifyAndApplyStateRecord,
     canPeerSendAction: (peerId, requiredRoles, inlineCert) => {
       if (isPeerBanned(peerId)) {
         return false
@@ -1546,18 +1420,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
         ...(banList.length ? {bans: banList} : {})
       }
     },
-    makeState: <T extends JsonValue>(
-      namespace: string,
-      initialValue: T,
-      config?: StateConfig<Widen<T>>,
-      broadcastState?: (rec: AuthoritativeStateRecord) => void
-    ): AuthoritativeState<Widen<T>> => {
-      standaloneRegisteredShared.add(namespace)
-      if (broadcastState) {
-        standaloneBroadcastCallbacks.set(namespace, broadcastState)
-      }
-      return getStandaloneState().makeState(namespace, initialValue, config)
-    },
     issueRoleCertificate: async (targetId, role) => {
       await ensureResolved()
       const rolesToGrant = (Array.isArray(role) ? role : [role]).filter(Boolean)
@@ -1635,9 +1497,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       })
       await verifyAndApplyBan(ban)
       return ban
-    },
-    clearListeners: () => {
-      standaloneState?.destroy()
     }
   }
 }
@@ -1661,31 +1520,15 @@ export const roles = (
       return {effectiveRoomId: roomId}
     },
     setup: kernel => {
-      const peerAuthPenalty = createBoundedCache<
-        string,
-        {failures: number; syncs: number; windowStart: number}
-      >(512)
-      const getPenaltyEntry = (peerId: string) => {
-        const now = Date.now()
-        const existing = peerAuthPenalty.get(peerId)
-        if (!existing || now - existing.windowStart > 30_000) {
-          const fresh = {failures: 0, syncs: 0, windowStart: now}
-          peerAuthPenalty.set(peerId, fresh)
-          return fresh
-        }
-        return existing
-      }
-      const isAuthAbusive = (peerId: string): boolean =>
-        (peerAuthPenalty.get(peerId)?.failures ?? 0) >= 8
+      const authFailures = createWindowCounter(512, 8)
+      const authSyncQuota = createWindowCounter(512, 13)
 
       const recordPeerAuthFailure = (fromPeerId?: string) => {
         kernel.getScaleProvider()?.recordSignatureFailure()
         if (!fromPeerId || fromPeerId === kernel.selfId) {
           return
         }
-        const entry = getPenaltyEntry(fromPeerId)
-        entry.failures += 1
-        if (entry.failures >= 8) {
+        if (authFailures.hit(fromPeerId)) {
           const err = mkErr('excessive invalid authority records')
           kernel.emitError({
             code: 'peer-error',
@@ -1778,14 +1621,12 @@ export const roles = (
         if (
           !isObj(msg) ||
           authority.isPeerBanned(fromPeerId) ||
-          isAuthAbusive(fromPeerId)
+          authFailures.over(fromPeerId)
         ) {
           return
         }
         if (msg.t === 'sync') {
-          const penalty = getPenaltyEntry(fromPeerId)
-          penalty.syncs += 1
-          if (penalty.syncs > 12) {
+          if (authSyncQuota.hit(fromPeerId)) {
             return
           }
           if (msg.pubKey) {
@@ -1807,7 +1648,7 @@ export const roles = (
             for (const c of Array.isArray(msg.certs)
               ? msg.certs.slice(0, maxSyncCerts)
               : []) {
-              if (isAuthAbusive(fromPeerId)) {
+              if (authFailures.over(fromPeerId)) {
                 return
               }
               if (await authority.verifyAndApplyCert(c, fromPeerId)) {
@@ -1817,7 +1658,7 @@ export const roles = (
             for (const r of Array.isArray(msg.revocations)
               ? msg.revocations.slice(0, maxSyncModerationRecords)
               : []) {
-              if (isAuthAbusive(fromPeerId)) {
+              if (authFailures.over(fromPeerId)) {
                 return
               }
               if (await authority.verifyAndApplyRevocation(r, fromPeerId)) {
@@ -1827,7 +1668,7 @@ export const roles = (
             for (const b of Array.isArray(msg.bans)
               ? msg.bans.slice(0, maxSyncModerationRecords)
               : []) {
-              if (isAuthAbusive(fromPeerId)) {
+              if (authFailures.over(fromPeerId)) {
                 return
               }
               if (await authority.verifyAndApplyBan(b, fromPeerId)) {
@@ -1876,7 +1717,6 @@ export const roles = (
       })
 
       kernel.onPeerActivated(pid => void sendSync(pid, true), {replay: true})
-      kernel.onLeave(() => authority.clearListeners())
 
       return {
         grantRole: async (id, role) => {
@@ -1894,10 +1734,7 @@ export const roles = (
           await sendAuth({t: 'ban', ban}).catch(noOp)
         },
         isBanned: id => authority.isPeerBanned(id)
-      } satisfies Omit<
-        RolesPluginApi,
-        'makeState' | 'makeUserState'
-      > as unknown as RolesPluginApi
+      }
     }
   })
   return normalized.selfAsAdmin ? {...plugin, selfAsAdmin: true} : plugin

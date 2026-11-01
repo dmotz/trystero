@@ -162,7 +162,6 @@ export type UserIdentityConfig =
 export type RolesConfig = {
   selfAsAdmin?: boolean
   admins?: string[]
-  maxClockSkewMs?: number
 }
 
 export type RoleCertificate = {
@@ -218,7 +217,6 @@ export type AuthoritativeStateRecord<T = JsonValue> = {
   pub: string
   val?: T
   del?: true
-  ret?: number
   cert?: RoleCertificate
   sig: string
 }
@@ -231,10 +229,8 @@ export type StateChangeContext<T = JsonValue> = {
   timestamp: number
 }
 
-type StateRolesSpec = string | readonly string[]
-
-export type StateConfig<T = JsonValue, TRoles = StateRolesSpec> = {
-  roles?: TRoles
+export type StateConfig<T = JsonValue> = {
+  roles?: string | readonly string[]
   maxBytes?: number
   validate?: (next: T, context: StateChangeContext<T>) => boolean
 }
@@ -251,31 +247,21 @@ export type SharedState<T = JsonValue> = {
 
 export type AuthoritativeState<T = JsonValue> = SharedState<T>
 
-export type UserStateRetentionConfig = {
-  ttlMs?: number
-  maxUsers?: number
-}
-
-export type UserStateGetAllOptions = {
-  onlineOnly?: boolean
-}
-
 export type UserStateChangeContext<T = JsonValue> = StateChangeContext<T> & {
   self: boolean
   online: boolean
   removed: boolean
 }
 
-export type UserStateConfig<T = JsonValue, TRoles = StateRolesSpec> = {
-  roles?: TRoles
-  retain?: boolean | UserStateRetentionConfig
+export type UserStateConfig<T = JsonValue> = {
+  roles?: string | readonly string[]
   maxBytes?: number
   validate?: (next: T, context: UserStateChangeContext<T>) => boolean
 }
 
 export type UserState<T = JsonValue> = {
   get: (id?: string) => T
-  getAll: (options?: UserStateGetAllOptions) => Readonly<Record<string, T>>
+  getAll: () => Readonly<Record<string, T>>
   has: (id?: string) => boolean
   set: (next: T | ((prev: T) => T)) => Promise<void>
   clear: () => Promise<void>
@@ -291,7 +277,6 @@ export type UserState<T = JsonValue> = {
 
 export type KernelRolesProvider = {
   getEffectiveRoomId: () => string
-  getMaxClockSkewMs?: () => number
   getPeerRoles: (peerOrUserId?: string) => string[]
   isPeerBanned: (peerOrUserId: string) => boolean
   getBanReason?: (peerOrUserId: string) => string | undefined
@@ -456,7 +441,6 @@ export interface BaseRoomConfig {
   limit?: number
   use?: readonly RoomPlugin<string, any>[]
   maxReceiveBytes?: number
-  maxClockSkewMs?: number
   password?: string
   passive?: boolean
   relayConfig?: BaseRelayConfig
@@ -674,35 +658,7 @@ export type Widen<T> = [JsonValue] extends [T]
             ? {[K in keyof T]: Widen<T[K]>}
             : T
 
-type MakeStateFn<in TRoles = never> = {
-  <T extends JsonValue = JsonValue>(
-    namespace: string,
-    initialValue?: null,
-    config?: StateConfig<Widen<T> | null, TRoles>
-  ): SharedState<Widen<T> | null>
-  <T extends JsonValue>(
-    namespace: string,
-    initialValue: T,
-    config?: StateConfig<Widen<T>, TRoles>
-  ): SharedState<Widen<T>>
-}
-
-type MakeUserStateFn<in TRoles = never> = {
-  <T extends JsonValue = JsonValue>(
-    namespace: string,
-    initialValue?: null,
-    config?: UserStateConfig<Widen<T> | null, TRoles>
-  ): UserState<Widen<T> | null>
-  <T extends JsonValue>(
-    namespace: string,
-    initialValue: T,
-    config?: UserStateConfig<Widen<T>, TRoles>
-  ): UserState<Widen<T>>
-}
-
 export type RolesPluginApi = {
-  makeState: MakeStateFn<StateRolesSpec>
-  makeUserState: MakeUserStateFn<StateRolesSpec>
   grantRole: (
     targetId: string,
     role: string | string[]
@@ -729,8 +685,30 @@ export type Room = {
       config: RequestActionConfig
     ): RequestAction<T, R>
   }
-  makeState: MakeStateFn
-  makeUserState: MakeUserStateFn
+  makeState: {
+    <T extends JsonValue = JsonValue>(
+      namespace: string,
+      initialValue?: null,
+      config?: StateConfig<Widen<T> | null>
+    ): SharedState<Widen<T> | null>
+    <T extends JsonValue>(
+      namespace: string,
+      initialValue: T,
+      config?: StateConfig<Widen<T>>
+    ): SharedState<Widen<T>>
+  }
+  makeUserState: {
+    <T extends JsonValue = JsonValue>(
+      namespace: string,
+      initialValue?: null,
+      config?: UserStateConfig<Widen<T> | null>
+    ): UserState<Widen<T> | null>
+    <T extends JsonValue>(
+      namespace: string,
+      initialValue: T,
+      config?: UserStateConfig<Widen<T>>
+    ): UserState<Widen<T>>
+  }
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
   getSelf: () => Promise<SelfInfo>
@@ -910,37 +888,21 @@ type UnionToIntersection<U> = (
   ? I
   : never
 
-type StripIndexSignature<T> = 0 extends 1 & T
-  ? Record<never, never>
-  : {
-      [
-        K in keyof T as string extends K
-          ? never
-          : number extends K
-            ? never
-            : symbol extends K
-              ? never
-              : K
-      ]: T[K]
-    }
-
 export type InferPluginApi<TPlugin> =
   TPlugin extends RoomPlugin<string, infer TApi>
-    ? StripIndexSignature<TApi>
-    : Record<never, never>
-
-type MergeRoomPlugins<TRoom, TPluginApis> = [keyof TPluginApis] extends [never]
-  ? TRoom
-  : Omit<TRoom, Extract<keyof TPluginApis, 'makeState' | 'makeUserState'>> &
-      TPluginApis
+    ? 0 extends 1 & TApi
+      ? unknown
+      : TApi
+    : Record<string, never>
 
 export type RoomWithPlugins<
   TPlugins extends readonly RoomPlugin<string, any>[] | undefined = undefined
-> = TPlugins extends readonly (infer P)[]
-  ? [P] extends [never]
-    ? Room
-    : MergeRoomPlugins<Room, UnionToIntersection<InferPluginApi<P>>>
-  : Room
+> = Room &
+  (TPlugins extends readonly (infer P)[]
+    ? [P] extends [never]
+      ? unknown
+      : UnionToIntersection<InferPluginApi<P>>
+    : unknown)
 
 declare const joinRoomConfigBrand: unique symbol
 

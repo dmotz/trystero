@@ -23,6 +23,7 @@ import type {
   RelayConfig,
   RelayConnectivity,
   ReplayListenerOptions,
+  RoleCertificate,
   RoomPlugin,
   SocketClient,
   Unsubscribe
@@ -853,3 +854,61 @@ export const isSelfAsAdminPlugin = (use?: RoomPlugin | RoomPlugin[]): boolean =>
         (p as Record<string, unknown>)['selfAsAdmin'] === true
     )
   )
+
+export const isObj = (v: unknown): v is Record<string, unknown> =>
+  Boolean(v && typeof v === 'object' && !Array.isArray(v))
+
+export const isStr = (v: unknown): v is string =>
+  typeof v === 'string' && v.length > 0
+
+export const isPosSafeInt = (n: unknown): n is number =>
+  typeof n === 'number' && Number.isSafeInteger(n) && n > 0
+
+export const isValidSig = (s: unknown): s is string =>
+  typeof s === 'string' && s.length >= 64 && s.length <= 128
+
+export const validateRoleCertificateShape = (
+  c: unknown
+): c is RoleCertificate =>
+  isObj(c) &&
+  c['v'] === 1 &&
+  isStr(c['certId']) &&
+  isStr(c['issuerPubKey']) &&
+  isStr(c['subUserId']) &&
+  isStr(c['appId']) &&
+  isStr(c['roomId']) &&
+  Array.isArray(c['roles']) &&
+  c['roles'].length > 0 &&
+  c['roles'].every(isStr) &&
+  isPosSafeInt(c['iat']) &&
+  isValidSig(c['sig'])
+
+export const createWindowCounter = (
+  maxEntries: number,
+  limit: number,
+  windowMs = 30_000
+): {
+  hit: (id: string) => boolean
+  reset: (id: string) => void
+  over: (id: string) => boolean
+} => {
+  const map = createBoundedCache<string, {n: number; t: number}>(maxEntries)
+  return {
+    hit: id => {
+      const now = Date.now()
+      let cur = map.get(id)
+      if (!cur || now - cur.t > windowMs) {
+        cur = {n: 0, t: now}
+        map.set(id, cur)
+      }
+      return ++cur.n >= limit
+    },
+    reset: id => {
+      map.delete(id)
+    },
+    over: id => {
+      const cur = map.get(id)
+      return Boolean(cur && Date.now() - cur.t <= windowMs && cur.n >= limit)
+    }
+  }
+}

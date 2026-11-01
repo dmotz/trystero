@@ -486,9 +486,7 @@ export {
   type UserLeaveContext,
   type UserState,
   type UserStateChangeContext,
-  type UserStateConfig,
-  type UserStateGetAllOptions,
-  type UserStateRetentionConfig
+  type UserStateConfig
 } from '@trystero-p2p/core'
 
 export const defaultRelayUrls: string[] = [

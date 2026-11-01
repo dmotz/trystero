@@ -116,14 +116,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     if (
-      config.maxClockSkewMs !== undefined &&
-      (!Number.isSafeInteger(config.maxClockSkewMs) ||
-        config.maxClockSkewMs <= 0)
-    ) {
-      throw posSafeIntErr('maxClockSkewMs')
-    }
-
-    if (
       config.limit !== undefined &&
       (!Number.isSafeInteger(config.limit) || config.limit < 1)
     ) {
@@ -753,9 +745,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       ...(config.maxReceiveBytes === undefined
         ? {}
         : {maxReceiveBytes: config.maxReceiveBytes}),
-      ...(config.maxClockSkewMs === undefined
-        ? {}
-        : {maxClockSkewMs: config.maxClockSkewMs}),
       ...(composedPeerHandshake
         ? {onPeerHandshake: composedPeerHandshake}
         : {}),

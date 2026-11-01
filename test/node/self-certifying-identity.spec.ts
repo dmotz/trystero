@@ -2072,8 +2072,6 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       'UserState',
       'UserStateConfig',
       'UserStateChangeContext',
-      'UserStateRetentionConfig',
-      'UserStateGetAllOptions',
       'UserIdentity',
       'SelfInfo',
       'PeerInfo',
@@ -2102,7 +2100,9 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'RoomAuthorityInfo',
     'AdminRoomInfo',
     'createAdminRoom',
-    'manualReconnection'
+    'manualReconnection',
+    'UserStateRetentionConfig',
+    'UserStateGetAllOptions'
   ]) {
     assert.equal(
       indexDts.includes(removedType),

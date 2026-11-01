@@ -503,7 +503,7 @@ provides two state primitives right on `room`:
 | Primitive                           | Best for                                                      | Who can write                         | Synced to late joiners?                         |
 | ----------------------------------- | ------------------------------------------------------------- | ------------------------------------- | ----------------------------------------------- |
 | `room.makeAction(ns)`               | Chat messages, sound effects, 1-to-1 RPC, binary/file streams | Any member (or `roles`)               | No (ephemeral events)                           |
-| **`room.makeUserState(ns, init?)`** | Display names, avatars, cursors, ready flags, player loadouts | **Only that `userId`** (own slot)     | Yes (while present, or offline with `retain`)   |
+| **`room.makeUserState(ns, init?)`** | Display names, avatars, cursors, ready flags, player loadouts | **Only that `userId`** (own slot)     | Yes (while user is present in room)             |
 | **`room.makeState(ns, init?)`**     | Cooperative boards, shared timers, jam tempo, casual lobbies  | **Any room member** (without `roles`) | Yes (cached & relayed by remaining peers)       |
 | **`room.makeState` + `roles(...)`** | Official match phase, host scoreboard, moderated watch party  | **Only `'admin'` / specified roles**  | Yes (cryptographically verified against admins) |
 
@@ -563,14 +563,9 @@ Key behaviors of `makeUserState`:
 - **Automatic write coalescing**: Rapid synchronous or back-to-back `.set()`
   calls (such as dragging a slider or cursor) automatically fold pending updates
   while an ECDSA signature is in flight so bandwidth and CPU stay minimal.
-- **Presence-scoped by default, opt-in offline retention (`retain`)**: By
-  default, a user's entry lives while they are in the room and is evicted right
-  after `onUserLeave`. Pass `retain: true` (24-hour TTL, up to 256 offline
-  users) or `retain: {ttlMs, maxUsers}` when you want remaining peers—or an
-  always-on [`passive: true` server peer](#running-server-side-node-bun-deno)—to
-  keep and replay disconnected users' latest signed state when they rejoin or
-  when newcomers arrive (`getAll({onlineOnly: true})` filters to currently
-  connected users).
+- **Presence-scoped lifecycle**: A user's entry lives while they are in the
+  room, remains readable _during_ `room.onUserLeave` callbacks, and is evicted
+  automatically right after `onUserLeave`.
 
 ### Shared room state (`room.makeState`)
 
@@ -611,9 +606,9 @@ member mode**:
   in `makeUserState`, and use a CRDT plugin (such as Yjs; see
   [Custom room plugins](#custom-room-plugins)) if you need concurrent character-
   or list-level merging.
-- **Bounded clock-skew window**: Peers reject state records dated more than
-  `maxClockSkewMs` (default: `60,000` ms) into the future, bounding how far a
-  misconfigured clock or griefing member in an open room can pin a timestamp.
+- **Bounded clock-skew window**: Peers reject state records dated more than 60
+  seconds into the future, bounding how far a misconfigured clock or griefing
+  member in an open room can pin a timestamp.
 - **Upgrade to `roles()` for untrusted/public rooms**: Whenever untrusted
   strangers can join and you need host-only state, custom writer roles, or peer
   banning, pass `use: [roles(...)]` (see
@@ -1043,8 +1038,7 @@ certificates.
   converge deterministically under `(hlc, userId, peerId, sig)`, late joiners
   reconcile missing records via bounded 1-RTT digest pull sync, and `room.ban()`
   immediately purges any state authored by the banned user. Records tolerate up
-  to `maxClockSkewMs` (default: `60,000` ms) of future wall-clock skew across
-  devices.
+  to 60 seconds of future wall-clock skew across devices.
 - **Edge filtering & private signaling**: In multi-hop topologies, immediate
   neighbors (Hop-1 relays) verify role certificates, signatures, and
   `PeerBanRecord`s before forwarding packets, stopping unauthorized traffic or
@@ -1320,11 +1314,11 @@ const room = joinRoom(
 )
 ```
 
-> **Zero-schema state relay:** A `passive: true` peer automatically verifies,
-> caches, and syncs signed `makeState()` records and `retain`-enabled
-> `makeUserState()` records for newcomers—even if the server process never calls
-> `makeState()` or `makeUserState()` itself (while automatically evicting
-> non-retained presence state as soon as a user disconnects).
+> **Always-on shared-state relay:** A `passive: true` server peer that declares
+> `room.makeState(...)` for your room's shared namespaces automatically
+> verifies, caches, and syncs the latest signed shared state to newcomers—even
+> if all browser peers briefly disconnect (while presence-scoped `makeUserState`
+> entries are evicted automatically as each user leaves).
 
 ### Self-hosted WebSocket relay
 
@@ -1514,18 +1508,14 @@ the same namespace will return the same room instance.
     `256 * 1024 ** 2` (256 MiB). Must be a positive integer. Raise it for larger
     files or lower it to reduce memory use.
 
-  - `maxClockSkewMs` - **(optional)** Maximum tolerated future wall-clock skew
-    in milliseconds for signed state records (`makeState` and `makeUserState`).
-    Defaults to `60000` (60 seconds). Must be a positive integer.
-
   - `passive` - **(optional)** Boolean for backup or relay peers that should
     listen for active peers without broadcasting room presence announcements.
     Passive peers respond directly to active peers that announce or send offers,
-    so passive peers never discover or connect to each other, and automatically
-    cache and sync signed `makeState` and retained `makeUserState` records. For
-    BitTorrent, passive rooms register with trackers as seeders (`left: 0`)
-    without generating outgoing offers, which avoids passive-to-passive
-    discovery while keeping tracker load low.
+    so passive peers never discover or connect to each other, and can declare
+    `room.makeState(...)` namespaces to cache and sync signed shared state for
+    newcomers. For BitTorrent, passive rooms register with trackers as seeders
+    (`left: 0`) without generating outgoing offers, which avoids
+    passive-to-passive discovery while keeping tracker load low.
 
   - `identity` - **(optional)** Controls how the local user's `userId` is loaded
     and saved (see [User identity](#user-identity)):
@@ -1542,10 +1532,10 @@ the same namespace will return the same room instance.
     `scale()`, or `definePlugin()`. TypeScript automatically infers the extra
     methods added to the returned `Room` instance (`RoomWithPlugins`) from the
     plugins passed in `use` (e.g. `grantRole`, `revokeRole`, `getRoles`, `ban`,
-    and `isBanned` from `roles()`, or `getTopology` from `scale()`, plus
-    unlocking `{roles}` config options on `makeAction`, `makeState`, and
-    `makeUserState` when `roles()` is included). Plugin methods attach to `room`
-    when `await room.ready` (or `await room.getSelf()`) resolves. See the
+    and `isBanned` from `roles()`, or `getTopology` from `scale()`). Including
+    `roles()` also enables `{roles}` authorization options on `makeAction`,
+    `makeState`, and `makeUserState`. Plugin methods attach to `room` when
+    `await room.ready` (or `await room.getSelf()`) resolves. See the
     [Plugin Authoring Guide](docs/plugins.md) for creating custom plugins.
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
@@ -1719,13 +1709,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     within the room (up to `32` published namespaces and `64 KiB` total per
     `userId`).
   - `initialValue` - **(optional)** Fallback JSON value returned by `get(id?)`
-    when a user has not published or has cleared/left (defaults to `null`).
-  - `config.retain` - **(optional)** Presence-scoped (`false`) by default: a
-    user's entry remains readable _during_ `room.onUserLeave` callbacks and is
-    evicted immediately afterward. Pass `true`
-    (`{ttlMs: 86400000, maxUsers: 256}`) or
-    `{ttlMs?: number, maxUsers?: number}` to retain and relay offline users'
-    signed records across peers.
+    when a user has not published or has cleared/left (defaults to `null`). A
+    user's entry is presence-scoped: it remains readable _during_
+    `room.onUserLeave` callbacks and is evicted immediately afterward.
   - `config.maxBytes` - **(optional)** Maximum UTF-8 serialized JSON byte size
     per user entry (default: `16384`, maximum: `65536`).
   - `config.validate(next, context)` - **(optional)** Synchronous predicate
@@ -1739,10 +1725,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   Returns a `UserState<T>` object with:
   - `get([targetId])` - Returns the current value for `targetId` (`userId` or
     `peerId`, or the local user if omitted), or `initialValue` if unpublished.
-  - `getAll([options])` - Returns a frozen, reference-stable
-    `Readonly<Record<string, T>>` keyed by `userId` for all published entries
-    (including the local user once published). Pass `{onlineOnly: true}` to
-    exclude retained offline users.
+  - `getAll()` - Returns a frozen, reference-stable
+    `Readonly<Record<string, T>>` keyed by `userId` for all active published
+    entries (including the local user once published).
   - `has([targetId])` - Returns `true` if `targetId` (or the local user if
     omitted) currently has a published entry (distinguishing an explicit
     `set(null)` from an unpublished `null` default).
@@ -1756,9 +1741,8 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     `targetId` (or the local user if omitted), or `null` if unpublished.
   - `onChange(callback, [options])` - Subscribes `(value, context) => void`
     (`value` is `undefined` when `context.removed === true` due to `clear()`,
-    presence departure, TTL/LRU eviction, or `ban()`) and returns an
-    `Unsubscribe` function. Accepts
-    `{replay?: boolean, once?: boolean, signal?: AbortSignal}`.
+    presence departure, or `ban()`) and returns an `Unsubscribe` function.
+    Accepts `{replay?: boolean, once?: boolean, signal?: AbortSignal}`.
 
 - ### `grantRole(targetId, role)`
 
@@ -2097,9 +2081,6 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 - `roles({admins: [userId1, userId2]})` - Trusts the specified 22-character
   Base62 `userId`s as root room admins on either a fixed room name or alongside
   `selfAsAdmin: true`.
-- `roles({maxClockSkewMs})` - Configures maximum tolerated future wall-clock
-  skew in milliseconds for incoming signed authority records (default: `60000`,
-  up to `86400000`).
 
 ### `scale([config])`
 

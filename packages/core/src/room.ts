@@ -1,6 +1,6 @@
 import {
-  createBoundedCache,
   createEventEmitter,
+  createWindowCounter,
   entries,
   fromEntries,
   getConfiguredPlugins,
@@ -17,7 +17,6 @@ import {
   peerDisconnectedErr,
   peerDisconnectedMsg,
   peerLeftRoomErr,
-  posSafeIntErr,
   requiresRolesErr,
   reservedRoomPropertyNames,
   roomFullErr,
@@ -43,7 +42,7 @@ import {
   resolveUserIdentity
 } from './identity'
 import {createMediaManager, type InternalMediaMeta} from './media'
-import {createStateManager} from './state'
+import {createStateManager, jwkToCompactPub} from './state'
 import type {
   AddMediaOptions,
   DataPayload,
@@ -123,7 +122,6 @@ type RoomOptions = {
   userIdentityP?: Promise<UserIdentity>
   verifyPeerIdentity?: boolean
   maxReceiveBytes?: number
-  maxClockSkewMs?: number
   onPeerHandshake?: PeerHandshake
   handshakeTimeoutMs?: number
   onBeforeLeave?: () => void
@@ -152,7 +150,6 @@ export default <
     onPeerHandshake,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
     maxReceiveBytes,
-    maxClockSkewMs,
     onBeforeLeave
   } = roomOptions
   let localSelfId = explicitSelfId ?? ''
@@ -171,6 +168,7 @@ export default <
   const activePeerMap: Record<string, PeerHandle> = {}
   const peerUserIds = new Map<string, string>()
   const peerPubKeys = new Map<string, JsonWebKey>()
+  const peerUserPubKeys = new Map<string, string>()
   const verifiedPeerIds = new Set<string>()
   const deferredHandshakeReady = new Map<string, HandshakeReadyPayload>()
   const rejectCloseTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -184,12 +182,6 @@ export default <
   const hasRolesPlugin = plugins.some(p => p.name === 'roles')
   if (!hasRolesPlugin && selfCertifyingRoomRegex.test(initialRoomId)) {
     throw selfCertRoomRolesErr
-  }
-  if (
-    maxClockSkewMs !== undefined &&
-    (!Number.isSafeInteger(maxClockSkewMs) || maxClockSkewMs <= 0)
-  ) {
-    throw posSafeIntErr('maxClockSkewMs')
   }
   let effectiveRoomId = initialRoomId
   let rolesProvider: KernelRolesProvider | null = null
@@ -568,25 +560,15 @@ export default <
   const handleData = actionManager.handleData
   const makeAction = actionManager.makeAction
 
-  const peerStatePenalty = createBoundedCache<
-    string,
-    {failures: number; windowStart: number}
-  >(1024)
+  const peerStatePenalty = createWindowCounter(512, 8)
 
   const recordPeerStateFailure = (fromPeerId?: string): void => {
     scaleProvider?.recordSignatureFailure()
     if (!fromPeerId || fromPeerId === localSelfId) {
       return
     }
-    const now = Date.now()
-    let entry = peerStatePenalty.get(fromPeerId)
-    if (!entry || now - entry.windowStart > 30_000) {
-      entry = {failures: 0, windowStart: now}
-      peerStatePenalty.set(fromPeerId, entry)
-    }
-    entry.failures += 1
-    if (entry.failures >= 8) {
-      peerStatePenalty.delete(fromPeerId)
+    if (peerStatePenalty.hit(fromPeerId)) {
+      peerStatePenalty.reset(fromPeerId)
       onPeerError(fromPeerId, mkErr('excessive invalid state records'))
     }
   }
@@ -622,8 +604,9 @@ export default <
     hasRolesPlugin: () => hasRolesPlugin,
     getRolesProvider: () => rolesProvider,
     getScaleProvider: () => scaleProvider,
-    ...(maxClockSkewMs === undefined ? {} : {maxClockSkewMs}),
     isPeerActive: peerId => Boolean(activePeerMap[peerId]),
+    isPeerPendingHandshake: peerId =>
+      Boolean(handshakeManager.getPeer(peerId) && !isDirectPeer(peerId)),
     isDirectPeer,
     getDirectPeerIds: () =>
       keys(activePeerMap).filter(id => !virtualPeerIds.has(id)),
@@ -634,6 +617,8 @@ export default <
       ),
     getKnownPeerUserId: peerId =>
       peerId === localSelfId ? localUserId : peerUserIds.get(peerId),
+    getPeerUserPub: peerId =>
+      verifiedPeerIds.has(peerId) ? peerUserPubKeys.get(peerId) : undefined,
     isPeerBanned: peerOrUserId =>
       Boolean(peerOrUserId && isPeerBanned(peerOrUserId)),
     getPeerRoles: peerOrUserId => getPeerRoles(peerOrUserId),
@@ -654,6 +639,7 @@ export default <
     handshakeManager.clearPeer(id, err)
     stateManager.clearPeer(id)
     verifiedPeerIds.delete(id)
+    peerUserPubKeys.delete(id)
     deferredHandshakeReady.delete(id)
     virtualPeerIds.delete(id)
     delete peerMap[id]
@@ -678,6 +664,7 @@ export default <
 
     if (existingVirtual && err.message !== peerBannedMsg) {
       handshakeManager.clearPeer(id, err)
+      stateManager.clearPeer(id)
       peerMap[id] = existingVirtual
       current.destroy()
       scaleProvider?.removeDirectPeer(id, current, err)
@@ -787,7 +774,11 @@ export default <
   })
   const handshakeReadyAction = makeActionInternal<HandshakeReadyPayload>(
     'hsready',
-    {sendToPending: true, receiveWhilePending: true, maxPayloadBytes: 64 * 1024}
+    {
+      sendToPending: true,
+      receiveWhilePending: true,
+      maxPayloadBytes: 128 * 1024
+    }
   )
 
   const kernel: RoomKernel = {
@@ -1076,7 +1067,7 @@ export default <
     },
     beforeSendHandshakeReady: (id, peer) =>
       peerMap[id] === peer && !isPeerBanned(id)
-        ? stateManager.sendPreJoinUserState(id)
+        ? stateManager.prepareHandshakeReady(id)
         : undefined,
     onActivate: (id, peer) => {
       if (isPeerBanned(id)) {
@@ -1117,6 +1108,8 @@ export default <
       })
       if (!alreadyJoined) {
         notifyPeerActivated(id)
+      } else {
+        stateManager.onPeerJoined(id, getPeerUserId(id), true)
       }
     },
     onFailure: (id, peer, reason) => {
@@ -1151,7 +1144,7 @@ export default <
     if (leavePromise) {
       return
     }
-    if (data && typeof data === 'object' && !data.ok) {
+    if (data && typeof data === 'object' && data.ok === false) {
       if (data.err === roomFullMsg) {
         if (!handshakeManager.getPeer(id) || isDirectPeer(id)) {
           return
@@ -1198,16 +1191,17 @@ export default <
     data: HandshakeReadyPayload,
     id: string
   ): void => {
-    if (typeof data === 'string') {
-      const pending = stateManager.getPendingPreJoin(id)
-      if (pending) {
-        void pending.finally(() => {
+    if (data && typeof data === 'object' && data.ok === true) {
+      if (!isPeerBanned(id) && !isAlreadyFullForPeer(id)) {
+        void stateManager.stageHandshakeUserState(id, data, () => {
           if (!leavePromise && handshakeManager.getPeer(id)) {
-            processHandshakeReady(data, id)
+            processHandshakeReady('', id)
           }
         })
         return
       }
+      processHandshakeReady('', id)
+      return
     }
     processHandshakeReady(data, id)
   }
@@ -1242,7 +1236,9 @@ export default <
       }
 
       if (wasVirtual) {
+        stateManager.clearPeer(id)
         verifiedPeerIds.delete(id)
+        peerUserPubKeys.delete(id)
         deferredHandshakeReady.delete(id)
         delete peerMap[id]
       } else {
@@ -1296,9 +1292,9 @@ export default <
 
     makeAction,
 
-    makeState: stateManager.makeState as Room['makeState'],
+    makeState: stateManager.makeState,
 
-    makeUserState: stateManager.makeUserState as Room['makeUserState'],
+    makeUserState: stateManager.makeUserState,
 
     leave,
 
@@ -1467,6 +1463,7 @@ export default <
       }
       verifiedPeerIds.add(peerId)
       peerPubKeys.set(peerId, verified.peerPubKey)
+      peerUserPubKeys.set(peerId, jwkToCompactPub(verified.userPubKey))
       scaleProvider?.setPeerSignPublicKey(peerId, verified.peerPubKey)
       rolesProvider?.registerPeerPublicKey(peerId, verified.userPubKey)
       if (deferredHandshakeReady.has(peerId)) {
