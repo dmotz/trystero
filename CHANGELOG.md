@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.27.0-beta1](https://github.com/dmotz/trystero/releases/tag/0.27.0-beta1) - 2026-10-20
+## [0.27.0] - unreleased
 
 ### Improvements
 
