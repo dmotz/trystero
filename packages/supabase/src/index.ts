@@ -40,7 +40,7 @@ type ChannelEntry = {
   nextListenerId: number
 }
 
-const clientChannels = new WeakMap<SupabaseClient, ChannelCache>()
+const clientChannels = /*@__PURE__*/ new WeakMap<SupabaseClient, ChannelCache>()
 
 const getChannelName = (topic: string): string => `room:${topic}:messages`
 
@@ -232,7 +232,7 @@ const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
     }
   })
 
-const joins = new Map<string, JoinRoom<SupabaseRoomConfig>>()
+const joins = /*@__PURE__*/ new Map<string, JoinRoom<SupabaseRoomConfig>>()
 
 // Remove `...extra` forwarding in 0.28.0 once createStrategy's 0.27 3rd-arg migration guard is retired.
 export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((

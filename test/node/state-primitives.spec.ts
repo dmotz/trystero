@@ -1142,8 +1142,16 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   assert.equal(await mgrGuard.verifyAndApplyStateRecord(unregRec), false)
   assert.equal(invalidFrom.length, 0)
 
-  // Mallory sends a direct live 'rec' with valid identity binding (peerM + mallory.userId + mallory.pub) but a forged 86-char signature
+  // Mallory sends a direct live 'rec' with valid identity binding (peerM + mallory.userId + mallory.pub) but a forged 86-char signature.
+  // Eager signature verification rejects it before mutating slot.entries or emitting onChange, preserving Alice's valid value.
   const guardedSlot = mgrGuard.makeState('lazy-check', 'clean')
+  const newcomerSlot = mgrNewcomer.makeState('lazy-check', 'clean')
+  await newcomerSlot.set('alice-valid')
+  await waitFor(() => guardedSlot.get() === 'alice-valid')
+  const observedOnGuard: string[] = []
+  guardedSlot.onChange(val => {
+    observedOnGuard.push(val)
+  })
   handlers.get(`${peerB}:state`)?.(
     {
       t: 'rec',
@@ -1151,7 +1159,7 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
         v: 1,
         k: 's',
         ns: 'lazy-check',
-        hlc: fixedHlc + 10,
+        hlc: fixedHlc + 50_000,
         peerId: peerM,
         userId: mallory.userId,
         pub: peerPubs[peerM]!,
@@ -1161,14 +1169,11 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
     },
     peerM
   )
-  await waitFor(() => guardedSlot.get() === 'forged-direct')
-  assert.equal(invalidFrom.length, 0)
-
-  // Newcomer registers slot (triggering pull from Bob) -> Bob verifies signature before relaying, evicts forged entry, blames peerM, and never relays to newcomer!
-  const newcomerSlot = mgrNewcomer.makeState('lazy-check', 'clean')
-  await waitFor(() => guardedSlot.get() === 'clean')
+  await waitFor(() => invalidFrom.length === 1)
   await wait(30)
-  assert.equal(newcomerSlot.get(), 'clean')
+  assert.equal(guardedSlot.get(), 'alice-valid')
+  assert.equal(newcomerSlot.get(), 'alice-valid')
+  assert.deepEqual(observedOnGuard, [])
   assert.deepEqual(invalidFrom, [peerM])
   mgrNewcomer.destroy()
 
@@ -1593,5 +1598,73 @@ void test('Handshake ready enrichment resilience: hung state sign degrades to li
     } finally {
       await Promise.all([rAdmin.leave(), rPeer.leave()])
     }
+  }
+})
+
+void test('Concurrent functional set(prev => ...) re-evaluates on top of higher-HLC remote write committed while sign() is in flight', async () => {
+  const {makeJoinRoom} = createMemorySignalBus()
+  const baseAlice = await createUserIdentity()
+  const bobId = await createUserIdentity()
+
+  let notifySignEntered!: () => void
+  const signEntered = new Promise<void>(r => {
+    notifySignEntered = r
+  })
+  let releaseSign!: () => void
+  const signGate = new Promise<void>(r => {
+    releaseSign = r
+  })
+  let pauseNextCountSign = false
+
+  const pausedAlice: UserIdentity = {
+    ...baseAlice,
+    sign: async payload => {
+      const txt = decodeBytes(payload)
+      if (pauseNextCountSign && txt.includes(':state:')) {
+        pauseNextCountSign = false
+        notifySignEntered()
+        await signGate
+      }
+      return baseAlice.sign(payload)
+    }
+  }
+
+  const rA = makeJoinRoom('cas-alice')(
+    {appId: 'cas-retry-app', rtcPolyfill, identity: pausedAlice},
+    'cas-room'
+  )
+  const rB = makeJoinRoom('cas-bob')(
+    {appId: 'cas-retry-app', rtcPolyfill, identity: bobId},
+    'cas-room'
+  )
+  const countA = rA.makeState<number>('count', 0)
+  const countB = rB.makeState<number>('count', 0)
+
+  try {
+    await waitFor(
+      () =>
+        Object.keys(rA.getPeers()).length === 1 &&
+        Object.keys(rB.getPeers()).length === 1,
+      2_000
+    )
+
+    pauseNextCountSign = true
+    const aliceIncrement = countA.set(n => n + 1)
+    await signEntered
+
+    // While Alice's signature for val=1 is suspended, Bob commits val=10 with a newer HLC
+    await wait(5)
+    await countB.set(10)
+    await waitFor(() => countA.get() === 10, 2_000)
+
+    // Unblock Alice: flushSlot must detect the newer remote HLC, re-evaluate (10 => 11), re-sign, and converge!
+    releaseSign()
+    await aliceIncrement
+
+    assert.equal(countA.get(), 11)
+    await waitFor(() => countB.get() === 11, 2_000)
+  } finally {
+    releaseSign()
+    await Promise.all([rA.leave(), rB.leave()])
   }
 })

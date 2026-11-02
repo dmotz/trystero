@@ -93,6 +93,7 @@ export type BoundedCache<K, V> = {
   has: (key: K) => boolean
   set: (key: K, value: V) => void
   delete: (key: K) => boolean
+  clear: () => void
 }
 
 export const createBoundedCache = <K, V>(
@@ -120,7 +121,8 @@ export const createBoundedCache = <K, V>(
       }
       map.set(key, value)
     },
-    delete: key => map.delete(key)
+    delete: key => map.delete(key),
+    clear: () => map.clear()
   }
 }
 

@@ -25,8 +25,14 @@ import {
   toJson,
   userIdLength
 } from './primitives'
+import {
+  buildUserIdentityFromIdbRecord,
+  deleteIdbIdentity,
+  type IdbIdentityDeps,
+  loadOrCreateIdbIdentity,
+  type StoredIdbIdentityRecord
+} from './identity-idb'
 import {invalidP256KeyErr, noOp, requiredErr, userIdRegex, warn} from './utils'
-import type {StoredIdbIdentityRecord} from './identity-idb'
 import type {
   ResolvedIdentityPersistence,
   UserIdentity,
@@ -546,7 +552,7 @@ export const createUserIdentity = async (): Promise<UserIdentity> => {
   return buildExtractableUserIdentity(keyPair.privateKey, rec, rawJwk.d ?? '')
 }
 
-export const generateNonExtractableIdbRecord =
+const generateNonExtractableIdbRecord =
   async (): Promise<StoredIdbIdentityRecord> => {
     const {keyPair, rec} = await generateP256KeyMaterial(false)
     return {
@@ -557,16 +563,8 @@ export const generateNonExtractableIdbRecord =
     }
   }
 
-const createNonExtractableUserIdentity = async (): Promise<UserIdentity> => {
-  const rec = await generateNonExtractableIdbRecord()
-  return {
-    userId: rec.userId,
-    publicKey: rec.publicKey,
-    signPubJwk: rec.signPubJwk,
-    sign: (payload: Uint8Array) =>
-      ecdsaSign(rec.privateKey, payload as BufferSource)
-  }
-}
+const createNonExtractableUserIdentity = (): Promise<UserIdentity> =>
+  generateNonExtractableIdbRecord().then(buildUserIdentityFromIdbRecord)
 
 const tryParsePrivateJwk = (
   keyOrJwk: string | JsonWebKey
@@ -801,9 +799,11 @@ const getOrCreateRuntimeUserIdentity = (
 export const getDefaultUserIdentity = (): Promise<UserIdentity> =>
   getOrCreateRuntimeUserIdentity()
 
-let idbModuleP: Promise<typeof import('./identity-idb')> | null = null
-const getIdbModule = (): Promise<typeof import('./identity-idb')> =>
-  (idbModuleP ??= import('./identity-idb'))
+const idbDeps: IdbIdentityDeps = {
+  generateRecord: generateNonExtractableIdbRecord,
+  verifyUserIdKey,
+  verifyWithP256
+}
 
 const inflightLocalLoadByApp = new Map<string, Promise<UserIdentity>>()
 const localOpTailByApp = new Map<string, Promise<unknown>>()
@@ -813,10 +813,12 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
   if (inflight) {
     return inflight
   }
-  const runLoad = async (): Promise<UserIdentity> => {
-    const {loadOrCreateIdbIdentity} = await getIdbModule()
-    return withPersistence(await loadOrCreateIdbIdentity(appId), 'local', true)
-  }
+  const runLoad = async (): Promise<UserIdentity> =>
+    withPersistence(
+      await loadOrCreateIdbIdentity(appId, idbDeps),
+      'local',
+      true
+    )
   const prev = localOpTailByApp.get(appId)
   const promise = (prev ? prev.catch(noOp).then(runLoad) : runLoad()).finally(
     () => {
@@ -854,7 +856,6 @@ export const clearUserIdentity = async (appId: string): Promise<void> => {
     if (!hasIndexedDB()) {
       return
     }
-    const {deleteIdbIdentity} = await getIdbModule()
     await deleteIdbIdentity(appId)
   }
 

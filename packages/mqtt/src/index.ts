@@ -9,7 +9,7 @@ import {
 } from '@trystero-p2p/core'
 
 const defaultRedundancy = 4
-const relayManager = createRelayManager<mqtt.MqttClient>(
+const relayManager = /*@__PURE__*/ createRelayManager<mqtt.MqttClient>(
   client =>
     (client.stream as {socket?: WebSocket} | undefined)?.socket as
       | WebSocket
@@ -23,8 +23,8 @@ type TopicState = {
   ready?: Promise<unknown>
 }
 
-const topicStates = relayManager.scoped<TopicState>()
-const pendingBatches = new WeakMap<
+const topicStates = /*@__PURE__*/ relayManager.scoped<TopicState>()
+const pendingBatches = /*@__PURE__*/ new WeakMap<
   mqtt.MqttClient,
   {topics: Set<string>; promise: Promise<unknown>}
 >()
@@ -73,101 +73,103 @@ const ensureSubscribed = (
 
 export type MqttRoomConfig = JoinRoomConfig
 
-export const joinRoom: JoinRoom<MqttRoomConfig> = createTopicStrategy({
-  init: config =>
-    getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
-      const client = relayManager.register(url, () =>
-        mqtt.connect(url, {queueQoSZero: false, resubscribe: false})
-      )
-      const states = topicStates.forRelay(client)
+export const joinRoom: JoinRoom<MqttRoomConfig> =
+  /*@__PURE__*/ createTopicStrategy({
+    init: config =>
+      getRelays(config, defaultRelayUrls, defaultRedundancy).map(url => {
+        const client = relayManager.register(url, () =>
+          mqtt.connect(url, {queueQoSZero: false, resubscribe: false})
+        )
+        const states = topicStates.forRelay(client)
 
-      if (client.listenerCount('message') === 0) {
-        client
-          .on('message', (topic, buffer) =>
-            states[topic]?.handler?.(topic, buffer.toString())
-          )
-          .on('connect', () => {
-            const topics = Object.keys(states).filter(
-              topic => (states[topic]?.refs ?? 0) > 0
+        if (client.listenerCount('message') === 0) {
+          client
+            .on('message', (topic, buffer) =>
+              states[topic]?.handler?.(topic, buffer.toString())
             )
+            .on('connect', () => {
+              const topics = Object.keys(states).filter(
+                topic => (states[topic]?.refs ?? 0) > 0
+              )
 
-            if (topics.length === 0) {
-              return
-            }
+              if (topics.length === 0) {
+                return
+              }
 
-            void client
-              .subscribeAsync(topics)
-              .then(() => {
-                Object.entries(states).forEach(([topic, state]) => {
-                  if (state.announcement) {
-                    client.publish(topic, state.announcement)
-                  }
+              void client
+                .subscribeAsync(topics)
+                .then(() => {
+                  Object.entries(states).forEach(([topic, state]) => {
+                    if (state.announcement) {
+                      client.publish(topic, state.announcement)
+                    }
+                  })
                 })
-              })
-              .catch(console.error)
-          })
-          .on('error', console.error)
-      }
-
-      return client.connected
-        ? Promise.resolve(client)
-        : new Promise<mqtt.MqttClient>(res =>
-            client.once('connect', () => res(client))
-          )
-    }),
-
-  subscribeTopic: (client, topic, onMessage, context) => {
-    const states = topicStates.forRelay(client)
-    const state = (states[topic] ??= {refs: 0})
-    const token = Symbol(topic)
-    const topicHandler = (topic: string, data: string) => onMessage(topic, data)
-
-    state.handler = topicHandler
-    state.token = token
-    state.refs += 1
-
-    const cleanup = () => {
-      state.refs = Math.max(0, state.refs - 1)
-
-      if (state.handler === topicHandler) {
-        delete state.handler
-      }
-
-      if (state.token === token) {
-        delete state.token
-      }
-
-      if (state.refs === 0) {
-        if (state.ready) {
-          client.unsubscribe(topic)
+                .catch(console.error)
+            })
+            .on('error', console.error)
         }
-        delete states[topic]
+
+        return client.connected
+          ? Promise.resolve(client)
+          : new Promise<mqtt.MqttClient>(res =>
+              client.once('connect', () => res(client))
+            )
+      }),
+
+    subscribeTopic: (client, topic, onMessage, context) => {
+      const states = topicStates.forRelay(client)
+      const state = (states[topic] ??= {refs: 0})
+      const token = Symbol(topic)
+      const topicHandler = (topic: string, data: string) =>
+        onMessage(topic, data)
+
+      state.handler = topicHandler
+      state.token = token
+      state.refs += 1
+
+      const cleanup = () => {
+        state.refs = Math.max(0, state.refs - 1)
+
+        if (state.handler === topicHandler) {
+          delete state.handler
+        }
+
+        if (state.token === token) {
+          delete state.token
+        }
+
+        if (state.refs === 0) {
+          if (state.ready) {
+            client.unsubscribe(topic)
+          }
+          delete states[topic]
+        }
+      }
+
+      // Rooms subscribe to self before root; waiting on root batches
+      // all concurrent room SUBSCRIBEs into a single packet before announcing.
+      return context.kind === 'root'
+        ? Promise.all([
+            ensureSubscribed(client, states, context.selfTopic),
+            ensureSubscribed(client, states, topic)
+          ]).then(() => cleanup)
+        : cleanup
+    },
+
+    publishTopic: (client, topic, msg, {kind}) => {
+      const payload = typeof msg === 'string' ? msg : toJson(msg)
+
+      if (kind === 'announce') {
+        ;(topicStates.forRelay(client)[topic] ??= {refs: 0}).announcement =
+          payload
+      }
+
+      if (client.connected) {
+        client.publish(topic, payload)
       }
     }
-
-    // Rooms subscribe to self before root; waiting on root batches
-    // all concurrent room SUBSCRIBEs into a single packet before announcing.
-    return context.kind === 'root'
-      ? Promise.all([
-          ensureSubscribed(client, states, context.selfTopic),
-          ensureSubscribed(client, states, topic)
-        ]).then(() => cleanup)
-      : cleanup
-  },
-
-  publishTopic: (client, topic, msg, {kind}) => {
-    const payload = typeof msg === 'string' ? msg : toJson(msg)
-
-    if (kind === 'announce') {
-      ;(topicStates.forRelay(client)[topic] ??= {refs: 0}).announcement =
-        payload
-    }
-
-    if (client.connected) {
-      client.publish(topic, payload)
-    }
-  }
-})
+  })
 
 export const getRelaySockets: () => Record<string, WebSocket> =
   relayManager.getSockets
@@ -243,7 +245,7 @@ export {
   type UserStateConfig
 } from '@trystero-p2p/core'
 
-export const defaultRelayUrls: string[] = [
+export const defaultRelayUrls: string[] = /*@__PURE__*/ [
   'broker.emqx.io:8084/mqtt',
   'public:public@public.cloud.shiftr.io',
   'broker.hivemq.com:8884/mqtt',

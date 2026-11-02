@@ -205,9 +205,8 @@ export type PeerBanRecord = {
   sig: string
 }
 
-export type AuthoritativeStateRecord<T = JsonValue> = {
+type AuthoritativeStateRecordBase = {
   v: 1
-  k: 's' | 'u'
   appId: string
   roomId: string
   ns: string
@@ -215,11 +214,26 @@ export type AuthoritativeStateRecord<T = JsonValue> = {
   peerId: string
   userId: string
   pub: string
-  val?: T
-  del?: true
   cert?: RoleCertificate
   sig: string
 }
+
+export type AuthoritativeStateValueRecord<T = JsonValue> =
+  AuthoritativeStateRecordBase & {
+    k: 's' | 'u'
+    val: T
+    del?: false
+  }
+
+export type AuthoritativeStateTombstoneRecord = AuthoritativeStateRecordBase & {
+  k: 'u'
+  val?: never
+  del: true
+}
+
+export type AuthoritativeStateRecord<T = JsonValue> =
+  | AuthoritativeStateValueRecord<T>
+  | AuthoritativeStateTombstoneRecord
 
 export type StateChangeContext<T = JsonValue> = {
   prev: T

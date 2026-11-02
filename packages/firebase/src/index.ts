@@ -51,167 +51,177 @@ const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> =>
         initializeApp({databaseURL: config.appId})
       ))
 
-export const joinRoom: JoinRoom<FirebaseRoomConfig> = createTopicStrategy({
-  reannounceOnDisconnect: false,
+export const joinRoom: JoinRoom<FirebaseRoomConfig> =
+  /*@__PURE__*/ createTopicStrategy({
+    reannounceOnDisconnect: false,
 
-  init: config =>
-    ref(initDb(config), config.relayConfig?.firebasePath ?? defaultRootPath),
+    init: config =>
+      ref(initDb(config), config.relayConfig?.firebasePath ?? defaultRootPath),
 
-  subscribeTopic: (rootRef, topic, onMessage, context) => {
-    const {rootTopic, selfTopic, kind} = context
-    const roomRef = child(rootRef, rootTopic)
-    const key = roomKey(rootTopic, selfTopic)
-    const subscriptionToken = (subscriptionTokens[key] ??= Symbol(key))
-    const unsubFns: Array<() => void> = []
+    subscribeTopic: (rootRef, topic, onMessage, context) => {
+      const {rootTopic, selfTopic, kind} = context
+      const roomRef = child(rootRef, rootTopic)
+      const key = roomKey(rootTopic, selfTopic)
+      const subscriptionToken = (subscriptionTokens[key] ??= Symbol(key))
+      const unsubFns: Array<() => void> = []
 
-    if (kind === 'self') {
-      const selfRef = child(roomRef, selfTopic)
-      const peerSignals: Record<string, Record<string, boolean>> = {}
+      if (kind === 'self') {
+        const selfRef = child(roomRef, selfTopic)
+        const peerSignals: Record<string, Record<string, boolean>> = {}
 
-      const selfCleanup = onChildAdded(selfRef, data => {
-        const peerId = data.key
+        const selfCleanup = onChildAdded(selfRef, data => {
+          const peerId = data.key
 
-        if (!peerId || peerId === presencePath) {
+          if (!peerId || peerId === presencePath) {
+            return
+          }
+
+          unsubFns.push(
+            onChildAdded(data.ref, nestedData => {
+              peerSignals[peerId] ??= {}
+
+              if (nestedData.key && nestedData.key in peerSignals[peerId]) {
+                return
+              }
+
+              if (nestedData.key) {
+                peerSignals[peerId][nestedData.key] = true
+              }
+
+              void onMessage(topic, nestedData.val() as StrategyMessage)
+              void remove(nestedData.ref)
+            })
+          )
+        })
+
+        return () => {
+          selfCleanup()
+          unsubFns.forEach(unsub => unsub())
+
+          if (subscriptionTokens[key] === subscriptionToken) {
+            void remove(selfRef)
+          }
+        }
+      }
+
+      const pendingRoomOwners: StrategyMessage[] = []
+
+      const processRoomEntry = (
+        value: Record<string, unknown> | null
+      ): void => {
+        const owner = value?.[presencePath]
+
+        if (!owner) {
           return
         }
 
-        unsubFns.push(
-          onChildAdded(data.ref, nestedData => {
-            peerSignals[peerId] ??= {}
+        if (!didSyncRoom) {
+          pendingRoomOwners.push(owner as Record<string, unknown>)
+          return
+        }
 
-            if (nestedData.key && nestedData.key in peerSignals[peerId]) {
-              return
-            }
+        void onMessage(topic, owner as StrategyMessage)
+      }
 
-            if (nestedData.key) {
-              peerSignals[peerId][nestedData.key] = true
-            }
+      let didSyncRoom = false
 
-            void onMessage(topic, nestedData.val() as StrategyMessage)
-            void remove(nestedData.ref)
-          })
-        )
-      })
+      unsubFns.push(
+        onValue(
+          roomRef,
+          () => {
+            didSyncRoom = true
+            pendingRoomOwners.forEach(owner => {
+              void onMessage(topic, owner)
+            })
+            pendingRoomOwners.length = 0
+          },
+          {onlyOnce: true}
+        ),
+
+        onChildAdded(roomRef, data => {
+          processRoomEntry(data.val() as Record<string, unknown> | null)
+        })
+      )
 
       return () => {
-        selfCleanup()
         unsubFns.forEach(unsub => unsub())
 
-        if (subscriptionTokens[key] === subscriptionToken) {
-          void remove(selfRef)
+        if (subscriptionTokens[key] !== subscriptionToken) {
+          return
         }
+
+        if (presenceRefs[key]) {
+          presenceCleanups[key]?.()
+          void remove(presenceRefs[key])
+          delete presenceRefs[key]
+          delete presenceMessages[key]
+          delete presenceCleanups[key]
+        }
+
+        delete subscriptionTokens[key]
       }
-    }
+    },
 
-    const pendingRoomOwners: StrategyMessage[] = []
+    publishTopic: (
+      rootRef,
+      topic,
+      msg,
+      {kind, rootTopic, selfTopic, peerId}
+    ) => {
+      const roomRef = child(rootRef, rootTopic)
+      const key = roomKey(rootTopic, selfTopic)
 
-    const processRoomEntry = (value: Record<string, unknown> | null): void => {
-      const owner = value?.[presencePath]
+      if (kind === 'announce') {
+        presenceMessages[key] = {
+          [presencePath]:
+            typeof msg === 'string'
+              ? fromJson<Record<string, unknown>>(msg)
+              : msg
+        }
 
-      if (!owner) {
-        return
-      }
+        const presenceRef =
+          presenceRefs[key] ?? (presenceRefs[key] = push(roomRef))
 
-      if (!didSyncRoom) {
-        pendingRoomOwners.push(owner as Record<string, unknown>)
-        return
-      }
+        if (!presenceCleanups[key]) {
+          let didConnect = false
 
-      void onMessage(topic, owner as StrategyMessage)
-    }
+          void onDisconnect(presenceRef).remove()
+          void set(presenceRef, presenceMessages[key])
+          presenceCleanups[key] = onValue(
+            child(rootRef.root, '.info/connected'),
+            snapshot => {
+              if (snapshot.val() !== true) {
+                return
+              }
 
-    let didSyncRoom = false
+              const isReconnect = didConnect
+              didConnect = true
 
-    unsubFns.push(
-      onValue(
-        roomRef,
-        () => {
-          didSyncRoom = true
-          pendingRoomOwners.forEach(owner => {
-            void onMessage(topic, owner)
-          })
-          pendingRoomOwners.length = 0
-        },
-        {onlyOnce: true}
-      ),
+              if (!isReconnect) {
+                return
+              }
 
-      onChildAdded(roomRef, data => {
-        processRoomEntry(data.val() as Record<string, unknown> | null)
-      })
-    )
-
-    return () => {
-      unsubFns.forEach(unsub => unsub())
-
-      if (subscriptionTokens[key] !== subscriptionToken) {
-        return
-      }
-
-      if (presenceRefs[key]) {
-        presenceCleanups[key]?.()
-        void remove(presenceRefs[key])
-        delete presenceRefs[key]
-        delete presenceMessages[key]
-        delete presenceCleanups[key]
-      }
-
-      delete subscriptionTokens[key]
-    }
-  },
-
-  publishTopic: (rootRef, topic, msg, {kind, rootTopic, selfTopic, peerId}) => {
-    const roomRef = child(rootRef, rootTopic)
-    const key = roomKey(rootTopic, selfTopic)
-
-    if (kind === 'announce') {
-      presenceMessages[key] = {
-        [presencePath]:
-          typeof msg === 'string' ? fromJson<Record<string, unknown>>(msg) : msg
-      }
-
-      const presenceRef =
-        presenceRefs[key] ?? (presenceRefs[key] = push(roomRef))
-
-      if (!presenceCleanups[key]) {
-        let didConnect = false
-
-        void onDisconnect(presenceRef).remove()
-        void set(presenceRef, presenceMessages[key])
-        presenceCleanups[key] = onValue(
-          child(rootRef.root, '.info/connected'),
-          snapshot => {
-            if (snapshot.val() !== true) {
-              return
+              void onDisconnect(presenceRef)
+                .remove()
+                .then(() => {
+                  if (presenceRefs[key] === presenceRef) {
+                    void set(presenceRef, presenceMessages[key])
+                  }
+                })
             }
+          )
+        }
 
-            const isReconnect = didConnect
-            didConnect = true
-
-            if (!isReconnect) {
-              return
-            }
-
-            void onDisconnect(presenceRef)
-              .remove()
-              .then(() => {
-                if (presenceRefs[key] === presenceRef) {
-                  void set(presenceRef, presenceMessages[key])
-                }
-              })
-          }
-        )
+        return
       }
 
-      return
+      const signalRef = push(child(roomRef, getPath(topic, peerId)))
+
+      void onDisconnect(signalRef).remove()
+      void set(signalRef, msg)
+      return undefined
     }
-
-    const signalRef = push(child(roomRef, getPath(topic, peerId)))
-
-    void onDisconnect(signalRef).remove()
-    void set(signalRef, msg)
-    return undefined
-  }
-})
+  })
 
 export {
   clearUserIdentity,

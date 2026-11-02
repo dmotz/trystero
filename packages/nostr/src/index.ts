@@ -21,7 +21,9 @@ import {
   type NostrSigner
 } from './protocol'
 
-const relayManager = createRelayManager<SocketClient>(client => client.socket)
+const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
+  client => client.socket
+)
 const defaultRedundancy = 5
 const maxTopicsPerSubscription = 250
 
@@ -48,9 +50,13 @@ type AnnouncementRecord = {
 }
 
 const roomSigners: Record<string, RoomSignerState> = {}
-const relayBackoffs = new WeakMap<SocketClient, RelayBackoffState>()
-const announcementMessages = relayManager.scoped<AnnouncementRecord>()
-const retiredRelays = new WeakSet<SocketClient>()
+const relayBackoffs = /*@__PURE__*/ new WeakMap<
+  SocketClient,
+  RelayBackoffState
+>()
+const announcementMessages =
+  /*@__PURE__*/ relayManager.scoped<AnnouncementRecord>()
+const retiredRelays = /*@__PURE__*/ new WeakSet<SocketClient>()
 
 const getRoomKey = (rootTopic: string, selfTopic: string): string =>
   `${rootTopic}\0${selfTopic}`
@@ -341,172 +347,175 @@ const retrySubscription = (
   )
 }
 
-export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
-  init: config =>
-    getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
-      const client = relayManager.register(url, () =>
-        makeSocket(
-          url,
-          data => {
-            const [msgType, subId, payload, relayMsg] =
-              fromJson<
-                [
-                  string,
-                  string,
-                  {content: string; tags?: string[][]} | boolean | string,
-                  string
-                ]
-              >(data)
+export const joinRoom: JoinRoom<NostrRoomConfig> =
+  /*@__PURE__*/ createTopicStrategy({
+    init: config =>
+      getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
+        const client = relayManager.register(url, () =>
+          makeSocket(
+            url,
+            data => {
+              const [msgType, subId, payload, relayMsg] =
+                fromJson<
+                  [
+                    string,
+                    string,
+                    {content: string; tags?: string[][]} | boolean | string,
+                    string
+                  ]
+                >(data)
 
-            if (msgType !== eventMsgType) {
-              const prefix = `${libName}: relay failure from ${client.url} - `
-              const rejectionReason =
-                msgType === 'CLOSED' && typeof payload === 'string'
-                  ? payload
-                  : relayMsg
-              const didRejectEvent = msgType === 'OK' && payload === false
-              const isRateLimited =
-                (didRejectEvent || msgType === 'CLOSED') &&
-                rejectionReason?.startsWith('rate-limited:')
-              const isDuplicate =
-                didRejectEvent && rejectionReason?.startsWith('duplicate:')
-              const isTerminalRejection =
-                rejectionReason &&
-                /^(blocked|restricted|auth-required|pow):/.test(rejectionReason)
+              if (msgType !== eventMsgType) {
+                const prefix = `${libName}: relay failure from ${client.url} - `
+                const rejectionReason =
+                  msgType === 'CLOSED' && typeof payload === 'string'
+                    ? payload
+                    : relayMsg
+                const didRejectEvent = msgType === 'OK' && payload === false
+                const isRateLimited =
+                  (didRejectEvent || msgType === 'CLOSED') &&
+                  rejectionReason?.startsWith('rate-limited:')
+                const isDuplicate =
+                  didRejectEvent && rejectionReason?.startsWith('duplicate:')
+                const isTerminalRejection =
+                  rejectionReason &&
+                  /^(blocked|restricted|auth-required|pow):/.test(
+                    rejectionReason
+                  )
 
-              if (
-                msgType === 'OK' &&
-                payload === true &&
-                getRelayBackoffMs(client) === 0
-              ) {
-                relayBackoffs.delete(client)
-              }
+                if (
+                  msgType === 'OK' &&
+                  payload === true &&
+                  getRelayBackoffMs(client) === 0
+                ) {
+                  relayBackoffs.delete(client)
+                }
 
-              if (
-                (didRejectEvent || msgType === 'CLOSED') &&
-                isTerminalRejection &&
-                !retireRelay(client)
-              ) {
+                if (
+                  (didRejectEvent || msgType === 'CLOSED') &&
+                  isTerminalRejection &&
+                  !retireRelay(client)
+                ) {
+                  return
+                }
+
+                if (isRateLimited) {
+                  backoffRelay(client)
+                } else if (msgType === 'EOSE') {
+                  const batcher = batchers[client.url]
+                  if (
+                    batcher?.pendingEose.delete(subId) &&
+                    batcher.pendingEose.size === 0
+                  ) {
+                    batcher.retryMs = subscriptionRetryMs
+                    if (batcher.retryTimer !== null) {
+                      clearTimeout(batcher.retryTimer)
+                      batcher.retryTimer = null
+                    }
+                    // Do not wait for EOSE on the fast path. If installation was
+                    // slow, announce once when all batched subscriptions are ready.
+                    if (Date.now() - batcher.requestedAt >= 1_000) {
+                      replayAnnouncements(client)
+                    }
+                  }
+                }
+                if (msgType === 'CLOSED' && !isTerminalRejection) {
+                  retrySubscription(client, Boolean(isRateLimited))
+                }
+
+                if (
+                  !isDuplicate &&
+                  config.relayConfig?.warnOnRelayFailure !== false
+                ) {
+                  if (msgType === 'NOTICE') {
+                    console.warn(prefix + subId)
+                  } else if (didRejectEvent || msgType === 'CLOSED') {
+                    console.warn(prefix + rejectionReason)
+                  }
+                }
+
                 return
               }
 
-              if (isRateLimited) {
-                backoffRelay(client)
-              } else if (msgType === 'EOSE') {
-                const batcher = batchers[client.url]
-                if (
-                  batcher?.pendingEose.delete(subId) &&
-                  batcher.pendingEose.size === 0
-                ) {
-                  batcher.retryMs = subscriptionRetryMs
-                  if (batcher.retryTimer !== null) {
-                    clearTimeout(batcher.retryTimer)
-                    batcher.retryTimer = null
-                  }
-                  // Do not wait for EOSE on the fast path. If installation was
-                  // slow, announce once when all batched subscriptions are ready.
-                  if (Date.now() - batcher.requestedAt >= 1_000) {
-                    replayAnnouncements(client)
-                  }
-                }
-              }
-              if (msgType === 'CLOSED' && !isTerminalRejection) {
-                retrySubscription(client, Boolean(isRateLimited))
-              }
-
               if (
-                !isDuplicate &&
-                config.relayConfig?.warnOnRelayFailure !== false
+                payload &&
+                typeof payload === 'object' &&
+                'content' in payload
               ) {
-                if (msgType === 'NOTICE') {
-                  console.warn(prefix + subId)
-                } else if (didRejectEvent || msgType === 'CLOSED') {
-                  console.warn(prefix + rejectionReason)
+                const batcher = batchers[client.url]
+
+                if (batcher?.subIds.includes(subId) && payload.tags) {
+                  const topicTag = payload.tags.find(t => t[0] === tag)
+
+                  if (topicTag?.[1]) {
+                    batcher.topics.get(topicTag[1])?.(
+                      topicTag[1],
+                      payload.content
+                    )
+                  }
                 }
               }
-
-              return
-            }
-
-            if (
-              payload &&
-              typeof payload === 'object' &&
-              'content' in payload
-            ) {
-              const batcher = batchers[client.url]
-
-              if (batcher?.subIds.includes(subId) && payload.tags) {
-                const topicTag = payload.tags.find(t => t[0] === tag)
-
-                if (topicTag?.[1]) {
-                  batcher.topics.get(topicTag[1])?.(
-                    topicTag[1],
-                    payload.content
-                  )
-                }
-              }
-            }
-          },
-          () => resubscribeOnReconnect(client)
+            },
+            () => resubscribeOnReconnect(client)
+          )
         )
-      )
 
-      return client.ready
-    }),
+        return client.ready
+      }),
 
-  subscribeTopic: (client, topic, onMessage, context) => {
-    const key = getRoomKey(context.rootTopic, context.selfTopic)
-    ;(roomSigners[key] ??= {refs: 0}).refs += 1
-    let didReleaseSigner = false
-    const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
+    subscribeTopic: (client, topic, onMessage, context) => {
+      const key = getRoomKey(context.rootTopic, context.selfTopic)
+      ;(roomSigners[key] ??= {refs: 0}).refs += 1
+      let didReleaseSigner = false
+      const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
 
-    batchAdd(client, topic, handler)
+      batchAdd(client, topic, handler)
 
-    const cleanup = () => {
-      if (!didReleaseSigner) {
-        didReleaseSigner = true
-        const state = roomSigners[key]
+      const cleanup = () => {
+        if (!didReleaseSigner) {
+          didReleaseSigner = true
+          const state = roomSigners[key]
 
-        if (state) {
-          state.refs -= 1
+          if (state) {
+            state.refs -= 1
 
-          if (state.refs <= 0) {
-            delete roomSigners[key]
+            if (state.refs <= 0) {
+              delete roomSigners[key]
+            }
           }
+        }
+
+        if (batchers[client.url]?.topics.get(topic) === handler) {
+          batchRemove(client, topic)
         }
       }
 
-      if (batchers[client.url]?.topics.get(topic) === handler) {
-        batchRemove(client, topic)
+      // Rooms add the self topic before the root topic. Waiting only on
+      // the root keeps both topics in one batch while guaranteeing the REQ is
+      // written before createStrategy starts announcing.
+      return context.kind === 'root'
+        ? waitForBatchFlush(client).then(() => cleanup)
+        : cleanup
+    },
+
+    publishTopic: (client, topic, msg, {kind, rootTopic, selfTopic}) => {
+      const payload = typeof msg === 'string' ? msg : toJson(msg)
+      const key = getRoomKey(rootTopic, selfTopic)
+      const getSigner = () => getRoomSigner(key)
+
+      if (kind === 'announce') {
+        announcementMessages.forRelay(client)[topic] = {payload, getSigner}
       }
+
+      return publishMessage(
+        client,
+        topic,
+        payload,
+        kind === 'announce',
+        getSigner
+      )
     }
-
-    // Rooms add the self topic before the root topic. Waiting only on
-    // the root keeps both topics in one batch while guaranteeing the REQ is
-    // written before createStrategy starts announcing.
-    return context.kind === 'root'
-      ? waitForBatchFlush(client).then(() => cleanup)
-      : cleanup
-  },
-
-  publishTopic: (client, topic, msg, {kind, rootTopic, selfTopic}) => {
-    const payload = typeof msg === 'string' ? msg : toJson(msg)
-    const key = getRoomKey(rootTopic, selfTopic)
-    const getSigner = () => getRoomSigner(key)
-
-    if (kind === 'announce') {
-      announcementMessages.forRelay(client)[topic] = {payload, getSigner}
-    }
-
-    return publishMessage(
-      client,
-      topic,
-      payload,
-      kind === 'announce',
-      getSigner
-    )
-  }
-})
+  })
 
 export const getRelaySockets: () => Record<string, WebSocket> =
   relayManager.getSockets
@@ -584,7 +593,7 @@ export {
   type UserStateConfig
 } from '@trystero-p2p/core'
 
-export const defaultRelayUrls: string[] = [
+export const defaultRelayUrls: string[] = /*@__PURE__*/ [
   '0x-nostr-relay.fly.dev',
   'bendernostur.duckdns.org:8443',
   'cdn.satellite.earth',

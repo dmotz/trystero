@@ -18,6 +18,10 @@ import {
 } from './identity'
 import {isValidSignalPeerId} from './signal-handler'
 import {
+  createSlidingReplayWindow,
+  createTokenBucketLimiter
+} from './signed-record'
+import {
   all,
   authMetaKey,
   createBoundedCache,
@@ -76,8 +80,6 @@ const maxVerifiedDescriptors = 2_048
 const maxPeersPerUser = 16
 const descriptorUpdateRatePerSec = 8
 const descriptorUpdateBurstCap = 16
-const replayWindowBits = 256n
-const replayWindowMask = (1n << replayWindowBits) - 1n
 
 export const deriveMaxHops = (
   rosterSize: number,
@@ -140,13 +142,7 @@ type UnicastEnvelopeHeader = {
   l?: UnicastLeaseTuple
 }
 
-type OriginReplayState = {
-  maxSeq: number
-  windowBits: bigint
-  lastSeenAt: number
-}
-
-const validModes = new Set<TopologyMode>(['auto', 'gossip'])
+const validModes = /*@__PURE__*/ new Set<TopologyMode>(['auto', 'gossip'])
 
 export const normalizeTopologyConfig = (
   topology?: TopologyMode | ScaleConfig
@@ -697,10 +693,11 @@ export const createOverlayManager = ({
   let localRoleCert: RoleCertificate | null = null
   const descriptors = new Map<string, PeerDescriptor>()
   const descriptorReceivedAt = new Map<string, number>()
-  const descUpdateBuckets = new Map<
-    string,
-    {tokens: number; lastRefillAt: number}
-  >()
+  const descUpdateLimiter = createTokenBucketLimiter(
+    descriptorUpdateRatePerSec,
+    descriptorUpdateBurstCap,
+    maxVerifiedDescriptors
+  )
   const senderInvalidDescCounts = new Map<string, number>()
   const adjacency = new Map<string, Set<string>>()
   const pinnedSignKeys = new Map<string, string>()
@@ -709,14 +706,17 @@ export const createOverlayManager = ({
     string,
     {lo: number; hi: number; sig: string}
   >()
-  const relayLeaseReplay = new Map<string, OriginReplayState>()
+  const relayLeaseReplay = createSlidingReplayWindow(maxTrackedOrigins)
   const leftPeersSeq = new Map<string, number>()
   const hadRoutePeers = new Set<string>()
   const everConfirmedNeighbors = new Map<string, Set<string>>()
   const unreachableTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   // Per-origin monotonic sequence & 256-bit sliding replay window (cannot be flushed by traffic volume)
-  const originReplay = new Map<string, OriginReplayState>()
+  const originReplay = createSlidingReplayWindow(
+    maxTrackedOrigins,
+    k => directPeers.has(k) || descriptors.has(k)
+  )
   const seenMsgIds = createBoundedSet<string>(4_096)
 
   let localDescriptorSeq = 0
@@ -846,96 +846,11 @@ export const createOverlayManager = ({
       .catch(noOp)
   }
 
-  const isSeqReplayInMap = (
-    map: Map<string, OriginReplayState>,
-    key: string,
-    seq: number
-  ): boolean => {
-    const state = map.get(key)
-    if (!state) {
-      return false
-    }
-    if (seq > state.maxSeq) {
-      return false
-    }
-    if (seq === state.maxSeq) {
-      return true
-    }
-    const offset = BigInt(state.maxSeq - seq)
-    if (offset >= replayWindowBits) {
-      return true
-    }
-    return (state.windowBits & (1n << offset)) !== 0n
-  }
-
-  const recordSeqInMap = (
-    map: Map<string, OriginReplayState>,
-    key: string,
-    seq: number,
-    isPinnedKey?: (k: string) => boolean
-  ): boolean => {
-    const now = Date.now()
-    const state = map.get(key)
-    if (!state) {
-      if (map.size >= maxTrackedOrigins) {
-        let oldestKey: string | null = null
-        let oldestTime = Infinity
-        for (const [k, v] of map.entries()) {
-          if (!isPinnedKey?.(k) && v.lastSeenAt < oldestTime) {
-            oldestTime = v.lastSeenAt
-            oldestKey = k
-          }
-        }
-        if (oldestKey) {
-          map.delete(oldestKey)
-        }
-      }
-      map.set(key, {
-        maxSeq: seq,
-        windowBits: 1n,
-        lastSeenAt: now
-      })
-      return true
-    }
-
-    if (seq > state.maxSeq) {
-      const shift = BigInt(seq - state.maxSeq)
-      state.windowBits =
-        shift >= replayWindowBits
-          ? 1n
-          : ((state.windowBits << shift) | 1n) & replayWindowMask
-      state.maxSeq = seq
-      state.lastSeenAt = now
-      return true
-    }
-
-    if (seq === state.maxSeq) {
-      return false
-    }
-
-    const offset = BigInt(state.maxSeq - seq)
-    if (offset >= replayWindowBits) {
-      return false
-    }
-    const bit = 1n << offset
-    if ((state.windowBits & bit) !== 0n) {
-      return false
-    }
-    state.windowBits |= bit
-    state.lastSeenAt = now
-    return true
-  }
-
   const isOriginSeqReplay = (origin: string, seq: number): boolean =>
-    isSeqReplayInMap(originReplay, origin, seq)
+    originReplay.has(origin, seq)
 
   const recordOriginSeq = (origin: string, seq: number): boolean =>
-    recordSeqInMap(
-      originReplay,
-      origin,
-      seq,
-      k => directPeers.has(k) || descriptors.has(k)
-    )
+    originReplay.record(origin, seq)
 
   void getLocalCryptoIdentityImpl().then(id => {
     if (!isDestroyed) {
@@ -1140,7 +1055,7 @@ export const createOverlayManager = ({
   const purgePeerFromGraph = (peerId: string): void => {
     descriptors.delete(peerId)
     descriptorReceivedAt.delete(peerId)
-    descUpdateBuckets.delete(peerId)
+    descUpdateLimiter.delete(peerId)
     senderInvalidDescCounts.delete(peerId)
     outboundUnicastLeases.delete(peerId)
     adjacency.delete(peerId)
@@ -2320,29 +2235,10 @@ export const createOverlayManager = ({
         const existingInFlight = inFlightDescriptors.get(descInFlightKey)
         if (!existingInFlight) {
           if (existing) {
-            const now = Date.now()
-            let bucket = descUpdateBuckets.get(d.peerId)
-            if (!bucket) {
-              bucket = {tokens: descriptorUpdateBurstCap, lastRefillAt: now}
-              descUpdateBuckets.set(d.peerId, bucket)
-            } else {
-              const elapsedSec = Math.max(
-                0,
-                (now - bucket.lastRefillAt) / 1_000
-              )
-              if (elapsedSec > 0) {
-                bucket.tokens = Math.min(
-                  descriptorUpdateBurstCap,
-                  bucket.tokens + elapsedSec * descriptorUpdateRatePerSec
-                )
-                bucket.lastRefillAt = now
-              }
-            }
-            if (bucket.tokens < 1) {
+            if (!descUpdateLimiter.consume(d.peerId)) {
               stats.signatureFailures++
               continue
             }
-            bucket.tokens -= 1
           } else {
             if ((senderInvalidDescCounts.get(fromPeerId) ?? 0) >= 16) {
               stats.signatureFailures++
@@ -2769,10 +2665,7 @@ export const createOverlayManager = ({
 
       const relayLeaseKey = `${origin}\0${dest}`
       if (dest !== selfId && lease) {
-        if (
-          isSeqReplayInMap(relayLeaseReplay, relayLeaseKey, seq) ||
-          seenMsgIds.has(msgId)
-        ) {
+        if (relayLeaseReplay.has(relayLeaseKey, seq) || seenMsgIds.has(msgId)) {
           stats.duplicatesDropped++
           return
         }
@@ -2819,7 +2712,7 @@ export const createOverlayManager = ({
           return
         }
         const recorded = lease
-          ? recordSeqInMap(relayLeaseReplay, relayLeaseKey, seq)
+          ? relayLeaseReplay.record(relayLeaseKey, seq)
           : recordOriginSeq(origin, seq)
         if (!recorded || !seenMsgIds.add(msgId)) {
           stats.duplicatesDropped++

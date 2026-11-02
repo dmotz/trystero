@@ -1,9 +1,4 @@
 import {ecdsaSign} from './crypto'
-import {
-  generateNonExtractableIdbRecord,
-  verifyUserIdKey,
-  verifyWithP256
-} from './identity'
 import {encodeBytes, libId, mkErr} from './primitives'
 import type {UserIdentity} from './types'
 
@@ -14,6 +9,19 @@ export type StoredIdbIdentityRecord = {
   privateKey: CryptoKey
 }
 
+export type IdbIdentityDeps = {
+  generateRecord: () => Promise<StoredIdbIdentityRecord>
+  verifyUserIdKey: (
+    userId: string,
+    pubKey: JsonWebKey
+  ) => boolean | Promise<boolean>
+  verifyWithP256: (
+    sig: Uint8Array,
+    payload: Uint8Array,
+    pubKey: JsonWebKey
+  ) => boolean | Promise<boolean>
+}
+
 const storagePrefix = `${libId}:user_identity:v1:`
 const idbDbName = `${libId}_identity_v1`
 const idbStoreName = 'identities'
@@ -21,7 +29,7 @@ const idbErr = (op: string): Error => mkErr(`IndexedDB ${op} failed`)
 const idbGetErr = /*@__PURE__*/ idbErr('get')
 const idbProbeBytes = /*@__PURE__*/ encodeBytes(`${libId}:idb-key-probe:v1`)
 
-const buildUserIdentityFromIdbRecord = (
+export const buildUserIdentityFromIdbRecord = (
   rec: StoredIdbIdentityRecord
 ): UserIdentity => ({
   userId: rec.userId,
@@ -58,7 +66,8 @@ const idbGetRecord = (
   })
 
 const isValidStoredIdbRecord = async (
-  rec: StoredIdbIdentityRecord | undefined
+  rec: StoredIdbIdentityRecord | undefined,
+  deps: IdbIdentityDeps
 ): Promise<boolean> => {
   if (
     !rec ||
@@ -66,13 +75,13 @@ const isValidStoredIdbRecord = async (
     !rec.userId ||
     !rec.signPubJwk ||
     !rec.privateKey ||
-    !(await verifyUserIdKey(rec.userId, rec.signPubJwk))
+    !(await deps.verifyUserIdKey(rec.userId, rec.signPubJwk))
   ) {
     return false
   }
   try {
     const sig = await ecdsaSign(rec.privateKey, idbProbeBytes as BufferSource)
-    return await verifyWithP256(sig, idbProbeBytes, rec.signPubJwk)
+    return await deps.verifyWithP256(sig, idbProbeBytes, rec.signPubJwk)
   } catch {
     return false
   }
@@ -93,7 +102,8 @@ const idbPutRecord = (
 const idbAddOrGetRecord = (
   db: IDBDatabase,
   appId: string,
-  candidate: StoredIdbIdentityRecord
+  candidate: StoredIdbIdentityRecord,
+  deps: IdbIdentityDeps
 ): Promise<StoredIdbIdentityRecord> =>
   new Promise((resolve, reject) => {
     const tx = db.transaction(idbStoreName, 'readwrite')
@@ -102,7 +112,7 @@ const idbAddOrGetRecord = (
     getReq.onsuccess = () => {
       const existing = getReq.result as StoredIdbIdentityRecord | undefined
       if (existing !== undefined) {
-        isValidStoredIdbRecord(existing).then(valid => {
+        isValidStoredIdbRecord(existing, deps).then(valid => {
           if (valid) {
             resolve(existing)
           } else {
@@ -121,7 +131,7 @@ const idbAddOrGetRecord = (
             reject(addReq.error ?? idbErr('add'))
             return
           }
-          isValidStoredIdbRecord(winner).then(valid => {
+          isValidStoredIdbRecord(winner, deps).then(valid => {
             if (valid) {
               resolve(winner)
             } else {
@@ -160,24 +170,25 @@ const withNavigatorLock = async <T>(
 }
 
 export const loadOrCreateIdbIdentity = (
-  idbKey: string
+  idbKey: string,
+  deps: IdbIdentityDeps
 ): Promise<UserIdentity> =>
   withNavigatorLock(`${storagePrefix}${idbKey}`, async () => {
     const db = await openIdentityDb()
     try {
       const existing = await idbGetRecord(db, idbKey)
       if (existing !== undefined) {
-        if (await isValidStoredIdbRecord(existing)) {
+        if (await isValidStoredIdbRecord(existing, deps)) {
           return buildUserIdentityFromIdbRecord(existing)
         }
-        const repaired = await generateNonExtractableIdbRecord()
+        const repaired = await deps.generateRecord()
         return buildUserIdentityFromIdbRecord(
           await idbPutRecord(db, idbKey, repaired)
         )
       }
-      const candidate = await generateNonExtractableIdbRecord()
+      const candidate = await deps.generateRecord()
       return buildUserIdentityFromIdbRecord(
-        await idbAddOrGetRecord(db, idbKey, candidate)
+        await idbAddOrGetRecord(db, idbKey, candidate, deps)
       )
     } finally {
       db.close()
