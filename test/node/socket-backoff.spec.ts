@@ -3,7 +3,7 @@ import test from 'node:test'
 import {
   makeSocket,
   setRelayConnectivity
-} from '../../packages/core/src/utils.ts'
+} from '../../packages/core/src/relay-manager.ts'
 import {setRelayConnectivity as nostrSetRelayConnectivity} from '../../packages/nostr/src/index.ts'
 import {setRelayConnectivity as torrentSetRelayConnectivity} from '../../packages/torrent/src/index.ts'
 import {setRelayConnectivity as trysteroSetRelayConnectivity} from '../../packages/trystero/src/index.ts'

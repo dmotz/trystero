@@ -12,6 +12,7 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const corePublicSourcePath = resolve('packages/core/src/public.ts')
 const empty = resolve('scripts/empty.ts')
 const packageDepsConfig = {
   deps: {
@@ -39,14 +40,16 @@ const dropDevLabelStatements = testBuild
 export default [
   {
     workspace: {
-      include: ['packages/*']
+      include: ['packages/core']
     },
-    entry: 'src/index.ts',
+    entry: {
+      index: 'src/index.ts',
+      public: 'src/public.ts'
+    },
     dts: {generator: 'oxc'},
     unbundle: true,
     sourcemap: false,
     minify: false,
-    exports: true,
     ...packageDepsConfig,
     publint: ci,
     attw: ci,
@@ -56,13 +59,29 @@ export default [
     workspace: {
       include: ['packages/ws-relay']
     },
-    entry: {server: 'src/server.ts'},
+    entry: {
+      index: 'src/index.ts',
+      server: 'src/server.ts'
+    },
     dts: {generator: 'oxc'},
     unbundle: true,
     sourcemap: false,
     minify: false,
-    clean: false,
-    exports: true,
+    ...packageDepsConfig,
+    publint: ci,
+    attw: ci,
+    ...dropDevLabelStatements
+  },
+  {
+    workspace: {
+      include: ['packages/*'],
+      exclude: ['packages/core', 'packages/ws-relay']
+    },
+    entry: 'src/index.ts',
+    dts: {generator: 'oxc'},
+    unbundle: true,
+    sourcemap: false,
+    minify: false,
     ...packageDepsConfig,
     publint: ci,
     attw: ci,
@@ -82,6 +101,7 @@ export default [
         minify: false,
         ...browserBundleDepsConfig,
         alias: {
+          '@trystero-p2p/core/public': corePublicSourcePath,
           '@trystero-p2p/core': coreSourcePath,
           crypto: empty,
           'node:crypto': empty

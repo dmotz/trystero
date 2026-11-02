@@ -62,7 +62,7 @@ const fixture = t => {
     announceIntervalMs: 5333,
     selfId
   }
-  const receive = createSignalHandler(ctx)(0)
+  const receive = createSignalHandler(ctx).handleMessage(0)
   const send = (_, message) => messages.push(JSON.parse(message))
   return {
     ctx,
@@ -243,8 +243,10 @@ void test('a matching repeated offer replays its answer and candidates, not a ne
     'rapid duplicates must not amplify traffic'
   )
   const relay1Messages = []
-  await createSignalHandler(f.ctx)(1)('root', offer, (_, message) =>
-    relay1Messages.push(JSON.parse(message))
+  await createSignalHandler(f.ctx).handleMessage(1)(
+    'root',
+    offer,
+    (_, message) => relay1Messages.push(JSON.parse(message))
   )
   assert.deepEqual(
     relay1Messages,
@@ -450,8 +452,8 @@ void test(
 
       assert.equal(
         initCount,
-        1,
-        'strategy init should run once for a shared createStrategy instance'
+        2,
+        'strategy init should run with each joinRoom config'
       )
       assert.notEqual(
         appARoom,

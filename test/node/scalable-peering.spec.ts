@@ -4925,7 +4925,7 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     onPeerDiscovered: () => {
       discoveredCount++
     }
-  })(0)
+  }).handleMessage(0)
 
   const handleSignal = (raw: string, topic = 'root-topic') =>
     relayHandler(topic, raw, () => {})

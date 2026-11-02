@@ -1,67 +1,45 @@
-import {
-  createEventEmitter,
-  createWindowCounter,
-  entries,
-  fromEntries,
-  getConfiguredPlugins,
-  internalActionPrefix,
-  isBrowser,
-  isSelfAsAdminPlugin,
-  keys,
-  lockMethods,
-  logErr,
-  mkErr,
-  noOp,
-  peerBannedErr,
-  peerBannedMsg,
-  peerDisconnectedErr,
-  peerDisconnectedMsg,
-  peerLeftRoomErr,
-  requiresRolesErr,
-  reservedRoomPropertyNames,
-  roomFullErr,
-  roomFullMsg,
-  roomLeftErr,
-  selfCertifyingRoomRegex,
-  selfCertRoomRolesErr,
-  toError,
-  toErrorMessage,
-  warnEphemeralAdmin,
-  warnNoPeer
-} from './utils'
 import {createActionManager} from './actions'
-import {
-  createHandshakeManager,
-  type HandshakeReadyPayload,
-  type VerifiedPeerIdentity
-} from './handshake'
+import type {HandshakeReadyPayload, VerifiedPeerIdentity} from './handshake'
 import {
   type EndpointIdentity,
   getDefaultEndpointIdentity,
-  isEphemeralIdentityConfig,
   resolveUserIdentity
 } from './identity'
+import type {
+  InternalRoomContext,
+  KernelRolesProvider,
+  KernelScaleProvider
+} from './internal-types'
 import {createMediaManager, type InternalMediaMeta} from './media'
 import {
   createPeerRegistry,
   type PeerActivationResult,
   type PeerDeactivationResult
 } from './peer-registry'
-import {createStateManager, jwkToCompactPub} from './state'
+import {signalingBridgeSymbol} from './primitives'
+import {createRoomAdmission} from './room-admission'
+import {
+  directMeshPolicy,
+  isBanError,
+  openAuthPolicy,
+  registerBeforeUnloadCleanup,
+  resolvePluginRoomIds,
+  setupRoomPlugins,
+  validateAndPreparePlugins
+} from './room-bootstrap'
+import {createStateManager} from './state'
 import type {
   AddMediaOptions,
   DataPayload,
-  KernelRolesProvider,
   KernelRoomErrorInput,
-  KernelScaleProvider,
   PeerHandle,
   PeerHandshake,
   PeerJoinContext,
   PeerLeaveContext,
+  PluginContext,
   RemoveMediaOptions,
   Room,
   RoomError,
-  RoomKernel,
   RoomPlugin,
   RoomWithPlugins,
   SelfInfo,
@@ -72,44 +50,27 @@ import type {
   UserJoinContext,
   UserLeaveContext
 } from './types'
+import {
+  createEventEmitter,
+  createWindowCounter,
+  fromEntries,
+  internalActionPrefix,
+  isBrowser,
+  lockMethods,
+  logErr,
+  mkErr,
+  noOp,
+  peerDisconnectedErr,
+  peerDisconnectedMsg,
+  peerLeftRoomErr,
+  requiresRolesErr,
+  roomLeftErr,
+  toError,
+  toErrorMessage,
+  warnNoPeer
+} from './utils'
 
-const unloadEvent = 'beforeunload'
 const defaultHandshakeTimeoutMs = 10_000
-const beforeUnloadRoomCleanups = new Set<() => void>()
-
-const cleanupActiveRoomsOnBeforeUnload = (): void =>
-  beforeUnloadRoomCleanups.forEach(cleanup => cleanup())
-
-const registerBeforeUnloadCleanup = (cleanup: () => void): (() => void) => {
-  beforeUnloadRoomCleanups.add(cleanup)
-
-  if (beforeUnloadRoomCleanups.size === 1) {
-    addEventListener(unloadEvent, cleanupActiveRoomsOnBeforeUnload)
-  }
-
-  return (): void => {
-    beforeUnloadRoomCleanups.delete(cleanup)
-
-    if (!beforeUnloadRoomCleanups.size) {
-      removeEventListener(unloadEvent, cleanupActiveRoomsOnBeforeUnload)
-    }
-  }
-}
-
-const isBanError = (err?: Error | string): boolean => {
-  if (!err) {
-    return false
-  }
-  if (err === peerBannedErr || err === peerBannedMsg) {
-    return true
-  }
-  const msg = typeof err === 'string' ? err : err.message
-  return (
-    msg === peerBannedMsg ||
-    msg === peerBannedErr.message ||
-    msg.includes(peerBannedMsg)
-  )
-}
 
 export type RoomSignalingBridge = {
   getScaleProvider: () => KernelScaleProvider | null
@@ -123,31 +84,35 @@ export type RoomSignalingBridge = {
   emitError: (error: RoomError) => void
 }
 
-const roomSignalingBridges = new WeakMap<Room, RoomSignalingBridge>()
-
 export const getRoomSignalingBridge = (
   room: Room
-): RoomSignalingBridge | undefined => roomSignalingBridges.get(room)
+): RoomSignalingBridge | undefined =>
+  (room as Room & {[signalingBridgeSymbol]?: RoomSignalingBridge})[
+    signalingBridgeSymbol
+  ]
 
-type RoomOptions = {
+export type RoomOptions = {
   selfId?: string
   endpointIdentityP?: Promise<EndpointIdentity>
   appId?: string
   roomId?: string
+  effectiveRoomIdP?: Promise<string>
   password?: string
   limit?: number
   use?: readonly RoomPlugin<string, any>[]
   preResolvedPlugins?: Map<RoomPlugin, unknown>
+  didResolvePluginRoomIds?: boolean
   identity?: UserIdentityConfig
   userIdentityP?: Promise<UserIdentity>
   verifyPeerIdentity?: boolean
+  runIdentityHandshake?: boolean
   maxReceiveBytes?: number
   onPeerHandshake?: PeerHandshake
   handshakeTimeoutMs?: number
   onBeforeLeave?: () => void
 }
 
-export default <
+export const createRoomWithBridge = <
   const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
     undefined
 >(
@@ -155,7 +120,7 @@ export default <
   onPeerLeave: (id: string) => void,
   onSelfLeave: () => void,
   roomOptions: RoomOptions & {use?: TPlugins} = {}
-): RoomWithPlugins<TPlugins> => {
+): {room: RoomWithPlugins<TPlugins>; bridge: RoomSignalingBridge} => {
   const {
     selfId: explicitSelfId,
     endpointIdentityP,
@@ -163,10 +128,10 @@ export default <
     roomId: initialRoomId = '',
     password = '',
     limit,
-    preResolvedPlugins,
     identity,
     userIdentityP,
     verifyPeerIdentity = false,
+    runIdentityHandshake = false,
     onPeerHandshake,
     handshakeTimeoutMs = defaultHandshakeTimeoutMs,
     maxReceiveBytes,
@@ -189,17 +154,21 @@ export default <
     ReturnType<typeof setTimeout>
   >()
   const pendingActionAuthorities = new Map<string, string[]>()
-  const plugins = getConfiguredPlugins(roomOptions.use)
-  const hasRolesPlugin = plugins.some(p => p.name === 'roles')
-  if (!hasRolesPlugin && selfCertifyingRoomRegex.test(initialRoomId)) {
-    throw selfCertRoomRolesErr
-  }
+  const {plugins, resolveOrderPlugins, hasRolesPlugin} =
+    validateAndPreparePlugins(
+      roomOptions.use,
+      initialRoomId,
+      identity,
+      Boolean(userIdentityP)
+    )
   let effectiveRoomId = initialRoomId
   let rolesProvider: KernelRolesProvider | null = null
   let scaleProvider: KernelScaleProvider | null = null
   let scaleTargetsChangedCallback: ((targetPeerIds: string[]) => void) | null =
     null
   let roomInstanceRef: Room | null = null
+  const auth = (): KernelRolesProvider => rolesProvider ?? openAuthPolicy
+  const mesh = (): KernelScaleProvider => scaleProvider ?? directMeshPolicy
   const peerActivatedEmitter = createEventEmitter<[string, PeerHandle]>(
     'peer activated handler'
   )
@@ -227,12 +196,20 @@ export default <
     }
   }
 
+  const setEffectiveRoomId = (rid: string): void => {
+    if (rid && rid !== effectiveRoomId) {
+      effectiveRoomId = rid
+      roomIdChangedEmitter.emit(rid)
+    }
+  }
+
   let localUserId = ''
   const peerRegistry = createPeerRegistry({
     getSelfId: () => localSelfId,
     getLocalUserId: () => localUserId
   })
 
+  let didReportLocalIdentityError = false
   const resolvedUserIdentityP = (
     userIdentityP ??
     resolveUserIdentity(
@@ -241,6 +218,7 @@ export default <
       identity === undefined ? undefined : {identity},
       explicitSelfId
     ).catch(err => {
+      didReportLocalIdentityError = true
       queueMicrotask(() => {
         emitRoomError({
           code: 'identity-failed',
@@ -256,6 +234,42 @@ export default <
   })
   void resolvedUserIdentityP.catch(noOp)
 
+  const localResolvedPlugins = roomOptions.didResolvePluginRoomIds
+    ? {
+        preResolvedPlugins: roomOptions.preResolvedPlugins,
+        effectiveRoomIdP: roomOptions.effectiveRoomIdP
+      }
+    : resolvePluginRoomIds(
+        resolveOrderPlugins,
+        appId,
+        initialRoomId,
+        resolvedUserIdentityP,
+        (pluginName, err) => {
+          if (!didReportLocalIdentityError && !roomOptions.userIdentityP) {
+            queueMicrotask(() => {
+              emitRoomError({
+                code: 'plugin-failed',
+                plugin: pluginName,
+                message: toErrorMessage(err, 'room resolution failed'),
+                cause: err
+              })
+            })
+          }
+        }
+      )
+  const preResolvedPlugins =
+    roomOptions.preResolvedPlugins ?? localResolvedPlugins.preResolvedPlugins
+  const effectiveRoomIdP =
+    roomOptions.effectiveRoomIdP ?? localResolvedPlugins.effectiveRoomIdP
+
+  if (effectiveRoomIdP) {
+    void effectiveRoomIdP.then(rid => {
+      if (!leavePromise) {
+        setEffectiveRoomId(rid)
+      }
+    }, noOp)
+  }
+
   const {
     getPeerUserId,
     getKnownPeerUserId,
@@ -265,29 +279,8 @@ export default <
   } = peerRegistry
 
   const isDirectPeer = (id: string): boolean => peerRegistry.isDirectActive(id)
-
-  const isPeerBanned = (id: string): boolean =>
-    rolesProvider?.isPeerBanned(id) ?? false
-
-  const getPeerRoles = (id = localSelfId): string[] =>
-    rolesProvider?.getPeerRoles(id) ?? []
-
-  const reportHandshakeError = (
-    peerId: string,
-    error: string,
-    cause?: Error
-  ): void => {
-    const cleanMsg = error.replace(/^handshake failed: /, '')
-    if (isBanError(cleanMsg) || isBanError(cause) || isPeerBanned(peerId)) {
-      return
-    }
-    emitRoomError({
-      code: 'handshake-failed',
-      peerId,
-      message: cleanMsg,
-      ...(cause !== undefined ? {cause} : {})
-    })
-  }
+  const isPeerBanned = (id: string): boolean => auth().isPeerBanned(id)
+  const getPeerRoles = (id = localSelfId): string[] => auth().getPeerRoles(id)
 
   const emitActivatedEvents = (
     peerId: string,
@@ -321,7 +314,6 @@ export default <
   }
 
   let unregisterBeforeUnloadCleanup: () => void = noOp
-  let didReportRoomFull = false
 
   const iterate = (
     targets: TargetPeers,
@@ -352,7 +344,7 @@ export default <
       }
     } else if (!peerRegistry.hasAnyPeer(id)) {
       if (banned) {
-        scaleProvider?.markPeerBanned(id)
+        mesh().markPeerBanned(id)
       }
       return
     }
@@ -403,11 +395,9 @@ export default <
     canReceiveFromPeer: (id, receiveWhilePending) =>
       !isPeerBanned(id) &&
       (peerRegistry.isRoomActive(id) ||
-        handshakeManager.canReceiveFromPeer(id, receiveWhilePending)),
+        admission.canReceiveFromPeer(id, receiveWhilePending)),
     broadcastInline: (frame, onProgress) =>
-      scaleProvider
-        ? scaleProvider.broadcastInline(frame, onProgress)
-        : Promise.resolve(false),
+      mesh().broadcastInline(frame, onProgress),
     registerActionAuthority: (namespace, roles) => {
       if (!rolesProvider && !hasRolesPlugin) {
         throw requiresRolesErr('action role gating')
@@ -417,72 +407,47 @@ export default <
       } else {
         pendingActionAuthorities.delete(namespace)
       }
-      scaleProvider?.registerActionAuthority(namespace, roles)
+      mesh().registerActionAuthority(namespace, roles)
     },
     getPeerRoles: peerId => getPeerRoles(peerId),
     onUnauthorizedAction: () => {
-      scaleProvider?.recordSignatureFailure()
+      mesh().recordSignatureFailure()
     },
-    signActionPayload: async (namespace, requiredRoles, data, userMetadata) => {
-      if (!rolesProvider && hasRolesPlugin) {
-        await pluginSetupP
-      }
-      return rolesProvider
-        ? rolesProvider.signActionPayload(
-            namespace,
-            requiredRoles,
-            data,
-            userMetadata
-          )
-        : (userMetadata ?? null)
-    },
-    verifyActionOffer: async (
-      namespace,
-      peerId,
-      requiredRoles,
-      wireMetadata
-    ) => {
-      if (!rolesProvider && hasRolesPlugin) {
-        await pluginSetupP
-      }
-      return rolesProvider
-        ? rolesProvider.verifyActionOffer(
-            namespace,
-            peerId,
-            requiredRoles,
-            wireMetadata
-          )
-        : {
-            valid: true,
-            ...(wireMetadata === undefined ? {} : {userMetadata: wireMetadata}),
-            roles: []
-          }
-    },
+    signActionPayload: async (namespace, requiredRoles, data, userMetadata) =>
+      (await ensureRolesReady()).signActionPayload(
+        namespace,
+        requiredRoles,
+        data,
+        userMetadata
+      ),
+    verifyActionOffer: async (namespace, peerId, requiredRoles, wireMetadata) =>
+      (await ensureRolesReady()).verifyActionOffer(
+        namespace,
+        peerId,
+        requiredRoles,
+        wireMetadata
+      ),
     verifyActionPayload: async (
       namespace,
       peerId,
       requiredRoles,
       data,
       wireMetadata
-    ) => {
-      if (!rolesProvider && hasRolesPlugin) {
-        await pluginSetupP
-      }
-      return rolesProvider
-        ? rolesProvider.verifyActionPayload(
-            namespace,
-            peerId,
-            requiredRoles,
-            data,
-            wireMetadata
-          )
-        : {
-            valid: true,
-            ...(wireMetadata === undefined ? {} : {userMetadata: wireMetadata}),
-            roles: []
-          }
-    }
+    ) =>
+      (await ensureRolesReady()).verifyActionPayload(
+        namespace,
+        peerId,
+        requiredRoles,
+        data,
+        wireMetadata
+      )
   })
+  const ensureRolesReady = async (): Promise<KernelRolesProvider> => {
+    if (!rolesProvider && hasRolesPlugin) {
+      await pluginSetupP
+    }
+    return auth()
+  }
   const makeActionInternal = actionManager.makeInternalAction
   const handleData = actionManager.handleData
   const makeAction = actionManager.makeAction
@@ -490,7 +455,7 @@ export default <
   const peerStatePenalty = createWindowCounter(512, 8)
 
   const recordPeerStateFailure = (fromPeerId?: string): void => {
-    scaleProvider?.recordSignatureFailure()
+    mesh().recordSignatureFailure()
     if (!fromPeerId || fromPeerId === localSelfId) {
       return
     }
@@ -509,17 +474,19 @@ export default <
       const [, resolvedUser] = await Promise.all([
         localEndpointP,
         resolvedUserIdentityP,
-        pluginSetupP
+        pluginSetupP,
+        ...(effectiveRoomIdP ? [effectiveRoomIdP] : [])
       ])
+      const pluginSetupError = getPluginSetupError()
       if (pluginSetupError) {
         throw pluginSetupError
       }
       if (rolesProvider) {
-        const auth = await rolesProvider.getAuthorityInfo()
+        const info = await rolesProvider.getAuthorityInfo()
         return {
           selfId: localSelfId,
           user: resolvedUser,
-          roomId: auth.roomId
+          roomId: info.roomId
         }
       }
       return {
@@ -533,7 +500,7 @@ export default <
     getScaleProvider: () => scaleProvider,
     isPeerActive: peerId => peerRegistry.isRoomActive(peerId),
     isPeerPendingHandshake: peerId =>
-      Boolean(handshakeManager.getPeer(peerId) && !isDirectPeer(peerId)),
+      Boolean(admission.getPendingPeer(peerId) && !isDirectPeer(peerId)),
     isDirectPeer,
     getDirectPeerIds: () => peerRegistry.getDirectPeerIds(true),
     isUserOnline: peerRegistry.isUserOnline,
@@ -573,7 +540,7 @@ export default <
     if (peer) {
       if (currentDirect !== peer) {
         if (banned) {
-          scaleProvider?.markPeerBanned(id)
+          mesh().markPeerBanned(id)
           if (!peerRegistry.hasAnyPeer(id)) {
             return
           }
@@ -583,7 +550,7 @@ export default <
       }
     } else if (!peerRegistry.hasAnyPeer(id)) {
       if (banned) {
-        scaleProvider?.markPeerBanned(id)
+        mesh().markPeerBanned(id)
       }
       return
     }
@@ -595,20 +562,20 @@ export default <
       !peerRegistry.isDirectActive(id) &&
       peerRegistry.hasVirtual(id)
     ) {
-      handshakeManager.clearPeer(id, err)
+      admission.clearPendingPeer(id, err)
       stateManager.clearPeer(id)
       peerRegistry.removePendingDirectOnly(id, currentDirect)
       currentDirect.destroy()
-      scaleProvider?.removeDirectPeer(id, currentDirect, err)
+      mesh().removeDirectPeer(id, currentDirect, err)
       onPeerLeave(id)
       return
     }
 
     if (banned) {
-      scaleProvider?.markPeerBanned(id)
+      mesh().markPeerBanned(id)
     }
 
-    handshakeManager.clearPeer(id, err)
+    admission.clearPendingPeer(id, err)
     stateManager.clearPeer(id)
     actionManager.clearPeer(id, err)
     mediaManager.clearPeer(id)
@@ -616,7 +583,7 @@ export default <
 
     if (removed.directPeer) {
       destroyDirectHandle(removed.directPeer, banned)
-      scaleProvider?.removeDirectPeer(id, removed.directPeer, err)
+      mesh().removeDirectPeer(id, removed.directPeer, err)
       onPeerLeave(id)
     }
 
@@ -626,11 +593,9 @@ export default <
   const leave = (): Promise<void> =>
     (leavePromise ??= (async () => {
       onBeforeLeave?.()
-      for (const id of peerRegistry.getPeerIds(true)) {
-        handshakeManager.clearPeer(id, roomLeftErr)
-      }
+      admission.clearAllAdmission(roomLeftErr)
       leaveEmitter.emit()
-      scaleProvider?.announceLeave()
+      mesh().announceLeave()
       const leaveTargets = scaleProvider
         ? peerRegistry.getDirectPeerIds(false)
         : undefined
@@ -644,7 +609,7 @@ export default <
       controller.abort()
 
       try {
-        scaleProvider?.destroy()
+        mesh().destroy()
         for (const [peer, timer] of deferredBanDestroyPeers.entries()) {
           clearTimeout(timer)
           peer.destroy()
@@ -707,7 +672,7 @@ export default <
     }
   )
 
-  const kernel: RoomKernel = {
+  const publicKernel: PluginContext = {
     get selfId() {
       return localSelfId
     },
@@ -716,23 +681,12 @@ export default <
     password,
     ...(limit === undefined ? {} : {limit}),
     getRoomId: () => effectiveRoomId,
-    setEffectiveRoomId: rid => {
-      if (rid && rid !== effectiveRoomId) {
-        effectiveRoomId = rid
-        roomIdChangedEmitter.emit(rid)
-      }
-    },
     getLocalUserIdentity: () => resolvedUserIdentityP,
     getPeerUserId,
     getKnownPeerUserId,
-    setPeerUserId: peerRegistry.setPeerUserId,
     getUserPeerIds,
     getPeerPublicKey: peerRegistry.getPeerPubKey,
-    setPeerPublicKey: (peerId, pubKey) => {
-      peerRegistry.setPeerPubKey(peerId, pubKey)
-      scaleProvider?.setPeerSignPublicKey(peerId, pubKey)
-    },
-    getActivePeerIds: () => peerRegistry.getDirectPeerIds(true),
+    getActivePeerIds: () => peerRegistry.getPeerIds(false),
     getAllPeerIds: () => peerRegistry.getPeerIds(true),
     isPeerActive: peerId => peerRegistry.isRoomActive(peerId),
     getPeerHandle: (peerId, includePending = false) =>
@@ -740,13 +694,38 @@ export default <
     resolveSendTarget,
     resolveRequestTarget,
     kickPeer: (peerId, reason) => kickPeer(peerId, undefined, reason),
-    purgeBannedUserState: userId => stateManager.purgeBannedUser(userId),
     emitError: err => emitRoomError(err),
     makeAction,
     makeInternalAction: makeActionInternal,
+    getRolesProvider: () => rolesProvider,
+    getScaleProvider: () => scaleProvider,
+    onPeerActivated: (cb, options) =>
+      peerActivatedEmitter.subscribe(cb, options, () =>
+        peerRegistry.getDirectPeerEntries(true)
+      ),
+    onPeerDeactivated: (cb, options) =>
+      peerDeactivatedEmitter.subscribe(cb, options),
+    onRoomIdChanged: (cb, options) =>
+      roomIdChangedEmitter.subscribe(cb, options),
+    onLeave: (cb, options) => leaveEmitter.subscribe(cb, options)
+  }
+
+  const internalKernel: InternalRoomContext = {
+    ...publicKernel,
+    get selfId() {
+      return localSelfId
+    },
+    ...(effectiveRoomIdP === undefined ? {} : {effectiveRoomIdP}),
+    setEffectiveRoomId,
+    setPeerUserId: peerRegistry.setPeerUserId,
+    setPeerPublicKey: (peerId, pubKey) => {
+      peerRegistry.setPeerPubKey(peerId, pubKey)
+      mesh().setPeerSignPublicKey(peerId, pubKey)
+    },
+    getDirectActivePeerIds: () => peerRegistry.getDirectPeerIds(true),
     deliverRawData: (originPeerId, data) => {
       if (isPeerBanned(originPeerId)) {
-        scaleProvider?.recordSignatureFailure()
+        mesh().recordSignatureFailure()
         return
       }
       handleData(originPeerId, data)
@@ -769,19 +748,10 @@ export default <
         provider.addDirectPeer(id, peer)
       }
     },
-    getRolesProvider: () => rolesProvider,
-    getScaleProvider: () => scaleProvider,
-    onPeerActivated: (cb, options) =>
-      peerActivatedEmitter.subscribe(cb, options, () =>
-        peerRegistry.getDirectPeerEntries(true)
-      ),
-    onPeerDeactivated: (cb, options) =>
-      peerDeactivatedEmitter.subscribe(cb, options),
-    onRoomIdChanged: (cb, options) =>
-      roomIdChangedEmitter.subscribe(cb, options),
-    onLeave: (cb, options) => leaveEmitter.subscribe(cb, options),
+    getInternalRolesProvider: () => rolesProvider,
+    getInternalScaleProvider: () => scaleProvider,
     activateVirtualPeer: (peerId, transport) => {
-      if (isPeerBanned(peerId) || isAlreadyFullForPeer(peerId)) {
+      if (isPeerBanned(peerId) || admission.isAlreadyFullForPeer(peerId)) {
         transport.close?.()
         return false
       }
@@ -808,224 +778,61 @@ export default <
         mediaManager.clearPeer(peerId)
       }
       emitDeactivatedEvents(peerId, res)
-    }
+    },
+    purgeBannedUserState: userId => stateManager.purgeBannedUser(userId)
   }
 
-  if (
-    !userIdentityP &&
-    plugins.some(isSelfAsAdminPlugin) &&
-    isEphemeralIdentityConfig(identity)
-  ) {
-    warnEphemeralAdmin()
-  }
-  const pluginApis: Record<string, unknown> = {}
-  let didRunPluginSetup = false
-  let pluginSetupError: unknown = null
-  let failedPluginName: string | undefined
-  const runPluginSetup = (): void => {
-    if (didRunPluginSetup) {
-      if (pluginSetupError) {
-        throw pluginSetupError
-      }
-      return
-    }
-    didRunPluginSetup = true
-    let activePluginName: string | undefined
-    try {
-      const seenPluginApiKeys = new Set<string>()
-      for (const plugin of plugins) {
-        activePluginName = plugin.name
-        const preState = preResolvedPlugins?.get(plugin)
-        const api = plugin.setup(kernel, preState)
-        if (api && typeof api === 'object') {
-          for (const key of keys(api as Record<string, unknown>)) {
-            const propErr = (msg: string): Error =>
-              mkErr(`plugin "${plugin.name}" ${msg} room property "${key}"`)
-            if (reservedRoomPropertyNames.has(key)) {
-              throw propErr('cannot override reserved')
-            }
-            if (seenPluginApiKeys.has(key)) {
-              throw propErr('defines duplicate')
-            }
-            seenPluginApiKeys.add(key)
-          }
-          Object.assign(pluginApis, api)
-        }
-      }
-      activePluginName = undefined
-      if (!rolesProvider && selfCertifyingRoomRegex.test(initialRoomId)) {
-        throw selfCertRoomRolesErr
-      }
-      if (roomInstanceRef) {
-        for (const [k, v] of entries(pluginApis)) {
-          if (!reservedRoomPropertyNames.has(k)) {
-            ;(roomInstanceRef as Record<string, unknown>)[k] = v
-          }
-        }
-      }
-    } catch (err) {
-      failedPluginName = activePluginName
-      pluginSetupError = err
-      throw err
-    }
-  }
-
-  let pluginSetupP: Promise<void>
-  if (localSelfId) {
-    runPluginSetup()
-    pluginSetupP = Promise.resolve()
-  } else {
-    pluginSetupP = localEndpointP.then(() => {
-      try {
-        runPluginSetup()
-      } catch (err) {
-        emitRoomError({
-          code: 'plugin-failed',
-          ...(failedPluginName !== undefined ? {plugin: failedPluginName} : {}),
-          message: toErrorMessage(err, 'plugin setup failed'),
-          cause: err
-        })
-        onSelfLeave()
-        throw err
-      }
+  const {pluginApis, pluginSetupP, roomReadyP, getPluginSetupError} =
+    setupRoomPlugins({
+      plugins,
+      preResolvedPlugins,
+      initialRoomId,
+      hasImmediateSelfId: Boolean(localSelfId),
+      localEndpointP,
+      effectiveRoomIdP,
+      isLeaving: () => Boolean(leavePromise),
+      setEffectiveRoomId,
+      onSelfLeave,
+      emitRoomError,
+      publicKernel,
+      internalKernel,
+      hasRolesProvider: () => Boolean(rolesProvider),
+      getRoomInstance: () => roomInstanceRef
     })
-    void pluginSetupP.catch(noOp)
-  }
 
-  const isAlreadyFullForPeer = (id: string): boolean => {
-    if (limit === undefined || peerRegistry.isRoomActive(id)) {
-      return false
-    }
-    const activeUsers = peerRegistry.getActiveUniqueUsers()
-    return !activeUsers.has(getPeerUserId(id)) && activeUsers.size >= limit
-  }
-
-  const rejectPeer = (
-    id: string,
-    peer: PeerHandle,
-    err: typeof roomFullMsg | typeof peerBannedMsg
-  ): void => {
-    if (peerRegistry.getDirectPeer(id, true) !== peer) {
-      return
-    }
-    const errObj = err === peerBannedMsg ? peerBannedErr : roomFullErr
-    if (err === peerBannedMsg) {
-      scaleProvider?.markPeerBanned(id)
-    }
-    const banReason =
-      err === peerBannedMsg
-        ? (rolesProvider?.getBanReason?.(getPeerUserId(id)) ??
-          rolesProvider?.getBanReason?.(id))
-        : undefined
-    handshakeManager.clearPeer(id, errObj)
-    stateManager.clearPeer(id)
-    void handshakeReadyAction
-      .send(
-        {
-          ok: false,
-          err,
-          ...(banReason !== undefined ? {reason: banReason} : {})
-        },
-        id
-      )
-      .catch(noOp)
-      .finally(() => {
-        const closeNow = (): void => {
-          peerRegistry.clearRejectTimer(id)
-          if (peerRegistry.getDirectPeer(id, true) !== peer) {
-            return
-          }
-          if (err === peerBannedMsg) {
-            kickPeer(id, peer, errObj)
-          } else {
-            exitPeer(id, peer, errObj)
-          }
-        }
-        if (!verifyPeerIdentity || leavePromise) {
-          closeNow()
-          return
-        }
-        const timer = setTimeout(closeNow, 40)
-        ;(timer as {unref?: () => void}).unref?.()
-        peerRegistry.setRejectTimer(id, timer)
-      })
-  }
-
-  const handshakeManager = createHandshakeManager({
-    selfId: localSelfId,
-    selfIdP: localSelfIdP,
-    ...(onPeerHandshake === undefined ? {} : {onPeerHandshake}),
-    onHandshakeError: reportHandshakeError,
+  const admission = createRoomAdmission({
+    appId,
+    initialRoomId,
+    effectiveRoomIdP,
+    limit,
+    verifyPeerIdentity,
+    runIdentityHandshake,
     handshakeTimeoutMs,
+    onPeerHandshake,
+    getSelfId: () => localSelfId,
+    selfIdP: localSelfIdP,
+    endpointIdentityP: localEndpointP,
+    getUserIdentity: () => resolvedUserIdentityP,
+    isLeaving: () => Boolean(leavePromise),
+    peerRegistry,
+    isPeerBanned,
+    getBanReason: peerOrUserId => rolesProvider?.getBanReason?.(peerOrUserId),
+    getRolesProvider: () => rolesProvider,
+    getScaleProvider: () => scaleProvider,
+    prepareHandshakeReady: id => stateManager.prepareHandshakeReady(id),
+    stageHandshakeUserState: (id, data, done) =>
+      stateManager.stageHandshakeUserState(id, data, done),
+    clearStatePeer: id => stateManager.clearPeer(id),
+    onStatePeerJoined: (id, userId, isDirect) =>
+      stateManager.onPeerJoined(id, userId, isDirect),
     sendHandshakeData: handshakeDataAction.send,
     sendHandshakeReady: handshakeReadyAction.send,
-    onLocalHandshakePassed: (id, peer) => {
-      if (isAlreadyFullForPeer(id)) {
-        rejectPeer(id, peer, roomFullMsg)
-        return false
-      }
-      return true
-    },
-    beforeSendHandshakeReady: (id, peer) =>
-      peerRegistry.getDirectPeer(id, true) === peer && !isPeerBanned(id)
-        ? stateManager.prepareHandshakeReady(id)
-        : undefined,
-    onActivate: (id, peer) => {
-      if (isPeerBanned(id)) {
-        kickPeer(id, peer, peerBannedErr)
-        return
-      }
-      if (isAlreadyFullForPeer(id)) {
-        rejectPeer(id, peer, roomFullMsg)
-        return
-      }
-      const res = peerRegistry.activateDirect(id, peer)
-      if (!res) {
-        return
-      }
-      scaleProvider?.addDirectPeer(id, peer)
-      peerActivatedEmitter.emit(id, peer)
-      if (
-        limit !== undefined &&
-        peerRegistry.getActiveUniqueUsers().size >= limit
-      ) {
-        for (const pendingId of handshakeManager.getPendingIds()) {
-          if (
-            !peerRegistry.isRoomActive(pendingId) &&
-            (!verifyPeerIdentity || peerRegistry.hasKnownUserId(pendingId)) &&
-            isAlreadyFullForPeer(pendingId)
-          ) {
-            const pendingPeer =
-              handshakeManager.getPeer(pendingId) ??
-              peerRegistry.getDirectPeer(pendingId, true)
-            if (pendingPeer) {
-              rejectPeer(pendingId, pendingPeer, roomFullMsg)
-            }
-          }
-        }
-      }
-      peer.setHandlers({
-        signal: sdp => {
-          if (peerRegistry.getDirectPeer(id, false) === peer) {
-            void signalAction
-              .send(sdp as unknown as DataPayload, id)
-              .catch(noOp)
-          }
-        }
-      })
-      if (res.becameRoomActive) {
-        emitActivatedEvents(id, res)
-      } else {
-        stateManager.onPeerJoined(id, res.userId, true)
-      }
-    },
-    onFailure: (id, peer, reason) => {
-      if (isBanError(reason)) {
-        rejectPeer(id, peer, peerBannedMsg)
-        return
-      }
-      kickPeer(id, peer, reason)
-    }
+    sendSignal: signalAction.send,
+    emitRoomError,
+    emitPeerActivated: (id, peer) => peerActivatedEmitter.emit(id, peer),
+    emitActivatedEvents,
+    kickPeer,
+    exitPeer
   })
 
   signalAction.onMessage((sdp, id) => {
@@ -1038,96 +845,13 @@ export default <
 
   leaveAction.onMessage((_, id) => exitPeer(id, undefined, peerLeftRoomErr))
 
-  handshakeDataAction.onMessage((data, id, metadata) => {
-    if (!leavePromise) {
-      handshakeManager.receiveHandshakeData(data, id, metadata)
-    }
-  })
+  handshakeDataAction.onMessage((data, id, metadata) =>
+    admission.receiveHandshakeData(data, id, metadata)
+  )
 
-  const processHandshakeReady = (
-    data: HandshakeReadyPayload,
-    id: string
-  ): void => {
-    if (leavePromise) {
-      return
-    }
-    if (data && typeof data === 'object' && data.ok === false) {
-      if (data.err === roomFullMsg) {
-        if (!handshakeManager.getPeer(id) || isDirectPeer(id)) {
-          return
-        }
-        handshakeManager.clearPeer(id, roomFullErr)
-        if (
-          !didReportRoomFull &&
-          !(
-            peerRegistry.getPeerIds(false).length > 0 &&
-            isAlreadyFullForPeer(id)
-          )
-        ) {
-          didReportRoomFull = true
-          emitRoomError({
-            code: 'room-full',
-            peerId: id,
-            message: roomFullMsg
-          })
-        }
-        exitPeer(id, peerRegistry.getDirectPeer(id, true), roomFullErr)
-        return
-      }
-      if (data.err === peerBannedMsg) {
-        if (!handshakeManager.getPeer(id) || isDirectPeer(id)) {
-          return
-        }
-        const reason =
-          typeof data.reason === 'string' && data.reason.length <= 512
-            ? data.reason
-            : undefined
-        const msg = reason ? `${peerBannedMsg}: ${reason}` : peerBannedMsg
-        handshakeManager.clearPeer(id, peerBannedErr)
-        emitRoomError({
-          code: 'banned',
-          peerId: id,
-          ...(reason !== undefined ? {reason} : {}),
-          message: msg
-        })
-        kickPeer(id, peerRegistry.getDirectPeer(id, true), peerBannedErr)
-        return
-      }
-    }
-    handshakeManager.receiveHandshakeReady(id)
-  }
-
-  const deliverHandshakeReady = (
-    data: HandshakeReadyPayload,
-    id: string
-  ): void => {
-    if (data && typeof data === 'object' && data.ok === true) {
-      if (!isPeerBanned(id) && !isAlreadyFullForPeer(id)) {
-        void stateManager.stageHandshakeUserState(id, data, () => {
-          if (!leavePromise && handshakeManager.getPeer(id)) {
-            processHandshakeReady('', id)
-          }
-        })
-        return
-      }
-      processHandshakeReady('', id)
-      return
-    }
-    processHandshakeReady(data, id)
-  }
-
-  handshakeReadyAction.onMessage((data, id) => {
-    if (leavePromise) {
-      return
-    }
-    if (verifyPeerIdentity && !peerRegistry.isVerified(id)) {
-      if (handshakeManager.getPeer(id) && !isDirectPeer(id)) {
-        peerRegistry.setDeferredReady(id, data)
-      }
-      return
-    }
-    deliverHandshakeReady(data, id)
-  })
+  handshakeReadyAction.onMessage((data, id) =>
+    admission.receiveHandshakeReadyMessage(data, id)
+  )
 
   onPeer((peer, id) => {
     if (leavePromise) {
@@ -1135,7 +859,7 @@ export default <
     }
     if (
       isPeerBanned(id) ||
-      (peerRegistry.hasKnownUserId(id) && isAlreadyFullForPeer(id))
+      (peerRegistry.hasKnownUserId(id) && admission.isAlreadyFullForPeer(id))
     ) {
       peer.destroy()
       return
@@ -1148,13 +872,13 @@ export default <
       const wasDirectActive = peerRegistry.isDirectActive(id)
       const replacedErr = mkErr('peer replaced')
       existingDirect.destroy()
-      handshakeManager.clearPeer(id, replacedErr)
+      admission.clearPendingPeer(id, replacedErr)
       stateManager.clearPeer(id)
       if (wasDirectActive) {
         const removed = peerRegistry.removePeer(id)
         actionManager.clearPeer(id, replacedErr)
         mediaManager.clearPeer(id)
-        scaleProvider?.removeDirectPeer(id, existingDirect, replacedErr)
+        mesh().removeDirectPeer(id, existingDirect, replacedErr)
         emitDeactivatedEvents(id, removed)
       } else {
         peerRegistry.removePendingDirectOnly(id, existingDirect)
@@ -1165,7 +889,7 @@ export default <
     }
 
     peerRegistry.addPendingDirect(id, peer)
-    handshakeManager.addPeer(id, peer)
+    admission.addPendingPeer(id, peer)
 
     peer.setHandlers({
       data: d => {
@@ -1173,7 +897,7 @@ export default <
           peerRegistry.getDirectPeer(id, true) === peer &&
           !isPeerBanned(id)
         ) {
-          if (!scaleProvider?.handleFrame(id, d)) {
+          if (!mesh().handleFrame(id, d)) {
             handleData(id, d)
           }
         }
@@ -1198,7 +922,7 @@ export default <
       }
     })
 
-    handshakeManager.start(id, peer)
+    admission.startPeer(id, peer)
   })
 
   if (isBrowser) {
@@ -1208,7 +932,7 @@ export default <
   }
 
   const roomInstance: Room = {
-    ready: pluginSetupP,
+    ready: roomReadyP,
 
     makeAction,
 
@@ -1228,8 +952,9 @@ export default <
       const [, resolvedUser] = await Promise.all([
         localEndpointP,
         resolvedUserIdentityP,
-        pluginSetupP
+        roomReadyP
       ])
+      const pluginSetupError = getPluginSetupError()
       if (pluginSetupError) {
         throw pluginSetupError
       }
@@ -1237,16 +962,16 @@ export default <
       const persisted = resolvedUser.persisted ?? false
       const identityPersistence = resolvedUser.persistence ?? 'none'
       if (rolesProvider) {
-        const auth = await rolesProvider.getAuthorityInfo()
+        const info = await rolesProvider.getAuthorityInfo()
         return {
           peerId: localSelfId,
           userId,
           persisted,
           identityPersistence,
-          roomId: auth.roomId,
-          baseRoomId: auth.baseRoomId,
-          isAdmin: auth.isAdmin,
-          roles: auth.roles
+          roomId: info.roomId,
+          baseRoomId: info.baseRoomId,
+          isAdmin: info.isAdmin,
+          roles: info.roles
         }
       }
       return {
@@ -1266,7 +991,7 @@ export default <
         peerRegistry.getPeerIds(false).map(id => {
           const directPeer = peerRegistry.getDirectPeer(id, false)
           const direct = Boolean(directPeer)
-          const hops = direct ? 1 : (scaleProvider?.getRoute(id)?.hops ?? 2)
+          const hops = direct ? 1 : (mesh().getRoute(id)?.hops ?? 2)
           return [
             id,
             {
@@ -1367,7 +1092,7 @@ export default <
 
   roomInstanceRef = roomInstance
 
-  roomSignalingBridges.set(roomInstance, {
+  const bridge: RoomSignalingBridge = {
     getScaleProvider: () => scaleProvider,
     setOnScaleTargetsChanged: cb => {
       scaleTargetsChangedCallback = cb
@@ -1375,39 +1100,37 @@ export default <
     },
     canConnectPeer: peerId =>
       !isPeerBanned(peerId) &&
-      !(peerRegistry.hasKnownUserId(peerId) && isAlreadyFullForPeer(peerId)),
-    onPeerIdentityVerified: (peerId, verified) => {
-      peerRegistry.setPeerUserId(peerId, verified.userId)
-      if (isPeerBanned(peerId) || isPeerBanned(verified.userId)) {
-        scaleProvider?.markPeerBanned(peerId)
-        throw peerBannedErr
-      }
-      peerRegistry.setVerifiedIdentity(
-        peerId,
-        verified.userId,
-        verified.peerPubKey,
-        jwkToCompactPub(verified.userPubKey)
-      )
-      scaleProvider?.setPeerSignPublicKey(peerId, verified.peerPubKey)
-      rolesProvider?.registerPeerPublicKey(peerId, verified.userPubKey)
-      const readyPayload = peerRegistry.takeDeferredReady(peerId)
-      if (readyPayload !== undefined) {
-        queueMicrotask(() => {
-          if (peerRegistry.isVerified(peerId)) {
-            deliverHandshakeReady(readyPayload, peerId)
-          }
-        })
-      }
-    },
-    getPeerHandle: peerId =>
-      handshakeManager.getPeer(peerId) ??
-      peerRegistry.getDirectPeer(peerId, true),
+      !(
+        peerRegistry.hasKnownUserId(peerId) &&
+        admission.isAlreadyFullForPeer(peerId)
+      ),
+    onPeerIdentityVerified: admission.onPeerIdentityVerified,
+    getPeerHandle: admission.getPeerHandle,
     emitError: err => {
       if (!leavePromise) {
         errorEmitter.emit(err)
       }
     }
+  }
+
+  Object.defineProperty(roomInstance, signalingBridgeSymbol, {
+    value: bridge,
+    enumerable: false
   })
 
-  return roomInstance as RoomWithPlugins<TPlugins>
+  return {
+    room: roomInstance as RoomWithPlugins<TPlugins>,
+    bridge
+  }
 }
+
+export default <
+  const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
+    undefined
+>(
+  onPeer: (f: (peer: PeerHandle, id: string) => void) => void,
+  onPeerLeave: (id: string) => void,
+  onSelfLeave: () => void,
+  roomOptions: RoomOptions & {use?: TPlugins} = {}
+): RoomWithPlugins<TPlugins> =>
+  createRoomWithBridge(onPeer, onPeerLeave, onSelfLeave, roomOptions).room

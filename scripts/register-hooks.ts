@@ -1,5 +1,45 @@
 import {registerHooks} from 'node:module'
 
+const workspaceSrcUrls: Record<string, string> = {
+  '@trystero-p2p/core': new URL(
+    '../packages/core/src/index.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/core/public': new URL(
+    '../packages/core/src/public.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/firebase': new URL(
+    '../packages/firebase/src/index.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/mqtt': new URL(
+    '../packages/mqtt/src/index.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/nostr': new URL(
+    '../packages/nostr/src/index.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/supabase': new URL(
+    '../packages/supabase/src/index.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/torrent': new URL(
+    '../packages/torrent/src/index.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/ws-relay': new URL(
+    '../packages/ws-relay/src/index.ts',
+    import.meta.url
+  ).href,
+  '@trystero-p2p/ws-relay/server': new URL(
+    '../packages/ws-relay/src/server.ts',
+    import.meta.url
+  ).href,
+  trystero: new URL('../packages/trystero/src/index.ts', import.meta.url).href
+}
+
 const isRelativeOrFileSpecifier = (specifier: string): boolean =>
   specifier.startsWith('./') ||
   specifier.startsWith('../') ||
@@ -19,6 +59,16 @@ const isMissingModuleError = (err: unknown): boolean => {
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (
+      !context.parentURL?.includes('/node_modules/') &&
+      !context.parentURL?.includes('/dist/')
+    ) {
+      const mappedUrl = workspaceSrcUrls[specifier]
+      if (mappedUrl) {
+        return {url: mappedUrl, shortCircuit: true}
+      }
+    }
+
     try {
       return nextResolve(specifier, context)
     } catch (err) {

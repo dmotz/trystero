@@ -34,12 +34,16 @@ import {
 } from './state'
 import type {
   AuthoritativeStateRecord,
-  DataPayload,
-  JsonValue,
+  InternalRoomContext,
   KernelRolesProvider,
   PeerBanRecord,
+  RoleRevocationRecord
+} from './internal-types'
+import {internalPluginSymbol} from './primitives'
+import type {
+  DataPayload,
+  JsonValue,
   RoleCertificate,
-  RoleRevocationRecord,
   RolesConfig,
   RolesPluginApi,
   RoomPlugin,
@@ -452,10 +456,17 @@ export type RoomAuthority = Omit<
   ) => Promise<PeerBanRecord>
 }
 
+export type RoomAuthorityPreResolvedState = {
+  adminUserId?: string
+  baseRoomId?: string
+}
+
 export type RoomAuthorityInit = {
   selfId: string
   appId: string
   initialRoomId: string
+  effectiveRoomIdP?: Promise<string>
+  getPreResolvedState?: () => RoomAuthorityPreResolvedState | undefined
   admin?: RolesConfig
   getLocalCryptoIdentity?: () => Promise<unknown>
   getLocalUserIdentity?: () => Promise<UserIdentity>
@@ -536,13 +547,15 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   const acceptedOffers = createBoundedCache<string, string>(512)
   const verifiedCertCache = createBoundedCache<string, string[]>(512)
 
+  const initialPreResolved = init.getPreResolvedState?.()
   let localCert: RoleCertificate | null = null
   let localModSeq = 0
   let localActSeq = 0
   let didSyncActSeqFloor = false
   let effectiveRoomId = initialRoomId
-  let {baseRoomId, userId: roomAdminUserId} =
-    parseSelfCertifyingRoomId(initialRoomId)
+  const initialParsed = parseSelfCertifyingRoomId(initialRoomId)
+  let baseRoomId = initialPreResolved?.baseRoomId ?? initialParsed.baseRoomId
+  let roomAdminUserId = initialPreResolved?.adminUserId ?? initialParsed.userId
   const rootUserIds = new Set<string>(roomAdminUserId ? [roomAdminUserId] : [])
   let localUser: UserIdentity | null = null
   for (const uid of admin.admins ?? []) {
@@ -806,7 +819,21 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
       localUser = init.getLocalUserIdentity
         ? await init.getLocalUserIdentity()
         : null
-      if (!roomAdminUserId && admin.selfAsAdmin && localUser) {
+      if (init.effectiveRoomIdP) {
+        const resolvedRid = await init.effectiveRoomIdP
+        const preResolved = init.getPreResolvedState?.()
+        if (resolvedRid && resolvedRid !== effectiveRoomId) {
+          effectiveRoomId = resolvedRid
+          init.onRoomIdResolved?.(effectiveRoomId)
+        }
+        const parsed = parseSelfCertifyingRoomId(effectiveRoomId)
+        baseRoomId = preResolved?.baseRoomId ?? parsed.baseRoomId
+        const resolvedAdminUid = preResolved?.adminUserId ?? parsed.userId
+        if (resolvedAdminUid) {
+          roomAdminUserId = resolvedAdminUid
+          rootUserIds.add(resolvedAdminUid)
+        }
+      } else if (!roomAdminUserId && admin.selfAsAdmin && localUser) {
         roomAdminUserId = localUser.userId
         baseRoomId = initialRoomId
         effectiveRoomId = formatSelfCertifyingRoomId(
@@ -1462,257 +1489,290 @@ export const roles = (
   config?: RolesConfig
 ): RoomPlugin<'roles', RolesPluginApi> & {selfAsAdmin?: boolean} => {
   const normalized = normalizeRolesConfig(config)
-  const plugin = definePlugin<'roles', RolesPluginApi>('roles', {
-    resolveRoomId: async ({roomId, userIdentityP}) => {
+  const setupInternal = (
+    kernel: InternalRoomContext,
+    preResolvedState?: unknown,
+    getPreResolvedState?: () => unknown
+  ): RolesPluginApi => {
+    const authFailures = createWindowCounter(512, 8)
+    const authSyncQuota = createWindowCounter(512, 24)
+    const sentPullPeers = new Set<string>()
+
+    const recordPeerAuthFailure = (fromPeerId?: string) => {
+      kernel.getInternalScaleProvider()?.recordSignatureFailure()
+      if (!fromPeerId || fromPeerId === kernel.selfId) {
+        return
+      }
+      if (authFailures.hit(fromPeerId)) {
+        const err = mkErr('excessive invalid authority records')
+        kernel.emitError({
+          code: 'peer-error',
+          peerId: fromPeerId,
+          message: err.message,
+          cause: err
+        })
+        kernel.kickPeer(fromPeerId, err)
+      }
+    }
+
+    const rawAuth = kernel.makeInternalAction<JsonValue>('auth', {
+      maxPayloadBytes: 256 * 1024
+    })
+    const sendAuth = (msg: AuthControlMessage, targets?: TargetPeers) =>
+      rawAuth.send(msg as unknown as JsonValue, targets)
+    let didReportSelfBan = false
+
+    const authority = createRoomAuthority({
+      selfId: kernel.selfId,
+      appId: kernel.appId,
+      initialRoomId: kernel.getRoomId(),
+      ...(kernel.effectiveRoomIdP === undefined
+        ? {}
+        : {effectiveRoomIdP: kernel.effectiveRoomIdP}),
+      getPreResolvedState: () =>
+        (getPreResolvedState?.() ?? preResolvedState) as
+          | RoomAuthorityPreResolvedState
+          | undefined,
+      admin: normalized,
+      getLocalUserIdentity: () => kernel.getLocalUserIdentity(),
+      isOverlayPeerBanned: pid =>
+        kernel.getInternalScaleProvider()?.isPeerBanned(pid) ?? false,
+      getPeerUserId: pid => kernel.getKnownPeerUserId(pid),
+      onRoomIdResolved: id => kernel.setEffectiveRoomId(id),
+      onPeerPublicKey: (pid, _key, uid) => {
+        if (uid) {
+          kernel.setPeerUserId(pid, uid)
+        }
+      },
+      onLocalRoleCertificate: cert =>
+        kernel.getInternalScaleProvider()?.setLocalRoleCertificate(cert),
+      onPeerBanned: (bannedUid, banRec, fromPeerId) => {
+        const localUid = kernel.getKnownPeerUserId(kernel.selfId)
+        if (
+          bannedUid === kernel.selfId ||
+          (localUid && bannedUid === localUid)
+        ) {
+          if (!didReportSelfBan) {
+            didReportSelfBan = true
+            kernel.emitError({
+              code: 'banned',
+              message: banRec.reason
+                ? `${peerBannedMsg}: ${banRec.reason}`
+                : peerBannedMsg,
+              ...(banRec.reason !== undefined ? {reason: banRec.reason} : {}),
+              ...(fromPeerId ? {peerId: fromPeerId} : {})
+            })
+          }
+          return
+        }
+        kernel.purgeBannedUserState(bannedUid)
+        kernel.getInternalScaleProvider()?.markPeerBanned(bannedUid)
+        const toKick = new Set<string>(kernel.getUserPeerIds(bannedUid))
+        for (const pid of kernel.getAllPeerIds()) {
+          if (authority.isPeerBanned(pid)) {
+            toKick.add(pid)
+          }
+        }
+        const activeKickTargets = [...toKick].filter(pid =>
+          kernel.isPeerActive(pid)
+        )
+        if (activeKickTargets.length > 0) {
+          void sendAuth({t: 'ban', ban: banRec}, activeKickTargets).catch(noOp)
+        }
+        for (const pid of toKick) {
+          kernel.getInternalScaleProvider()?.markPeerBanned(pid)
+          kernel.kickPeer(pid, peerBannedErr)
+        }
+      },
+      onSignatureFailure: recordPeerAuthFailure
+    })
+
+    const sendPull = async (peerId: string) => {
       if (
-        normalized.selfAsAdmin &&
-        !parseSelfCertifyingRoomId(roomId).userId &&
-        userIdentityP
+        sentPullPeers.has(peerId) ||
+        !kernel.isPeerActive(peerId) ||
+        authority.isPeerBanned(peerId)
       ) {
+        return
+      }
+      sentPullPeers.add(peerId)
+      const payload = await authority.buildPullMessage()
+      if (
+        payload &&
+        kernel.isPeerActive(peerId) &&
+        !authority.isPeerBanned(peerId)
+      ) {
+        void sendAuth(payload, peerId).catch(noOp)
+      }
+    }
+
+    rawAuth.onMessage((raw, fromPeerId) => {
+      const msg = raw as unknown as AuthControlMessage
+      if (
+        !isObj(msg) ||
+        authority.isPeerBanned(fromPeerId) ||
+        authFailures.over(fromPeerId)
+      ) {
+        return
+      }
+      if (msg.t === 'pull') {
+        if (authSyncQuota.hit(fromPeerId)) {
+          return
+        }
+        if (msg.pubKey) {
+          authority.registerPeerPublicKey(fromPeerId, msg.pubKey)
+        }
+        if (
+          Array.isArray(msg.s) &&
+          msg.s.length > maxSyncCerts + maxSyncModerationRecords * 2
+        ) {
+          recordPeerAuthFailure(fromPeerId)
+          return
+        }
+        if (!sentPullPeers.has(fromPeerId)) {
+          void sendPull(fromPeerId)
+        }
+        void authority.buildDiffSyncMessage(msg.s).then(diff => {
+          if (
+            diff &&
+            kernel.isPeerActive(fromPeerId) &&
+            !authority.isPeerBanned(fromPeerId)
+          ) {
+            void sendAuth(diff, fromPeerId).catch(noOp)
+          }
+        })
+      } else if (msg.t === 'sync') {
+        if (authSyncQuota.hit(fromPeerId)) {
+          return
+        }
+        if (msg.pubKey) {
+          authority.registerPeerPublicKey(fromPeerId, msg.pubKey)
+        }
+        if (
+          (Array.isArray(msg.certs) && msg.certs.length > maxSyncCerts) ||
+          (Array.isArray(msg.revocations) &&
+            msg.revocations.length > maxSyncModerationRecords) ||
+          (Array.isArray(msg.bans) &&
+            msg.bans.length > maxSyncModerationRecords)
+        ) {
+          recordPeerAuthFailure(fromPeerId)
+        }
+        void authority
+          .applySyncBatch(
+            {
+              ...(Array.isArray(msg.certs) ? {certs: msg.certs} : {}),
+              ...(Array.isArray(msg.revocations)
+                ? {revocations: msg.revocations}
+                : {}),
+              ...(Array.isArray(msg.bans) ? {bans: msg.bans} : {})
+            },
+            fromPeerId,
+            () => authFailures.over(fromPeerId)
+          )
+          .then(({certs, revocations, bans}) => {
+            if (!certs.length && !revocations.length && !bans.length) {
+              return
+            }
+            const directOthers = kernel
+              .getDirectActivePeerIds()
+              .filter(id => id !== fromPeerId && !authority.isPeerBanned(id))
+            if (directOthers.length > 0) {
+              void sendAuth(
+                {
+                  t: 'sync',
+                  ...(certs.length ? {certs} : {}),
+                  ...(revocations.length ? {revocations} : {}),
+                  ...(bans.length ? {bans} : {})
+                },
+                directOthers
+              ).catch(noOp)
+            }
+          })
+      } else if (msg.t === 'cert') {
+        void authority.verifyAndApplyCert(msg.cert, fromPeerId)
+      } else if (msg.t === 'revoke') {
+        void authority.verifyAndApplyRevocation(msg.revocation, fromPeerId)
+      } else if (msg.t === 'ban') {
+        void authority.verifyAndApplyBan(msg.ban, fromPeerId)
+      }
+    })
+
+    kernel.registerRolesProvider({
+      ...authority,
+      onPeerDescriptorCert: (pid, _key, cert, uid) => {
+        if (
+          authority.isPeerBanned(pid) ||
+          (uid && authority.isPeerBanned(uid))
+        ) {
+          kernel.getInternalScaleProvider()?.markPeerBanned(pid)
+          kernel.kickPeer(pid, peerBannedErr)
+        } else if (cert) {
+          void authority.verifyAndApplyCert(cert, pid)
+        }
+      }
+    })
+
+    kernel.onPeerActivated(pid => void sendPull(pid), {replay: true})
+    kernel.onPeerDeactivated(pid => {
+      sentPullPeers.delete(pid)
+    })
+
+    return {
+      grantRole: async (id, role) => {
+        const cert = await authority.issueRoleCertificate(id, role)
+        await sendAuth({t: 'cert', cert}).catch(noOp)
+        return cert
+      },
+      revokeRole: async (id, role) => {
+        const revocation = await authority.issueRoleRevocation(id, role)
+        await sendAuth({t: 'revoke', revocation}).catch(noOp)
+      },
+      getRoles: id => authority.getPeerRoles(id ?? kernel.selfId),
+      ban: async (id, opts) => {
+        const ban = await authority.issuePeerBan(id, opts)
+        await sendAuth({t: 'ban', ban}).catch(noOp)
+      },
+      isBanned: id => authority.isPeerBanned(id)
+    }
+  }
+
+  const basePlugin = definePlugin<'roles', RolesPluginApi>('roles', {
+    resolveRoomId: async ({roomId, userIdentityP}) => {
+      const parsed = parseSelfCertifyingRoomId(roomId)
+      if (parsed.userId) {
+        return {
+          effectiveRoomId: roomId,
+          state: {
+            adminUserId: parsed.userId,
+            baseRoomId: parsed.baseRoomId
+          } satisfies RoomAuthorityPreResolvedState
+        }
+      }
+      if (normalized.selfAsAdmin && userIdentityP) {
         const user = await userIdentityP
         return {
-          effectiveRoomId: formatSelfCertifyingRoomId(roomId, user.userId)
+          effectiveRoomId: formatSelfCertifyingRoomId(roomId, user.userId),
+          state: {
+            adminUserId: user.userId,
+            baseRoomId: roomId
+          } satisfies RoomAuthorityPreResolvedState
         }
       }
       return {effectiveRoomId: roomId}
     },
-    setup: kernel => {
-      const authFailures = createWindowCounter(512, 8)
-      const authSyncQuota = createWindowCounter(512, 24)
-      const sentPullPeers = new Set<string>()
-
-      const recordPeerAuthFailure = (fromPeerId?: string) => {
-        kernel.getScaleProvider()?.recordSignatureFailure()
-        if (!fromPeerId || fromPeerId === kernel.selfId) {
-          return
-        }
-        if (authFailures.hit(fromPeerId)) {
-          const err = mkErr('excessive invalid authority records')
-          kernel.emitError({
-            code: 'peer-error',
-            peerId: fromPeerId,
-            message: err.message,
-            cause: err
-          })
-          kernel.kickPeer(fromPeerId, err)
-        }
-      }
-
-      const rawAuth = kernel.makeInternalAction<JsonValue>('auth', {
-        maxPayloadBytes: 256 * 1024
-      })
-      const sendAuth = (msg: AuthControlMessage, targets?: TargetPeers) =>
-        rawAuth.send(msg as unknown as JsonValue, targets)
-      let didReportSelfBan = false
-
-      const authority = createRoomAuthority({
-        selfId: kernel.selfId,
-        appId: kernel.appId,
-        initialRoomId: kernel.initialRoomId,
-        admin: normalized,
-        getLocalUserIdentity: () => kernel.getLocalUserIdentity(),
-        isOverlayPeerBanned: pid =>
-          kernel.getScaleProvider()?.isPeerBanned(pid) ?? false,
-        getPeerUserId: pid => kernel.getKnownPeerUserId(pid),
-        onRoomIdResolved: id => kernel.setEffectiveRoomId(id),
-        onPeerPublicKey: (pid, _key, uid) => {
-          if (uid) {
-            kernel.setPeerUserId(pid, uid)
-          }
-        },
-        onLocalRoleCertificate: cert =>
-          kernel.getScaleProvider()?.setLocalRoleCertificate(cert),
-        onPeerBanned: (bannedUid, banRec, fromPeerId) => {
-          const localUid = kernel.getKnownPeerUserId(kernel.selfId)
-          if (
-            bannedUid === kernel.selfId ||
-            (localUid && bannedUid === localUid)
-          ) {
-            if (!didReportSelfBan) {
-              didReportSelfBan = true
-              kernel.emitError({
-                code: 'banned',
-                message: banRec.reason
-                  ? `${peerBannedMsg}: ${banRec.reason}`
-                  : peerBannedMsg,
-                ...(banRec.reason !== undefined ? {reason: banRec.reason} : {}),
-                ...(fromPeerId ? {peerId: fromPeerId} : {})
-              })
-            }
-            return
-          }
-          kernel.purgeBannedUserState?.(bannedUid)
-          kernel.getScaleProvider()?.markPeerBanned(bannedUid)
-          const toKick = new Set<string>(kernel.getUserPeerIds(bannedUid))
-          for (const pid of kernel.getAllPeerIds()) {
-            if (authority.isPeerBanned(pid)) {
-              toKick.add(pid)
-            }
-          }
-          const activeKickTargets = [...toKick].filter(pid =>
-            kernel.isPeerActive(pid)
-          )
-          if (activeKickTargets.length > 0) {
-            void sendAuth({t: 'ban', ban: banRec}, activeKickTargets).catch(
-              noOp
-            )
-          }
-          for (const pid of toKick) {
-            kernel.getScaleProvider()?.markPeerBanned(pid)
-            kernel.kickPeer(pid, peerBannedErr)
-          }
-        },
-        onSignatureFailure: recordPeerAuthFailure
-      })
-
-      const sendPull = async (peerId: string) => {
-        if (
-          sentPullPeers.has(peerId) ||
-          !kernel.isPeerActive(peerId) ||
-          authority.isPeerBanned(peerId)
-        ) {
-          return
-        }
-        sentPullPeers.add(peerId)
-        const payload = await authority.buildPullMessage()
-        if (
-          payload &&
-          kernel.isPeerActive(peerId) &&
-          !authority.isPeerBanned(peerId)
-        ) {
-          void sendAuth(payload, peerId).catch(noOp)
-        }
-      }
-
-      rawAuth.onMessage((raw, fromPeerId) => {
-        const msg = raw as unknown as AuthControlMessage
-        if (
-          !isObj(msg) ||
-          authority.isPeerBanned(fromPeerId) ||
-          authFailures.over(fromPeerId)
-        ) {
-          return
-        }
-        if (msg.t === 'pull') {
-          if (authSyncQuota.hit(fromPeerId)) {
-            return
-          }
-          if (msg.pubKey) {
-            authority.registerPeerPublicKey(fromPeerId, msg.pubKey)
-          }
-          if (
-            Array.isArray(msg.s) &&
-            msg.s.length > maxSyncCerts + maxSyncModerationRecords * 2
-          ) {
-            recordPeerAuthFailure(fromPeerId)
-            return
-          }
-          if (!sentPullPeers.has(fromPeerId)) {
-            void sendPull(fromPeerId)
-          }
-          void authority.buildDiffSyncMessage(msg.s).then(diff => {
-            if (
-              diff &&
-              kernel.isPeerActive(fromPeerId) &&
-              !authority.isPeerBanned(fromPeerId)
-            ) {
-              void sendAuth(diff, fromPeerId).catch(noOp)
-            }
-          })
-        } else if (msg.t === 'sync') {
-          if (authSyncQuota.hit(fromPeerId)) {
-            return
-          }
-          if (msg.pubKey) {
-            authority.registerPeerPublicKey(fromPeerId, msg.pubKey)
-          }
-          if (
-            (Array.isArray(msg.certs) && msg.certs.length > maxSyncCerts) ||
-            (Array.isArray(msg.revocations) &&
-              msg.revocations.length > maxSyncModerationRecords) ||
-            (Array.isArray(msg.bans) &&
-              msg.bans.length > maxSyncModerationRecords)
-          ) {
-            recordPeerAuthFailure(fromPeerId)
-          }
-          void authority
-            .applySyncBatch(
-              {
-                ...(Array.isArray(msg.certs) ? {certs: msg.certs} : {}),
-                ...(Array.isArray(msg.revocations)
-                  ? {revocations: msg.revocations}
-                  : {}),
-                ...(Array.isArray(msg.bans) ? {bans: msg.bans} : {})
-              },
-              fromPeerId,
-              () => authFailures.over(fromPeerId)
-            )
-            .then(({certs, revocations, bans}) => {
-              if (!certs.length && !revocations.length && !bans.length) {
-                return
-              }
-              const directOthers = kernel
-                .getActivePeerIds()
-                .filter(id => id !== fromPeerId && !authority.isPeerBanned(id))
-              if (directOthers.length > 0) {
-                void sendAuth(
-                  {
-                    t: 'sync',
-                    ...(certs.length ? {certs} : {}),
-                    ...(revocations.length ? {revocations} : {}),
-                    ...(bans.length ? {bans} : {})
-                  },
-                  directOthers
-                ).catch(noOp)
-              }
-            })
-        } else if (msg.t === 'cert') {
-          void authority.verifyAndApplyCert(msg.cert, fromPeerId)
-        } else if (msg.t === 'revoke') {
-          void authority.verifyAndApplyRevocation(msg.revocation, fromPeerId)
-        } else if (msg.t === 'ban') {
-          void authority.verifyAndApplyBan(msg.ban, fromPeerId)
-        }
-      })
-
-      kernel.registerRolesProvider({
-        ...authority,
-        onPeerDescriptorCert: (pid, _key, cert, uid) => {
-          if (
-            authority.isPeerBanned(pid) ||
-            (uid && authority.isPeerBanned(uid))
-          ) {
-            kernel.getScaleProvider()?.markPeerBanned(pid)
-            kernel.kickPeer(pid, peerBannedErr)
-          } else if (cert) {
-            void authority.verifyAndApplyCert(cert, pid)
-          }
-        }
-      })
-
-      kernel.onPeerActivated(pid => void sendPull(pid), {replay: true})
-      kernel.onPeerDeactivated(pid => {
-        sentPullPeers.delete(pid)
-      })
-
-      return {
-        grantRole: async (id, role) => {
-          const cert = await authority.issueRoleCertificate(id, role)
-          await sendAuth({t: 'cert', cert}).catch(noOp)
-          return cert
-        },
-        revokeRole: async (id, role) => {
-          const revocation = await authority.issueRoleRevocation(id, role)
-          await sendAuth({t: 'revoke', revocation}).catch(noOp)
-        },
-        getRoles: id => authority.getPeerRoles(id ?? kernel.selfId),
-        ban: async (id, opts) => {
-          const ban = await authority.issuePeerBan(id, opts)
-          await sendAuth({t: 'ban', ban}).catch(noOp)
-        },
-        isBanned: id => authority.isPeerBanned(id)
-      }
+    setup: () => {
+      throw mkErr('roles() must be registered via joinRoom({use: [roles()]})')
     }
   })
-  return normalized.selfAsAdmin ? {...plugin, selfAsAdmin: true} : plugin
+  const plugin: RoomPlugin<'roles', RolesPluginApi> & {selfAsAdmin?: boolean} =
+    normalized.selfAsAdmin ? {...basePlugin, selfAsAdmin: true} : basePlugin
+  Object.defineProperty(plugin, internalPluginSymbol, {
+    value: {
+      kind: 'roles' as const,
+      selfAsAdmin: Boolean(normalized.selfAsAdmin),
+      setup: setupInternal
+    },
+    enumerable: false
+  })
+  return plugin
 }

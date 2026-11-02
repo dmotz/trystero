@@ -40,7 +40,20 @@ type ChannelEntry = {
   nextListenerId: number
 }
 
+const clients = /*@__PURE__*/ new Map<string, SupabaseClient>()
+const clientKeys = /*@__PURE__*/ new WeakMap<SupabaseClient, string>()
 const clientChannels = /*@__PURE__*/ new WeakMap<SupabaseClient, ChannelCache>()
+
+const getOrCreateClient = (config: SupabaseRoomConfig): SupabaseClient => {
+  const key = JSON.stringify([config.appId, config.relayConfig.supabaseKey])
+  let client = clients.get(key)
+  if (!client) {
+    client = createClient(config.appId, config.relayConfig.supabaseKey)
+    clients.set(key, client)
+    clientKeys.set(client, key)
+  }
+  return client
+}
 
 const getChannelName = (topic: string): string => `room:${topic}:messages`
 
@@ -187,11 +200,18 @@ const removeUnusedChannels = (client: SupabaseClient): void => {
     void client.removeChannel(entry.channel)
     delete cache.channels[topic]
   })
+
+  if (keys(cache.channels).length === 0) {
+    const key = clientKeys.get(client)
+    if (key && clients.get(key) === client) {
+      clients.delete(key)
+    }
+  }
 }
 
-const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
-  createTopicStrategy({
-    init: config => createClient(config.appId, config.relayConfig.supabaseKey),
+export const joinRoom: JoinRoom<SupabaseRoomConfig> =
+  /*@__PURE__*/ createTopicStrategy({
+    init: getOrCreateClient,
 
     subscribeTopic: async (client, topic, onMessage, {kind}) => {
       const entry = getOrCreateChannel(client, topic)
@@ -232,87 +252,4 @@ const createJoinRoom = (): JoinRoom<SupabaseRoomConfig> =>
     }
   })
 
-const joins = /*@__PURE__*/ new Map<string, JoinRoom<SupabaseRoomConfig>>()
-
-// Remove `...extra` forwarding in 0.28.0 once createStrategy's 0.27 3rd-arg migration guard is retired.
-export const joinRoom: JoinRoom<SupabaseRoomConfig> = ((
-  config: SupabaseRoomConfig,
-  roomId: string,
-  ...extra: unknown[]
-) => {
-  const key = JSON.stringify([config?.appId, config?.relayConfig?.supabaseKey])
-  let join = joins.get(key)
-  if (!join) {
-    join = createJoinRoom()
-    joins.set(key, join)
-  }
-  return (join as (...args: unknown[]) => unknown)(config, roomId, ...extra)
-}) as JoinRoom<SupabaseRoomConfig>
-
-export {
-  clearUserIdentity,
-  createUserIdentity,
-  definePlugin,
-  exportUserIdentity,
-  importUserIdentity,
-  roles,
-  scale,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type AuthoritativeState,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RemoveMediaOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyMode,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
-} from '@trystero-p2p/core'
+export * from '@trystero-p2p/core/public'

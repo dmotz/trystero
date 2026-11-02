@@ -1,11 +1,13 @@
 import mqtt from 'mqtt'
 import {
   createRelayManager,
+  createRelayScopedStore,
   createTopicStrategy,
   getRelays,
   toJson,
   type JoinRoom,
-  type JoinRoomConfig
+  type JoinRoomConfig,
+  type RelayConfig
 } from '@trystero-p2p/core'
 
 const defaultRedundancy = 4
@@ -23,7 +25,10 @@ type TopicState = {
   ready?: Promise<unknown>
 }
 
-const topicStates = /*@__PURE__*/ relayManager.scoped<TopicState>()
+const topicStates = /*@__PURE__*/ createRelayScopedStore<
+  TopicState,
+  mqtt.MqttClient
+>()
 const pendingBatches = /*@__PURE__*/ new WeakMap<
   mqtt.MqttClient,
   {topics: Set<string>; promise: Promise<unknown>}
@@ -171,83 +176,15 @@ export const joinRoom: JoinRoom<MqttRoomConfig> =
     }
   })
 
-export const getRelaySockets: () => Record<string, WebSocket> =
-  relayManager.getSockets
+export const getRelaySockets = (): Record<string, WebSocket> =>
+  relayManager.getSockets()
 
-export type {JoinRoomConfig}
+export type {JoinRoomConfig, RelayConfig}
+export * from '@trystero-p2p/core/public'
 
-export {
-  clearUserIdentity,
-  createUserIdentity,
-  definePlugin,
-  exportUserIdentity,
-  importUserIdentity,
-  roles,
-  scale,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type AuthoritativeState,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RelayConfig,
-  type RemoveMediaOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyMode,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
-} from '@trystero-p2p/core'
-
-export const defaultRelayUrls: string[] = /*@__PURE__*/ [
-  'broker.emqx.io:8084/mqtt',
-  'public:public@public.cloud.shiftr.io',
-  'broker.hivemq.com:8884/mqtt',
-  'test.mosquitto.org:8081/mqtt'
-].map(url => 'wss://' + url)
+export const defaultRelayUrls: string[] = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://public:public@public.cloud.shiftr.io',
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt'
+]

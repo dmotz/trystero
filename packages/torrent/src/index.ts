@@ -1,15 +1,19 @@
 import {
   createRelayManager,
+  createRelayScopedStore,
   createStrategy,
   fromJson,
   getRelays,
   hashTopic,
   libName,
   makeSocket,
+  setRelayConnectivity,
   toJson,
   type JoinRoom,
   type JoinRoomConfig,
   type OfferRecord,
+  type RelayConfig,
+  type RelayConnectivity,
   type SocketClient
 } from '@trystero-p2p/core'
 
@@ -29,7 +33,7 @@ type TopicState = {
 }
 
 const handledSignals: Record<string, number> = {}
-const topicStates = /*@__PURE__*/ relayManager.scoped<TopicState>()
+const topicStates = /*@__PURE__*/ createRelayScopedStore<TopicState>()
 const roomOutstandingOffers: Record<
   string,
   Record<string, OfferRecord & {createdAt: number}>
@@ -182,8 +186,9 @@ const ensureOutstandingOffers = async (
   return getRoomOutstandingOffers(rootTopic)
 }
 
-const joinRoomStrategy: JoinRoom<TorrentRoomConfig> =
+export const joinRoom: JoinRoom<TorrentRoomConfig> =
   /*@__PURE__*/ createStrategy({
+    defaultConfig: {trickleIce: false},
     init: config =>
       getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
         const client = relayManager.register(rawUrl, () =>
@@ -409,103 +414,21 @@ const joinRoomStrategy: JoinRoom<TorrentRoomConfig> =
     }
   })
 
-// Remove `...extra` forwarding in 0.28.0 once createStrategy's 0.27 3rd-arg migration guard is retired.
-export const joinRoom: JoinRoom<TorrentRoomConfig> = ((
-  config: TorrentRoomConfig,
-  roomId: string,
-  ...extra: unknown[]
-) =>
-  (joinRoomStrategy as (...args: unknown[]) => unknown)(
-    config
-      ? {
-          ...config,
-          trickleIce: config.trickleIce ?? false
-        }
-      : config,
-    roomId,
-    ...extra
-  )) as JoinRoom<TorrentRoomConfig>
-
-export const getRelaySockets: () => Record<string, WebSocket> =
-  relayManager.getSockets
-
-export type {JoinRoomConfig}
+export const getRelaySockets = (): Record<string, WebSocket> =>
+  relayManager.getSockets()
 
 export {
-  clearUserIdentity,
-  createUserIdentity,
-  definePlugin,
-  exportUserIdentity,
-  importUserIdentity,
-  roles,
-  scale,
   setRelayConnectivity,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type AuthoritativeState,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
+  type JoinRoomConfig,
   type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyMode,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
-} from '@trystero-p2p/core'
+  type RelayConnectivity
+}
+export * from '@trystero-p2p/core/public'
 
-export const defaultRelayUrls: string[] = /*@__PURE__*/ [
-  'open.ftorrent.com',
-  'tracker.webtorrent.dev',
-  'tracker.openwebtorrent.com',
-  'tracker.btorrent.xyz',
-  'tracker.files.fm:7073/announce'
-].map(url => 'wss://' + url)
+export const defaultRelayUrls: string[] = [
+  'wss://open.ftorrent.com',
+  'wss://tracker.webtorrent.dev',
+  'wss://tracker.openwebtorrent.com',
+  'wss://tracker.btorrent.xyz',
+  'wss://tracker.files.fm:7073/announce'
+]

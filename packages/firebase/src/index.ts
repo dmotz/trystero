@@ -24,6 +24,10 @@ import {
 const presencePath = '_'
 const defaultRootPath = `__${libName.toLowerCase()}__`
 const dbs: Record<string, ReturnType<typeof getDatabase>> = {}
+const appDbs = /*@__PURE__*/ new WeakMap<
+  FirebaseApp,
+  ReturnType<typeof getDatabase>
+>()
 const presenceRefs: Record<string, DatabaseReference> = {}
 const presenceMessages: Record<string, Record<string, unknown>> = {}
 const presenceCleanups: Record<string, () => void> = {}
@@ -42,14 +46,20 @@ const getPath = (...xs: string[]): string => xs.join('/')
 const roomKey = (rootTopic: string, selfTopic: string): string =>
   `${rootTopic}|${selfTopic}`
 
-const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> =>
-  config.relayConfig?.firebaseApp
-    ? (dbs[
-        config.relayConfig.firebaseApp.options.databaseURL ?? config.appId
-      ] ??= getDatabase(config.relayConfig.firebaseApp))
-    : (dbs[config.appId] ??= getDatabase(
-        initializeApp({databaseURL: config.appId})
-      ))
+const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> => {
+  const app = config.relayConfig?.firebaseApp
+  if (app) {
+    let db = appDbs.get(app)
+    if (!db) {
+      db = getDatabase(app)
+      appDbs.set(app, db)
+    }
+    return db
+  }
+  return (dbs[config.appId] ??= getDatabase(
+    initializeApp({databaseURL: config.appId})
+  ))
+}
 
 export const joinRoom: JoinRoom<FirebaseRoomConfig> =
   /*@__PURE__*/ createTopicStrategy({
@@ -223,70 +233,4 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
     }
   })
 
-export {
-  clearUserIdentity,
-  createUserIdentity,
-  definePlugin,
-  exportUserIdentity,
-  importUserIdentity,
-  roles,
-  scale,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type AuthoritativeState,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RemoveMediaOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyMode,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
-} from '@trystero-p2p/core'
+export * from '@trystero-p2p/core/public'

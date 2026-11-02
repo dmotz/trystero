@@ -1,14 +1,12 @@
-import createStrategy from './strategy'
-import {mkErr, toJson} from './utils'
 import type {
-  BaseRoomConfig,
-  JoinRoom,
-  JoinRoomConfig,
   StrategyContext,
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext
-} from './types'
+} from './internal-types'
+import createStrategy from './strategy'
+import type {BaseRoomConfig, JoinRoom, JoinRoomConfig} from './types'
+import {mkErr, toJson} from './utils'
 
 const defaultSteadyAnnounceIntervalMs = 60_000
 const topicMissingErr = (what: string): Error =>
@@ -59,6 +57,7 @@ const makeTopicContext = <
 })
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
+  defaultConfig,
   steadyAnnounceIntervalMs = defaultSteadyAnnounceIntervalMs,
   reannounceOnDisconnect = true,
   init,
@@ -66,6 +65,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   publishTopic
 }: TopicStrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> =>
   createStrategy<TRelay, TConfig>({
+    ...(defaultConfig === undefined ? {} : {defaultConfig}),
     init,
 
     subscribe: async (

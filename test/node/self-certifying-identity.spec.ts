@@ -2029,6 +2029,34 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     {stdio: 'pipe'}
   )
 
+  const publicDts = readFileSync(
+    resolve(process.cwd(), 'packages/core/dist/public.d.mts'),
+    'utf8'
+  )
+  const collectDtsExportedNames = (dts: string, out = new Set<string>()) => {
+    for (const m of dts.matchAll(
+      /^export (?:type|interface|declare const) (\w+)\b/gm
+    )) {
+      if (m[1]) {
+        out.add(m[1])
+      }
+    }
+    for (const m of dts.matchAll(/^export \{([^}]+)\}/gm)) {
+      for (const part of (m[1] ?? '').split(',')) {
+        const cleaned = part
+          .trim()
+          .replace(/^type\s+/, '')
+          .split(/\s+as\s+/)
+          .at(-1)
+          ?.trim()
+        if (cleaned) {
+          out.add(cleaned)
+        }
+      }
+    }
+    return out
+  }
+
   for (const strategyPkg of [
     'nostr',
     'mqtt',
@@ -2042,30 +2070,19 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       'utf8'
     )
     assert.equal(
-      strategyDts.includes('export type *'),
+      /^export\s+(?:type\s+)?\*\s+from\s+['"]@trystero-p2p\/core['"]/m.test(
+        strategyDts
+      ),
       false,
-      `packages/${strategyPkg}/dist/index.d.mts must not wildcard re-export core types`
+      `packages/${strategyPkg}/dist/index.d.mts must not wildcard re-export @trystero-p2p/core root`
     )
-    const exportedNames = new Set<string>()
-    for (const m of strategyDts.matchAll(
-      /^export (?:type|interface|declare const) (\w+)\b/gm
-    )) {
-      if (m[1]) {
-        exportedNames.add(m[1])
-      }
-    }
-    for (const m of strategyDts.matchAll(/^export \{([^}]+)\}/gm)) {
-      for (const part of (m[1] ?? '').split(',')) {
-        const cleaned = part
-          .trim()
-          .replace(/^type\s+/, '')
-          .split(/\s+as\s+/)
-          .at(-1)
-          ?.trim()
-        if (cleaned) {
-          exportedNames.add(cleaned)
-        }
-      }
+    const exportedNames = collectDtsExportedNames(strategyDts)
+    if (
+      /^export\s+\*\s+from\s+['"]@trystero-p2p\/core\/public['"]/m.test(
+        strategyDts
+      )
+    ) {
+      collectDtsExportedNames(publicDts, exportedNames)
     }
 
     for (const leaked of [

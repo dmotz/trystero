@@ -1,24 +1,28 @@
 import {
   createRelayManager,
+  createRelayScopedStore,
   createTopicStrategy,
   makeSocket,
+  setRelayConnectivity,
   toJson,
   type BaseRoomConfig,
   type JoinRoom,
   type RelayConfig,
+  type RelayConnectivity,
   type SocketClient,
   type StrategyMessage
 } from '@trystero-p2p/core'
+import {parseServerMessage, type WsRelayClientMessage} from './protocol'
 
 const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
   client => client.socket
 )
 const msgHandlers =
-  /*@__PURE__*/ relayManager.scoped<
+  /*@__PURE__*/ createRelayScopedStore<
     Set<(topic: string, data: StrategyMessage) => void>
   >()
 const announcementMessages =
-  /*@__PURE__*/ relayManager.scoped<StrategyMessage>()
+  /*@__PURE__*/ createRelayScopedStore<StrategyMessage>()
 
 export type WsRelayConfig = Omit<RelayConfig, 'urls' | 'redundancy'> & {
   urls: string[]
@@ -28,50 +32,22 @@ export type WsRelayRoomConfig = BaseRoomConfig & {
   relayConfig: WsRelayConfig
 }
 
-type WsRelayClientMessage =
-  | {type: 'subscribe'; topic: string}
-  | {type: 'unsubscribe'; topic: string}
-  | {type: 'publish'; topic: string; payload: StrategyMessage}
-
-type WsRelayServerMessage = {
-  topic: string
-  payload: StrategyMessage
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const isStrategyMessage = (value: unknown): value is StrategyMessage =>
-  typeof value === 'string' || isRecord(value)
-
-const parseServerMessage = (data: string): WsRelayServerMessage | null => {
-  try {
-    const msg = JSON.parse(data) as Partial<WsRelayServerMessage>
-
-    return typeof msg.topic === 'string' && isStrategyMessage(msg.payload)
-      ? {topic: msg.topic, payload: msg.payload}
-      : null
-  } catch {
-    return null
-  }
-}
-
 const publish = (
   topic: string,
   payload: StrategyMessage
-): WsRelayClientMessage =>
+): WsRelayClientMessage<StrategyMessage> =>
   ({
     type: 'publish',
     topic,
     payload
   }) as const
 
-const subscribe = (topic: string): WsRelayClientMessage => ({
+const subscribe = (topic: string): WsRelayClientMessage<StrategyMessage> => ({
   type: 'subscribe',
   topic
 })
 
-const unsubscribe = (topic: string): WsRelayClientMessage => ({
+const unsubscribe = (topic: string): WsRelayClientMessage<StrategyMessage> => ({
   type: 'unsubscribe',
   topic
 })
@@ -148,75 +124,8 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> =
     }
   })
 
-export const getRelaySockets: () => Record<string, WebSocket> =
-  relayManager.getSockets
+export const getRelaySockets = (): Record<string, WebSocket> =>
+  relayManager.getSockets()
 
-export {
-  clearUserIdentity,
-  createUserIdentity,
-  definePlugin,
-  exportUserIdentity,
-  importUserIdentity,
-  roles,
-  scale,
-  setRelayConnectivity,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type AuthoritativeState,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyMode,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
-} from '@trystero-p2p/core'
+export {setRelayConnectivity, type RelayConfig, type RelayConnectivity}
+export * from '@trystero-p2p/core/public'

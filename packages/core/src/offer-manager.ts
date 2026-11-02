@@ -1,5 +1,6 @@
+import type {OfferRecord} from './internal-types'
 import {all, alloc, genId, mkErr, resetTimer} from './utils'
-import type {OfferRecord, PeerHandle} from './types'
+import type {PeerHandle} from './types'
 
 const offerLeaseTtlMs = 180_000
 const defaultOfferIdSize = 20

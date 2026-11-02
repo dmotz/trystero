@@ -11,12 +11,13 @@ export {
 } from './primitives'
 export {
   createRelayManager,
-  definePlugin,
-  genId,
+  createRelayScopedStore,
   getRelays,
   makeSocket,
-  setRelayConnectivity
-} from './utils'
+  setRelayConnectivity,
+  type RelayScopedStore
+} from './relay-manager'
+export {definePlugin, genId} from './utils'
 
 export {roles} from './authority'
 
@@ -30,8 +31,24 @@ export {
 } from './identity'
 
 export type {
-  ActionMessageHandler,
   ActionOptions,
+  InternalAction,
+  KernelRolesProvider,
+  KernelScaleProvider,
+  OfferRecord,
+  SignalPeer,
+  SocketClient,
+  StrategyAdapter,
+  StrategyContext,
+  StrategyMessage,
+  StrategyOnMessage,
+  TopicPublishContext,
+  TopicStrategyAdapter,
+  TopicSubscriptionContext
+} from './internal-types'
+
+export type {
+  ActionMessageHandler,
   ActionProgressContext,
   ActionProgressHandler,
   ActionReceiveContext,
@@ -42,18 +59,14 @@ export type {
   BaseRelayConfig,
   BaseRoomConfig,
   DataPayload,
-  InternalAction,
   JoinRoom,
   JoinRoomConfig,
   JsonValue,
-  KernelRolesProvider,
   KernelRoomErrorInput,
-  KernelScaleProvider,
   ListenerOptions,
   MessageAction,
   MessageActionConfig,
   MessageContext,
-  OfferRecord,
   PeerHandle,
   PeerHandlers,
   PeerInfo,
@@ -62,6 +75,9 @@ export type {
   PeerMediaContext,
   PeerResult,
   PeerTarget,
+  PluginContext,
+  PublicRolesProvider,
+  PublicScaleProvider,
   RelayConfig,
   RelayConnectivity,
   RemoveMediaOptions,
@@ -89,18 +105,9 @@ export type {
   SendOptions,
   SharedState,
   Signal,
-  SignalPeer,
-  SocketClient,
   StateChangeContext,
   StateConfig,
-  StrategyAdapter,
-  StrategyContext,
-  StrategyMessage,
-  StrategyOnMessage,
   TargetPeers,
-  TopicPublishContext,
-  TopicStrategyAdapter,
-  TopicSubscriptionContext,
   TopologyMode,
   TopologyRoute,
   TopologySnapshot,

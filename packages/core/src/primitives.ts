@@ -4,6 +4,12 @@ const decoder = /*@__PURE__*/ new TextDecoder()
 export const libName = 'Trystero'
 export const libId = 'trystero'
 
+export const socketInitialFailureSymbol: unique symbol = Symbol(
+  'socketInitialFailure'
+)
+export const internalPluginSymbol: unique symbol = Symbol('internalPlugin')
+export const signalingBridgeSymbol: unique symbol = Symbol('signalingBridge')
+
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
 export const toJson: typeof JSON.stringify = JSON.stringify

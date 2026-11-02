@@ -2,18 +2,23 @@ import {decrypt, encrypt, genKey, hashTopic} from './crypto'
 import {
   createIdentityClientId,
   getDefaultEndpointIdentity,
-  isEphemeralIdentityConfig,
   resolveUserIdentity,
   validateIdentityConfig
 } from './identity'
+import type {
+  SignalContext,
+  StrategyAdapter,
+  StrategyContext
+} from './internal-types'
 import {OfferManager} from './offer-manager'
-import {createIdentityHandshake} from './handshake'
 import initPeer from './peer'
-import room, {getRoomSignalingBridge, type RoomSignalingBridge} from './room'
+import {socketInitialFailureSymbol} from './primitives'
+import {createRoomWithBridge, type RoomSignalingBridge} from './room'
+import {resolvePluginRoomIds, validateAndPreparePlugins} from './room-bootstrap'
 import {
   buildSignalAad,
-  createSignalHandler,
   clearConnectedPeer,
+  createSignalHandler,
   detachConnectedPeer,
   getConnectedPeerHealth,
   getState,
@@ -22,12 +27,20 @@ import {
   resetAnsweringState,
   resetOfferState
 } from './signal-handler'
+import type {
+  BaseRoomConfig,
+  JoinRoom,
+  JoinRoomConfig,
+  PeerHandle,
+  Room,
+  RoomError,
+  RoomPlugin,
+  RoomWithPlugins,
+  Signal
+} from './types'
 import {
   all,
   entries,
-  getConfiguredPlugins,
-  getSocketInitialFailure,
-  isSelfAsAdminPlugin,
   keys,
   libName,
   log,
@@ -36,50 +49,36 @@ import {
   posSafeIntErr,
   requiredErr,
   resetTimer,
-  selfCertifyingRoomRegex,
-  selfCertRoomRolesErr,
   toErrorMessage,
   topicPath,
-  values,
-  warn,
-  warnEphemeralAdmin
+  warn
 } from './utils'
-import type {
-  BaseRoomConfig,
-  JoinRoom,
-  JoinRoomConfig,
-  PeerHandle,
-  RoomError,
-  RoomPlugin,
-  RoomWithPlugins,
-  Signal,
-  SignalContext,
-  StrategyContext,
-  StrategyAdapter
-} from './types'
 
 const announceIntervalMs = 5_333
 const announceWarmupIntervalsMs = [233, 533, 1_333] as const
 
+const mergeDefaultConfig = <T extends object>(
+  defaults: Partial<T>,
+  overrides: T
+): T => {
+  const merged = {...defaults} as Record<string, unknown>
+  for (const [k, v] of entries(overrides as Record<string, unknown>)) {
+    if (v !== undefined) {
+      merged[k] = v
+    }
+  }
+  return merged as T
+}
+
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
+  defaultConfig,
   init,
   subscribe,
   announce
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
   const clientId = createIdentityClientId()
-  const occupiedRooms: Record<
-    string,
-    Record<string, ReturnType<typeof room>>
-  > = {}
-  const leavingRoomCleanups: Record<
-    string,
-    Record<string, (rejoining?: boolean) => void>
-  > = {}
-  const hasActiveRooms = (): boolean =>
-    values(occupiedRooms).some(rooms => keys(rooms).length > 0)
-
-  let didInit = false
-  let initPromises: Promise<TRelay>[] = []
+  const occupiedRooms: Record<string, Record<string, Room>> = {}
+  const leavingRoomCleanups: Record<string, Record<string, () => void>> = {}
 
   return (<
     const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
@@ -99,7 +98,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       )
     }
 
-    const {appId} = config
+    const effectiveConfig = defaultConfig
+      ? mergeDefaultConfig(defaultConfig, config)
+      : config
+
+    const {appId} = effectiveConfig
 
     if (!appId) {
       throw requiredErr('appId')
@@ -110,39 +113,34 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     if (
-      config.maxReceiveBytes !== undefined &&
-      (!Number.isSafeInteger(config.maxReceiveBytes) ||
-        config.maxReceiveBytes <= 0)
+      effectiveConfig.maxReceiveBytes !== undefined &&
+      (!Number.isSafeInteger(effectiveConfig.maxReceiveBytes) ||
+        effectiveConfig.maxReceiveBytes <= 0)
     ) {
       throw posSafeIntErr('maxReceiveBytes')
     }
 
     if (
-      config.limit !== undefined &&
-      (!Number.isSafeInteger(config.limit) || config.limit < 1)
+      effectiveConfig.limit !== undefined &&
+      (!Number.isSafeInteger(effectiveConfig.limit) ||
+        effectiveConfig.limit < 1)
     ) {
       throw posSafeIntErr('limit')
     }
 
-    validateIdentityConfig(config)
+    validateIdentityConfig(effectiveConfig)
 
-    const plugins = getConfiguredPlugins(config.use)
-    const hasRolesPlugin = plugins.some(p => p.name === 'roles')
-    if (!hasRolesPlugin && selfCertifyingRoomRegex.test(roomId)) {
-      throw selfCertRoomRolesErr
-    }
-    if (
-      plugins.some(isSelfAsAdminPlugin) &&
-      isEphemeralIdentityConfig(config.identity)
-    ) {
-      warnEphemeralAdmin()
-    }
+    const {plugins, resolveOrderPlugins} = validateAndPreparePlugins(
+      effectiveConfig.use,
+      roomId,
+      effectiveConfig.identity
+    )
 
     if (occupiedRooms[appId]?.[roomId]) {
       return occupiedRooms[appId][roomId] as RoomWithPlugins<TPlugins>
     }
 
-    leavingRoomCleanups[appId]?.[roomId]?.(true)
+    leavingRoomCleanups[appId]?.[roomId]?.()
 
     const localEndpointP = getDefaultEndpointIdentity(
       undefined,
@@ -165,7 +163,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const userIdentityP = resolveUserIdentity(
       appId,
       roomId,
-      config,
+      effectiveConfig,
       clientId
     ).catch(err => {
       didReportSetupError = true
@@ -184,54 +182,41 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     })
     void userIdentityP.catch(noOp)
 
-    const preResolvedPlugins = new Map<RoomPlugin, unknown>()
-    let resolvedRoomIdP:
-      | Promise<{effectiveRoomId: string; state?: unknown}>
-      | undefined
-    for (const plugin of plugins) {
-      if (plugin.resolveRoomId) {
-        const pluginName = plugin.name
-        const resP = plugin.resolveRoomId({appId, roomId, userIdentityP})
-        if (resP) {
-          resolvedRoomIdP = resP.then(
-            res => {
-              preResolvedPlugins.set(plugin, res.state)
-              return res
-            },
-            err => {
-              if (!didReportSetupError && !didLeaveRoom) {
-                didReportSetupError = true
-                queueMicrotask(() => {
-                  if (!didLeaveRoom) {
-                    emitError({
-                      code: 'plugin-failed',
-                      plugin: pluginName,
-                      message: toErrorMessage(err, 'room resolution failed'),
-                      appId,
-                      roomId: effectiveRoomId,
-                      cause: err
-                    })
-                  }
+    const {preResolvedPlugins, effectiveRoomIdP: rawEffectiveRoomIdP} =
+      resolvePluginRoomIds(
+        resolveOrderPlugins,
+        appId,
+        roomId,
+        userIdentityP,
+        (pluginName, err) => {
+          if (!didReportSetupError && !didLeaveRoom) {
+            didReportSetupError = true
+            queueMicrotask(() => {
+              if (!didLeaveRoom) {
+                emitError({
+                  code: 'plugin-failed',
+                  plugin: pluginName,
+                  message: toErrorMessage(err, 'room resolution failed'),
+                  appId,
+                  roomId: effectiveRoomId,
+                  cause: err
                 })
               }
-              throw err
-            }
-          )
+            })
+          }
         }
-      }
-    }
-    void resolvedRoomIdP?.catch(noOp)
+      )
 
     const rootTopicPlaintext = topicPath(libName, appId, roomId)
-    const effectiveRoomIdP = resolvedRoomIdP?.then(res => {
-      effectiveRoomId = res.effectiveRoomId
-      ctx.roomId = res.effectiveRoomId
-      ctx.rootTopicPlaintext = topicPath(libName, appId, res.effectiveRoomId)
-      strategyContext.roomId = res.effectiveRoomId
-      if (res.effectiveRoomId !== roomId && !didLeaveRoom) {
-        ;(occupiedRooms[appId] ??= {})[res.effectiveRoomId] = joinedRoom
+    const effectiveRoomIdP = rawEffectiveRoomIdP?.then(rid => {
+      effectiveRoomId = rid
+      ctx.roomId = rid
+      ctx.rootTopicPlaintext = topicPath(libName, appId, rid)
+      strategyContext.roomId = rid
+      if (rid !== roomId && !didLeaveRoom) {
+        ;(occupiedRooms[appId] ??= {})[rid] = joinedRoom
       }
-      return res.effectiveRoomId
+      return rid
     })
     void effectiveRoomIdP?.catch(noOp)
 
@@ -251,24 +236,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     })
     void selfTopicP.catch(noOp)
     const key = effectiveRoomIdP
-      ? effectiveRoomIdP.then(rid => genKey(config.password ?? '', appId, rid))
-      : genKey(config.password ?? '', appId, roomId)
+      ? effectiveRoomIdP.then(rid =>
+          genKey(effectiveConfig.password ?? '', appId, rid)
+        )
+      : genKey(effectiveConfig.password ?? '', appId, roomId)
     void key.catch(noOp)
-
-    const syncOverlayNeighbors = (): void => {
-      const scaleProvider = bridgeRef.current?.getScaleProvider()
-      if (
-        didLeaveRoom ||
-        isPassive ||
-        !scaleProvider ||
-        scaleProvider.getActiveMode() === 'mesh'
-      ) {
-        return
-      }
-      for (const targetId of scaleProvider.getTargetNeighbors()) {
-        ctx.dialPeer?.(targetId)
-      }
-    }
 
     const withKey =
       (
@@ -293,7 +265,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     const toPlain = withKey(decrypt)
     const toCipher = withKey(encrypt)
-    const makeOffer = (): PeerHandle => initPeer(true, config)
+    const makeOffer = (): PeerHandle => initPeer(true, effectiveConfig)
     let reannounceOnDisconnect = false
     const offerManager = new OfferManager(makeOffer)
 
@@ -339,7 +311,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     }
 
-    const isPassive = Boolean(config.passive)
+    const isPassive = Boolean(effectiveConfig.passive)
+    let syncOverlayNeighbors = noOp
     let requeueAnnounce = noOp
     let disconnectReannounceQueued = false
     const reannounceAfterDisconnect = (): void => {
@@ -376,7 +349,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     const ctx: SignalContext = {
       appId,
       roomId,
-      config,
+      config: effectiveConfig,
       peerStates: {},
       rootTopicPlaintext,
       rootTopicP,
@@ -406,24 +379,35 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           true)
     }
     const strategyContext: StrategyContext<TConfig> = {
-      config,
+      config: effectiveConfig,
       appId,
       roomId
     }
 
-    const handleMessage = createSignalHandler(ctx)
-
-    if (!didInit) {
-      const initRes = init(config)
-      initPromises = (Array.isArray(initRes) ? initRes : [initRes]).map(
-        value => {
-          const p = Promise.resolve(value)
-          void p.catch(noOp)
-          return p
-        }
-      )
-      didInit = true
+    const {handleMessage, dialPeer} = createSignalHandler(ctx)
+    syncOverlayNeighbors = () => {
+      const scaleProvider = bridgeRef.current?.getScaleProvider()
+      if (
+        didLeaveRoom ||
+        isPassive ||
+        !scaleProvider ||
+        scaleProvider.getActiveMode() === 'mesh'
+      ) {
+        return
+      }
+      for (const targetId of scaleProvider.getTargetNeighbors()) {
+        dialPeer(targetId)
+      }
     }
+
+    const initRes = init(effectiveConfig)
+    const initPromises: Promise<TRelay>[] = (
+      Array.isArray(initRes) ? initRes : [initRes]
+    ).map(value => {
+      const p = Promise.resolve(value)
+      void p.catch(noOp)
+      return p
+    })
 
     // Only explicit numeric relay pacing overrides the signaling retry default.
     const announceScheduleIntervals = initPromises.map(() => announceIntervalMs)
@@ -469,9 +453,13 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     }
 
     initPromises.forEach((relayP, i) => {
-      const socketFailureP = getSocketInitialFailure(relayP)
-      if (socketFailureP) {
-        void socketFailureP.then(err => {
+      const getInitialFailure = (
+        relayP as Promise<TRelay> & {
+          [socketInitialFailureSymbol]?: () => Promise<Error | null>
+        }
+      )[socketInitialFailureSymbol]
+      if (typeof getInitialFailure === 'function') {
+        void getInitialFailure().then(err => {
           if (err) {
             markRelayFailed(i, err)
           }
@@ -560,7 +548,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
             if (
               errorStreak === 0 &&
-              config.relayConfig?.warnOnRelayFailure !== false
+              effectiveConfig.relayConfig?.warnOnRelayFailure !== false
             ) {
               warn(`announce failed - ${toErrorMessage(error, '')}`)
             }
@@ -653,18 +641,6 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
 
-    const {compose: composeIdentity} = createIdentityHandshake({
-      endpointIdentityP: localEndpointP,
-      appId,
-      roomId: effectiveRoomIdP ?? roomId,
-      getUserIdentity: () => userIdentityP,
-      getPeerHandle: peerId => bridgeRef.current?.getPeerHandle(peerId),
-      onVerified: (peerId, verified) => {
-        bridgeRef.current?.onPeerIdentityVerified(peerId, verified)
-      }
-    })
-    const composedPeerHandshake = composeIdentity()
-
     const releaseOccupiedRoom = (): void => {
       const appRooms = occupiedRooms[appId]
       if (!appRooms) {
@@ -703,7 +679,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     }
 
-    const cleanupRoom = (rejoining = false): void => {
+    const cleanupRoom = (): void => {
       if (didLeaveRoom) {
         return
       }
@@ -735,29 +711,27 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       })
 
       offerManager.destroy()
-
-      if (rejoining || hasActiveRooms()) {
-        return
-      }
-
-      didInit = false
     }
 
     const roomOptions = {
       endpointIdentityP: localEndpointP,
       appId,
       roomId,
-      ...(config.password === undefined ? {} : {password: config.password}),
-      ...(config.limit === undefined ? {} : {limit: config.limit}),
+      ...(effectiveRoomIdP === undefined ? {} : {effectiveRoomIdP}),
+      ...(effectiveConfig.password === undefined
+        ? {}
+        : {password: effectiveConfig.password}),
+      ...(effectiveConfig.limit === undefined
+        ? {}
+        : {limit: effectiveConfig.limit}),
       ...(plugins.length > 0 ? {use: plugins, preResolvedPlugins} : {}),
+      didResolvePluginRoomIds: true,
       userIdentityP,
       verifyPeerIdentity: true,
-      ...(config.maxReceiveBytes === undefined
+      runIdentityHandshake: true,
+      ...(effectiveConfig.maxReceiveBytes === undefined
         ? {}
-        : {maxReceiveBytes: config.maxReceiveBytes}),
-      ...(composedPeerHandshake
-        ? {onPeerHandshake: composedPeerHandshake}
-        : {}),
+        : {maxReceiveBytes: effectiveConfig.maxReceiveBytes}),
       onBeforeLeave: () => {
         isLeavingRoom = true
         announceTimeouts.forEach(resetTimer)
@@ -770,8 +744,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
     occupiedRooms[appId] ??= {}
 
     let joinedRoom: RoomWithPlugins<TPlugins>
+    let signalingBridge: RoomSignalingBridge
     try {
-      joinedRoom = room(
+      const created = createRoomWithBridge(
         f => (onPeerConnect = f),
         id => {
           if (didLeaveRoom) {
@@ -788,9 +763,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           // Shared-peer close handlers reach the room callback, not disconnectPeer.
           reannounceAfterDisconnect()
         },
-        () => cleanupRoom(false),
+        cleanupRoom,
         roomOptions
-      ) as RoomWithPlugins<TPlugins>
+      )
+      joinedRoom = created.room as RoomWithPlugins<TPlugins>
+      signalingBridge = created.bridge
     } catch (err) {
       didLeaveRoom = true
       announceTimeouts.forEach(resetTimer)
@@ -798,18 +775,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         void f.then(cleanup => cleanup(), noOp)
       })
       offerManager.destroy()
-      if (!hasActiveRooms()) {
-        didInit = false
-      }
       throw err
     }
 
-    const signalingBridge = getRoomSignalingBridge(joinedRoom)
     bridgeRef.current = signalingBridge
-    signalingBridge?.setOnScaleTargetsChanged(missingTargets => {
+    signalingBridge.setOnScaleTargetsChanged(missingTargets => {
       if (!didLeaveRoom) {
         missingTargets.forEach(targetId => {
-          ctx.dialPeer?.(targetId)
+          dialPeer(targetId)
         })
       }
     })

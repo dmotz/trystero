@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {createRelayManager, makeSocket} from '../../packages/core/src/utils.ts'
+import {
+  createRelayManager,
+  makeSocket
+} from '../../packages/core/src/relay-manager.ts'
 import {joinRoom as joinNostrRoom} from '../../packages/nostr/src/index.ts'
 import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
 import {joinRoom as joinWsRelayRoom} from '../../packages/ws-relay/src/index.ts'

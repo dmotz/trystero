@@ -66,8 +66,10 @@ import {
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import type {
   AuthoritativeStateRecord,
+  PeerDataTransport
+} from '../../packages/core/src/internal-types.ts'
+import type {
   JsonValue,
-  PeerDataTransport,
   PeerHandle,
   RoleCertificate,
   Room,
@@ -1394,7 +1396,7 @@ void test('S14: signal-handler drops invalid peerIds before allocating peerState
     announceIntervalMs: 5_000,
     selfId: 'K'.repeat(20),
     onError: undefined
-  })(0)
+  }).handleMessage(0)
 
   const invalidIds = [
     '',
@@ -1480,7 +1482,7 @@ void test('S15: undecryptable offers allocate 0 RTCPeerConnections and announce 
     announceIntervalMs: 60_000,
     selfId: '0'.repeat(20),
     onError: undefined
-  })(0)
+  }).handleMessage(0)
 
   // 1. 50 undecryptable offers must allocate ZERO answer RTCPeerConnections
   for (let i = 0; i < 50; i++) {
@@ -1761,7 +1763,7 @@ void test('D2: signaling ciphertexts bind type|peerId|offerId via AAD and reject
     announceIntervalMs: 5_000,
     selfId: 'K'.repeat(20),
     onError: undefined
-  })(0)
+  }).handleMessage(0)
 
   await receive('self', {peerId: 'L'.repeat(20), offer: ct}, () => {})
   await receive('self', {peerId: 'L'.repeat(20), answer: ct}, () => {})

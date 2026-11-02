@@ -11,7 +11,9 @@ import {
   type SocketClient
 } from '../../packages/core/src/index.ts'
 import {createActionManager} from '../../packages/core/src/actions.ts'
+import type {InternalRoomContext} from '../../packages/core/src/internal-types.ts'
 import {createMediaManager} from '../../packages/core/src/media.ts'
+import {internalPluginSymbol} from '../../packages/core/src/primitives.ts'
 import createRoom, {
   getRoomSignalingBridge
 } from '../../packages/core/src/room.ts'
@@ -1085,37 +1087,50 @@ void test('RoomKernel lifecycle hooks return Unsubscribe and support {replay, on
 
   let lateSubscribeReplay: (() => void) | null = null
 
-  const lifecyclePlugin = definePlugin('lifecycle-probe', {
-    setup(kernel) {
-      const unsubAct = kernel.onPeerActivated(id => activatedLive.push(id))
-      const unsubDeact = kernel.onPeerDeactivated(id => deactivated.push(id), {
-        once: true
-      })
-      kernel.onRoomIdChanged(rid => roomIds.push(rid), {once: true})
-      const leaveAbort = new AbortController()
-      kernel.onLeave(
-        () => {
-          leaveCount++
-        },
-        {signal: leaveAbort.signal}
-      )
-      const unsubLeave2 = kernel.onLeave(() => {
-        leaveCount += 10
-      })
+  const setupLifecycleProbe = (kernel: InternalRoomContext) => {
+    const unsubAct = kernel.onPeerActivated(id => activatedLive.push(id))
+    const unsubDeact = kernel.onPeerDeactivated(id => deactivated.push(id), {
+      once: true
+    })
+    kernel.onRoomIdChanged(rid => roomIds.push(rid), {once: true})
+    const leaveAbort = new AbortController()
+    kernel.onLeave(
+      () => {
+        leaveCount++
+      },
+      {signal: leaveAbort.signal}
+    )
+    const unsubLeave2 = kernel.onLeave(() => {
+      leaveCount += 10
+    })
 
-      lateSubscribeReplay = () => {
-        kernel.onPeerActivated(id => activatedReplayed.push(id), {replay: true})
-        unsubAct()
-        unsubLeave2()
-      }
+    lateSubscribeReplay = () => {
+      kernel.onPeerActivated(id => activatedReplayed.push(id), {replay: true})
+      unsubAct()
+      unsubLeave2()
+    }
 
-      return {
-        triggerRoomIdChange: (next: string) => kernel.setEffectiveRoomId(next),
-        abortFirstLeaveHook: () => leaveAbort.abort(),
-        unsubDeact
+    return {
+      triggerRoomIdChange: (next: string) => kernel.setEffectiveRoomId(next),
+      abortFirstLeaveHook: () => leaveAbort.abort(),
+      unsubDeact
+    }
+  }
+  const lifecyclePlugin = Object.assign(
+    definePlugin('lifecycle-probe', {
+      setup: () => ({
+        triggerRoomIdChange: (_next: string) => {},
+        abortFirstLeaveHook: () => {},
+        unsubDeact: () => {}
+      })
+    }),
+    {
+      [internalPluginSymbol]: {
+        kind: 'internal' as const,
+        setup: setupLifecycleProbe
       }
     }
-  })
+  )
 
   const roomA = createRoom(
     f => regMap.set('a', f),

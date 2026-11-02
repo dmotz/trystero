@@ -54,6 +54,7 @@ const formatKb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`
 
 const tempDir = await mkdtemp(join(tmpdir(), 'trystero-bundle-sizes-'))
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const corePublicSourcePath = resolve('packages/core/src/public.ts')
 const empty = resolve('scripts/empty.ts')
 
 try {
@@ -91,6 +92,7 @@ try {
           onlyBundle: false
         },
         alias: {
+          '@trystero-p2p/core/public': corePublicSourcePath,
           '@trystero-p2p/core': coreSourcePath,
           crypto: empty,
           'node:crypto': empty

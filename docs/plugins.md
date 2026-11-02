@@ -236,7 +236,6 @@ verification via `roles: ['admin', ...]`.
 | `kernel.initialRoomId`              | `string`                                      | The initial `roomId` passed to `joinRoom`.                                                             |
 | `kernel.password`                   | `string`                                      | Room password string (`''` if none).                                                                   |
 | `kernel.getRoomId()`                | `() => string`                                | Returns the current effective room ID (including any `~<userId>` suffix).                              |
-| `kernel.setEffectiveRoomId(id)`     | `(id: string) => void`                        | Updates the effective room ID and notifies `onRoomIdChanged` listeners.                                |
 | `kernel.getLocalUserIdentity()`     | `() => Promise<UserIdentity>`                 | Resolves the local user's cryptographic `UserIdentity` (`{userId, publicKey, signPubJwk, sign, ...}`). |
 | `kernel.getPeerUserId(peerId)`      | `(peerId: string) => string`                  | Returns the verified `userId` for `peerId` (falls back to `peerId` if not yet known).                  |
 | `kernel.getKnownPeerUserId(peerId)` | `(peerId: string) => string \| undefined`     | Returns the verified `userId` for `peerId`, or `undefined` if unknown.                                 |
@@ -275,7 +274,7 @@ has enabled them, while degrading gracefully when they are omitted:
 ### Checking Roles & Bans (`kernel.getRolesProvider()`)
 
 If `roles()` is passed to `joinRoom`, `kernel.getRolesProvider()` returns the
-active `KernelRolesProvider` (otherwise `null`):
+active `PublicRolesProvider` (otherwise `null`):
 
 ```ts
 const rolesProvider = kernel.getRolesProvider()
@@ -294,7 +293,7 @@ if (rolesProvider) {
 ### Inspecting Topology (`kernel.getScaleProvider()`)
 
 If `scale()` is passed to `joinRoom`, `kernel.getScaleProvider()` returns the
-active `KernelScaleProvider` (otherwise `null`):
+active `PublicScaleProvider` (otherwise `null`):
 
 ```ts
 const scaleProvider = kernel.getScaleProvider()

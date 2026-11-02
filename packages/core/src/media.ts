@@ -9,10 +9,10 @@ import {
   toJson,
   warn
 } from './utils'
+import type {MediaIdentityCache} from './internal-types'
 import type {
   AddMediaOptions,
   JsonValue,
-  MediaIdentityCache,
   PeerHandle,
   PeerMediaContext,
   ReplayListenerOptions,

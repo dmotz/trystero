@@ -23,11 +23,13 @@ import type {
   AuthoritativeStateRecord,
   AuthoritativeStateTombstoneRecord,
   AuthoritativeStateValueRecord,
-  DataPayload,
   InternalAction,
-  JsonValue,
   KernelRolesProvider,
-  KernelScaleProvider,
+  KernelScaleProvider
+} from './internal-types'
+import type {
+  DataPayload,
+  JsonValue,
   ReplayListenerOptions,
   RoleCertificate,
   SharedState,

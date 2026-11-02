@@ -1,14 +1,18 @@
 import {
   createRelayManager,
+  createRelayScopedStore,
   createTopicStrategy,
   fromJson,
   genId,
   getRelays,
   libName,
   makeSocket,
+  setRelayConnectivity,
   toJson,
   type JoinRoom,
   type JoinRoomConfig,
+  type RelayConfig,
+  type RelayConnectivity,
   type SocketClient
 } from '@trystero-p2p/core'
 import {
@@ -55,7 +59,7 @@ const relayBackoffs = /*@__PURE__*/ new WeakMap<
   RelayBackoffState
 >()
 const announcementMessages =
-  /*@__PURE__*/ relayManager.scoped<AnnouncementRecord>()
+  /*@__PURE__*/ createRelayScopedStore<AnnouncementRecord>()
 const retiredRelays = /*@__PURE__*/ new WeakSet<SocketClient>()
 
 const getRoomKey = (rootTopic: string, selfTopic: string): string =>
@@ -517,110 +521,45 @@ export const joinRoom: JoinRoom<NostrRoomConfig> =
     }
   })
 
-export const getRelaySockets: () => Record<string, WebSocket> =
-  relayManager.getSockets
-
-export type {JoinRoomConfig}
+export const getRelaySockets = (): Record<string, WebSocket> =>
+  relayManager.getSockets()
 
 export {
-  clearUserIdentity,
-  createUserIdentity,
-  definePlugin,
-  exportUserIdentity,
-  importUserIdentity,
-  roles,
-  scale,
   setRelayConnectivity,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type AuthoritativeState,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
+  type JoinRoomConfig,
   type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyMode,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
-} from '@trystero-p2p/core'
+  type RelayConnectivity
+}
+export * from '@trystero-p2p/core/public'
 
-export const defaultRelayUrls: string[] = /*@__PURE__*/ [
-  '0x-nostr-relay.fly.dev',
-  'bendernostur.duckdns.org:8443',
-  'cdn.satellite.earth',
-  'nos.lol',
-  'nostr.chaima.info',
-  'nostr.christiansass.de',
-  'nostr.rblb.it',
-  'nostr.red5d.dev',
-  'nostr.robosats.org',
-  'nostr.stakey.net',
-  'nostrcity-club.fly.dev',
-  'relay-dev.gulugulu.moe',
-  'relay.aarpia.com',
-  'relay.agentry.com',
-  'relay.bitmacro.cloud',
-  'relay.bullishbounty.com',
-  'relay.degmods.com',
-  'relay.flashapp.me',
-  'relay.grigic.org',
-  'relay.hackshed.dev',
-  'relay.kaleidoswap.com',
-  'relay.layer.systems',
-  'relay.nostr.blockhenge.com',
-  'relay.nostr.dev.br',
-  'relay.nostrmap.net',
-  'relay.novospes.com',
-  'relay.piazza.today',
-  'relay.routstr.com',
-  'testr.nymble.world'
-].map(url => 'wss://' + url)
+export const defaultRelayUrls: string[] = [
+  'wss://0x-nostr-relay.fly.dev',
+  'wss://bendernostur.duckdns.org:8443',
+  'wss://cdn.satellite.earth',
+  'wss://nos.lol',
+  'wss://nostr.chaima.info',
+  'wss://nostr.christiansass.de',
+  'wss://nostr.rblb.it',
+  'wss://nostr.red5d.dev',
+  'wss://nostr.robosats.org',
+  'wss://nostr.stakey.net',
+  'wss://nostrcity-club.fly.dev',
+  'wss://relay-dev.gulugulu.moe',
+  'wss://relay.aarpia.com',
+  'wss://relay.agentry.com',
+  'wss://relay.bitmacro.cloud',
+  'wss://relay.bullishbounty.com',
+  'wss://relay.degmods.com',
+  'wss://relay.flashapp.me',
+  'wss://relay.grigic.org',
+  'wss://relay.hackshed.dev',
+  'wss://relay.kaleidoswap.com',
+  'wss://relay.layer.systems',
+  'wss://relay.nostr.blockhenge.com',
+  'wss://relay.nostr.dev.br',
+  'wss://relay.nostrmap.net',
+  'wss://relay.novospes.com',
+  'wss://relay.piazza.today',
+  'wss://relay.routstr.com',
+  'wss://testr.nymble.world'
+]

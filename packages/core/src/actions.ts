@@ -30,6 +30,7 @@ import {
   type InternalAction,
   type InternalActionSender
 } from './action-wire'
+import type {PeerDataTransport} from './peer-registry'
 import type {
   ActionMessageHandler,
   ActionProgressContext,
@@ -41,7 +42,6 @@ import type {
   MessageAction,
   MessageActionConfig,
   MessageContext,
-  PeerDataTransport,
   PeerHandle,
   PeerResult,
   RequestAction,
