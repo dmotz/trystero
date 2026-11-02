@@ -1,121 +1,53 @@
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
+import {
+  type BoundedCache,
+  type BoundedSet,
+  base62Alphabet,
+  base64UrlRe,
+  bytesMatch,
+  bytesToBigInt,
+  createBoundedCache,
+  createBoundedSet,
+  decodeBytes,
+  encodeBytes,
+  fromBase64,
+  fromBase64Url,
+  fromJson,
+  hash32,
+  libId,
+  libName,
+  mkErr,
+  peerIdLength,
+  toBase64,
+  toBase64Url,
+  toHex,
+  toJson,
+  userIdLength
+} from './primitives'
 
-export const libName = 'Trystero'
-export const libId: string = libName.toLowerCase()
-
-export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
-
-export const toJson: typeof JSON.stringify = JSON.stringify
-
-export const fromJson = <T>(s: string): T => {
-  try {
-    return JSON.parse(s)
-  } catch {
-    throw mkErr(`failed to parse JSON: ${s}`)
-  }
-}
-
-export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
-
-export const decodeBytes = (buf: ArrayBufferLike | ArrayBufferView): string =>
-  decoder.decode(buf)
-
-export const toHex = (buffer: Uint8Array): string =>
-  buffer.reduce((a, c) => a + c.toString(16).padStart(2, '0'), '')
-
-export const toBase64 = (bytes: Uint8Array): string => {
-  let bin = ''
-  for (let i = 0; i < bytes.byteLength; i++) {
-    bin += String.fromCharCode(bytes[i]!)
-  }
-  return btoa(bin)
-}
-
-export const fromBase64 = (b64: string): Uint8Array => {
-  const bin = atob(b64)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) {
-    out[i] = bin.charCodeAt(i)
-  }
-  return out
-}
-
-export const toBase64Url = (bytes: Uint8Array): string =>
-  toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
-
-export const fromBase64Url = (b64url: string): Uint8Array => {
-  const padded = b64url.replace(/-/g, '+').replace(/_/g, '/')
-  return fromBase64(padded + '='.repeat((4 - (padded.length % 4)) % 4))
-}
-
-export const base62Alphabet =
-  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-export const peerIdLength = 20
-export const userIdLength = 22
-const base64UrlRe = /^[A-Za-z0-9_-]+$/
-
-export const hash32 = (str: string): number => {
-  const bytes = encodeBytes(str)
-  let h = 0x811c9dc5
-  for (let i = 0; i < bytes.byteLength; i++) {
-    h = Math.imul(h ^ bytes[i]!, 0x01000193)
-  }
-  h ^= h >>> 16
-  h = Math.imul(h, 0x85ebca6b)
-  h ^= h >>> 13
-  h = Math.imul(h, 0xc2b2ae35)
-  return (h ^ (h >>> 16)) >>> 0
-}
-
-export const createBoundedCache = <K, V>(
-  maxSize = 4_096
-): {
-  get: (key: K) => V | undefined
-  has: (key: K) => boolean
-  set: (key: K, value: V) => void
-  delete: (key: K) => boolean
-} => {
-  const map = new Map<K, V>()
-  return {
-    get: key => map.get(key),
-    has: key => map.has(key),
-    set: (key, value) => {
-      if (!map.has(key) && map.size >= maxSize) {
-        const oldest = map.keys().next().value
-        if (oldest !== undefined) {
-          map.delete(oldest)
-        }
-      }
-      map.set(key, value)
-    },
-    delete: key => map.delete(key)
-  }
-}
-
-export const createBoundedSet = <T>(
-  maxSize = 4_096
-): {
-  has: (value: T) => boolean
-  add: (value: T) => boolean
-} => {
-  const set = new Set<T>()
-  return {
-    has: value => set.has(value),
-    add: value => {
-      if (set.has(value)) {
-        return false
-      }
-      if (set.size >= maxSize) {
-        const oldest = set.keys().next().value
-        if (oldest !== undefined) {
-          set.delete(oldest)
-        }
-      }
-      set.add(value)
-      return true
-    }
-  }
+export {
+  type BoundedCache,
+  type BoundedSet,
+  base62Alphabet,
+  base64UrlRe,
+  bytesMatch,
+  bytesToBigInt,
+  createBoundedCache,
+  createBoundedSet,
+  decodeBytes,
+  encodeBytes,
+  fromBase64,
+  fromBase64Url,
+  fromJson,
+  hash32,
+  libId,
+  libName,
+  mkErr,
+  peerIdLength,
+  toBase64,
+  toBase64Url,
+  toHex,
+  toJson,
+  userIdLength
 }
 
 export const ecdsaKeyAlgo: EcKeyImportParams = {
@@ -138,14 +70,20 @@ const gcmIvBytes = 12
 const gcmTagBytes = 16
 const hmacAlgo = 'HMAC'
 const pbkdf2Iterations = 600_000
-const topicHashCache = createBoundedCache<string, string>(4_096)
-const derivedKeyCache = createBoundedCache<string, Promise<CryptoKey>>(64)
-const derivedAuthKeyCache = createBoundedCache<string, Promise<CryptoKey>>(64)
+const topicHashCache = /*@__PURE__*/ createBoundedCache<string, string>(4_096)
+const derivedKeyCache = /*@__PURE__*/ createBoundedCache<
+  string,
+  Promise<CryptoKey>
+>(64)
+const derivedAuthKeyCache = /*@__PURE__*/ createBoundedCache<
+  string,
+  Promise<CryptoKey>
+>(64)
 
 export const p256N =
   0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
 const p256HalfN = p256N >> 1n
-const p256NBytes = new Uint8Array([
+const p256NBytes = /*@__PURE__*/ new Uint8Array([
   0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
   0xff, 0xff, 0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9,
   0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51
@@ -165,23 +103,11 @@ export const isValidP256PrivateScalar = (bytes: Uint8Array): boolean => {
   return nonZero !== 0 && borrow === 1
 }
 
-const sliceToBigInt = (
-  bytes: Uint8Array,
-  start: number,
-  end: number
-): bigint => {
-  let res = 0n
-  for (let i = start; i < end; i++) {
-    res = (res << 8n) | BigInt(bytes[i]!)
-  }
-  return res
-}
-
 export const normalizeLowSP256Signature = (sig: Uint8Array): Uint8Array => {
   if (sig.byteLength !== 64) {
     return sig
   }
-  const s = sliceToBigInt(sig, 32, 64)
+  const s = bytesToBigInt(sig.subarray(32, 64))
   if (s <= p256HalfN) {
     return sig
   }
@@ -198,8 +124,8 @@ export const isLowSP256Signature = (sig: Uint8Array): boolean => {
   if (sig.byteLength !== 64) {
     return false
   }
-  const r = sliceToBigInt(sig, 0, 32)
-  const s = sliceToBigInt(sig, 32, 64)
+  const r = bytesToBigInt(sig.subarray(0, 32))
+  const s = bytesToBigInt(sig.subarray(32, 64))
   return r > 0n && r < p256N && s > 0n && s <= p256HalfN
 }
 
@@ -241,25 +167,17 @@ export const hashTopic = async (str: string): Promise<string> => {
   return digest
 }
 
-export const genKey = async (
+const derivePbkdf2Key = (
+  cache: BoundedCache<string, Promise<CryptoKey>>,
+  domainTag: string,
   secret: string,
   appId: string,
-  roomId: string
+  roomId: string,
+  derivedKeyType: AesKeyGenParams | HmacKeyGenParams,
+  keyUsages: KeyUsage[]
 ): Promise<CryptoKey> => {
-  if (!secret) {
-    return crypto.subtle.importKey(
-      'raw',
-      (await sha256(
-        toJson([`${libId}:room-key:v2`, appId, roomId])
-      )) as BufferSource,
-      {name: algo},
-      false,
-      ['encrypt', 'decrypt']
-    )
-  }
-
   const cacheKey = toJson([secret, appId, roomId])
-  const existing = derivedKeyCache.get(cacheKey)
+  const existing = cache.get(cacheKey)
   if (existing) {
     return existing
   }
@@ -273,7 +191,7 @@ export const genKey = async (
         false,
         ['deriveKey']
       ),
-      sha256(toJson([`${libId}:pbkdf2:v2`, appId, roomId]))
+      sha256(toJson([domainTag, appId, roomId]))
     ])
     return crypto.subtle.deriveKey(
       {
@@ -283,61 +201,58 @@ export const genKey = async (
         hash: 'SHA-256'
       },
       baseKey,
-      {name: algo, length: 256},
+      derivedKeyType,
       false,
-      ['encrypt', 'decrypt']
+      keyUsages
     )
   })()
 
   deriveP.catch(() => {
-    derivedKeyCache.delete(cacheKey)
+    cache.delete(cacheKey)
   })
-  derivedKeyCache.set(cacheKey, deriveP)
+  cache.set(cacheKey, deriveP)
   return deriveP
 }
+
+export const genKey = async (
+  secret: string,
+  appId: string,
+  roomId: string
+): Promise<CryptoKey> =>
+  secret
+    ? derivePbkdf2Key(
+        derivedKeyCache,
+        `${libId}:pbkdf2:v2`,
+        secret,
+        appId,
+        roomId,
+        {name: algo, length: 256},
+        ['encrypt', 'decrypt']
+      )
+    : crypto.subtle.importKey(
+        'raw',
+        (await sha256(
+          toJson([`${libId}:room-key:v2`, appId, roomId])
+        )) as BufferSource,
+        {name: algo},
+        false,
+        ['encrypt', 'decrypt']
+      )
 
 export const genAuthKey = (
   secret: string,
   appId: string,
   roomId: string
-): Promise<CryptoKey> => {
-  const cacheKey = toJson([secret, appId, roomId])
-  const existing = derivedAuthKeyCache.get(cacheKey)
-  if (existing) {
-    return existing
-  }
-
-  const deriveP = (async () => {
-    const [baseKey, salt] = await Promise.all([
-      crypto.subtle.importKey(
-        'raw',
-        encodeBytes(secret) as BufferSource,
-        'PBKDF2',
-        false,
-        ['deriveKey']
-      ),
-      sha256(toJson([`${libId}:pbkdf2-auth:v1`, appId, roomId]))
-    ])
-    return crypto.subtle.deriveKey(
-      {
-        name: 'PBKDF2',
-        salt: salt as BufferSource,
-        iterations: pbkdf2Iterations,
-        hash: 'SHA-256'
-      },
-      baseKey,
-      {name: hmacAlgo, hash: 'SHA-256', length: 256},
-      false,
-      ['sign', 'verify']
-    )
-  })()
-
-  deriveP.catch(() => {
-    derivedAuthKeyCache.delete(cacheKey)
-  })
-  derivedAuthKeyCache.set(cacheKey, deriveP)
-  return deriveP
-}
+): Promise<CryptoKey> =>
+  derivePbkdf2Key(
+    derivedAuthKeyCache,
+    `${libId}:pbkdf2-auth:v1`,
+    secret,
+    appId,
+    roomId,
+    {name: hmacAlgo, hash: 'SHA-256', length: 256},
+    ['sign', 'verify']
+  )
 
 const roomAuthPayload = (
   appId: string,

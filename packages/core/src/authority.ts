@@ -1,8 +1,8 @@
 import {sha256} from './crypto'
 import {
-  canonicalizePubJwk,
   getVerifiedPubKeyRecord,
   isValidUserId,
+  jwkToCompactPub,
   pubJwkToUncompressedBytes
 } from './identity'
 import {
@@ -32,7 +32,6 @@ import type {
 import {
   authMetaKey,
   createBoundedCache,
-  createBoundedSet,
   createWindowCounter,
   definePlugin,
   encodeBytes,
@@ -166,7 +165,7 @@ export const signRoleCertificate = async (
   const u: Omit<RoleCertificate, 'sig'> = {
     v: 1,
     certId: crypto.randomUUID(),
-    issuerPubKey: canonicalizePubJwk(issuerPubJwk),
+    issuerPubKey: jwkToCompactPub(issuerPubJwk),
     subUserId: p.subUserId,
     appId: p.appId,
     roomId: p.roomId,
@@ -721,7 +720,6 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
   const peerToUserId = new Map<string, string>()
   const lastSeenActionSeq = new Map<string, number>()
   const verifiedCertCache = createBoundedCache<string, string[]>(512)
-  const verifiedActionSigCache = createBoundedSet(512)
 
   let localCert: RoleCertificate | null = null
   let localModSeq = 0
@@ -1279,14 +1277,8 @@ export const createRoomAuthority = (init: RoomAuthorityInit): RoomAuthority => {
     ) {
       return {valid: false, roles: []}
     }
-    const sigCacheKey = `${actionAuthPayload(env)}\u0000${env.sig}`
-    if (!verifiedActionSigCache.has(sigCacheKey)) {
-      if (
-        !(await verifySig(env.signerPubKey, actionAuthPayload(env), env.sig))
-      ) {
-        return {valid: false, roles: []}
-      }
-      verifiedActionSigCache.add(sigCacheKey)
+    if (!(await verifySig(env.signerPubKey, actionAuthPayload(env), env.sig))) {
+      return {valid: false, roles: []}
     }
     if (!isOffer) {
       if (lastSeenActionSeq.size >= 2048) {

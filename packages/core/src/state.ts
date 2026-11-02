@@ -1,8 +1,9 @@
 import {ecdsaSign, hash32, normalizeLowSP256Signature} from './crypto'
 import {
+  compactPubToJwk,
   getVerifiedPubKeyRecord,
   isValidUserId,
-  pubJwkToUncompressedBytes,
+  jwkToCompactPub,
   verifyWithP256
 } from './identity'
 import {isValidSignalPeerId} from './signal-handler'
@@ -141,25 +142,7 @@ export const verifySig = async (
   }
 }
 
-export const jwkToCompactPub = (jwk: JsonWebKey): string => {
-  if (!pubJwkToUncompressedBytes(jwk) || !jwk.x || !jwk.y) {
-    throw mkErr('invalid P-256 public key')
-  }
-  return `${jwk.x}.${jwk.y}`
-}
-
-export const compactPubToJwk = (pub: string): JsonWebKey | null => {
-  if (typeof pub !== 'string' || pub.length !== 87 || pub[43] !== '.') {
-    return null
-  }
-  const jwk: JsonWebKey = {
-    crv: 'P-256',
-    kty: 'EC',
-    x: pub.slice(0, 43),
-    y: pub.slice(44)
-  }
-  return pubJwkToUncompressedBytes(jwk) ? jwk : null
-}
+export {compactPubToJwk, jwkToCompactPub}
 
 export const stateRecordPayload = (
   r: Omit<AuthoritativeStateRecord, 'sig'>
@@ -263,8 +246,7 @@ export const verifyStateRecordSignature = async (
   rec: AuthoritativeStateRecord,
   appId: string,
   roomId: string,
-  clockSkewMs: number = defaultMaxClockSkewMs,
-  sigCache?: {has: (value: string) => boolean; add: (value: string) => boolean}
+  clockSkewMs: number = defaultMaxClockSkewMs
 ): Promise<boolean> => {
   if (
     !validateStateRecordShape(rec) ||
@@ -275,24 +257,11 @@ export const verifyStateRecordSignature = async (
   ) {
     return false
   }
-  const jwk = compactPubToJwk(rec.pub)
-  if (!jwk) {
-    return false
-  }
-  const signer = await getVerifiedPubKeyRecord(jwk)
+  const signer = await getVerifiedPubKeyRecord(rec.pub)
   if (!signer || signer.userId !== rec.userId) {
     return false
   }
-  const canon = stateRecordPayload(rec)
-  const cacheKey = `${canon}\u0000${rec.sig}`
-  if (sigCache?.has(cacheKey)) {
-    return true
-  }
-  const ok = await verifySig(jwk, canon, rec.sig)
-  if (ok) {
-    sigCache?.add(cacheKey)
-  }
-  return ok
+  return verifySig(rec.pub, stateRecordPayload(rec), rec.sig)
 }
 
 export const compareStateRecords = (
@@ -562,7 +531,6 @@ const getLiveEntry = (slot: Slot, key: string): SlotEntry | undefined => {
 
 export const createStateManager = (deps: StateManagerDeps): StateManager => {
   const slots = new Map<string, Slot>()
-  const verifiedSigCache = createBoundedSet(1_024)
   const forwardedRecSigs = createBoundedSet(1_024)
   const peerRateBuckets = createBoundedCache<
     string,
@@ -730,16 +698,12 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
     if (entry.sigOk) {
       return true
     }
-    const canon = stateRecordPayload(entry.rec)
-    const cacheKey = `${canon}\u0000${entry.rec.sig}`
-    if (verifiedSigCache.has(cacheKey)) {
-      entry.sigOk = true
-      return true
-    }
-    const jwk = compactPubToJwk(entry.rec.pub)
-    const ok = jwk ? await verifySig(jwk, canon, entry.rec.sig) : false
+    const ok = await verifySig(
+      entry.rec.pub,
+      stateRecordPayload(entry.rec),
+      entry.rec.sig
+    )
     if (ok) {
-      verifiedSigCache.add(cacheKey)
       entry.sigOk = true
       return true
     }
@@ -828,8 +792,7 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
         rec,
         deps.appId,
         roomId,
-        defaultMaxClockSkewMs,
-        verifiedSigCache
+        defaultMaxClockSkewMs
       ))
     ) {
       return {status: 'invalid'}
@@ -1581,7 +1544,6 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
                   cert: auth.cert
                 }
               )
-              verifiedSigCache.add(`${stateRecordPayload(rec)}\u0000${rec.sig}`)
             } catch (err) {
               for (const op of accepted) {
                 op.rej(err)
@@ -2025,8 +1987,7 @@ export const createStateManager = (deps: StateManagerDeps): StateManager => {
     }
     if (
       completedSyncPeers.size + inFlightPullTimers.size < syncPullFanout ||
-      (deps.getScaleProvider?.()?.getActiveMode() === 'gossip' &&
-        deps.getSelfId() < peerId)
+      deps.getScaleProvider?.()?.getActiveMode() === 'gossip'
     ) {
       sendPullToPeer(peerId)
     }

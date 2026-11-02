@@ -32,9 +32,6 @@ type SdpDescription = {
   sdp: string
 }
 
-const rewriteMdnsCandidatesToLoopback = (sdp: string): string =>
-  sdp.replace(/ (\S+\.local) (\d+) typ host/g, ' 127.0.0.1 $2 typ host')
-
 export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   const {trickleIce, rtcConfig, rtcPolyfill, turnConfig} = config
   const iceServers = [
@@ -115,39 +112,11 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     }
   }
 
-  const normalizeSdp = (sdp: string): string => {
-    DEV: if (
-      '_test_only_mdnsHostFallbackToLoopback' in config &&
-      config._test_only_mdnsHostFallbackToLoopback
-    ) {
-      return rewriteMdnsCandidatesToLoopback(sdp)
-    }
-    return sdp
-  }
-
-  const normalizeCandidate = (
-    candidate: RTCIceCandidateInit
-  ): RTCIceCandidateInit => {
-    DEV: if (
-      '_test_only_mdnsHostFallbackToLoopback' in config &&
-      config._test_only_mdnsHostFallbackToLoopback &&
-      typeof candidate.candidate === 'string'
-    ) {
-      const normalizedCandidate = rewriteMdnsCandidatesToLoopback(
-        candidate.candidate
-      )
-      return normalizedCandidate === candidate.candidate
-        ? candidate
-        : {...candidate, candidate: normalizedCandidate}
-    }
-    return candidate
-  }
-
   const localDescriptionSignal = (
     peerConnection: RTCPeerConnection
   ): SdpDescription => ({
     type: (peerConnection.localDescription?.type ?? offerType) as RTCSdpType,
-    sdp: normalizeSdp(peerConnection.localDescription?.sdp ?? '')
+    sdp: peerConnection.localDescription?.sdp ?? ''
   })
 
   const getRemoteUfrag = (): string | null => {
@@ -448,7 +417,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       return
     }
 
-    const candidatePayload = normalizeCandidate(
+    const candidatePayload =
       typeof candidate.toJSON === 'function'
         ? candidate.toJSON()
         : {
@@ -457,7 +426,6 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
             sdpMLineIndex: candidate.sdpMLineIndex,
             usernameFragment: candidate.usernameFragment
           }
-    )
 
     emitSignal({
       type: candidateType,
@@ -584,7 +552,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
           const candidate = JSON.parse(sdp.sdp) as RTCIceCandidateInit | null
 
           if (candidate && typeof candidate === 'object') {
-            await addRemoteCandidate(normalizeCandidate(candidate))
+            await addRemoteCandidate(candidate)
           }
         } catch (err) {
           handlers.error?.(toError(err, 'failed to parse remote candidate'))
@@ -601,10 +569,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
 
       try {
-        const rtcSdp: RTCSessionDescriptionInit = {
-          ...sdp,
-          sdp: normalizeSdp(sdp.sdp)
-        }
+        const rtcSdp: RTCSessionDescriptionInit = {...sdp}
 
         if (sdp.type === offerType) {
           const isCollision =

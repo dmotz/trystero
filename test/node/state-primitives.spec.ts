@@ -21,7 +21,12 @@ import {
   signStateRecord
 } from '../../packages/core/src/state.ts'
 import {decodeBytes} from '../../packages/core/src/utils.ts'
-import {joinAsTestPeer, wait, waitFor} from './peer-harness.ts'
+import {
+  createSortedJoinRooms,
+  joinAsTestPeer,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 class LinkedDataChannel {
   label: string
@@ -1275,11 +1280,16 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
 void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mesh peer join and convergence across scale({mode: "gossip"})', async () => {
   // Part A: 9-peer mesh -> 10th peer joins with O(1) pull fanout rather than 9 full pushes
   const {makeJoinRoom} = createMemorySignalBus()
+  const meshPeers = await createSortedJoinRooms(
+    10,
+    () => makeJoinRoom(),
+    'scale-sync-app'
+  )
   const rooms: Room[] = []
   const names: Array<UserState<string>> = []
 
   for (let i = 0; i < 9; i++) {
-    const r = makeJoinRoom(`mesh-p${i}`)(
+    const r = meshPeers[i]!.joinRoom(
       {appId: 'scale-sync-app', rtcPolyfill},
       'mesh-10'
     )
@@ -1296,6 +1306,7 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
   await waitFor(
     () =>
       rooms.every(r => Object.keys(r.getUsers()).length === 8) &&
+      rooms.every(r => r.makeState('stage', 'ready').get() === 'live-match') &&
       names.every(n => Object.keys(n.getAll()).length === 9),
     5_000
   )
@@ -1320,7 +1331,7 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
   }
 
   try {
-    const r10 = makeJoinRoom('mesh-p9')(
+    const r10 = meshPeers[9]!.joinRoom(
       {appId: 'scale-sync-app', rtcPolyfill},
       'mesh-10'
     )
@@ -1351,6 +1362,11 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
 
   // Part B: Multi-hop gossip mode (`scale({mode: 'gossip', maxConnections: 4})`) converges shared & user state across non-adjacent peers
   const {makeJoinRoom: makeGossipJoin} = createMemorySignalBus()
+  const gossipPeers = await createSortedJoinRooms(
+    12,
+    () => makeGossipJoin(),
+    'gossip-state-app'
+  )
   const gossipRooms: Array<
     ReturnType<ReturnType<typeof makeGossipJoin>> & {
       getTopology: () => {
@@ -1365,7 +1381,7 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
 
   try {
     for (let i = 0; i < 12; i++) {
-      const gr = makeGossipJoin(`gossip-n${i}`)(
+      const gr = gossipPeers[i]!.joinRoom(
         {
           appId: 'gossip-state-app',
           rtcPolyfill,

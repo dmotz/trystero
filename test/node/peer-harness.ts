@@ -2,9 +2,24 @@ import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
 import createRoom from '../../packages/core/src/room.ts'
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
-import {joinAsTestPeer, withTestPeerId} from './test-identity.ts'
+import {
+  allocTestPeerIds,
+  createSortedJoinRooms,
+  joinAsTestPeer,
+  testEndpoint,
+  testPeerId,
+  withTestPeerId
+} from './test-identity.ts'
 
-export {internalActionPrefix, joinAsTestPeer, withTestPeerId}
+export {
+  allocTestPeerIds,
+  createSortedJoinRooms,
+  internalActionPrefix,
+  joinAsTestPeer,
+  testEndpoint,
+  testPeerId,
+  withTestPeerId
+}
 
 type PeerHandlers = Record<string, (...args: any[]) => void>
 type TestMediaTrack = {id: string}

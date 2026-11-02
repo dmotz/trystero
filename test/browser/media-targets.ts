@@ -1,5 +1,6 @@
 import {expect, test} from '@playwright/test'
 import {strategyConfigs} from '../strategy-configs'
+import {installLoopbackMdnsPeerConnection} from './mdns-loopback'
 
 test('Trystero: ws-relay: targeted media connects multi-hop peers privately', async ({
   browser,
@@ -11,10 +12,7 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
     ...strategyConfigs['ws-relay'],
     appId: roomId,
     identity: 'none',
-    rtcConfig: {iceServers: []},
-    ...(browserName === 'firefox' || browserName === 'webkit'
-      ? {_test_only_mdnsHostFallbackToLoopback: true}
-      : {})
+    rtcConfig: {iceServers: []}
   }
   const contexts = await Promise.all(
     Array.from({length: 8}, () =>
@@ -28,6 +26,9 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
   )
   try {
     const pages = await Promise.all(contexts.map(context => context.newPage()))
+    if (browserName === 'firefox' || browserName === 'webkit') {
+      await Promise.all(pages.map(installLoopbackMdnsPeerConnection))
+    }
     const ids: string[] = []
     for (const page of pages) {
       await page.goto(

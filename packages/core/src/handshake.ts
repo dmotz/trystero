@@ -1,7 +1,5 @@
-import {normalizeLowSP256Signature} from './crypto'
 import {
   type EndpointIdentity,
-  extractDtlsFingerprints,
   fromBase64Url,
   getDefaultEndpointIdentity,
   resolveSelfId,
@@ -31,10 +29,27 @@ import type {
   UserIdentity
 } from './types'
 
-const peerIdentityErr = mkErr('peer identity verification failed')
-const handshakeDisconnectErr = mkErr('peer disconnected during handshake')
+const peerIdentityErr = /*@__PURE__*/ mkErr('peer identity verification failed')
+const handshakeDisconnectErr = /*@__PURE__*/ mkErr(
+  'peer disconnected during handshake'
+)
 const hsStepKey = `__${libId}_id`
 const hsDomain = `${libId}-id-hs:v1`
+
+export const extractDtlsFingerprints = (sdp?: string | null): string[] => {
+  if (!sdp || typeof sdp !== 'string') {
+    return []
+  }
+  const matches = sdp.matchAll(/^a=fingerprint:([^\r\n]+)$/gm)
+  const set = new Set<string>()
+  for (const m of matches) {
+    const val = m[1]?.trim().toLowerCase()
+    if (val) {
+      set.add(val)
+    }
+  }
+  return [...set].sort()
+}
 
 export type HandshakeReadyPayload =
   | string
@@ -171,14 +186,13 @@ export const createIdentityHandshake = (params: {
     localUser: UserIdentity
   ): Promise<{ps: string; us: string}> => {
     const localEndpoint = await localEndpointP
-    const [psBytes, usBytesRaw] = await Promise.all([
+    const [psBytes, usBytes] = await Promise.all([
       localEndpoint.sign(transcriptBytes),
       localUser.sign(transcriptBytes)
     ])
-    const usBytes = normalizeLowSP256Signature(new Uint8Array(usBytesRaw))
     return {
       ps: toBase64Url(psBytes),
-      us: toBase64Url(usBytes)
+      us: toBase64Url(new Uint8Array(usBytes))
     }
   }
 

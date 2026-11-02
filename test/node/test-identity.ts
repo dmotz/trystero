@@ -1,84 +1,79 @@
 import {
-  canonicalizePubJwk,
   createEndpointIdentity,
-  createUserIdentity,
-  type DevIdentityProvider,
-  type EndpointIdentity,
-  setDevIdentityProvider
+  type EndpointIdentity
 } from '../../packages/core/src/identity.ts'
 import type {
   BaseRoomConfig,
   JoinRoom,
-  JoinRoomConfig,
-  UserIdentity
+  JoinRoomConfig
 } from '../../packages/core/src/types.ts'
 
-let currentTestPeerId: string | undefined
-const endpointByPeerId = new Map<string, Promise<EndpointIdentity>>()
-const canonicalJwkByPeerId = new Map<string, string>()
-const userIdentityByPeerId = new Map<string, Promise<UserIdentity>>()
+const clusterPoolSize = 300
+const namedPoolSize = 96
 
-const testIdentityProvider: DevIdentityProvider = {
-  getEndpointIdentity: peerId => {
-    const targetId = peerId ?? currentTestPeerId
-    if (!targetId) {
-      return undefined
-    }
-    let existing = endpointByPeerId.get(targetId)
-    if (!existing) {
-      existing = createEndpointIdentity().then(base => {
-        canonicalJwkByPeerId.set(targetId, canonicalizePubJwk(base.signPubJwk))
-        return {...base, peerId: targetId}
-      })
-      endpointByPeerId.set(targetId, existing)
-    }
-    return existing
-  },
-  isPeerIdKeyCachedValid: (peerId, rec) =>
-    canonicalJwkByPeerId.get(peerId) === rec.canonicalJwk,
-  verifyPeerIdKey: async (peerId, rec) => {
-    const cachedJwk = canonicalJwkByPeerId.get(peerId)
-    if (cachedJwk !== undefined) {
-      return cachedJwk === rec.canonicalJwk
-    }
-    const pending = endpointByPeerId.get(peerId)
-    if (!pending) {
-      return false
-    }
-    const ep = await pending
-    return canonicalizePubJwk(ep.signPubJwk) === rec.canonicalJwk
-  },
-  getUserIdentity: peerId => {
-    const targetId = peerId ?? currentTestPeerId
-    if (!targetId) {
-      return undefined
-    }
-    let existing = userIdentityByPeerId.get(targetId)
-    if (!existing) {
-      existing = createUserIdentity()
-      userIdentityByPeerId.set(targetId, existing)
-    }
-    return existing
+const allEndpoints = await Promise.all(
+  Array.from({length: clusterPoolSize + namedPoolSize}, () =>
+    createEndpointIdentity()
+  )
+)
+
+const sortedClusterPool = allEndpoints
+  .slice(0, clusterPoolSize)
+  .sort((a, b) => (a.peerId < b.peerId ? -1 : a.peerId > b.peerId ? 1 : 0))
+
+const namedPool = allEndpoints.slice(clusterPoolSize)
+const endpointByLabel = new Map<string, EndpointIdentity>()
+let nextNamedIndex = 0
+
+export const allocTestPeerIds = (count: number): string[] => {
+  if (count > sortedClusterPool.length) {
+    throw new Error(
+      `allocTestPeerIds(${count}) exceeds pre-warmed pool (${sortedClusterPool.length})`
+    )
   }
+  return sortedClusterPool.slice(0, count).map(ep => ep.peerId)
 }
 
-setDevIdentityProvider(testIdentityProvider)
-
-export const withTestPeerId = <T>(peerId: string, fn: () => T): T => {
-  const prev = currentTestPeerId
-  currentTestPeerId = peerId
-  try {
-    return fn()
-  } finally {
-    currentTestPeerId = prev
+export const testEndpoint = (label: string): EndpointIdentity => {
+  const existing = endpointByLabel.get(label)
+  if (existing) {
+    return existing
   }
+  const ep = namedPool[nextNamedIndex % namedPool.length]!
+  nextNamedIndex++
+  endpointByLabel.set(label, ep)
+  return ep
 }
+
+export const testPeerId = (label: string): string => testEndpoint(label).peerId
+
+export const withTestPeerId = <T>(_peerId: string, fn: () => T): T => fn()
 
 export const joinAsTestPeer = <TConfig extends BaseRoomConfig = JoinRoomConfig>(
-  peerId: string,
+  _peerId: string,
   joinRoom: JoinRoom<TConfig>
-): JoinRoom<TConfig> =>
-  ((config: TConfig, roomId: string, ...extra: unknown[]) =>
-    withTestPeerId(peerId, () =>
-      (joinRoom as (...args: unknown[]) => unknown)(config, roomId, ...extra)
-    )) as JoinRoom<TConfig>
+): JoinRoom<TConfig> => joinRoom
+
+export const createSortedJoinRooms = async <
+  TConfig extends BaseRoomConfig = JoinRoomConfig
+>(
+  count: number,
+  makeJoin: () => JoinRoom<TConfig>,
+  appId: string
+): Promise<Array<{joinRoom: JoinRoom<TConfig>; peerId: string}>> => {
+  const entries = await Promise.all(
+    Array.from({length: count}, async (_, i) => {
+      const joinRoom = makeJoin()
+      const warm = joinRoom(
+        {appId} as TConfig & {use?: undefined},
+        `__warm_${i}__`
+      )
+      const {peerId} = await warm.getSelf()
+      await warm.leave()
+      return {joinRoom, peerId}
+    })
+  )
+  return entries.sort((a, b) =>
+    a.peerId < b.peerId ? -1 : a.peerId > b.peerId ? 1 : 0
+  )
+}

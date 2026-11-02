@@ -1,20 +1,22 @@
 import {expect, test} from '@playwright/test'
+import {installLoopbackMdnsPeerConnection} from './mdns-loopback'
 
 test('Trystero: torrent: a prewarmed offer attaches after its data channel opens', async ({
   page,
   browserName
 }) => {
+  if (browserName !== 'chromium') {
+    await installLoopbackMdnsPeerConnection(page)
+  }
   await page.goto(`https://127.0.0.1:${process.env.TRYSTERO_TEST_PORT}/test`)
-  const attached = await page.evaluate(async useLoopbackFallback => {
+  const attached = await page.evaluate(async () => {
     const peerModule = '../packages/core/dist/peer.mjs'
     const {default: initPeer} = await import(peerModule)
     const config = {
       appId: 'prewarmed-browser-test',
       trickleIce: false,
       rtcConfig: {iceServers: []},
-      ...(useLoopbackFallback
-        ? {_test_only_mdnsHostFallbackToLoopback: true}
-        : {})
+      rtcPolyfill: window.RTCPeerConnection
     }
     const initiator = initPeer(true, config)
     const answerer = initPeer(false, config)
@@ -50,7 +52,7 @@ test('Trystero: torrent: a prewarmed offer attaches after its data channel opens
       initiator.destroy()
       answerer.destroy()
     }
-  }, browserName !== 'chromium')
+  })
 
   expect(attached.joined).toEqual([1, 1])
   expect(attached.channels).toEqual(['open', 'open'])

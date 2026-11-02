@@ -16,7 +16,7 @@ import {
   toHex,
   toJson,
   userIdLength
-} from './crypto'
+} from './primitives'
 import type {
   BaseRoomConfig,
   ListenerOptions,

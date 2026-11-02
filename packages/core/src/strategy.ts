@@ -1,5 +1,6 @@
 import {decrypt, encrypt, genKey, hashTopic} from './crypto'
 import {
+  createIdentityClientId,
   getDefaultEndpointIdentity,
   isEphemeralIdentityConfig,
   resolveUserIdentity,
@@ -65,6 +66,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   subscribe,
   announce
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
+  const clientId = createIdentityClientId()
   const occupiedRooms: Record<
     string,
     Record<string, ReturnType<typeof room>>
@@ -142,7 +144,11 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     leavingRoomCleanups[appId]?.[roomId]?.(true)
 
-    const localEndpointP = getDefaultEndpointIdentity(undefined, appId)
+    const localEndpointP = getDefaultEndpointIdentity(
+      undefined,
+      appId,
+      clientId
+    )
     const selfIdP = localEndpointP.then(ep => ep.peerId)
 
     let didLeaveRoom = false
@@ -156,23 +162,26 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         bridgeRef.current?.emitError(error)
       }
     }
-    const userIdentityP = resolveUserIdentity(appId, roomId, config).catch(
-      err => {
-        didReportSetupError = true
-        queueMicrotask(() => {
-          if (!didLeaveRoom) {
-            emitError({
-              code: 'identity-failed',
-              message: toErrorMessage(err, 'identity resolution failed'),
-              appId,
-              roomId: effectiveRoomId,
-              cause: err
-            })
-          }
-        })
-        throw err
-      }
-    )
+    const userIdentityP = resolveUserIdentity(
+      appId,
+      roomId,
+      config,
+      clientId
+    ).catch(err => {
+      didReportSetupError = true
+      queueMicrotask(() => {
+        if (!didLeaveRoom) {
+          emitError({
+            code: 'identity-failed',
+            message: toErrorMessage(err, 'identity resolution failed'),
+            appId,
+            roomId: effectiveRoomId,
+            cause: err
+          })
+        }
+      })
+      throw err
+    })
     void userIdentityP.catch(noOp)
 
     const preResolvedPlugins = new Map<RoomPlugin, unknown>()

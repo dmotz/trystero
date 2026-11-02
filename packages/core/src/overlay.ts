@@ -8,10 +8,8 @@ import {
 } from './crypto'
 import {maxActionFrameBytes, maxOverlayHeaderBytes} from './data-limits'
 import {
-  getCachedPubKeyRecord,
+  canonicalizePubJwk,
   getDefaultEndpointIdentity,
-  isPeerIdKeyCachedValid,
-  isUserEndpointProofCachedValid,
   pubJwkToUncompressedBytes,
   signUserEndpointProof,
   verifyPeerIdKey,
@@ -558,11 +556,17 @@ export const descriptorCanonicalPayload = (
     d.peerId,
     d.seq,
     d.neighbors,
-    d.signPubKey ?? null,
-    d.encPubKey ?? null,
+    d.signPubKey ? canonicalizePubJwk(d.signPubKey) : null,
+    d.encPubKey ? canonicalizePubJwk(d.encPubKey) : null,
     d.roomAuth ?? null,
     d.cert?.sig ?? null,
-    ...(d.userId ? [d.userId, d.userPubKey ?? null, d.userProof ?? null] : [])
+    ...(d.userId
+      ? [
+          d.userId,
+          d.userPubKey ? canonicalizePubJwk(d.userPubKey) : null,
+          d.userProof ?? null
+        ]
+      : [])
   ])
 
 type CryptoIdentity = {
@@ -575,30 +579,10 @@ type CryptoIdentity = {
   encPubJwk: JsonWebKey
 }
 
-const verifiedSigBytes = createBoundedCache<string, Uint8Array>(4_096)
-const inFlightSigVerifies = new Map<string, Promise<boolean>>()
-const lastLocalSeqByRoomPeer = createBoundedCache<
+const lastLocalSeqByRoomPeer = /*@__PURE__*/ createBoundedCache<
   string,
   {descSeq: number; pktSeq: number}
 >(4_096)
-
-const bytesMatch = (a: Uint8Array, b: Uint8Array): boolean => {
-  if (a.byteLength !== b.byteLength) {
-    return false
-  }
-  for (let i = 0; i < a.byteLength; i++) {
-    if (a[i] !== b[i]) {
-      return false
-    }
-  }
-  return true
-}
-
-const rememberVerifiedSig = (cacheKey: string, bytes: Uint8Array): void => {
-  if (bytes.byteLength <= 2_048) {
-    verifiedSigBytes.set(cacheKey, bytes.slice())
-  }
-}
 
 export type OverlayManagerDeps = {
   selfId?: string
@@ -801,10 +785,16 @@ export const createOverlayManager = ({
             ['deriveKey', 'deriveBits']
           )
         ])
-        const encPubJwk = await crypto.subtle.exportKey(
+        const rawEncPubJwk = await crypto.subtle.exportKey(
           'jwk',
           encPair.publicKey
         )
+        const encPubJwk: JsonWebKey = {
+          crv: 'P-256',
+          kty: 'EC',
+          x: rawEncPubJwk.x ?? '',
+          y: rawEncPubJwk.y ?? ''
+        }
         const res: CryptoIdentity = {
           peerId: endpointId.peerId,
           signPrivateKey: endpointId.signPrivateKey,
@@ -1514,43 +1504,6 @@ export const createOverlayManager = ({
   }, heartbeatIntervalMs)
   ;(heartbeatTimer as {unref?: () => void}).unref?.()
 
-  const verifySigWithCache = async (
-    sigCacheKey: string | undefined,
-    sig: string,
-    signedBytes: Uint8Array,
-    pubJwk: JsonWebKey
-  ): Promise<boolean> => {
-    if (sigCacheKey) {
-      const cachedVerifiedBytes = verifiedSigBytes.get(sigCacheKey)
-      if (cachedVerifiedBytes && bytesMatch(cachedVerifiedBytes, signedBytes)) {
-        return true
-      }
-      const inFlight = inFlightSigVerifies.get(sigCacheKey)
-      if (inFlight) {
-        return inFlight
-      }
-    }
-    const verifyPromise = (async () => {
-      try {
-        const ok = await verifyWithP256(fromBase64(sig), signedBytes, pubJwk)
-        if (ok && sigCacheKey) {
-          rememberVerifiedSig(sigCacheKey, signedBytes)
-        }
-        return ok
-      } catch {
-        return false
-      } finally {
-        if (sigCacheKey) {
-          inFlightSigVerifies.delete(sigCacheKey)
-        }
-      }
-    })()
-    if (sigCacheKey) {
-      inFlightSigVerifies.set(sigCacheKey, verifyPromise)
-    }
-    return verifyPromise
-  }
-
   const maxDescriptorNeighbors = Math.max(16, config.maxConnections * 3)
   const maxGossipEntriesPerFrame = 64
 
@@ -1625,7 +1578,6 @@ export const createOverlayManager = ({
       await ecdsaSign(id.signPrivateKey, canonicalBytes as BufferSource)
     )
     descriptor.sig = sig
-    rememberVerifiedSig(`desc:${toJson(id.signPubJwk)}:${sig}`, canonicalBytes)
 
     return descriptor
   }
@@ -1685,135 +1637,135 @@ export const createOverlayManager = ({
     return true
   }
 
-  const tryVerifyDescriptorCached = (d: PeerDescriptor): boolean => {
+  const verifyBase64Sig = (
+    sig: string,
+    signedBytes: Uint8Array,
+    pubJwk: JsonWebKey
+  ): boolean | Promise<boolean> => {
+    try {
+      return verifyWithP256(fromBase64(sig), signedBytes, pubJwk)
+    } catch {
+      return false
+    }
+  }
+
+  const verifyDescriptor = (d: PeerDescriptor): boolean | Promise<boolean> => {
     if (
-      password ||
       !hasValidDescriptorShape(d) ||
       !d.signPubKey ||
       typeof d.sig !== 'string' ||
-      !d.sig ||
-      !isPeerIdKeyCachedValid(d.peerId, d.signPubKey)
+      !d.sig
     ) {
-      return false
-    }
-
-    if (
-      needsUserProof(d) &&
-      (!d.userId ||
-        !d.userPubKey ||
-        !d.userProof ||
-        !isUserEndpointProofCachedValid({
-          appId,
-          roomId,
-          peerId: d.peerId,
-          peerPubJwk: d.signPubKey,
-          userId: d.userId,
-          userPubJwk: d.userPubKey,
-          proof: d.userProof,
-          seq: d.seq
-        }))
-    ) {
-      return false
-    }
-
-    const keyThumbprint = toJson(d.signPubKey)
-    const pinned = pinnedSignKeys.get(d.peerId)
-    if (pinned && pinned !== keyThumbprint) {
-      return false
-    }
-
-    const canonicalBytes = encodeBytes(
-      descriptorCanonicalPayload(d, appId, roomId)
-    )
-    const cachedVerifiedBytes = verifiedSigBytes.get(
-      `desc:${keyThumbprint}:${d.sig}`
-    )
-    if (
-      !cachedVerifiedBytes ||
-      !bytesMatch(cachedVerifiedBytes, canonicalBytes)
-    ) {
-      return false
-    }
-
-    return commitVerifiedDescriptor(d, keyThumbprint)
-  }
-
-  const verifyDescriptor = async (d: PeerDescriptor): Promise<boolean> => {
-    if (!hasValidDescriptorShape(d)) {
       stats.signatureFailures++
       return false
     }
+    const keyThumbprint = canonicalizePubJwk(d.signPubKey)
+    const pinned = pinnedSignKeys.get(d.peerId)
+    if (pinned && pinned !== keyThumbprint) {
+      stats.signatureFailures++
+      return false
+    }
+    const peerOk = password ? null : verifyPeerIdKey(d.peerId, d.signPubKey)
+    if (peerOk === false) {
+      stats.signatureFailures++
+      return false
+    }
+    const checkUser = needsUserProof(d)
+    if (checkUser && (!d.userId || !d.userPubKey || !d.userProof)) {
+      stats.signatureFailures++
+      return false
+    }
+    const userOk =
+      peerOk === true && checkUser
+        ? verifyUserEndpointProof({
+            appId,
+            roomId,
+            peerId: d.peerId,
+            peerPubJwk: d.signPubKey,
+            userId: d.userId!,
+            userPubJwk: d.userPubKey!,
+            proof: d.userProof!,
+            seq: d.seq
+          })
+        : !checkUser
+    if (userOk === false) {
+      stats.signatureFailures++
+      return false
+    }
+    if (peerOk === true && userOk === true) {
+      const canonicalBytes = encodeBytes(
+        descriptorCanonicalPayload(d, appId, roomId)
+      )
+      const sigOk = verifyBase64Sig(d.sig, canonicalBytes, d.signPubKey)
+      if (typeof sigOk === 'boolean') {
+        if (!sigOk) {
+          stats.signatureFailures++
+          return false
+        }
+        return commitVerifiedDescriptor(d, keyThumbprint)
+      }
+      return sigOk.then(ok => {
+        if (!ok) {
+          stats.signatureFailures++
+          return false
+        }
+        return commitVerifiedDescriptor(d, keyThumbprint)
+      })
+    }
 
-    if (password) {
+    return (async () => {
       if (
-        typeof d.roomAuth !== 'string' ||
-        !d.roomAuth ||
-        !(await verifyRoomAuth(
-          password,
-          appId,
-          roomId,
-          d.peerId,
-          d.seq,
-          d.roomAuth
-        ))
+        password &&
+        (typeof d.roomAuth !== 'string' ||
+          !d.roomAuth ||
+          !(await verifyRoomAuth(
+            password,
+            appId,
+            roomId,
+            d.peerId,
+            d.seq,
+            d.roomAuth
+          )))
       ) {
         stats.signatureFailures++
         return false
       }
-    }
-
-    if (
-      !d.signPubKey ||
-      typeof d.sig !== 'string' ||
-      !d.sig ||
-      !(await verifyPeerIdKey(d.peerId, d.signPubKey))
-    ) {
-      stats.signatureFailures++
-      return false
-    }
-
-    if (
-      needsUserProof(d) &&
-      (!d.userId ||
-        !d.userPubKey ||
-        !d.userProof ||
-        !(await verifyUserEndpointProof({
-          appId,
-          roomId,
-          peerId: d.peerId,
-          peerPubJwk: d.signPubKey,
-          userId: d.userId,
-          userPubJwk: d.userPubKey,
-          proof: d.userProof,
-          seq: d.seq
-        })))
-    ) {
-      stats.signatureFailures++
-      return false
-    }
-
-    const keyThumbprint = toJson(d.signPubKey)
-    const pinned = pinnedSignKeys.get(d.peerId)
-    if (pinned && pinned !== keyThumbprint) {
-      stats.signatureFailures++
-      return false
-    }
-
-    const canonicalBytes = encodeBytes(
-      descriptorCanonicalPayload(d, appId, roomId)
-    )
-    const sigCacheKey = `desc:${keyThumbprint}:${d.sig}`
-    const ok = await verifySigWithCache(
-      sigCacheKey,
-      d.sig,
-      canonicalBytes,
-      d.signPubKey
-    )
-    if (!ok) {
-      stats.signatureFailures++
-      return false
-    }
-    return commitVerifiedDescriptor(d, keyThumbprint)
+      if (!(await (peerOk ?? verifyPeerIdKey(d.peerId, d.signPubKey)))) {
+        stats.signatureFailures++
+        return false
+      }
+      if (
+        checkUser &&
+        !(await (typeof userOk === 'boolean'
+          ? verifyUserEndpointProof({
+              appId,
+              roomId,
+              peerId: d.peerId,
+              peerPubJwk: d.signPubKey,
+              userId: d.userId!,
+              userPubJwk: d.userPubKey!,
+              proof: d.userProof!,
+              seq: d.seq
+            })
+          : userOk))
+      ) {
+        stats.signatureFailures++
+        return false
+      }
+      const latestPinned = pinnedSignKeys.get(d.peerId)
+      if (latestPinned && latestPinned !== keyThumbprint) {
+        stats.signatureFailures++
+        return false
+      }
+      const canonicalBytes = encodeBytes(
+        descriptorCanonicalPayload(d, appId, roomId)
+      )
+      if (!(await verifyBase64Sig(d.sig, canonicalBytes, d.signPubKey))) {
+        stats.signatureFailures++
+        return false
+      }
+      return commitVerifiedDescriptor(d, keyThumbprint)
+    })()
   }
 
   const sendGossipToNeighbors = (
@@ -1908,11 +1860,9 @@ export const createOverlayManager = ({
     }
     syncSessionSeqFloor(selfId)
     const combined = buildOverlaySignedBytes(canonicalHeader, payload)
-    const sig = toBase64(
+    return toBase64(
       await ecdsaSign(id.signPrivateKey, combined as BufferSource)
     )
-    rememberVerifiedSig(`pkt:${toJson(id.signPubJwk)}:${sig}`, combined)
-    return sig
   }
 
   const verifyUnicastOrBroadcast = async (
@@ -1928,19 +1878,18 @@ export const createOverlayManager = ({
     const signPubJwk =
       peerSignPubKeys.get(originPeerId) ??
       descriptors.get(originPeerId)?.signPubKey
-    const pinnedThumbprint =
-      pinnedSignKeys.get(originPeerId) ??
-      (signPubJwk ? toJson(signPubJwk) : undefined)
     if (!signPubJwk) {
+      stats.signatureFailures++
+      return false
+    }
+    const pinned = pinnedSignKeys.get(originPeerId)
+    if (pinned && pinned !== canonicalizePubJwk(signPubJwk)) {
       stats.signatureFailures++
       return false
     }
 
     const combined = buildOverlaySignedBytes(canonicalHeader, payload)
-    const sigCacheKey = pinnedThumbprint
-      ? `pkt:${pinnedThumbprint}:${sig}`
-      : undefined
-    const ok = await verifySigWithCache(sigCacheKey, sig, combined, signPubJwk)
+    const ok = await verifyBase64Sig(sig, combined, signPubJwk)
     if (!ok) {
       stats.signatureFailures++
       return false
@@ -2281,6 +2230,8 @@ export const createOverlayManager = ({
     }
   }
 
+  const inFlightDescriptors = new Map<string, Promise<boolean>>()
+
   const handleControlFrame = async (
     fromPeerId: string,
     msg: OverlayControlMessage
@@ -2365,115 +2316,140 @@ export const createOverlayManager = ({
           continue
         }
 
-        if (existing) {
-          const now = Date.now()
-          let bucket = descUpdateBuckets.get(d.peerId)
-          if (!bucket) {
-            bucket = {tokens: descriptorUpdateBurstCap, lastRefillAt: now}
-            descUpdateBuckets.set(d.peerId, bucket)
-          } else {
-            const elapsedSec = Math.max(0, (now - bucket.lastRefillAt) / 1_000)
-            if (elapsedSec > 0) {
-              bucket.tokens = Math.min(
-                descriptorUpdateBurstCap,
-                bucket.tokens + elapsedSec * descriptorUpdateRatePerSec
-              )
-              bucket.lastRefillAt = now
-            }
-          }
-          if (bucket.tokens < 1) {
-            stats.signatureFailures++
-            continue
-          }
-          bucket.tokens -= 1
-        } else {
-          if ((senderInvalidDescCounts.get(fromPeerId) ?? 0) >= 16) {
-            stats.signatureFailures++
-            continue
-          }
-
-          if (!directPeers.has(d.peerId)) {
+        const descInFlightKey = `${d.peerId}:${d.seq}:${d.sig}`
+        const existingInFlight = inFlightDescriptors.get(descInFlightKey)
+        if (!existingInFlight) {
+          if (existing) {
             const now = Date.now()
+            let bucket = descUpdateBuckets.get(d.peerId)
+            if (!bucket) {
+              bucket = {tokens: descriptorUpdateBurstCap, lastRefillAt: now}
+              descUpdateBuckets.set(d.peerId, bucket)
+            } else {
+              const elapsedSec = Math.max(
+                0,
+                (now - bucket.lastRefillAt) / 1_000
+              )
+              if (elapsedSec > 0) {
+                bucket.tokens = Math.min(
+                  descriptorUpdateBurstCap,
+                  bucket.tokens + elapsedSec * descriptorUpdateRatePerSec
+                )
+                bucket.lastRefillAt = now
+              }
+            }
+            if (bucket.tokens < 1) {
+              stats.signatureFailures++
+              continue
+            }
+            bucket.tokens -= 1
+          } else {
+            if ((senderInvalidDescCounts.get(fromPeerId) ?? 0) >= 16) {
+              stats.signatureFailures++
+              continue
+            }
 
-            if (d.userId) {
-              let userPeerCount = 0
-              let oldestUserTime = Infinity
-              for (const existingDesc of descriptors.values()) {
-                if (
-                  existingDesc.peerId !== d.peerId &&
-                  existingDesc.userId === d.userId
-                ) {
-                  userPeerCount++
+            if (!directPeers.has(d.peerId)) {
+              const now = Date.now()
+
+              if (d.userId) {
+                let userPeerCount = 0
+                let oldestUserTime = Infinity
+                for (const existingDesc of descriptors.values()) {
                   if (
-                    existingDesc.peerId !== selfId &&
-                    !directPeers.has(existingDesc.peerId)
+                    existingDesc.peerId !== d.peerId &&
+                    existingDesc.userId === d.userId
                   ) {
-                    const t = descriptorReceivedAt.get(existingDesc.peerId) ?? 0
-                    if (t < oldestUserTime) {
-                      oldestUserTime = t
+                    userPeerCount++
+                    if (
+                      existingDesc.peerId !== selfId &&
+                      !directPeers.has(existingDesc.peerId)
+                    ) {
+                      const t =
+                        descriptorReceivedAt.get(existingDesc.peerId) ?? 0
+                      if (t < oldestUserTime) {
+                        oldestUserTime = t
+                      }
                     }
                   }
                 }
-              }
-              if (
-                userPeerCount >= maxPeersPerUser &&
-                now - oldestUserTime <= descriptorTtlMs
-              ) {
-                continue
-              }
-            }
-
-            if (maxUsers !== undefined) {
-              const activeIdentityKeys = new Set<string>([
-                localUserId ??
-                  descriptors.get(selfId)?.userId ??
-                  (selfId || '__self__')
-              ])
-              for (const directId of directPeers.keys()) {
-                activeIdentityKeys.add(
-                  descriptors.get(directId)?.userId ?? directId
-                )
-              }
-              for (const [descPeerId, existingDesc] of descriptors.entries()) {
-                if (descPeerId === selfId) {
+                if (
+                  userPeerCount >= maxPeersPerUser &&
+                  now - oldestUserTime <= descriptorTtlMs
+                ) {
                   continue
                 }
-                const receivedAt = descriptorReceivedAt.get(descPeerId) ?? 0
-                if (
-                  directPeers.has(descPeerId) ||
-                  now - receivedAt <= descriptorTtlMs
-                ) {
-                  activeIdentityKeys.add(existingDesc.userId ?? descPeerId)
-                }
               }
-              const candidateKey = d.userId ?? d.peerId
-              if (
-                !activeIdentityKeys.has(candidateKey) &&
-                activeIdentityKeys.size >= maxUsers
-              ) {
-                continue
-              }
-            }
 
-            if (descriptors.size >= maxVerifiedDescriptors) {
-              let oldestTime = Infinity
-              for (const existingId of descriptors.keys()) {
-                if (existingId !== selfId && !directPeers.has(existingId)) {
-                  const t = descriptorReceivedAt.get(existingId) ?? 0
-                  if (t < oldestTime) {
-                    oldestTime = t
+              if (maxUsers !== undefined) {
+                const activeIdentityKeys = new Set<string>([
+                  localUserId ??
+                    descriptors.get(selfId)?.userId ??
+                    (selfId || '__self__')
+                ])
+                for (const directId of directPeers.keys()) {
+                  activeIdentityKeys.add(
+                    descriptors.get(directId)?.userId ?? directId
+                  )
+                }
+                for (const [
+                  descPeerId,
+                  existingDesc
+                ] of descriptors.entries()) {
+                  if (descPeerId === selfId) {
+                    continue
+                  }
+                  const receivedAt = descriptorReceivedAt.get(descPeerId) ?? 0
+                  if (
+                    directPeers.has(descPeerId) ||
+                    now - receivedAt <= descriptorTtlMs
+                  ) {
+                    activeIdentityKeys.add(existingDesc.userId ?? descPeerId)
                   }
                 }
+                const candidateKey = d.userId ?? d.peerId
+                if (
+                  !activeIdentityKeys.has(candidateKey) &&
+                  activeIdentityKeys.size >= maxUsers
+                ) {
+                  continue
+                }
               }
-              if (now - oldestTime <= descriptorTtlMs) {
-                continue
+
+              if (descriptors.size >= maxVerifiedDescriptors) {
+                let oldestTime = Infinity
+                for (const existingId of descriptors.keys()) {
+                  if (existingId !== selfId && !directPeers.has(existingId)) {
+                    const t = descriptorReceivedAt.get(existingId) ?? 0
+                    if (t < oldestTime) {
+                      oldestTime = t
+                    }
+                  }
+                }
+                if (now - oldestTime <= descriptorTtlMs) {
+                  continue
+                }
               }
             }
           }
         }
 
-        const isValid =
-          tryVerifyDescriptorCached(d) || (await verifyDescriptor(d))
+        const verifyRes = existingInFlight ?? verifyDescriptor(d)
+        let isValid = false
+        if (typeof verifyRes === 'boolean') {
+          isValid = verifyRes
+        } else {
+          if (!existingInFlight) {
+            inFlightDescriptors.set(descInFlightKey, verifyRes)
+          }
+          try {
+            isValid = await verifyRes
+          } finally {
+            if (inFlightDescriptors.get(descInFlightKey) === verifyRes) {
+              inFlightDescriptors.delete(descInFlightKey)
+            }
+          }
+        }
         if (!isValid || isDestroyed) {
           if (!isValid && !isDestroyed) {
             senderInvalidDescCounts.set(
@@ -2546,7 +2522,8 @@ export const createOverlayManager = ({
         if (
           latest?.encPubKey &&
           d.encPubKey &&
-          toJson(latest.encPubKey) !== toJson(d.encPubKey)
+          canonicalizePubJwk(latest.encPubKey) !==
+            canonicalizePubJwk(d.encPubKey)
         ) {
           derivedPairwiseKeys.delete(d.peerId)
         }
@@ -3246,18 +3223,18 @@ export const createOverlayManager = ({
       if (!isValidSignalPeerId(peerId) || !pubKey) {
         return
       }
-      const cached = getCachedPubKeyRecord(pubKey)
-      if (cached && cached.peerId === peerId) {
-        peerSignPubKeys.set(peerId, pubKey)
-        pinnedSignKeys.set(peerId, toJson(pubKey))
-        return
-      }
-      void verifyPeerIdKey(peerId, pubKey).then(ok => {
+      const apply = (ok: boolean): void => {
         if (ok) {
           peerSignPubKeys.set(peerId, pubKey)
-          pinnedSignKeys.set(peerId, toJson(pubKey))
+          pinnedSignKeys.set(peerId, canonicalizePubJwk(pubKey))
         }
-      })
+      }
+      const res = verifyPeerIdKey(peerId, pubKey)
+      if (typeof res === 'boolean') {
+        apply(res)
+      } else {
+        void res.then(apply)
+      }
     },
 
     setLocalRoleCertificate: (cert: RoleCertificate | null): void => {

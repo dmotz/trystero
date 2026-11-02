@@ -1,6 +1,7 @@
 import {expect, test} from '@playwright/test'
 import {attachPageLogging, emojis, shortBrowsers} from '../logger'
 import {strategyConfigs} from '../strategy-configs'
+import {installLoopbackMdnsPeerConnection} from './mdns-loopback'
 
 const testPort = process.env.TRYSTERO_TEST_PORT ?? '8080'
 // Firefox may gather no host ICE candidates when the page uses localhost.
@@ -73,6 +74,16 @@ export const withStrategyBrowserPair = (
           pages: [page, page2]
         })
 
+        if (
+          useTestOnlyMdnsFallback &&
+          (browserName === 'webkit' || browserName === 'firefox')
+        ) {
+          await Promise.all([
+            installLoopbackMdnsPeerConnection(page),
+            installLoopbackMdnsPeerConnection(page2)
+          ])
+        }
+
         await page.goto(testUrl)
         await page2.goto(testUrl)
 
@@ -99,10 +110,6 @@ export const withStrategyBrowserPair = (
         const roomConfig = {
           appId: `trystero-test-${Math.random()}`,
           password: '03d1p@M@@s' + Math.random(),
-          ...(useTestOnlyMdnsFallback &&
-          (browserName === 'webkit' || browserName === 'firefox')
-            ? {_test_only_mdnsHostFallbackToLoopback: true}
-            : {}),
           ...config,
           ...(isRelayStrategy || config.relayConfig ? {relayConfig} : {})
         }

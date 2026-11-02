@@ -442,24 +442,6 @@ void test(
     try {
       await waitFor(() => subscribers.length >= 1)
 
-      const sub = subscribers[0]
-      const roomKey = genKey('', appId, 'test-room')
-      const encryptedAnswerForPassive = await encrypt(
-        roomKey,
-        'answer-sdp',
-        buildSignalAad('answer', 'active-peer', 'offer-1')
-      )
-      await sub.onMessage(
-        sub.rootTopic,
-        {
-          peerId: 'active-peer',
-          offerId: 'offer-1',
-          answer: encryptedAnswerForPassive,
-          peer: peerA
-        },
-        () => {}
-      )
-
       activeRoom = joinAsTestPeer(
         'active-peer',
         createStrategy({
@@ -479,15 +461,36 @@ void test(
       )
 
       await waitFor(() => subscribers.length >= 2)
+      const [{peerId: passivePeerId}, {peerId: activePeerId}] =
+        await Promise.all([room.getSelf(), activeRoom.getSelf()])
+
+      const sub = subscribers[0]
+      const roomKey = genKey('', appId, 'test-room')
+      const encryptedAnswerForPassive = await encrypt(
+        roomKey,
+        'answer-sdp',
+        buildSignalAad('answer', activePeerId, 'offer-1')
+      )
+      await sub.onMessage(
+        sub.rootTopic,
+        {
+          peerId: activePeerId,
+          offerId: 'offer-1',
+          answer: encryptedAnswerForPassive,
+          peer: peerA
+        },
+        () => {}
+      )
+
       const encryptedAnswerForActive = await encrypt(
         roomKey,
         'answer-sdp',
-        buildSignalAad('answer', 'passive-peer', 'offer-1')
+        buildSignalAad('answer', passivePeerId, 'offer-1')
       )
       await subscribers[1].onMessage(
         subscribers[1].rootTopic,
         {
-          peerId: 'passive-peer',
+          peerId: passivePeerId,
           offerId: 'offer-1',
           answer: encryptedAnswerForActive,
           peer: peerB
@@ -495,7 +498,7 @@ void test(
         () => {}
       )
 
-      await waitFor(() => 'active-peer' in room.getPeers())
+      await waitFor(() => activePeerId in room.getPeers())
       await activeRoom.leave()
 
       await waitFor(() => Object.keys(room.getPeers()).length === 0)

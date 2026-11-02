@@ -85,9 +85,11 @@ import {
 } from '../../packages/core/src/utils.ts'
 import {createEvent, createSigner} from '../../packages/nostr/src/protocol.ts'
 import {
+  allocTestPeerIds,
   LinkedPeer,
   linkPeers,
   MockRTCPeerConnection,
+  testPeerId,
   wait,
   waitFor
 } from './peer-harness.ts'
@@ -448,9 +450,12 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
 
   let capturedBroadcast: Uint8Array | null = null
   let capturedUnicast: Uint8Array | null = null
+  const aliceId = testPeerId('alice-s5')
+  const relayId = testPeerId('relay-s5')
+  const carolId = testPeerId('carol-s5')
 
   const alice = createOverlayManager({
-    selfId: 'alice-s5',
+    selfId: aliceId,
     appId: 's5-app',
     roomId: 's5-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -459,7 +464,7 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     onDeliverData: () => {}
   })
   const relay = createOverlayManager({
-    selfId: 'relay-s5',
+    selfId: relayId,
     appId: 's5-app',
     roomId: 's5-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -470,7 +475,7 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     }
   })
   const carol = createOverlayManager({
-    selfId: 'carol-s5',
+    selfId: carolId,
     appId: 's5-app',
     roomId: 's5-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -488,7 +493,7 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     // Verify per-instance non-extractable ECDH keys (distinct across OverlayManager instances)
     const aliceCrypto1 = await alice.getLocalCryptoIdentity()
     const alice2 = createOverlayManager({
-      selfId: 'alice-s5',
+      selfId: aliceId,
       appId: 's5-app',
       roomId: 's5-room-2',
       topology: {mode: 'gossip', maxConnections: 4},
@@ -504,33 +509,33 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     const ar = {alive: true}
     const rc = {alive: true}
     const aliceToRelaySniffer: PeerHandle = {
-      ...makeOverlayPipe('alice-s5', relay, ar),
+      ...makeOverlayPipe(aliceId, relay, ar),
       sendData: (d: Uint8Array) => {
         if (d[0] === overlayFrameVersion && d[1] === 2 && !capturedBroadcast) {
           capturedBroadcast = d.slice()
         }
-        relay.handleOverlayFrame('alice-s5', d.slice().buffer)
+        relay.handleOverlayFrame(aliceId, d.slice().buffer)
       }
     }
     const relayToCarolSniffer: PeerHandle = {
-      ...makeOverlayPipe('relay-s5', carol, rc),
+      ...makeOverlayPipe(relayId, carol, rc),
       sendData: (d: Uint8Array) => {
         if (d[0] === overlayFrameVersion && d[1] === 3 && !capturedUnicast) {
           capturedUnicast = d.slice()
         }
-        carol.handleOverlayFrame('relay-s5', d.slice().buffer)
+        carol.handleOverlayFrame(relayId, d.slice().buffer)
       }
     }
 
-    alice.addDirectPeer('relay-s5', aliceToRelaySniffer)
-    relay.addDirectPeer('alice-s5', makeOverlayPipe('relay-s5', alice, ar))
-    relay.addDirectPeer('carol-s5', relayToCarolSniffer)
-    carol.addDirectPeer('relay-s5', makeOverlayPipe('carol-s5', relay, rc))
+    alice.addDirectPeer(relayId, aliceToRelaySniffer)
+    relay.addDirectPeer(aliceId, makeOverlayPipe(relayId, alice, ar))
+    relay.addDirectPeer(carolId, relayToCarolSniffer)
+    carol.addDirectPeer(relayId, makeOverlayPipe(carolId, relay, rc))
 
-    await waitFor(() => Boolean(alice.getSnapshot().routes['carol-s5']), 2_000)
+    await waitFor(() => Boolean(alice.getSnapshot().routes[carolId]), 2_000)
 
     await alice.broadcastInline(encodeBytes('bcast-target'))
-    alice.sendUnicast('carol-s5', encodeBytes('uni:secret-1'))
+    alice.sendUnicast(carolId, encodeBytes('uni:secret-1'))
     await waitFor(
       () =>
         deliveredBroadcasts.includes('bcast-target') &&
@@ -546,14 +551,14 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     }
 
     // Disconnect and reconnect Alice <-> Relay (previously cleared originReplay!)
-    relay.removeDirectPeer('alice-s5')
-    relay.addDirectPeer('alice-s5', makeOverlayPipe('relay-s5', alice, ar))
+    relay.removeDirectPeer(aliceId)
+    relay.addDirectPeer(aliceId, makeOverlayPipe(relayId, alice, ar))
 
     const countBeforeBcast = deliveredBroadcasts.filter(
       x => x === 'bcast-target'
     ).length
-    relay.handleOverlayFrame('alice-s5', capturedBroadcast!.slice().buffer)
-    carol.handleOverlayFrame('relay-s5', capturedUnicast!.slice().buffer)
+    relay.handleOverlayFrame(aliceId, capturedBroadcast!.slice().buffer)
+    carol.handleOverlayFrame(relayId, capturedUnicast!.slice().buffer)
     await wait(40)
 
     assert.equal(
@@ -576,6 +581,8 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
 void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verify and cannot bypass activateVirtualPeer', async () => {
   let hostReg: ((peer: PeerHandle, id: string) => void) | null = null
   let attackerReg: ((peer: PeerHandle, id: string) => void) | null = null
+  const hostId = testPeerId('host-s6')
+  const attackerId = testPeerId('attacker-s6')
 
   const hostRoom = createRoom(
     f => {
@@ -584,7 +591,7 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
     () => {},
     () => {},
     {
-      selfId: 'host-s6',
+      selfId: hostId,
       appId: 's6-app',
       roomId: 's6-room',
       limit: 3,
@@ -598,7 +605,7 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
     () => {},
     () => {},
     {
-      selfId: 'attacker-s6',
+      selfId: attackerId,
       appId: 's6-app',
       roomId: 's6-room',
       limit: 3,
@@ -608,11 +615,11 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
 
   try {
     const {peerA, peerB} = linkHandles()
-    hostReg!(peerA, 'attacker-s6')
-    attackerReg!(peerB, 'host-s6')
-    await waitFor(() => 'attacker-s6' in hostRoom.getPeers(), 2_000)
+    hostReg!(peerA, attackerId)
+    attackerReg!(peerB, hostId)
+    await waitFor(() => attackerId in hostRoom.getPeers(), 2_000)
 
-    // Mint 12 distinct valid self-certifying Sybil identities & descriptors claiming mutual edges with attacker-s6
+    // Mint 12 distinct valid self-certifying Sybil identities & descriptors claiming mutual edges with attacker
     const sybilDescs: PeerDescriptor[] = []
     const sybilIds: string[] = []
     for (let i = 0; i < 12; i++) {
@@ -633,7 +640,7 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
       const desc: PeerDescriptor = {
         peerId: ep.peerId,
         seq: 1,
-        neighbors: ['attacker-s6'],
+        neighbors: [attackerId],
         signPubKey: ep.signPubJwk,
         userId: usr.userId,
         userPubKey: usr.signPubJwk,
@@ -647,28 +654,28 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
       sybilDescs.push(desc)
     }
 
-    // Also build a valid attacker-s6 descriptor listing all 12 Sybils + host-s6 as neighbors (13 <= maxDescriptorNeighbors)
-    const attackerEp = await getDefaultEndpointIdentity('attacker-s6', 's6-app')
+    // Also build a valid attacker descriptor listing all 12 Sybils + host as neighbors (13 <= maxDescriptorNeighbors)
+    const attackerEp = await getDefaultEndpointIdentity(attackerId, 's6-app')
     const attackerUsr = await resolveUserIdentity(
       's6-app',
       's6-room',
       undefined,
-      'attacker-s6'
+      attackerId
     )
-    const attackerNeighbors = ['host-s6', ...sybilIds].sort()
+    const attackerNeighbors = [hostId, ...sybilIds].sort()
     const attackerUserProof = toBase64Url(
       await attackerUsr.sign(
         userEndpointProofPayload({
           appId: 's6-app',
           roomId: 's6-room',
-          peerId: 'attacker-s6',
+          peerId: attackerId,
           peerPubJwk: attackerEp.signPubJwk,
           seq: 50
         })
       )
     )
     const attackerDesc: PeerDescriptor = {
-      peerId: 'attacker-s6',
+      peerId: attackerId,
       seq: 50,
       neighbors: attackerNeighbors,
       signPubKey: attackerEp.signPubJwk,
@@ -701,7 +708,7 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
 
     try {
       for (const f of frames) {
-        hostScale.handleOverlayFrame('attacker-s6', f.slice().buffer)
+        hostScale.handleOverlayFrame(attackerId, f.slice().buffer)
       }
       await wait(100)
     } finally {
@@ -730,9 +737,12 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
   let capturedRoomXLeave: Uint8Array | null = null
   const roomYDelivered: string[] = []
   const roomYLeaves: string[] = []
+  const aliceId = testPeerId('alice-s7')
+  const relayId = testPeerId('relay-s7')
+  const victimId = testPeerId('victim-s7')
 
   const aliceX = createOverlayManager({
-    selfId: 'alice-s7',
+    selfId: aliceId,
     appId: 's7-app',
     roomId: 'room-X',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -741,7 +751,7 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     onDeliverData: () => {}
   })
   const relayX = createOverlayManager({
-    selfId: 'relay-s7',
+    selfId: relayId,
     appId: 's7-app',
     roomId: 'room-X',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -750,7 +760,7 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     onDeliverData: () => {}
   })
   const aliceY = createOverlayManager({
-    selfId: 'alice-s7',
+    selfId: aliceId,
     appId: 's7-app',
     roomId: 'room-Y',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -759,7 +769,7 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     onDeliverData: () => {}
   })
   const relayY = createOverlayManager({
-    selfId: 'relay-s7',
+    selfId: relayId,
     appId: 's7-app',
     roomId: 'room-Y',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -768,7 +778,7 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     onDeliverData: () => {}
   })
   const victimY = createOverlayManager({
-    selfId: 'victim-s7',
+    selfId: victimId,
     appId: 's7-app',
     roomId: 'room-Y',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -779,8 +789,8 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
   })
 
   try {
-    aliceX.addDirectPeer('relay-s7', {
-      ...makeOverlayPipe('alice-s7', relayX),
+    aliceX.addDirectPeer(relayId, {
+      ...makeOverlayPipe(aliceId, relayX),
       sendData: (d: Uint8Array) => {
         if (d[0] === overlayFrameVersion && d[1] === 2) {
           capturedRoomXBroadcast = d.slice()
@@ -790,20 +800,17 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
             capturedRoomXLeave = d.slice()
           }
         }
-        relayX.handleOverlayFrame('alice-s7', d.slice().buffer)
+        relayX.handleOverlayFrame(aliceId, d.slice().buffer)
       }
     })
-    relayX.addDirectPeer('alice-s7', makeOverlayPipe('relay-s7', aliceX))
+    relayX.addDirectPeer(aliceId, makeOverlayPipe(relayId, aliceX))
 
-    aliceY.addDirectPeer('relay-s7', makeOverlayPipe('alice-s7', relayY))
-    relayY.addDirectPeer('alice-s7', makeOverlayPipe('relay-s7', aliceY))
-    relayY.addDirectPeer('victim-s7', makeOverlayPipe('relay-s7', victimY))
-    victimY.addDirectPeer('relay-s7', makeOverlayPipe('victim-s7', relayY))
+    aliceY.addDirectPeer(relayId, makeOverlayPipe(aliceId, relayY))
+    relayY.addDirectPeer(aliceId, makeOverlayPipe(relayId, aliceY))
+    relayY.addDirectPeer(victimId, makeOverlayPipe(relayId, victimY))
+    victimY.addDirectPeer(relayId, makeOverlayPipe(victimId, relayY))
 
-    await waitFor(
-      () => Boolean(victimY.getSnapshot().routes['alice-s7']),
-      2_000
-    )
+    await waitFor(() => Boolean(victimY.getSnapshot().routes[aliceId]), 2_000)
 
     await aliceX.broadcastInline(encodeBytes('from-room-X'))
     aliceX.announceLeave()
@@ -813,20 +820,17 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     )
 
     // Relay replays Alice's room-X broadcast and room-X leave into room-Y
-    victimY.handleOverlayFrame(
-      'relay-s7',
-      capturedRoomXBroadcast!.slice().buffer
-    )
-    victimY.handleOverlayFrame('relay-s7', capturedRoomXLeave!.slice().buffer)
+    victimY.handleOverlayFrame(relayId, capturedRoomXBroadcast!.slice().buffer)
+    victimY.handleOverlayFrame(relayId, capturedRoomXLeave!.slice().buffer)
     await wait(50)
 
     assert.equal(roomYDelivered.includes('from-room-X'), false)
-    assert.equal(roomYLeaves.includes('alice-s7'), false)
-    assert.ok(victimY.getSnapshot().routes['alice-s7'])
+    assert.equal(roomYLeaves.includes(aliceId), false)
+    assert.ok(victimY.getSnapshot().routes[aliceId])
 
     // Updating roomId via setRoomId evicts descriptors signed for the old roomId
     victimY.setRoomId('room-Y~resolvedFp123456789012')
-    assert.equal(victimY.getSnapshot().routes['alice-s7'], undefined)
+    assert.equal(victimY.getSnapshot().routes[aliceId], undefined)
   } finally {
     aliceX.destroy()
     relayX.destroy()
@@ -838,8 +842,10 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
 
 void test('S8: signaling discovery spam cannot flip established auto mesh, displace verified gossip targets, or trigger unicast flood', async () => {
   let relayForwardedCount = 0
+  const nodeAId = testPeerId('node-a')
+  const nodeBId = testPeerId('node-b')
   const nodeA = createOverlayManager({
-    selfId: 'node-a',
+    selfId: nodeAId,
     appId: 's8-app',
     roomId: 's8-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -848,7 +854,7 @@ void test('S8: signaling discovery spam cannot flip established auto mesh, displ
     onDeliverData: () => {}
   })
   const nodeB = createOverlayManager({
-    selfId: 'node-b',
+    selfId: nodeBId,
     appId: 's8-app',
     roomId: 's8-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -858,19 +864,19 @@ void test('S8: signaling discovery spam cannot flip established auto mesh, displ
   })
 
   try {
-    nodeA.addDirectPeer('node-b', {
-      ...makeOverlayPipe('node-a', nodeB),
+    nodeA.addDirectPeer(nodeBId, {
+      ...makeOverlayPipe(nodeAId, nodeB),
       sendData: d => {
         if (d[0] === overlayFrameVersion && d[1] === 3) {
           relayForwardedCount++
         }
-        nodeB.handleOverlayFrame('node-a', d.slice().buffer)
+        nodeB.handleOverlayFrame(nodeAId, d.slice().buffer)
       }
     })
-    nodeB.addDirectPeer('node-a', makeOverlayPipe('node-b', nodeA))
+    nodeB.addDirectPeer(nodeAId, makeOverlayPipe(nodeBId, nodeA))
 
     await waitFor(
-      () => nodeA.getPeerSignPublicKey('node-b') !== undefined,
+      () => nodeA.getPeerSignPublicKey(nodeBId) !== undefined,
       2_000
     )
 
@@ -882,7 +888,7 @@ void test('S8: signaling discovery spam cannot flip established auto mesh, displ
 
     const targets = nodeA.getTargetNeighbors()
     assert.equal(
-      targets.has('node-b'),
+      targets.has(nodeBId),
       true,
       'verified neighbor must remain in getTargetNeighbors'
     )
@@ -1795,10 +1801,7 @@ void test('D3: createIdentityHandshake fails closed when peer.connection lacks S
 })
 
 void test('D5: peerId grinding by a single userId cannot eclipse all target slots of an honest peer', async () => {
-  const honestIds = Array.from(
-    {length: 16},
-    (_, i) => `honest-${String(i).padStart(2, '0')}`
-  )
+  const honestIds = allocTestPeerIds(16)
   const victim = createOverlayManager({
     selfId: honestIds[0]!,
     appId: 'd5-app',
@@ -2056,10 +2059,14 @@ void test('D7: 60s fixed clock skew tolerance rejects far-future records and mak
 void test('D8: transient 250ms route churn does not flap virtual peer membership under default 1200ms unreachableGraceMs', async () => {
   const virtualLeaves: string[] = []
   const virtualJoins: string[] = []
+  const aliceId = testPeerId('alice-d8')
+  const relay1Id = testPeerId('relay1-d8')
+  const relay2Id = testPeerId('relay2-d8')
+  const bobId = testPeerId('bob-d8')
 
   // Topology: alice <-> relay1 <-> relay2 <-> bob (so relay1 <-> relay2 drop is non-direct to alice)
   const alice = createOverlayManager({
-    selfId: 'alice-d8',
+    selfId: aliceId,
     appId: 'd8-app',
     roomId: 'd8-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -2068,7 +2075,7 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
     onDeliverData: () => {}
   })
   const relay1 = createOverlayManager({
-    selfId: 'relay1-d8',
+    selfId: relay1Id,
     appId: 'd8-app',
     roomId: 'd8-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -2077,7 +2084,7 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
     onDeliverData: () => {}
   })
   const relay2 = createOverlayManager({
-    selfId: 'relay2-d8',
+    selfId: relay2Id,
     appId: 'd8-app',
     roomId: 'd8-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -2086,7 +2093,7 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
     onDeliverData: () => {}
   })
   const bob = createOverlayManager({
-    selfId: 'bob-d8',
+    selfId: bobId,
     appId: 'd8-app',
     roomId: 'd8-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -2096,39 +2103,33 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
   })
 
   try {
-    alice.addDirectPeer('relay1-d8', makeOverlayPipe('alice-d8', relay1))
-    relay1.addDirectPeer('alice-d8', makeOverlayPipe('relay1-d8', alice))
+    alice.addDirectPeer(relay1Id, makeOverlayPipe(aliceId, relay1))
+    relay1.addDirectPeer(aliceId, makeOverlayPipe(relay1Id, alice))
     const r12 = {alive: true}
-    relay1.addDirectPeer('relay2-d8', makeOverlayPipe('relay1-d8', relay2, r12))
-    relay2.addDirectPeer('relay1-d8', makeOverlayPipe('relay2-d8', relay1, r12))
-    relay2.addDirectPeer('bob-d8', makeOverlayPipe('relay2-d8', bob))
-    bob.addDirectPeer('relay2-d8', makeOverlayPipe('bob-d8', relay2))
+    relay1.addDirectPeer(relay2Id, makeOverlayPipe(relay1Id, relay2, r12))
+    relay2.addDirectPeer(relay1Id, makeOverlayPipe(relay2Id, relay1, r12))
+    relay2.addDirectPeer(bobId, makeOverlayPipe(relay2Id, bob))
+    bob.addDirectPeer(relay2Id, makeOverlayPipe(bobId, relay2))
 
-    await waitFor(() => virtualJoins.includes('bob-d8'), 2_000)
+    await waitFor(() => virtualJoins.includes(bobId), 2_000)
 
     // Drop relay1 <-> relay2 for 250ms (> old 80ms grace, < new 1,200ms grace), then heal
     r12.alive = false
-    relay1.removeDirectPeer('relay2-d8')
-    relay2.removeDirectPeer('relay1-d8')
+    relay1.removeDirectPeer(relay2Id)
+    relay2.removeDirectPeer(relay1Id)
     await wait(250)
 
     assert.equal(
-      virtualLeaves.includes('bob-d8'),
+      virtualLeaves.includes(bobId),
       false,
       'bob-d8 must not flap during 250ms multi-hop route reconvergence'
     )
 
     const r12Healed = {alive: true}
-    relay1.addDirectPeer(
-      'relay2-d8',
-      makeOverlayPipe('relay1-d8', relay2, r12Healed)
-    )
-    relay2.addDirectPeer(
-      'relay1-d8',
-      makeOverlayPipe('relay2-d8', relay1, r12Healed)
-    )
-    await waitFor(() => Boolean(alice.getSnapshot().routes['bob-d8']), 2_000)
-    assert.equal(virtualLeaves.includes('bob-d8'), false)
+    relay1.addDirectPeer(relay2Id, makeOverlayPipe(relay1Id, relay2, r12Healed))
+    relay2.addDirectPeer(relay1Id, makeOverlayPipe(relay2Id, relay1, r12Healed))
+    await waitFor(() => Boolean(alice.getSnapshot().routes[bobId]), 2_000)
+    assert.equal(virtualLeaves.includes(bobId), false)
   } finally {
     alice.destroy()
     relay1.destroy()
@@ -2142,14 +2143,15 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
   const received: string[] = []
   let viaRelay1 = 0
   let viaRelay2 = 0
+  const [relay1Id, relay2Id, srcId, dstId] = allocTestPeerIds(4)
 
   const src = createOverlayManager({
-    selfId: 'src-d9',
+    selfId: srcId!,
     appId: 'd9-app',
     roomId: 'd9-room',
     topology: {mode: 'gossip', maxConnections: 4},
     onVirtualPeerJoin: (id, vp) => {
-      if (id === 'dst-d9') {
+      if (id === dstId) {
         virtualDestHandle = vp
       }
     },
@@ -2157,7 +2159,7 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
     onDeliverData: () => {}
   })
   const relay1 = createOverlayManager({
-    selfId: 'relay1-d9',
+    selfId: relay1Id!,
     appId: 'd9-app',
     roomId: 'd9-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -2166,7 +2168,7 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
     onDeliverData: () => {}
   })
   const relay2 = createOverlayManager({
-    selfId: 'relay2-d9',
+    selfId: relay2Id!,
     appId: 'd9-app',
     roomId: 'd9-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -2175,7 +2177,7 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
     onDeliverData: () => {}
   })
   const dst = createOverlayManager({
-    selfId: 'dst-d9',
+    selfId: dstId!,
     appId: 'd9-app',
     roomId: 'd9-room',
     topology: {mode: 'gossip', maxConnections: 4},
@@ -2189,33 +2191,33 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
     const r2State = {alive: true, bufferedAmount: 1_024}
 
     src.addDirectPeer(
-      'relay1-d9',
-      makeOverlayPipe('src-d9', relay1, r1State, d => {
+      relay1Id!,
+      makeOverlayPipe(srcId!, relay1, r1State, d => {
         if (d[0] === overlayFrameVersion && d[1] === 3) {
           viaRelay1++
         }
       })
     )
-    relay1.addDirectPeer('src-d9', makeOverlayPipe('relay1-d9', src))
-    relay1.addDirectPeer('dst-d9', makeOverlayPipe('relay1-d9', dst))
-    dst.addDirectPeer('relay1-d9', makeOverlayPipe('dst-d9', relay1))
+    relay1.addDirectPeer(srcId!, makeOverlayPipe(relay1Id!, src))
+    relay1.addDirectPeer(dstId!, makeOverlayPipe(relay1Id!, dst))
+    dst.addDirectPeer(relay1Id!, makeOverlayPipe(dstId!, relay1))
 
     src.addDirectPeer(
-      'relay2-d9',
-      makeOverlayPipe('src-d9', relay2, r2State, d => {
+      relay2Id!,
+      makeOverlayPipe(srcId!, relay2, r2State, d => {
         if (d[0] === overlayFrameVersion && d[1] === 3) {
           viaRelay2++
         }
       })
     )
-    relay2.addDirectPeer('src-d9', makeOverlayPipe('relay2-d9', src))
-    relay2.addDirectPeer('dst-d9', makeOverlayPipe('relay2-d9', dst))
-    dst.addDirectPeer('relay2-d9', makeOverlayPipe('dst-d9', relay2))
+    relay2.addDirectPeer(srcId!, makeOverlayPipe(relay2Id!, src))
+    relay2.addDirectPeer(dstId!, makeOverlayPipe(relay2Id!, dst))
+    dst.addDirectPeer(relay2Id!, makeOverlayPipe(dstId!, relay2))
 
     await waitFor(
       () =>
         Boolean(
-          virtualDestHandle && src.getSnapshot().routes['dst-d9']?.backupNextHop
+          virtualDestHandle && src.getSnapshot().routes[dstId!]?.backupNextHop
         ),
       2_000
     )

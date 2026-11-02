@@ -1,17 +1,21 @@
 export {default as createStrategy} from './strategy'
 export {default as createTopicStrategy} from './topic-strategy'
-export {hashTopic, libName} from './crypto'
+export {hashTopic} from './crypto'
 export {
-  createRelayManager,
   decodeBytes,
-  definePlugin,
   encodeBytes,
   fromJson,
+  hash32,
+  libName,
+  toJson
+} from './primitives'
+export {
+  createRelayManager,
+  definePlugin,
   genId,
   getRelays,
   makeSocket,
-  setRelayConnectivity,
-  toJson
+  setRelayConnectivity
 } from './utils'
 
 export {roles} from './authority'

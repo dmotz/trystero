@@ -1,5 +1,5 @@
 import {schnorr} from '@noble/secp256k1'
-import {encodeBytes, toJson} from '@trystero-p2p/core'
+import {encodeBytes, hash32, toJson} from '@trystero-p2p/core'
 
 export type NostrSigner = {
   secretKey: Uint8Array
@@ -35,16 +35,7 @@ const deriveTopicKind = (topic: string): number => {
     }
     return (val % 10_000) + 20_000
   }
-  const bytes = encodeBytes(topic)
-  let h = 0x811c9dc5
-  for (let i = 0; i < bytes.byteLength; i++) {
-    h = Math.imul(h ^ bytes[i]!, 0x01000193)
-  }
-  h ^= h >>> 16
-  h = Math.imul(h, 0x85ebca6b)
-  h ^= h >>> 13
-  h = Math.imul(h, 0xc2b2ae35)
-  return (((h ^ (h >>> 16)) >>> 0) % 10_000) + 20_000
+  return (hash32(topic) % 10_000) + 20_000
 }
 
 export const topicToKind = (topic: string): number =>

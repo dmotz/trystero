@@ -16,15 +16,34 @@ import {
   roles
 } from '../../packages/core/src/index.ts'
 import {
+  createEndpointIdentity,
+  decodePublicKey,
   derivePeerId,
   deriveUserId,
   getDefaultEndpointIdentity,
+  jwkToCompactPub,
   signUserEndpointProof,
   verifyPeerIdKey,
   verifyUserEndpointProof,
   verifyUserIdKey
 } from '../../packages/core/src/identity.ts'
-import {joinAsTestPeer, wait, waitFor} from './peer-harness.ts'
+import {
+  createOverlayManager,
+  descriptorCanonicalPayload,
+  packGossipControlFrames
+} from '../../packages/core/src/overlay.ts'
+import {
+  ecdsaSign,
+  encodeBytes,
+  toBase64
+} from '../../packages/core/src/crypto.ts'
+import {
+  createSortedJoinRooms,
+  joinAsTestPeer,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 class LinkedDataChannel {
   label: string
@@ -467,6 +486,17 @@ void test('Identity config validation & persistence modes: default local, none, 
                   }
                 })
                 return addReq
+              },
+              put: (val: any, key: string) => {
+                const putReq: any = {
+                  onsuccess: null,
+                  onerror: null
+                }
+                queueMicrotask(() => {
+                  idbStore.set(key, val)
+                  putReq.onsuccess?.()
+                })
+                return putReq
               }
             }),
             onabort: null,
@@ -635,7 +665,16 @@ void test(
     const bobUserJoins: any[] = []
     const bobUserLeaves: any[] = []
 
-    const roomBob = makeJoinRoom('peer-bob')(
+    const [alice1Slot, alice2Slot, bobSlot] = await createSortedJoinRooms(
+      3,
+      () => makeJoinRoom(),
+      appId
+    )
+    const alice1PeerId = alice1Slot!.peerId
+    const alice2PeerId = alice2Slot!.peerId
+    const bobPeerId = bobSlot!.peerId
+
+    const roomBob = bobSlot!.joinRoom(
       {
         appId,
         identity: bobIdentity,
@@ -652,7 +691,7 @@ void test(
     let roomAlice2: Room = null
     try {
       // 1. Alice's 1st tab joins
-      roomAlice1 = makeJoinRoom('peer-alice-1')(
+      roomAlice1 = alice1Slot!.joinRoom(
         {
           appId,
           identity: aliceIdentity,
@@ -663,20 +702,20 @@ void test(
 
       await waitFor(
         () =>
-          bobPeerJoins.some(e => e.peerId === 'peer-alice-1') &&
-          Object.keys(roomAlice1.getPeers()).includes('peer-bob'),
+          bobPeerJoins.some(e => e.peerId === alice1PeerId) &&
+          Object.keys(roomAlice1.getPeers()).includes(bobPeerId),
         3_000
       )
 
       assert.equal(bobPeerJoins.length, 1)
-      assert.equal(bobPeerJoins[0].peerId, 'peer-alice-1')
+      assert.equal(bobPeerJoins[0].peerId, alice1PeerId)
       assert.equal(bobPeerJoins[0].userId, aliceIdentity.userId)
       assert.equal(bobUserJoins.length, 1)
       assert.equal(bobUserJoins[0].userId, aliceIdentity.userId)
-      assert.equal(bobUserJoins[0].peerId, 'peer-alice-1')
+      assert.equal(bobUserJoins[0].peerId, alice1PeerId)
 
       // 2. Alice's 2nd tab joins with the same aliceIdentity
-      roomAlice2 = makeJoinRoom('peer-alice-2')(
+      roomAlice2 = alice2Slot!.joinRoom(
         {
           appId,
           identity: aliceIdentity,
@@ -687,8 +726,8 @@ void test(
 
       await waitFor(
         () =>
-          bobPeerJoins.some(e => e.peerId === 'peer-alice-2') &&
-          Object.keys(roomAlice2.getPeers()).includes('peer-bob'),
+          bobPeerJoins.some(e => e.peerId === alice2PeerId) &&
+          Object.keys(roomAlice2.getPeers()).includes(bobPeerId),
         3_000
       )
 
@@ -707,20 +746,20 @@ void test(
       assert.ok(usersAtBob[aliceIdentity.userId])
       assert.equal(usersAtBob[bobIdentity.userId], undefined)
       assert.deepEqual(usersAtBob[aliceIdentity.userId].peerIds.sort(), [
-        'peer-alice-1',
-        'peer-alice-2'
+        alice1PeerId,
+        alice2PeerId
       ])
       assert.equal(
-        roomBob.getPeers()['peer-alice-1'].userId,
+        roomBob.getPeers()[alice1PeerId].userId,
         aliceIdentity.userId
       )
       assert.equal(
-        roomBob.getPeers()['peer-alice-2'].userId,
+        roomBob.getPeers()[alice2PeerId].userId,
         aliceIdentity.userId
       )
 
       // Wait for Alice's two tabs to also connect to each other
-      await waitFor(() => 'peer-alice-2' in roomAlice1.getPeers(), 3_000)
+      await waitFor(() => alice2PeerId in roomAlice1.getPeers(), 3_000)
       // getUsers() on Alice's tab excludes the self user (aliceIdentity.userId)
       const usersAtAlice1 = roomAlice1.getUsers()
       assert.equal(
@@ -728,7 +767,7 @@ void test(
         undefined,
         'getUsers() must exclude the local user even when a second tab of the local user is connected'
       )
-      assert.deepEqual(usersAtAlice1[bobIdentity.userId].peerIds, ['peer-bob'])
+      assert.deepEqual(usersAtAlice1[bobIdentity.userId].peerIds, [bobPeerId])
 
       // ping(userId) deterministically pings one endpoint matching request() logic
       const rtt = await roomBob.ping(aliceIdentity.userId)
@@ -747,15 +786,15 @@ void test(
       })
 
       await chatBob.send('hello-alice-all-tabs', {
-        target: [aliceIdentity.userId, 'peer-alice-1']
+        target: [aliceIdentity.userId, alice1PeerId]
       })
 
       await waitFor(() => alice1Msgs.length === 1 && alice2Msgs.length === 1)
       assert.equal(alice1Msgs[0].data, 'hello-alice-all-tabs')
-      assert.equal(alice1Msgs[0].peerId, 'peer-bob')
+      assert.equal(alice1Msgs[0].peerId, bobPeerId)
       assert.equal(alice1Msgs[0].userId, bobIdentity.userId)
       assert.equal(alice2Msgs[0].data, 'hello-alice-all-tabs')
-      assert.equal(alice2Msgs[0].peerId, 'peer-bob')
+      assert.equal(alice2Msgs[0].peerId, bobPeerId)
       assert.equal(alice2Msgs[0].userId, bobIdentity.userId)
 
       // 4. Overloaded target on request(data, {target: userId}) routes deterministically to 1 tab (lowest peerId)
@@ -787,7 +826,7 @@ void test(
       assert.equal(
         rpcResponse,
         `from-alice-1:ping-user:${bobIdentity.userId}`,
-        'request(userId) should route deterministically to lowest peerId (peer-alice-1)'
+        'request(userId) should route deterministically to lowest peerId (alice1PeerId)'
       )
       assert.equal(alice1ReqCount, 1)
       assert.equal(alice2ReqCount, 0)
@@ -796,18 +835,18 @@ void test(
         targets: [aliceIdentity.userId]
       })
       assert.equal(manyResults.length, 1)
-      assert.equal(manyResults[0].peerId, 'peer-alice-1')
+      assert.equal(manyResults[0].peerId, alice1PeerId)
       assert.equal(manyResults[0].userId, aliceIdentity.userId)
       assert.equal(manyResults[0].status, 'fulfilled')
 
       // 5. Alice's 1st tab leaves -> onPeerLeave fires, onUserLeave does NOT fire
       await roomAlice1.leave()
       await waitFor(
-        () => bobPeerLeaves.some(e => e.peerId === 'peer-alice-1'),
+        () => bobPeerLeaves.some(e => e.peerId === alice1PeerId),
         3_000
       )
       assert.equal(bobPeerLeaves.length, 1)
-      assert.equal(bobPeerLeaves[0].peerId, 'peer-alice-1')
+      assert.equal(bobPeerLeaves[0].peerId, alice1PeerId)
       assert.equal(bobPeerLeaves[0].userId, aliceIdentity.userId)
       assert.equal(
         bobUserLeaves.length,
@@ -815,10 +854,10 @@ void test(
         'onUserLeave must NOT fire while Alice still has tab 2 open'
       )
       assert.deepEqual(roomBob.getUsers()[aliceIdentity.userId].peerIds, [
-        'peer-alice-2'
+        alice2PeerId
       ])
 
-      // Now request(aliceIdentity.userId) routes to Alice's remaining tab (peer-alice-2)
+      // Now request(aliceIdentity.userId) routes to Alice's remaining tab (alice2PeerId)
       const rpcResponse2 = await rpcBob.request('ping-user-2', {
         target: aliceIdentity.userId
       })
@@ -831,13 +870,13 @@ void test(
       // 6. Alice's 2nd (last) tab leaves -> both onPeerLeave and onUserLeave fire!
       await roomAlice2.leave()
       await waitFor(
-        () => bobPeerLeaves.some(e => e.peerId === 'peer-alice-2'),
+        () => bobPeerLeaves.some(e => e.peerId === alice2PeerId),
         3_000
       )
       assert.equal(bobPeerLeaves.length, 2)
       assert.equal(bobUserLeaves.length, 1)
       assert.equal(bobUserLeaves[0].userId, aliceIdentity.userId)
-      assert.equal(bobUserLeaves[0].peerId, 'peer-alice-2')
+      assert.equal(bobUserLeaves[0].peerId, alice2PeerId)
       assert.equal(roomBob.getUsers()[aliceIdentity.userId], undefined)
     } finally {
       await Promise.all([
@@ -1005,10 +1044,14 @@ void test(
       roomId
     )
 
+    const [{peerId: hostPeerId}, {peerId: alice1PeerId}] = await Promise.all([
+      hostRoom.getSelf(),
+      aliceTab1.getSelf()
+    ])
     await waitFor(
       () =>
-        'peer-alice-1' in hostRoom.getPeers() &&
-        'peer-host' in aliceTab1.getPeers(),
+        alice1PeerId in hostRoom.getPeers() &&
+        hostPeerId in aliceTab1.getPeers(),
       3_000
     )
 
@@ -1025,10 +1068,11 @@ void test(
     )
     aliceTab2.onError(err => aliceTab2Errors.push(err))
 
+    const {peerId: alice2PeerId} = await aliceTab2.getSelf()
     await waitFor(
       () =>
-        'peer-alice-2' in hostRoom.getPeers() &&
-        'peer-host' in aliceTab2.getPeers(),
+        alice2PeerId in hostRoom.getPeers() &&
+        hostPeerId in aliceTab2.getPeers(),
       3_000
     )
     assert.deepEqual(aliceTab2Errors, [])
@@ -1082,7 +1126,22 @@ void test(
     let limiterRoom: Room & RolesPluginApi
 
     try {
-      adminRoom = makeJoinRoom('peer-admin')(
+      const [
+        limiterSlot,
+        adminSlot,
+        alice1Slot,
+        alice2Slot,
+        attacker1Slot,
+        attacker2Slot
+      ] = await createSortedJoinRooms(6, () => makeJoinRoom(), appId)
+      const limiterPeerId = limiterSlot!.peerId
+      const adminPeerId = adminSlot!.peerId
+      const alice1PeerId = alice1Slot!.peerId
+      const alice2PeerId = alice2Slot!.peerId
+      const attacker1PeerId = attacker1Slot!.peerId
+      const attacker2PeerId = attacker2Slot!.peerId
+
+      adminRoom = adminSlot!.joinRoom(
         {
           appId,
           identity: adminUser,
@@ -1093,7 +1152,7 @@ void test(
       )
       const authInfo = await adminRoom.getSelf()
 
-      aliceTab1 = makeJoinRoom('peer-alice-1')(
+      aliceTab1 = alice1Slot!.joinRoom(
         {
           appId,
           identity: aliceUser,
@@ -1105,8 +1164,8 @@ void test(
 
       await waitFor(
         () =>
-          'peer-alice-1' in adminRoom.getPeers() &&
-          'peer-admin' in aliceTab1.getPeers(),
+          alice1PeerId in adminRoom.getPeers() &&
+          adminPeerId in aliceTab1.getPeers(),
         3_000
       )
 
@@ -1114,8 +1173,8 @@ void test(
       await adminRoom.grantRole(aliceUser.userId, 'moderator')
       await waitFor(() => aliceTab1.getRoles().includes('moderator'), 3_000)
 
-      // Alice opens Tab 2 (or reloads with persistent userId -> new peerId 'peer-alice-2')
-      aliceTab2 = makeJoinRoom('peer-alice-2')(
+      // Alice opens Tab 2 (or reloads with persistent userId -> new peerId alice2PeerId)
+      aliceTab2 = alice2Slot!.joinRoom(
         {
           appId,
           identity: aliceUser,
@@ -1127,7 +1186,7 @@ void test(
 
       await waitFor(
         () =>
-          'peer-alice-2' in adminRoom.getPeers() &&
+          alice2PeerId in adminRoom.getPeers() &&
           aliceTab2.getRoles().includes('moderator'),
         3_000
       )
@@ -1155,13 +1214,13 @@ void test(
       await modAlertTab2.send('verified-from-tab-2')
       await waitFor(() => modAlertsAtAdmin.length === 1, 3_000)
       assert.equal(modAlertsAtAdmin[0].msg, 'verified-from-tab-2')
-      assert.equal(modAlertsAtAdmin[0].peerId, 'peer-alice-2')
+      assert.equal(modAlertsAtAdmin[0].peerId, alice2PeerId)
       assert.equal(modAlertsAtAdmin[0].userId, aliceUser.userId)
       assert.deepEqual(modAlertsAtAdmin[0].roles, ['moderator'])
 
       await tab2TopicState.set('updated-by-tab-2')
       await waitFor(() => adminTopicState.get() === 'updated-by-tab-2', 3_000)
-      assert.equal(adminTopicState.getMeta()?.peerId, 'peer-alice-2')
+      assert.equal(adminTopicState.getMeta()?.peerId, alice2PeerId)
       assert.equal(adminTopicState.getMeta()?.userId, aliceUser.userId)
 
       const adminErrors: any[] = []
@@ -1169,7 +1228,7 @@ void test(
       adminRoom.onError(err => adminErrors.push(err))
 
       // Attacker joins, gets banned by userId, and then tries to evade the ban by opening a new tab with a fresh peerId
-      attackerTab1 = makeJoinRoom('peer-attacker-1')(
+      attackerTab1 = attacker1Slot!.joinRoom(
         {
           appId,
           identity: attackerUser,
@@ -1179,11 +1238,11 @@ void test(
         authInfo.roomId
       )
       attackerTab1.onError(err => attackerTab1Errors.push(err))
-      await waitFor(() => 'peer-attacker-1' in adminRoom.getPeers(), 3_000)
+      await waitFor(() => attacker1PeerId in adminRoom.getPeers(), 3_000)
       await adminRoom.ban(attackerUser.userId, {reason: 'disruptor'})
       await waitFor(
         () =>
-          !('peer-attacker-1' in adminRoom.getPeers()) &&
+          !(attacker1PeerId in adminRoom.getPeers()) &&
           attackerTab1Errors.length > 0,
         3_000
       )
@@ -1192,7 +1251,7 @@ void test(
       await attackerTab1.leave()
 
       const attackerTab2Errors: any[] = []
-      attackerTab2 = makeJoinRoom('peer-attacker-2')(
+      attackerTab2 = attacker2Slot!.joinRoom(
         {
           appId,
           identity: attackerUser,
@@ -1215,12 +1274,12 @@ void test(
         [],
         'admin enforcing a ban must not receive banned error'
       )
-      assert.equal('peer-attacker-2' in adminRoom.getPeers(), false)
+      assert.equal(attacker2PeerId in adminRoom.getPeers(), false)
 
       // Newcomer advertising limit: 1 refuses other users locally without self-evicting or ejecting established members
       const limiterUser = await createUserIdentity()
       const limiterErrors: any[] = []
-      limiterRoom = makeJoinRoom('peer-000-limiter')(
+      limiterRoom = limiterSlot!.joinRoom(
         {
           appId,
           identity: limiterUser,
@@ -1235,10 +1294,10 @@ void test(
       await wait(200)
       assert.deepEqual(limiterErrors, [])
       assert.deepEqual(Object.keys(limiterRoom.getPeers()), [])
-      assert.equal('peer-000-limiter' in adminRoom.getPeers(), false)
+      assert.equal(limiterPeerId in adminRoom.getPeers(), false)
       // Established members (admin + alice) must remain connected!
-      assert.equal('peer-alice-1' in adminRoom.getPeers(), true)
-      assert.equal('peer-alice-2' in adminRoom.getPeers(), true)
+      assert.equal(alice1PeerId in adminRoom.getPeers(), true)
+      assert.equal(alice2PeerId in adminRoom.getPeers(), true)
     } finally {
       await Promise.all([
         adminRoom?.leave().catch(() => {}),
@@ -1311,7 +1370,7 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
     resolve(import.meta.dirname, '../../packages/core/dist/types.d.mts'),
     'utf8'
   )
-  const distBundles = ['strategy.mjs', 'identity.mjs', 'room.mjs']
+  const distBundles = ['strategy.mjs', 'identity.mjs', 'room.mjs', 'peer.mjs']
     .map(name =>
       readFileSync(
         resolve(import.meta.dirname, `../../packages/core/dist/${name}`),
@@ -1330,7 +1389,8 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
     'getDefaultTestUserIdentity',
     'setDevIdentityProvider',
     'devIdentityProvider',
-    'TestOnlyRoomConfig'
+    'TestOnlyRoomConfig',
+    '_test_only_mdnsHostFallbackToLoopback'
   ]) {
     assert.equal(
       distBundles.includes(forbidden),
@@ -2119,4 +2179,113 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
   assert.equal(indexDts.includes('ScaleConfig'), true)
   assert.equal(indexDts.includes('RelayConnectivity'), true)
   assert.equal(indexDts.includes('setRelayConnectivity'), true)
+})
+
+void test('Canonical JWK & compact pubkey normalization: decodePublicKey accepts compact x.y, and overlay key-pinning tolerates JWK property order / ext / key_ops permutations', async () => {
+  const remoteEp = await createEndpointIdentity()
+  const remoteUser = await createUserIdentity()
+  const compact = jwkToCompactPub(remoteUser.signPubJwk)
+  assert.equal(compact.length, 87)
+  assert.deepEqual(decodePublicKey(compact), remoteUser.signPubJwk)
+
+  const appId = `jwk-canon-${Date.now()}`
+  const roomId = 'canon-room'
+  const observerId = testPeerId('jwk-observer')
+  const accepted: Array<{peerId: string; userId?: string}> = []
+  const overlay = createOverlayManager({
+    selfId: observerId,
+    appId,
+    roomId,
+    topology: {mode: 'gossip', maxConnections: 4},
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {},
+    onPeerDescriptorCert: (peerId, _signPubKey, _cert, userId) => {
+      accepted.push({peerId, userId})
+    }
+  })
+
+  try {
+    // Pin remoteEp's key using standard clean JWK order (crv, kty, x, y)
+    overlay.setPeerSignPublicKey(remoteEp.peerId, remoteEp.signPubJwk)
+
+    const encPair = await crypto.subtle.generateKey(
+      {name: 'ECDH', namedCurve: 'P-256'},
+      true,
+      ['deriveKey', 'deriveBits']
+    )
+    const rawEncJwk = await crypto.subtle.exportKey('jwk', encPair.publicKey)
+
+    // Permute property order AND attach extra WebCrypto metadata fields (ext, key_ops)
+    const permutedSignJwk: JsonWebKey = {
+      y: remoteEp.signPubJwk.y,
+      x: remoteEp.signPubJwk.x,
+      key_ops: ['verify'],
+      ext: true,
+      kty: 'EC',
+      crv: 'P-256'
+    }
+    const permutedEncJwk: JsonWebKey = {
+      y: rawEncJwk.y,
+      x: rawEncJwk.x,
+      ext: true,
+      kty: 'EC',
+      crv: 'P-256'
+    }
+    const proof = await signUserEndpointProof(remoteUser, {
+      appId,
+      roomId,
+      peerId: remoteEp.peerId,
+      peerPubJwk: permutedSignJwk,
+      seq: 1
+    })
+    const descriptor: any = {
+      peerId: remoteEp.peerId,
+      seq: 1,
+      ts: Date.now(),
+      neighbors: [observerId],
+      signPubKey: permutedSignJwk,
+      encPubKey: permutedEncJwk,
+      userId: remoteUser.userId,
+      userPubKey: {
+        y: remoteUser.signPubJwk.y,
+        x: remoteUser.signPubJwk.x,
+        ext: true,
+        key_ops: ['verify'],
+        kty: 'EC',
+        crv: 'P-256'
+      },
+      userProof: proof
+    }
+    const canon = encodeBytes(
+      descriptorCanonicalPayload(descriptor, appId, roomId)
+    )
+    descriptor.sig = toBase64(
+      await ecdsaSign(remoteEp.signPrivateKey, canon as BufferSource)
+    )
+
+    const relayId = testPeerId('jwk-relay')
+    const fakeNeighbor: any = {
+      isDead: false,
+      connection: {connectionState: 'connected'},
+      channel: {readyState: 'open', bufferedAmount: 0},
+      sendData: () => {},
+      destroy: () => {},
+      setHandlers: () => {}
+    }
+    overlay.addDirectPeer(relayId, fakeNeighbor)
+    const [frame] = packGossipControlFrames([descriptor])
+    overlay.handleOverlayFrame(relayId, frame!.slice().buffer)
+
+    await waitFor(
+      () =>
+        accepted.some(
+          x => x.peerId === remoteEp.peerId && x.userId === remoteUser.userId
+        ),
+      2_000
+    )
+    assert.equal(overlay.getSnapshot().stats.signatureFailures, 0)
+  } finally {
+    overlay.destroy()
+  }
 })

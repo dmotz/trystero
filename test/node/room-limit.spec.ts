@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {createTopicStrategy, scale} from '../../packages/core/src/index.ts'
-import {joinAsTestPeer, wait, waitFor} from './peer-harness.ts'
+import {
+  createSortedJoinRooms,
+  joinAsTestPeer,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 class LinkedDataChannel {
   label: string
@@ -283,7 +288,13 @@ void test(
     const appId = `limit-1-${Date.now()}`
     const roomId = 'solo-room'
 
-    const hostJoin = makeJoinRoom('peer-host')
+    const [hostSlot, lateSlot] = await createSortedJoinRooms(
+      2,
+      () => makeJoinRoom(),
+      appId
+    )
+    const hostJoin = hostSlot!.joinRoom
+    const lateJoin = lateSlot!.joinRoom
     const hostErrors: any[] = []
     const hostJoins: string[] = []
     const hostLeaves: string[] = []
@@ -302,7 +313,6 @@ void test(
 
     await wait(60)
 
-    const lateJoin = makeJoinRoom('peer-late')
     const lateErrors: any[] = []
     const lateJoins: string[] = []
 
@@ -332,7 +342,8 @@ void test(
       assert.equal(lateErrors[0].message, 'room full')
       assert.equal(lateErrors[0].appId, appId)
       assert.equal(lateErrors[0].roomId, roomId)
-      assert.equal(lateErrors[0].peerId, 'peer-host')
+      const {peerId: hostPeerId} = await hostRoom.getSelf()
+      assert.equal(lateErrors[0].peerId, hostPeerId)
       assert.deepEqual(lateJoins, [])
       assert.deepEqual(hostErrors, [], 'host must not receive onError')
       assert.deepEqual(
@@ -383,10 +394,15 @@ void test(
     const appId = `limit-2-seq-${Date.now()}`
     const roomId = 'duel-room'
 
-    const joinA = makeJoinRoom('peer-a')
-    const joinB = makeJoinRoom('peer-b')
-    const joinC = makeJoinRoom('peer-c')
-    const joinD = makeJoinRoom('peer-d')
+    const [slotA, slotB, slotC, slotD] = await createSortedJoinRooms(
+      4,
+      () => makeJoinRoom(),
+      appId
+    )
+    const joinA = slotA!.joinRoom
+    const joinB = slotB!.joinRoom
+    const joinC = slotC!.joinRoom
+    const joinD = slotD!.joinRoom
 
     const errorsA: any[] = []
     const errorsB: any[] = []
@@ -400,105 +416,111 @@ void test(
     const joinsC: string[] = []
     const joinsD: string[] = []
 
-    const roomA = joinA(
-      {
-        appId,
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    roomA.onError(err => errorsA.push(err))
-    roomA.onPeerJoin(({peerId}) => joinsA.push(peerId))
-    roomA.onPeerLeave(({peerId}) => leavesA.push(peerId))
-
-    const roomB = joinB(
-      {
-        appId,
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    roomB.onError(err => errorsB.push(err))
-    roomB.onPeerJoin(({peerId}) => joinsB.push(peerId))
-    roomB.onPeerLeave(({peerId}) => leavesB.push(peerId))
-
-    await waitFor(
-      () => joinsA.includes('peer-b') && joinsB.includes('peer-a'),
-      3_000
-    )
-
-    // Peer C attempts to join when room is already at capacity (2/2)
-    const roomC = joinC(
-      {
-        appId,
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    roomC.onError(err => errorsC.push(err))
-    roomC.onPeerJoin(({peerId}) => joinsC.push(peerId))
-
-    await waitFor(() => errorsC.length > 0, 3_000)
-    await wait(120)
-
-    assert.equal(errorsC.length, 1, 'Peer C must receive onError exactly once')
-    assert.equal(errorsC[0].code, 'room-full')
-    assert.equal(errorsC[0].message, 'room full')
-    assert.equal(errorsC[0].appId, appId)
-    assert.equal(errorsC[0].roomId, roomId)
-    assert.ok(
-      errorsC[0].peerId === 'peer-a' || errorsC[0].peerId === 'peer-b',
-      'rejecting peerId should be one of the existing members'
-    )
-    assert.deepEqual(joinsC, [], 'Peer C must not activate any peers')
-    assert.deepEqual(errorsA, [], 'Peer A must not receive onError')
-    assert.deepEqual(errorsB, [], 'Peer B must not receive onError')
-    assert.deepEqual(
-      joinsA,
-      ['peer-b'],
-      'Peer A must not fire onPeerJoin for C'
-    )
-    assert.deepEqual(
-      joinsB,
-      ['peer-a'],
-      'Peer B must not fire onPeerJoin for C'
-    )
-    assert.deepEqual(leavesA, [], 'Peer A must not fire onPeerLeave for C')
-    assert.deepEqual(leavesB, [], 'Peer B must not fire onPeerLeave for C')
-
-    // Rejected Peer C cleans up and Peer B leaves, freeing 1 seat (1/2)
-    await roomC.leave()
-    await roomB.leave()
-    await waitFor(() => leavesA.includes('peer-b'), 2_000)
-
-    // Peer D joins and should be admitted into the newly opened seat!
-    const roomD = joinD(
-      {
-        appId,
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    roomD.onError(err => errorsD.push(err))
-    roomD.onPeerJoin(({peerId}) => joinsD.push(peerId))
-
+    let roomA: any
+    let roomB: any
+    let roomC: any
+    let roomD: any
     try {
+      roomA = joinA(
+        {
+          appId,
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      roomA.onError(err => errorsA.push(err))
+      roomA.onPeerJoin(({peerId}: {peerId: string}) => joinsA.push(peerId))
+      roomA.onPeerLeave(({peerId}: {peerId: string}) => leavesA.push(peerId))
+
+      roomB = joinB(
+        {
+          appId,
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      roomB.onError(err => errorsB.push(err))
+      roomB.onPeerJoin(({peerId}: {peerId: string}) => joinsB.push(peerId))
+      roomB.onPeerLeave(({peerId}: {peerId: string}) => leavesB.push(peerId))
+
+      const [{peerId: peerA}, {peerId: peerB}] = await Promise.all([
+        roomA.getSelf(),
+        roomB.getSelf()
+      ])
       await waitFor(
-        () => joinsA.includes('peer-d') && joinsD.includes('peer-a'),
+        () => joinsA.includes(peerB) && joinsB.includes(peerA),
+        3_000
+      )
+
+      // Peer C attempts to join when room is already at capacity (2/2)
+      roomC = joinC(
+        {
+          appId,
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      roomC.onError(err => errorsC.push(err))
+      roomC.onPeerJoin(({peerId}: {peerId: string}) => joinsC.push(peerId))
+
+      await waitFor(() => errorsC.length > 0, 3_000)
+      await wait(120)
+
+      assert.equal(
+        errorsC.length,
+        1,
+        'Peer C must receive onError exactly once'
+      )
+      assert.equal(errorsC[0].code, 'room-full')
+      assert.equal(errorsC[0].message, 'room full')
+      assert.equal(errorsC[0].appId, appId)
+      assert.equal(errorsC[0].roomId, roomId)
+      assert.ok(
+        errorsC[0].peerId === peerA || errorsC[0].peerId === peerB,
+        'rejecting peerId should be one of the existing members'
+      )
+      assert.deepEqual(joinsC, [], 'Peer C must not activate any peers')
+      assert.deepEqual(errorsA, [], 'Peer A must not receive onError')
+      assert.deepEqual(errorsB, [], 'Peer B must not receive onError')
+      assert.deepEqual(joinsA, [peerB], 'Peer A must not fire onPeerJoin for C')
+      assert.deepEqual(joinsB, [peerA], 'Peer B must not fire onPeerJoin for C')
+      assert.deepEqual(leavesA, [], 'Peer A must not fire onPeerLeave for C')
+      assert.deepEqual(leavesB, [], 'Peer B must not fire onPeerLeave for C')
+
+      // Rejected Peer C cleans up and Peer B leaves, freeing 1 seat (1/2)
+      await roomC.leave()
+      await roomB.leave()
+      await waitFor(() => leavesA.includes(peerB), 2_000)
+
+      // Peer D joins and should be admitted into the newly opened seat!
+      roomD = joinD(
+        {
+          appId,
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      roomD.onError(err => errorsD.push(err))
+      roomD.onPeerJoin(({peerId}: {peerId: string}) => joinsD.push(peerId))
+
+      const {peerId: peerD} = await roomD.getSelf()
+      await waitFor(
+        () => joinsA.includes(peerD) && joinsD.includes(peerA),
         3_000
       )
       assert.deepEqual(errorsD, [])
-      assert.deepEqual(Object.keys(roomA.getPeers()), ['peer-d'])
-      assert.deepEqual(Object.keys(roomD.getPeers()), ['peer-a'])
+      assert.deepEqual(Object.keys(roomA.getPeers()), [peerD])
+      assert.deepEqual(Object.keys(roomD.getPeers()), [peerA])
     } finally {
       await Promise.all([
-        roomA.leave().catch(() => {}),
-        roomC.leave().catch(() => {}),
-        roomD.leave().catch(() => {})
+        roomA?.leave().catch(() => {}),
+        roomB?.leave().catch(() => {}),
+        roomC?.leave().catch(() => {}),
+        roomD?.leave().catch(() => {})
       ])
     }
   }
@@ -511,7 +533,10 @@ void test(
     const {makeJoinRoom} = createMemorySignalBus()
     const appId = `limit-burst-${Date.now()}`
     const roomId = 'burst-room'
-    const peerIds = ['peer-1', 'peer-2', 'peer-3', 'peer-4', 'peer-5']
+    const slots = await createSortedJoinRooms(8, () => makeJoinRoom(), appId)
+    const initialSlots = slots.slice(1, 6)
+    const newcomerSlots = [slots[0]!, slots[6]!, slots[7]!]
+    const peerIds = initialSlots.map(s => s.peerId)
 
     const stateByPeer = new Map<
       string,
@@ -524,8 +549,7 @@ void test(
     >()
 
     // Launch all 5 peers concurrently in the same tick on an empty limit: 2 room
-    for (const peerId of peerIds) {
-      const joinRoom = makeJoinRoom(peerId)
+    for (const {joinRoom, peerId} of initialSlots) {
       const errors: any[] = []
       const joins: string[] = []
       const leaves: string[] = []
@@ -601,12 +625,13 @@ void test(
       )
       await wait(60)
 
+      const newcomerIds = newcomerSlots.map(s => s.peerId)
       const newcomerRooms = new Map<string, any>()
       const newcomerErrors = new Map<string, any[]>()
-      for (const newcomerId of ['peer-0', 'peer-6', 'peer-7']) {
+      for (const {joinRoom, peerId: newcomerId} of newcomerSlots) {
         const errs: any[] = []
         newcomerErrors.set(newcomerId, errs)
-        const room = makeJoinRoom(newcomerId)(
+        const room = joinRoom(
           {
             appId,
             limit: 2,
@@ -623,19 +648,16 @@ void test(
       // while any unseated newcomer must report 'room full' (at least 1 of the 3).
       await waitFor(
         () =>
-          ['peer-0', 'peer-6', 'peer-7'].every(
+          newcomerIds.every(
             id =>
               newcomerErrors.get(id)!.length > 0 ||
               Object.keys(newcomerRooms.get(id)!.getPeers()).length === 1
-          ) &&
-          ['peer-0', 'peer-6', 'peer-7'].some(
-            id => newcomerErrors.get(id)!.length > 0
-          ),
+          ) && newcomerIds.some(id => newcomerErrors.get(id)!.length > 0),
         3_000
       )
       await wait(100)
 
-      for (const newcomerId of ['peer-0', 'peer-6', 'peer-7']) {
+      for (const newcomerId of newcomerIds) {
         const errs = newcomerErrors.get(newcomerId)!
         const peers = Object.keys(newcomerRooms.get(newcomerId)!.getPeers())
         assert.ok(peers.length <= 1)
@@ -678,63 +700,79 @@ void test(
     const appId = `limit-asym-${Date.now()}`
     const roomId = 'asym-room'
 
-    const hostRoom = makeJoinRoom('host-peer')(
-      {
-        appId,
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    const guest1Joins: string[] = []
-    const guest1Room = makeJoinRoom('guest-1')(
-      {
-        appId,
-        // guest-1 omits limit and must not adopt unauthenticated limit from host-peer
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    guest1Room.onPeerJoin(({peerId}) => guest1Joins.push(peerId))
-
-    await waitFor(
-      () =>
-        guest1Joins.includes('host-peer') &&
-        Object.keys(hostRoom.getPeers()).includes('guest-1'),
-      3_000
+    const [guest1Slot, guest2Slot, hostSlot] = await createSortedJoinRooms(
+      3,
+      () => makeJoinRoom(),
+      appId
     )
 
-    const guest2Errors: any[] = []
-    const guest2Room = makeJoinRoom('guest-2')(
-      {
-        appId,
-        // guest-2 has limit: 3 and must not self-evict or drop guest-1 when host-peer rejects as full
-        limit: 3,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    guest2Room.onError(err => guest2Errors.push(err))
-
+    let hostRoom: any
+    let guest1Room: any
+    let guest2Room: any
     try {
+      hostRoom = hostSlot!.joinRoom(
+        {
+          appId,
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      const guest1Joins: string[] = []
+      guest1Room = guest1Slot!.joinRoom(
+        {
+          appId,
+          // guest-1 omits limit and must not adopt unauthenticated limit from host-peer
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      guest1Room.onPeerJoin(({peerId}: {peerId: string}) =>
+        guest1Joins.push(peerId)
+      )
+
+      const [{peerId: hostPeerId}, {peerId: guest1PeerId}] = await Promise.all([
+        hostRoom.getSelf(),
+        guest1Room.getSelf()
+      ])
       await waitFor(
         () =>
-          guest2Errors.some(e => e.peerId === 'host-peer') &&
-          guest1Joins.includes('guest-2') &&
-          Object.keys(guest2Room.getPeers()).includes('guest-1'),
+          guest1Joins.includes(hostPeerId) &&
+          Object.keys(hostRoom.getPeers()).includes(guest1PeerId),
+        3_000
+      )
+
+      const guest2Errors: any[] = []
+      guest2Room = guest2Slot!.joinRoom(
+        {
+          appId,
+          // guest-2 has limit: 3 and must not self-evict or drop guest-1 when host-peer rejects as full
+          limit: 3,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      guest2Room.onError(err => guest2Errors.push(err))
+
+      const {peerId: guest2PeerId} = await guest2Room.getSelf()
+      await waitFor(
+        () =>
+          guest2Errors.some(e => e.peerId === hostPeerId) &&
+          guest1Joins.includes(guest2PeerId) &&
+          Object.keys(guest2Room.getPeers()).includes(guest1PeerId),
         3_000
       )
       assert.equal(guest2Errors[0].code, 'room-full')
       assert.equal(guest2Errors[0].message, 'room full')
-      assert.equal(guest2Errors[0].peerId, 'host-peer')
-      assert.deepEqual(Object.keys(hostRoom.getPeers()), ['guest-1'])
-      assert.ok(Object.keys(guest1Room.getPeers()).includes('guest-2'))
-      assert.ok(Object.keys(guest2Room.getPeers()).includes('guest-1'))
+      assert.equal(guest2Errors[0].peerId, hostPeerId)
+      assert.deepEqual(Object.keys(hostRoom.getPeers()), [guest1PeerId])
+      assert.ok(Object.keys(guest1Room.getPeers()).includes(guest2PeerId))
+      assert.ok(Object.keys(guest2Room.getPeers()).includes(guest1PeerId))
     } finally {
       await Promise.all([
-        hostRoom.leave().catch(() => {}),
-        guest1Room.leave().catch(() => {}),
-        guest2Room.leave().catch(() => {})
+        hostRoom?.leave().catch(() => {}),
+        guest1Room?.leave().catch(() => {}),
+        guest2Room?.leave().catch(() => {})
       ])
     }
   }
@@ -748,76 +786,91 @@ void test(
     const appId = `limit-pw-hs-${Date.now()}`
     const roomId = 'secure-duel'
 
-    const roomA = makeJoinRoom('peer-a')(
-      {
-        appId,
-        password: 'correct-password',
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
+    const [slotA, slotB, slotC, slotWrongPw] = await createSortedJoinRooms(
+      4,
+      () => makeJoinRoom(),
+      appId
     )
 
-    const roomB = makeJoinRoom('peer-b')(
-      {
-        appId,
-        password: 'correct-password',
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-
-    await waitFor(
-      () =>
-        Object.keys(roomA.getPeers()).includes('peer-b') &&
-        Object.keys(roomB.getPeers()).includes('peer-a'),
-      3_000
-    )
-
-    // 1. Peer with WRONG password must NOT receive 'room full' (must fail with password error)
-    const wrongPwErrors: any[] = []
-    const wrongPwRoom = makeJoinRoom('peer-wrong-pw')(
-      {
-        appId,
-        password: 'wrong-password',
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    wrongPwRoom.onError(err => wrongPwErrors.push(err))
-
-    await waitFor(() => wrongPwErrors.length > 0, 3_000)
-    assert.ok(
-      wrongPwErrors.every(e => e.code === 'decrypt-failed'),
-      'wrong-password peer must not learn that the room is full'
-    )
-    await wrongPwRoom.leave().catch(() => {})
-
-    // 2. Peer with CORRECT password when room is full receives 'room full'
-    const fullErrors: any[] = []
-    const rightPwFullRoom = makeJoinRoom('peer-c')(
-      {
-        appId,
-        password: 'correct-password',
-        limit: 2,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    rightPwFullRoom.onError(err => fullErrors.push(err))
-
+    let roomA: any
+    let roomB: any
+    let wrongPwRoom: any
+    let rightPwFullRoom: any
     try {
+      roomA = slotA!.joinRoom(
+        {
+          appId,
+          password: 'correct-password',
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+
+      roomB = slotB!.joinRoom(
+        {
+          appId,
+          password: 'correct-password',
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+
+      const [{peerId: peerA}, {peerId: peerB}] = await Promise.all([
+        roomA.getSelf(),
+        roomB.getSelf()
+      ])
+      await waitFor(
+        () =>
+          Object.keys(roomA.getPeers()).includes(peerB) &&
+          Object.keys(roomB.getPeers()).includes(peerA),
+        3_000
+      )
+
+      // 1. Peer with WRONG password must NOT receive 'room full' (must fail with password error)
+      const wrongPwErrors: any[] = []
+      wrongPwRoom = slotWrongPw!.joinRoom(
+        {
+          appId,
+          password: 'wrong-password',
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      wrongPwRoom.onError(err => wrongPwErrors.push(err))
+
+      await waitFor(() => wrongPwErrors.length > 0, 3_000)
+      assert.ok(
+        wrongPwErrors.every(e => e.code === 'decrypt-failed'),
+        'wrong-password peer must not learn that the room is full'
+      )
+      await wrongPwRoom.leave().catch(() => {})
+
+      // 2. Peer with CORRECT password when room is full receives 'room full'
+      const fullErrors: any[] = []
+      rightPwFullRoom = slotC!.joinRoom(
+        {
+          appId,
+          password: 'correct-password',
+          limit: 2,
+          rtcPolyfill: InMemoryRTCPeerConnection as any
+        },
+        roomId
+      )
+      rightPwFullRoom.onError(err => fullErrors.push(err))
+
       await waitFor(() => fullErrors.length > 0, 3_000)
       assert.equal(fullErrors.length, 1)
       assert.equal(fullErrors[0].code, 'room-full')
       assert.equal(fullErrors[0].message, 'room full')
     } finally {
       await Promise.all([
-        roomA.leave().catch(() => {}),
-        roomB.leave().catch(() => {}),
-        rightPwFullRoom.leave().catch(() => {})
+        roomA?.leave().catch(() => {}),
+        roomB?.leave().catch(() => {}),
+        wrongPwRoom?.leave().catch(() => {}),
+        rightPwFullRoom?.leave().catch(() => {})
       ])
     }
   }
@@ -832,11 +885,32 @@ void test(
     const roomId = 'tree-room'
     const scaleConfig = {mode: 'gossip' as const, maxConnections: 4}
 
-    const peerIds = ['node-1', 'node-2', 'node-3', 'node-4', 'node-5', 'node-6']
+    const slots = await createSortedJoinRooms(7, () => makeJoinRoom(), appId)
     const rooms: any[] = []
+    let fifthRoom: any
 
-    for (const peerId of peerIds) {
-      const room = makeJoinRoom(peerId)(
+    try {
+      for (const {joinRoom} of slots.slice(0, 6)) {
+        const room = joinRoom(
+          {
+            appId,
+            limit: 6,
+            use: [scale(scaleConfig)],
+            rtcPolyfill: InMemoryRTCPeerConnection as any
+          },
+          roomId
+        )
+        rooms.push(room)
+      }
+
+      await waitFor(
+        () => rooms.every(r => Object.keys(r.getPeers()).length === 5),
+        4_000
+      )
+
+      // 7th peer tries to join the 6-peer multi-hop overlay room
+      const fifthErrors: any[] = []
+      fifthRoom = slots[6]!.joinRoom(
         {
           appId,
           limit: 6,
@@ -845,28 +919,8 @@ void test(
         },
         roomId
       )
-      rooms.push(room)
-    }
+      fifthRoom.onError(err => fifthErrors.push(err))
 
-    await waitFor(
-      () => rooms.every(r => Object.keys(r.getPeers()).length === 5),
-      4_000
-    )
-
-    // 7th peer tries to join the 6-peer multi-hop overlay room
-    const fifthErrors: any[] = []
-    const fifthRoom = makeJoinRoom('node-7')(
-      {
-        appId,
-        limit: 6,
-        use: [scale(scaleConfig)],
-        rtcPolyfill: InMemoryRTCPeerConnection as any
-      },
-      roomId
-    )
-    fifthRoom.onError(err => fifthErrors.push(err))
-
-    try {
       await waitFor(() => fifthErrors.length > 0, 3_000)
       assert.equal(fifthErrors.length, 1)
       assert.equal(fifthErrors[0].code, 'room-full')
@@ -877,7 +931,7 @@ void test(
     } finally {
       await Promise.all([
         ...rooms.map(r => r.leave().catch(() => {})),
-        fifthRoom.leave().catch(() => {})
+        fifthRoom?.leave().catch(() => {})
       ])
     }
   }
