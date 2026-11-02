@@ -7,6 +7,7 @@ import {
   all,
   alloc,
   candidateType,
+  hasIceUrl,
   mkErr,
   peerDisconnectedMsg,
   resetTimer,
@@ -52,6 +53,14 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   const pendingRemoteCandidates: RTCIceCandidateInit[] = []
   const pendingStreams: MediaStream[] = []
   const streamSenders = new WeakMap<MediaStream, Set<RTCRtpSender>>()
+  const trackSender = (stream: MediaStream, sender: RTCRtpSender): void => {
+    let senders = streamSenders.get(stream)
+    if (!senders) {
+      senders = new Set()
+      streamSenders.set(stream, senders)
+    }
+    senders.add(sender)
+  }
   let resolveInitialOffer: ((signal: Signal | void) => void) | undefined
   let makingOffer = false
   let isSettingRemoteAnswerPending = false
@@ -119,27 +128,15 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     sdp: peerConnection.localDescription?.sdp ?? ''
   })
 
-  const getRemoteUfrag = (): string | null => {
-    const sdp = pc.remoteDescription?.sdp
-
-    if (!sdp) {
-      return null
-    }
-
-    const match = sdp.match(/a=ice-ufrag:([^\s]+)/)
-    return match?.[1] ?? null
-  }
-
-  const getRemoteMediaSectionCount = (): number =>
-    (pc.remoteDescription?.sdp?.match(/^m=/gm) ?? []).length
+  const getRemoteUfrag = (): string | null =>
+    pc.remoteDescription?.sdp?.match(/a=ice-ufrag:(\S+)/)?.[1] ?? null
 
   const canApplyRemoteCandidate = (candidate: RTCIceCandidateInit): boolean => {
     if (!pc.remoteDescription) {
       return false
     }
-
-    const remoteMLineCount = getRemoteMediaSectionCount()
-
+    const remoteMLineCount = (pc.remoteDescription.sdp?.match(/^m=/gm) ?? [])
+      .length
     if (
       typeof candidate.sdpMLineIndex === 'number' &&
       remoteMLineCount > 0 &&
@@ -147,18 +144,12 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     ) {
       return false
     }
-
     const remoteUfrag = getRemoteUfrag()
-
-    if (
+    return !(
       remoteUfrag &&
       candidate.usernameFragment &&
       candidate.usernameFragment !== remoteUfrag
-    ) {
-      return false
-    }
-
-    return true
+    )
   }
 
   const addIceCandidateSafe = async (
@@ -175,7 +166,6 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       ) {
         return false
       }
-
       throw err
     }
   }
@@ -187,16 +177,24 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     pendingRemoteCandidates.push(candidate)
   }
 
+  const addRemoteCandidate = async (
+    candidate: RTCIceCandidateInit
+  ): Promise<void> => {
+    if (
+      !canApplyRemoteCandidate(candidate) ||
+      !(await addIceCandidateSafe(candidate))
+    ) {
+      queueRemoteCandidate(candidate)
+    }
+  }
+
   const flushPendingRemoteCandidates = async (): Promise<void> => {
-    if (!pc.remoteDescription || pendingRemoteCandidates.length === 0) {
+    if (!pc.remoteDescription || !pendingRemoteCandidates.length) {
       return
     }
-
     const remoteUfrag = getRemoteUfrag()
-    const queuedCandidates = pendingRemoteCandidates.splice(0)
     const stillPending: RTCIceCandidateInit[] = []
-
-    for (const candidate of queuedCandidates) {
+    for (const candidate of pendingRemoteCandidates.splice(0)) {
       if (
         remoteUfrag &&
         candidate.usernameFragment &&
@@ -204,35 +202,14 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       ) {
         continue
       }
-
-      if (!canApplyRemoteCandidate(candidate)) {
-        stillPending.push(candidate)
-        continue
-      }
-
-      const didApply = await addIceCandidateSafe(candidate)
-
-      if (!didApply) {
+      if (
+        !canApplyRemoteCandidate(candidate) ||
+        !(await addIceCandidateSafe(candidate))
+      ) {
         stillPending.push(candidate)
       }
     }
-
     stillPending.forEach(queueRemoteCandidate)
-  }
-
-  const addRemoteCandidate = async (
-    candidate: RTCIceCandidateInit
-  ): Promise<void> => {
-    if (canApplyRemoteCandidate(candidate)) {
-      const didApply = await addIceCandidateSafe(candidate)
-
-      if (!didApply) {
-        queueRemoteCandidate(candidate)
-      }
-      return
-    }
-
-    queueRemoteCandidate(candidate)
   }
 
   const setupDataChannel = (channel: RTCDataChannel): void => {
@@ -286,13 +263,9 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     }
   }
 
-  const hasServerUrlPattern = (pattern: RegExp): boolean =>
-    iceServers.some(({urls}) =>
-      (Array.isArray(urls) ? urls : [urls]).some(url => pattern.test(url))
-    )
-  const expectsTurnCandidate = hasServerUrlPattern(/^turns?:/i)
+  const expectsTurnCandidate = hasIceUrl(iceServers, /^turns?:/i)
   const expectsStunCandidate =
-    !expectsTurnCandidate && hasServerUrlPattern(/^stuns?:/i)
+    !expectsTurnCandidate && hasIceUrl(iceServers, /^stuns?:/i)
   const targetCandidatePattern = expectsTurnCandidate
     ? /\btyp relay\b/
     : expectsStunCandidate
@@ -344,11 +317,11 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     return localDescriptionSignal(peerConnection)
   }
 
-  const emitLocalDescriptionSignal = async (): Promise<SdpDescription> => {
-    const signal = shouldTrickleIce
-      ? localDescriptionSignal(pc)
-      : await waitForIceGathering(pc)
+  const readLocalDescription = (): SdpDescription | Promise<SdpDescription> =>
+    shouldTrickleIce ? localDescriptionSignal(pc) : waitForIceGathering(pc)
 
+  const emitLocalDescriptionSignal = async (): Promise<SdpDescription> => {
+    const signal = await readLocalDescription()
     if (!didEmitClose) {
       emitSignal(signal)
     }
@@ -432,46 +405,41 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       sdp: JSON.stringify(candidatePayload)
     })
   }
+  const isDisconnectedState = (): boolean =>
+    pc.connectionState === 'disconnected' ||
+    pc.iceConnectionState === 'disconnected'
+
   const handleConnectionStateChange = () => {
+    const cs = pc.connectionState
+    const is = pc.iceConnectionState
     if (
-      pc.connectionState === 'failed' ||
-      pc.connectionState === 'closed' ||
-      pc.iceConnectionState === 'failed' ||
-      pc.iceConnectionState === 'closed'
+      cs === 'failed' ||
+      cs === 'closed' ||
+      is === 'failed' ||
+      is === 'closed'
     ) {
       emitClose()
       return
     }
 
     if (
-      pc.connectionState === 'connected' ||
-      pc.connectionState === 'connecting' ||
-      pc.iceConnectionState === 'connected' ||
-      pc.iceConnectionState === 'completed' ||
-      pc.iceConnectionState === 'checking'
+      cs === 'connected' ||
+      cs === 'connecting' ||
+      is === 'connected' ||
+      is === 'completed' ||
+      is === 'checking'
     ) {
       clearDisconnectedCloseTimer()
       return
     }
 
-    if (
-      pc.connectionState === 'disconnected' ||
-      pc.iceConnectionState === 'disconnected'
-    ) {
-      if (!disconnectedCloseTimer) {
-        disconnectedCloseTimer = setTimeout(() => {
-          disconnectedCloseTimer = null
-
-          if (
-            pc.connectionState === 'disconnected' ||
-            pc.iceConnectionState === 'disconnected'
-          ) {
-            emitClose()
-          }
-        }, disconnectedCloseDelayMs)
-      }
-
-      return
+    if (isDisconnectedState() && !disconnectedCloseTimer) {
+      disconnectedCloseTimer = setTimeout(() => {
+        disconnectedCloseTimer = null
+        if (isDisconnectedState()) {
+          emitClose()
+        }
+      }, disconnectedCloseDelayMs)
     }
   }
 
@@ -534,9 +502,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
 
       if (pc.localDescription?.type === offerType) {
-        return shouldTrickleIce
-          ? localDescriptionSignal(pc)
-          : waitForIceGathering(pc)
+        return readLocalDescription()
       }
 
       return offerPromise
@@ -637,8 +603,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
       if (handlers.data && pendingData.length > 0) {
         pendingDataTimer = resetTimer(pendingDataTimer)
-        const queued = pendingData.splice(0)
-        queued.forEach(data => handlers.data?.(data))
+        pendingData.splice(0).forEach(data => handlers.data?.(data))
       }
 
       if (signal) {
@@ -646,21 +611,15 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
 
       if (handlers.stream && pendingStreams.length > 0) {
-        const queued = pendingStreams.splice(0)
-        queued.forEach(stream => handlers.stream?.(stream))
+        pendingStreams.splice(0).forEach(stream => handlers.stream?.(stream))
       }
     },
 
     addStream: stream => {
-      let senders = streamSenders.get(stream)
-      if (!senders) {
-        senders = new Set()
-        streamSenders.set(stream, senders)
-      }
       stream.getTracks().forEach(track => {
         const sender = pc.addTrack(track, stream)
         if (sender) {
-          senders.add(sender)
+          trackSender(stream, sender)
         }
       })
     },
@@ -672,22 +631,18 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
         senders.forEach(sender => pc.removeTrack(sender))
         return
       }
-      pc.getSenders()
-        .filter(
-          sender => sender.track && stream.getTracks().includes(sender.track)
-        )
-        .forEach(sender => pc.removeTrack(sender))
+      const tracks = stream.getTracks()
+      pc.getSenders().forEach(sender => {
+        if (sender.track && tracks.includes(sender.track)) {
+          pc.removeTrack(sender)
+        }
+      })
     },
 
     addTrack: (track, stream) => {
       const sender = pc.addTrack(track, stream)
       if (sender && stream) {
-        let senders = streamSenders.get(stream)
-        if (!senders) {
-          senders = new Set()
-          streamSenders.set(stream, senders)
-        }
-        senders.add(sender)
+        trackSender(stream, sender)
       }
     },
 

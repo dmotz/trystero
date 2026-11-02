@@ -361,6 +361,15 @@ export const derivePairwiseAesKey = async (
   }
 }
 
+const gcmParams = (iv: Uint8Array, aad?: string): AesGcmParams =>
+  aad === undefined
+    ? {name: algo, iv: iv as BufferSource}
+    : {
+        name: algo,
+        iv: iv as BufferSource,
+        additionalData: encodeBytes(aad) as BufferSource
+      }
+
 export const encrypt = async (
   keyP: Promise<CryptoKey>,
   plaintext: string,
@@ -369,13 +378,7 @@ export const encrypt = async (
   const iv = crypto.getRandomValues(new Uint8Array(gcmIvBytes))
   const ct = new Uint8Array(
     await crypto.subtle.encrypt(
-      aad === undefined
-        ? {name: algo, iv}
-        : {
-            name: algo,
-            iv,
-            additionalData: encodeBytes(aad) as BufferSource
-          },
+      gcmParams(iv, aad),
       await keyP,
       encodeBytes(plaintext) as BufferSource
     )
@@ -401,20 +404,11 @@ export const decrypt = async (
   ) {
     throw mkErr('invalid ciphertext')
   }
-  const iv = packed.subarray(0, gcmIvBytes)
-  const ct = packed.subarray(gcmIvBytes)
-
   return decodeBytes(
     await crypto.subtle.decrypt(
-      aad === undefined
-        ? {name: algo, iv: iv as BufferSource}
-        : {
-            name: algo,
-            iv: iv as BufferSource,
-            additionalData: encodeBytes(aad) as BufferSource
-          },
+      gcmParams(packed.subarray(0, gcmIvBytes), aad),
       await keyP,
-      ct as BufferSource
+      packed.subarray(gcmIvBytes) as BufferSource
     )
   )
 }

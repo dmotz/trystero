@@ -1,6 +1,6 @@
 import type {ActionOptions, InternalAction} from './action-wire'
 import type {OfferManager} from './offer-manager'
-import type {ActionFrameKind, PeerDataTransport} from './peer-registry'
+import type {PeerDataTransport} from './peer-registry'
 import type {
   BaseRoomConfig,
   DataPayload,
@@ -17,7 +17,7 @@ import type {
   Signal
 } from './types'
 
-export type {ActionFrameKind, ActionOptions, InternalAction, PeerDataTransport}
+export type {ActionOptions, InternalAction, PeerDataTransport}
 
 export type RoleRevocationRecord = {
   v: 1
@@ -151,7 +151,10 @@ export type KernelScaleProvider = PublicScaleProvider & {
   recordSignatureFailure: () => void
 }
 
-export type InternalRoomContext = PluginContext & {
+export type InternalRoomContext = Omit<
+  PluginContext,
+  'getRolesProvider' | 'getScaleProvider'
+> & {
   readonly effectiveRoomIdP?: Promise<string> | undefined
   setEffectiveRoomId: (roomId: string) => void
   setPeerUserId: (peerId: string, userId: string) => void
@@ -160,8 +163,8 @@ export type InternalRoomContext = PluginContext & {
   deliverRawData: (originPeerId: string, data: ArrayBuffer) => void
   registerRolesProvider: (provider: KernelRolesProvider) => void
   registerScaleProvider: (provider: KernelScaleProvider) => void
-  getInternalRolesProvider: () => KernelRolesProvider | null
-  getInternalScaleProvider: () => KernelScaleProvider | null
+  getRolesProvider: () => KernelRolesProvider | null
+  getScaleProvider: () => KernelScaleProvider | null
   activateVirtualPeer: (peerId: string, transport: PeerDataTransport) => boolean
   deactivateVirtualPeer: (peerId: string, reason?: Error) => void
   purgeBannedUserState: (userId: string) => void
@@ -283,31 +286,31 @@ export type MediaIdentityCache = {
 export type PeerState = {
   offerPeer: PeerHandle | null
   offerId: string | null
-  offerSdp: string | null
-  offerInitPromise: Promise<{
-    peer: PeerHandle
-    offer: string
-    offerId: string
-  } | null> | null
-  offerAnswered: boolean
+  offerInitPromise: Promise<
+    [peer: PeerHandle, offer: string, offerId: string] | null
+  > | null
   offerRelays: unknown[]
-  offerSignalRelays: Array<((signal: Signal) => void) | null>
-  offerSignalBacklog: Signal[]
-  offerRelayTimers: Array<ReturnType<typeof setTimeout> | null>
-  offerExpiryTimer: ReturnType<typeof setTimeout> | null
   connectedPeer: PeerHandle | null
-  connectedPeerUnhealthySinceMs: number | null
-  answeringExpiryTimer: ReturnType<typeof setTimeout> | null
   answeringPeer: PeerHandle | null
-  answerSent: boolean
-  answerReplay: {
-    offer: string
-    offerId: string | undefined
-    messages: string[]
-    lastSentAt: Array<number | undefined>
-    relays: Array<((message: string) => void) | undefined>
-  } | null
-  connectionErrorReported: boolean
+  s: string | null
+  o: boolean
+  r: Array<((signal: Signal) => void) | null>
+  b: Signal[]
+  t: Array<ReturnType<typeof setTimeout> | null>
+  e: ReturnType<typeof setTimeout> | null
+  u: number | null
+  x: ReturnType<typeof setTimeout> | null
+  d: boolean
+  a:
+    | [
+        offer: string,
+        offerId: string | undefined,
+        messages: string[],
+        lastSentAt: Array<number | undefined>,
+        relays: Array<((message: string) => void) | undefined>
+      ]
+    | null
+  f: boolean
 }
 
 export type SignalContext = {

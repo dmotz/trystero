@@ -101,9 +101,6 @@ try {
           transform: {
             dropLabels: ['DEV']
           }
-        },
-        outputOptions: {
-          codeSplitting: false
         }
       })
     )

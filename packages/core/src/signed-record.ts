@@ -64,16 +64,17 @@ export const verifySig = (
   }
 }
 
-export type CanonicalJsonResult =
-  | {ok: true; json: string; bytes: number}
-  | {ok: false; reason: 'invalid' | 'max-bytes'}
-
+/**
+ * Returns `[canonicalJson, utf8ByteLength]` on success, `0` for invalid JSON,
+ * or `1` when exceeding `maxBytes`.
+ */
 export const canonicalizeAndMeasureJson = (
   val: unknown,
   maxBytes: number = Number.POSITIVE_INFINITY
-): CanonicalJsonResult => {
+): readonly [json: string, bytes: number] | 0 | 1 => {
   let minBytes = 0
-  let seen: Set<object> | null = null
+  const seen = new Set<object>()
+  const addMin = (n: number): boolean => (minBytes += n) <= maxBytes
 
   const walk = (v: unknown, depth: number): string | false | null => {
     if (depth > maxJsonDepth) {
@@ -81,113 +82,104 @@ export const canonicalizeAndMeasureJson = (
     }
     if (v === null || typeof v === 'boolean') {
       const s = String(v)
-      return (minBytes += s.length) > maxBytes ? false : s
+      return addMin(s.length) ? s : false
     }
     if (typeof v === 'number') {
       if (!Number.isFinite(v)) {
         return null
       }
       const s = toJson(v)
-      return (minBytes += s.length) > maxBytes ? false : s
+      return addMin(s.length) ? s : false
     }
     if (typeof v === 'string') {
-      return (minBytes += v.length + 2) > maxBytes ? false : toJson(v)
+      return addMin(v.length + 2) ? toJson(v) : false
     }
     if (typeof v !== 'object') {
       return null
     }
     const obj = v as object
-    seen ??= new Set<object>()
     if (seen.has(obj)) {
       return null
     }
-    if (Array.isArray(obj)) {
-      if ((minBytes += 2 + Math.max(0, obj.length - 1)) > maxBytes) {
-        return false
+    const isArr = Array.isArray(obj)
+    if (!isArr) {
+      const proto = Object.getPrototypeOf(obj)
+      if (proto !== Object.prototype && proto !== null) {
+        return null
       }
-      seen.add(obj)
-      const parts: string[] = []
-      for (let i = 0; i < obj.length; i++) {
-        const s = walk(obj[i], depth + 1)
-        if (typeof s !== 'string') {
-          seen.delete(obj)
-          return s
-        }
-        parts.push(s)
-      }
-      seen.delete(obj)
-      return `[${parts.join(',')}]`
     }
-    const proto = Object.getPrototypeOf(obj)
-    if (proto !== Object.prototype && proto !== null) {
-      return null
-    }
-    const sorted = keys(obj as Record<string, unknown>).sort()
-    if ((minBytes += 2 + Math.max(0, sorted.length * 2 - 1)) > maxBytes) {
+    const items = isArr ? obj : keys(obj as Record<string, unknown>).sort()
+    if (
+      !addMin(2 + Math.max(0, isArr ? items.length - 1 : items.length * 2 - 1))
+    ) {
       return false
     }
     seen.add(obj)
-    const parts: string[] = []
-    for (let i = 0; i < sorted.length; i++) {
-      const k = sorted[i]!
-      const pv = (obj as Record<string, unknown>)[k]
-      if (pv === undefined || (minBytes += k.length + 2) > maxBytes) {
-        seen.delete(obj)
-        return pv === undefined ? null : false
+    try {
+      const parts: string[] = []
+      for (let i = 0; i < items.length; i++) {
+        let elem = items[i]
+        let prefix = ''
+        if (!isArr) {
+          const k = elem as string
+          elem = (obj as Record<string, unknown>)[k]
+          if (elem === undefined) {
+            return null
+          }
+          if (!addMin(k.length + 2)) {
+            return false
+          }
+          prefix = `${toJson(k)}:`
+        }
+        const s = walk(elem, depth + 1)
+        if (typeof s !== 'string') {
+          return s
+        }
+        parts.push(prefix + s)
       }
-      const s = walk(pv, depth + 1)
-      if (typeof s !== 'string') {
-        seen.delete(obj)
-        return s
-      }
-      parts.push(`${toJson(k)}:${s}`)
+      return isArr ? `[${parts.join(',')}]` : `{${parts.join(',')}}`
+    } finally {
+      seen.delete(obj)
     }
-    seen.delete(obj)
-    return `{${parts.join(',')}}`
   }
 
   const json = walk(val, 0)
   if (json === null) {
-    return {ok: false, reason: 'invalid'}
+    return 0
   }
   if (json === false) {
-    return {ok: false, reason: 'max-bytes'}
+    return 1
   }
   const bytes = encodeBytes(json).byteLength
-  return bytes > maxBytes
-    ? {ok: false, reason: 'max-bytes'}
-    : {ok: true, json, bytes}
+  return bytes > maxBytes ? 1 : [json, bytes]
 }
 
 export const hasFiniteNums = (val: unknown): boolean =>
-  canonicalizeAndMeasureJson(val).ok
+  Array.isArray(canonicalizeAndMeasureJson(val))
 
 export const canonicalizeJson = (val: JsonValue): string => {
   const res = canonicalizeAndMeasureJson(val)
-  return res.ok ? res.json : toJson(val)
+  return Array.isArray(res) ? res[0] : toJson(val)
 }
 
-export type MonotonicClock = {
-  peek: () => number
-  observe: (ts: number) => void
-  next: (minTs?: number) => number
+export type MonotonicClock = readonly [
+  peek: () => number,
+  observe: (ts: number) => void,
+  next: (minTs?: number) => number,
   nextBounded: (ns: string, maxSkewMs?: number) => number
-}
+]
 
 export const createMonotonicClock = (initial = 0): MonotonicClock => {
   let last = initial
-  return {
-    peek: () => last,
-    observe: ts => {
+  return [
+    () => last,
+    ts => {
       if (ts > last) {
         last = ts
       }
     },
-    next: (minTs = 0) => {
-      const cand = Math.max(Date.now(), last + 1, minTs)
-      return (last = cand)
-    },
-    nextBounded: (ns, maxSkewMs = defaultMaxClockSkewMs) => {
+    (minTs = 0) => (last = Math.max(Date.now(), last + 1, minTs)),
+    (ns, maxSkewMs = defaultMaxClockSkewMs) => {
       const now = Date.now()
       const cand = Math.max(now, last + 1)
       if (cand > now + maxSkewMs) {
@@ -195,7 +187,7 @@ export const createMonotonicClock = (initial = 0): MonotonicClock => {
       }
       return (last = cand)
     }
-  }
+  ]
 }
 
 const signerClocks = /*@__PURE__*/ new WeakMap<object, MonotonicClock>()
@@ -230,23 +222,47 @@ export type CertSignParams = {
   now?: number
 }
 
-export const signRoleCertificate = async (
+export const invalidRoles = (): {valid: false; roles: string[]} => ({
+  valid: false,
+  roles: []
+})
+
+export const signRoleCertInternal = async (
   signer: StateSigner,
   issuerPubJwk: JsonWebKey,
-  p: CertSignParams
+  subUserId: string,
+  appId: string,
+  roomId: string,
+  roles: string[],
+  iat: number
 ): Promise<RoleCertificate> => {
   const u: Omit<RoleCertificate, 'sig'> = {
     v: 1,
     certId: crypto.randomUUID(),
     issuerPubKey: jwkToCompactPub(issuerPubJwk),
-    subUserId: p.subUserId,
-    appId: p.appId,
-    roomId: p.roomId,
-    roles: [...new Set(p.roles)].sort(),
-    iat: p.now ?? getSignerClock(signer).next()
+    subUserId,
+    appId,
+    roomId,
+    roles: [...new Set(roles)].sort(),
+    iat
   }
   return {...u, sig: await signWith(signer, roleCertPayload(u))}
 }
+
+export const signRoleCertificate = (
+  signer: StateSigner,
+  issuerPubJwk: JsonWebKey,
+  p: CertSignParams
+): Promise<RoleCertificate> =>
+  signRoleCertInternal(
+    signer,
+    issuerPubJwk,
+    p.subUserId,
+    p.appId,
+    p.roomId,
+    p.roles,
+    p.now ?? getSignerClock(signer)[2]()
+  )
 
 export const verifyRoleCertificate = async (
   cert: RoleCertificate,
@@ -261,32 +277,28 @@ export const verifyRoleCertificate = async (
     cert.roomId !== roomId ||
     cert.iat > Date.now() + clockSkewMs
   ) {
-    return {valid: false, roles: []}
+    return invalidRoles()
   }
   const iss = await getVerifiedPubKeyRecord(cert.issuerPubKey)
-  if (!iss || !rootUserIds.has(iss.userId)) {
-    return {valid: false, roles: []}
+  if (!iss || !rootUserIds.has(iss[6])) {
+    return invalidRoles()
   }
   return (await verifySig(cert.issuerPubKey, roleCertPayload(cert), cert.sig))
     ? {valid: true, roles: [...cert.roles]}
-    : {valid: false, roles: []}
+    : invalidRoles()
 }
 
 export const verifyRoleCertificateChain: typeof verifyRoleCertificate =
   verifyRoleCertificate
 
-export type SlidingReplayWindow = {
-  has: (key: string, seq: number) => boolean
-  record: (key: string, seq: number) => boolean
-  delete: (key: string) => void
+export type SlidingReplayWindow = readonly [
+  has: (key: string, seq: number) => boolean,
+  record: (key: string, seq: number) => boolean,
+  del: (key: string) => void,
   clear: () => void
-}
+]
 
-type ReplayEntry = {
-  maxSeq: number
-  windowBits: bigint
-  lastSeenAt: number
-}
+type ReplayEntry = [maxSeq: number, windowBits: bigint, lastSeenAt: number]
 
 export const createSlidingReplayWindow = (
   maxKeys: number,
@@ -296,94 +308,85 @@ export const createSlidingReplayWindow = (
   const windowMask = (1n << windowBits) - 1n
   const map = new Map<string, ReplayEntry>()
 
-  const has = (key: string, seq: number): boolean => {
-    const state = map.get(key)
-    if (!state || seq > state.maxSeq) {
-      return false
-    }
-    if (seq === state.maxSeq) {
-      return true
-    }
-    const offset = BigInt(state.maxSeq - seq)
-    if (offset >= windowBits) {
-      return true
-    }
-    return (state.windowBits & (1n << offset)) !== 0n
-  }
-
-  const record = (key: string, seq: number): boolean => {
-    const now = Date.now()
-    const state = map.get(key)
-    if (!state) {
-      if (map.size >= maxKeys) {
-        if (isPinnedKey) {
-          let oldestKey: string | null = null
-          let oldestTime = Infinity
-          for (const [k, v] of map.entries()) {
-            if (!isPinnedKey(k) && v.lastSeenAt < oldestTime) {
-              oldestTime = v.lastSeenAt
-              oldestKey = k
+  return [
+    (key, seq) => {
+      const state = map.get(key)
+      if (!state || seq > state[0]) {
+        return false
+      }
+      if (seq === state[0]) {
+        return true
+      }
+      const offset = BigInt(state[0] - seq)
+      return offset >= windowBits || (state[1] & (1n << offset)) !== 0n
+    },
+    (key, seq) => {
+      const now = Date.now()
+      const state = map.get(key)
+      if (!state) {
+        if (map.size >= maxKeys) {
+          if (isPinnedKey) {
+            let oldestKey: string | null = null
+            let oldestTime = Infinity
+            for (const [k, v] of map) {
+              if (!isPinnedKey(k) && v[2] < oldestTime) {
+                oldestTime = v[2]
+                oldestKey = k
+              }
+            }
+            if (oldestKey !== null) {
+              map.delete(oldestKey)
+            }
+          } else {
+            const oldest = map.keys().next().value
+            if (oldest !== undefined) {
+              map.delete(oldest)
             }
           }
-          if (oldestKey !== null) {
-            map.delete(oldestKey)
-          }
-        } else {
-          const oldest = map.keys().next().value
-          if (oldest !== undefined) {
-            map.delete(oldest)
-          }
         }
+        map.set(key, [seq, 1n, now])
+        return true
       }
-      map.set(key, {maxSeq: seq, windowBits: 1n, lastSeenAt: now})
+
+      if (seq > state[0]) {
+        const shift = BigInt(seq - state[0])
+        state[1] =
+          shift >= windowBits ? 1n : ((state[1] << shift) | 1n) & windowMask
+        state[0] = seq
+        state[2] = now
+        return true
+      }
+
+      if (seq === state[0]) {
+        return false
+      }
+
+      const offset = BigInt(state[0] - seq)
+      if (offset >= windowBits) {
+        return false
+      }
+      const bit = 1n << offset
+      if ((state[1] & bit) !== 0n) {
+        return false
+      }
+      state[1] |= bit
+      state[2] = now
       return true
-    }
-
-    if (seq > state.maxSeq) {
-      const shift = BigInt(seq - state.maxSeq)
-      state.windowBits =
-        shift >= windowBits
-          ? 1n
-          : ((state.windowBits << shift) | 1n) & windowMask
-      state.maxSeq = seq
-      state.lastSeenAt = now
-      return true
-    }
-
-    if (seq === state.maxSeq) {
-      return false
-    }
-
-    const offset = BigInt(state.maxSeq - seq)
-    if (offset >= windowBits) {
-      return false
-    }
-    const bit = 1n << offset
-    if ((state.windowBits & bit) !== 0n) {
-      return false
-    }
-    state.windowBits |= bit
-    state.lastSeenAt = now
-    return true
-  }
-
-  return {
-    has,
-    record,
-    delete: key => {
+    },
+    key => {
       map.delete(key)
     },
-    clear: () => {
+    () => {
       map.clear()
     }
-  }
+  ]
 }
 
-export type TokenBucketLimiter = {
-  consume: (key: string, cost?: number) => boolean
-  delete: (key: string) => void
+export type TokenBucketLimiter = readonly [
+  consume: (key: string, cost?: number) => boolean,
+  del: (key: string) => void,
   clear: () => void
-}
+]
 
 export const createTokenBucketLimiter = (
   ratePerSec: number,
@@ -392,36 +395,36 @@ export const createTokenBucketLimiter = (
 ): TokenBucketLimiter => {
   const buckets = createBoundedCache<
     string,
-    {tokens: number; lastRefillMs: number}
+    [tokens: number, lastRefillMs: number]
   >(maxKeys)
 
-  return {
-    consume: (key, cost = 1) => {
+  return [
+    (key, cost = 1) => {
       const now = Date.now()
       const cur = buckets.get(key)
       if (!cur) {
         if (burst < cost) {
           return false
         }
-        buckets.set(key, {tokens: burst - cost, lastRefillMs: now})
+        buckets.set(key, [burst - cost, now])
         return true
       }
-      const elapsedSec = Math.max(0, now - cur.lastRefillMs) / 1_000
+      const elapsedSec = Math.max(0, now - cur[1]) / 1_000
       if (elapsedSec > 0) {
-        cur.tokens = Math.min(burst, cur.tokens + elapsedSec * ratePerSec)
-        cur.lastRefillMs = now
+        cur[0] = Math.min(burst, cur[0] + elapsedSec * ratePerSec)
+        cur[1] = now
       }
-      if (cur.tokens < cost) {
+      if (cur[0] < cost) {
         return false
       }
-      cur.tokens -= cost
+      cur[0] -= cost
       return true
     },
-    delete: key => {
+    key => {
       buckets.delete(key)
     },
-    clear: () => {
+    () => {
       buckets.clear()
     }
-  }
+  ]
 }

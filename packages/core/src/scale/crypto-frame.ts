@@ -1,21 +1,18 @@
-import {derivePairwiseAesKey, ecdsaSign, hash32, signRoomAuth} from '../crypto'
+import {ecdsaSign, signRoomAuth} from '../crypto'
 import {maxActionFrameBytes, maxOverlayHeaderBytes} from '../data-limits'
 import {
   canonicalizePubJwk,
-  getDefaultEndpointIdentity,
-  pubJwkToUncompressedBytes,
   signUserEndpointProof,
   verifyWithP256
 } from '../identity'
 import {
-  all,
-  createBoundedCache,
   decodeBytes,
   encodeBytes,
   fromBase64,
   fromJson,
+  isObj,
+  isPosSafeInt,
   libId,
-  noOp,
   toBase64,
   toJson
 } from '../utils'
@@ -99,19 +96,19 @@ export const packOverlayBinary = (
   return frame
 }
 
-export const unpackOverlayBinary = (
-  bytes: Uint8Array
-): {
-  kind: number
-  ttl: number
-  header: Record<string, unknown>
+export type UnpackedOverlayFrame = readonly [
+  kind: number,
+  ttl: number,
+  header: Record<string, unknown>,
   payload: Uint8Array
-} | null => {
+]
+
+export const unpackOverlayFrame = (
+  bytes: Uint8Array
+): UnpackedOverlayFrame | null => {
   if (bytes.byteLength < 5 || bytes[0] !== overlayFrameVersion) {
     return null
   }
-  const kind = bytes[1]!
-  const ttl = bytes[2]!
   const headerLen = (bytes[3]! << 8) | bytes[4]!
   if (
     headerLen <= 0 ||
@@ -121,21 +118,27 @@ export const unpackOverlayBinary = (
     return null
   }
   try {
-    const header = fromJson<Record<string, unknown>>(
+    const header = fromJson<unknown>(
       decodeBytes(bytes.subarray(5, 5 + headerLen))
     )
-    if (!header || typeof header !== 'object' || Array.isArray(header)) {
-      return null
-    }
-    return {
-      kind,
-      ttl,
-      header,
-      payload: bytes.subarray(5 + headerLen)
-    }
+    return isObj(header)
+      ? [bytes[1]!, bytes[2]!, header, bytes.subarray(5 + headerLen)]
+      : null
   } catch {
     return null
   }
+}
+
+export const unpackOverlayBinary = (
+  bytes: Uint8Array
+): {
+  kind: number
+  ttl: number
+  header: Record<string, unknown>
+  payload: Uint8Array
+} | null => {
+  const f = unpackOverlayFrame(bytes)
+  return f ? {kind: f[0], ttl: f[1], header: f[2], payload: f[3]} : null
 }
 
 export const packOverlayControl = (msg: OverlayControlMessage): Uint8Array => {
@@ -148,13 +151,13 @@ export const packOverlayControl = (msg: OverlayControlMessage): Uint8Array => {
 }
 
 const gossipEnvelopeOverheadBytes = 32
-const descByteLengthCache = new WeakMap<PeerDescriptor, number>()
+const descByteLengthCache = /*@__PURE__*/ new WeakMap<PeerDescriptor, number>()
 
 export const packGossipControlFrames = (
   descriptors: PeerDescriptor[],
   maxFrameBytes: number = maxActionFrameBytes
 ): Uint8Array[] => {
-  if (descriptors.length === 0) {
+  if (!descriptors.length) {
     return []
   }
 
@@ -170,12 +173,7 @@ export const packGossipControlFrames = (
     }
     const addedBytes = (currentDescs.length > 0 ? 1 : 0) + descBytes
     if (currentDescs.length > 0 && currentBytes + addedBytes > maxFrameBytes) {
-      frames.push(
-        packOverlayControl({
-          t: 'gossip',
-          descriptors: currentDescs
-        })
-      )
+      frames.push(packOverlayControl({t: 'gossip', descriptors: currentDescs}))
       currentDescs = [desc]
       currentBytes = gossipEnvelopeOverheadBytes + descBytes
     } else {
@@ -185,21 +183,14 @@ export const packGossipControlFrames = (
   }
 
   if (currentDescs.length > 0) {
-    frames.push(
-      packOverlayControl({
-        t: 'gossip',
-        descriptors: currentDescs
-      })
-    )
+    frames.push(packOverlayControl({t: 'gossip', descriptors: currentDescs}))
   }
 
   return frames
 }
 
-const maxOverlayMsgIdLength = 128
-
 export const isValidOverlayMsgId = (msgId: string): boolean => {
-  if (msgId.length === 0 || msgId.length > maxOverlayMsgIdLength) {
+  if (!msgId.length || msgId.length > 128) {
     return false
   }
   for (let i = 0; i < msgId.length; i++) {
@@ -215,26 +206,26 @@ export const parseUnicastLease = (
   rawLease: unknown,
   seq: number,
   maxWindowPackets: number
-): UnicastLeaseTuple | null => {
-  if (
-    !Array.isArray(rawLease) ||
-    rawLease.length !== 3 ||
-    typeof rawLease[0] !== 'number' ||
-    typeof rawLease[1] !== 'number' ||
-    typeof rawLease[2] !== 'string' ||
-    !rawLease[2] ||
-    !Number.isSafeInteger(rawLease[0]) ||
-    !Number.isSafeInteger(rawLease[1]) ||
-    rawLease[0] < 1 ||
-    rawLease[1] < rawLease[0] ||
-    rawLease[1] - rawLease[0] >= maxWindowPackets ||
-    seq < rawLease[0] ||
-    seq > rawLease[1]
-  ) {
-    return null
-  }
-  return [rawLease[0], rawLease[1], rawLease[2]]
-}
+): UnicastLeaseTuple | null =>
+  Array.isArray(rawLease) &&
+  rawLease.length === 3 &&
+  isPosSafeInt(rawLease[0]) &&
+  isPosSafeInt(rawLease[1]) &&
+  typeof rawLease[2] === 'string' &&
+  Boolean(rawLease[2]) &&
+  rawLease[1] >= rawLease[0] &&
+  rawLease[1] - rawLease[0] < maxWindowPackets &&
+  seq >= rawLease[0] &&
+  seq <= rawLease[1]
+    ? [rawLease[0], rawLease[1], rawLease[2]]
+    : null
+
+const ovTag = (
+  kind: string,
+  appId: string,
+  roomId: string,
+  ...rest: unknown[]
+): string => toJson([`${libId}-${kind}`, appId, roomId, ...rest])
 
 export const canonicalBroadcastHeader = (
   origin: string,
@@ -242,8 +233,7 @@ export const canonicalBroadcastHeader = (
   seq: number = 1,
   appId: string = '',
   roomId: string = ''
-): string =>
-  toJson([`${libId}-broadcast-v2`, appId, roomId, origin, seq, msgId])
+): string => ovTag('broadcast-v2', appId, roomId, origin, seq, msgId)
 
 export const canonicalUnicastHeader = (
   origin: string,
@@ -253,24 +243,14 @@ export const canonicalUnicastHeader = (
   seq: number = 1,
   appId: string = '',
   roomId: string = ''
-): string =>
-  toJson([
-    `${libId}-unicast-v2`,
-    appId,
-    roomId,
-    origin,
-    dest,
-    seq,
-    msgId,
-    ivB64
-  ])
+): string => ovTag('unicast-v2', appId, roomId, origin, dest, seq, msgId, ivB64)
 
 export const canonicalLeaveHeader = (
   leavingId: string,
   seq: number,
   appId: string = '',
   roomId: string = ''
-): string => toJson([`${libId}-leave-v2`, appId, roomId, leavingId, seq])
+): string => ovTag('leave-v2', appId, roomId, leavingId, seq)
 
 export const canonicalUnicastLeaseHeader = (
   origin: string,
@@ -279,8 +259,7 @@ export const canonicalUnicastLeaseHeader = (
   hi: number,
   appId: string = '',
   roomId: string = ''
-): string =>
-  toJson([`${libId}-unicast-lease-v1`, appId, roomId, origin, dest, lo, hi])
+): string => ovTag('unicast-lease-v1', appId, roomId, origin, dest, lo, hi)
 
 export const buildOverlaySignedBytes = (
   canonicalHeader: string,
@@ -301,8 +280,8 @@ export const descriptorCanonicalPayload = (
   appId: string = '',
   roomId: string = ''
 ): string =>
-  toJson([
-    `${libId}-desc-v2`,
+  ovTag(
+    'desc-v2',
     appId,
     roomId,
     d.peerId,
@@ -319,7 +298,7 @@ export const descriptorCanonicalPayload = (
           d.userProof ?? null
         ]
       : [])
-  ])
+  )
 
 export const verifyBase64Sig = (
   sig: string,
@@ -379,246 +358,39 @@ export const signPeerDescriptor = async (
   return descriptor
 }
 
-export type OriginTaskQueue = {
-  has: (key: string) => boolean
-  enqueue: (key: string, fn: () => Promise<void>) => void
-  clear: () => void
-}
-
-export const createOriginTaskQueue = (
-  maxTrackedOrigins: number = 2_048
-): OriginTaskQueue => {
-  const queues = new Map<string, Promise<void>>()
-  return {
-    has: (key: string): boolean => queues.has(key),
-    enqueue: (key: string, fn: () => Promise<void>): void => {
-      const queueKey =
-        queues.has(key) || queues.size < maxTrackedOrigins
-          ? key
-          : `overflow:${hash32(key) & 63}`
-      const prev = queues.get(queueKey) ?? Promise.resolve()
-      const next = prev
-        .then(fn)
-        .catch(noOp)
-        .finally(() => {
-          if (queues.get(queueKey) === next) {
-            queues.delete(queueKey)
-          }
-        })
-      queues.set(queueKey, next)
-    },
-    clear: (): void => {
-      queues.clear()
-    }
-  }
-}
-
-export const createPairwiseKeyCache = (
-  appId: string,
-  getRoomId: () => string,
-  getSelfId: () => string,
-  getLocalCryptoIdentity: () => Promise<CryptoIdentity>,
-  getRemoteEncPubKey: (peerId: string) => JsonWebKey | undefined
-): {
-  get: (remotePeerId: string) => Promise<CryptoKey> | null
-  invalidate: (remotePeerId: string) => void
-  clear: () => void
-} => {
-  const derivedPairwiseKeys = new Map<string, Promise<CryptoKey>>()
-  return {
-    get: (remotePeerId: string): Promise<CryptoKey> | null => {
-      const remoteKey = getRemoteEncPubKey(remotePeerId)
-      const remoteUncompressed = remoteKey
-        ? pubJwkToUncompressedBytes(remoteKey)
-        : null
-      if (!remoteUncompressed) {
-        return null
-      }
-      let cached = derivedPairwiseKeys.get(remotePeerId)
-      if (!cached) {
-        const roomId = getRoomId()
-        cached = getLocalCryptoIdentity().then(id =>
-          derivePairwiseAesKey(
-            id.encPrivateKey,
-            remoteUncompressed,
-            appId,
-            roomId,
-            getSelfId(),
-            remotePeerId
-          )
-        )
-        cached.catch(() => {
-          derivedPairwiseKeys.delete(remotePeerId)
-        })
-        derivedPairwiseKeys.set(remotePeerId, cached)
-      }
-      return cached
-    },
-    invalidate: (remotePeerId: string): void => {
-      derivedPairwiseKeys.delete(remotePeerId)
-    },
-    clear: (): void => {
-      derivedPairwiseKeys.clear()
-    }
-  }
-}
+const aesGcmParams = (
+  iv: Uint8Array,
+  canonicalHeader: string
+): AesGcmParams => ({
+  name: 'AES-GCM',
+  iv: iv as BufferSource,
+  additionalData: encodeBytes(canonicalHeader) as BufferSource
+})
 
 export const encryptUnicastPayload = async (
   aesKey: CryptoKey,
   iv: Uint8Array,
   canonicalHeader: string,
   plainPayload: Uint8Array
-): Promise<Uint8Array> => {
-  const encrypted = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: iv as BufferSource,
-      additionalData: encodeBytes(canonicalHeader) as BufferSource
-    },
-    aesKey,
-    plainPayload as BufferSource
+): Promise<Uint8Array> =>
+  new Uint8Array(
+    await crypto.subtle.encrypt(
+      aesGcmParams(iv, canonicalHeader),
+      aesKey,
+      plainPayload as BufferSource
+    )
   )
-  return new Uint8Array(encrypted)
-}
 
 export const decryptUnicastPayload = async (
   aesKey: CryptoKey,
   ivB64: string,
   canonicalHeader: string,
   ciphertext: Uint8Array
-): Promise<Uint8Array> => {
-  const decrypted = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: fromBase64(ivB64) as BufferSource,
-      additionalData: encodeBytes(canonicalHeader) as BufferSource
-    },
-    aesKey,
-    ciphertext as BufferSource
+): Promise<Uint8Array> =>
+  new Uint8Array(
+    await crypto.subtle.decrypt(
+      aesGcmParams(fromBase64(ivB64), canonicalHeader),
+      aesKey,
+      ciphertext as BufferSource
+    )
   )
-  return new Uint8Array(decrypted)
-}
-
-export const createCryptoIdentityLoader = (
-  getEffectiveSelfId: () => string | undefined,
-  appId: string,
-  onReady?: (identity: CryptoIdentity) => void
-): {
-  getReady: () => CryptoIdentity | null
-  load: () => Promise<CryptoIdentity>
-} => {
-  let identityReady: CryptoIdentity | null = null
-  let localCryptoIdentityP: Promise<CryptoIdentity> | null = null
-
-  const load = (): Promise<CryptoIdentity> => {
-    if (!localCryptoIdentityP) {
-      localCryptoIdentityP = (async () => {
-        const [endpointId, encPair] = await all([
-          getDefaultEndpointIdentity(getEffectiveSelfId(), appId),
-          crypto.subtle.generateKey(
-            {name: 'ECDH', namedCurve: 'P-256'},
-            false,
-            ['deriveKey', 'deriveBits']
-          )
-        ])
-        const rawEncPubJwk = await crypto.subtle.exportKey(
-          'jwk',
-          encPair.publicKey
-        )
-        const encPubJwk: JsonWebKey = {
-          crv: 'P-256',
-          kty: 'EC',
-          x: rawEncPubJwk.x ?? '',
-          y: rawEncPubJwk.y ?? ''
-        }
-        const res: CryptoIdentity = {
-          peerId: endpointId.peerId,
-          signPrivateKey: endpointId.signPrivateKey,
-          signPublicKey: endpointId.signPublicKey,
-          signPubJwk: endpointId.signPubJwk,
-          encPrivateKey: encPair.privateKey,
-          encPublicKey: encPair.publicKey,
-          encPubJwk
-        }
-        identityReady = res
-        onReady?.(res)
-        return res
-      })()
-    }
-    return localCryptoIdentityP
-  }
-
-  return {
-    getReady: (): CryptoIdentity | null => identityReady,
-    load
-  }
-}
-
-const lastLocalSeqByRoomPeer = /*@__PURE__*/ createBoundedCache<
-  string,
-  {descSeq: number; pktSeq: number}
->(4_096)
-
-export const createSessionSeqTracker = (
-  appId: string,
-  getRoomId: () => string,
-  getSelfId: () => string
-): {
-  syncFloor: (id?: string) => void
-  resetFloorFlag: () => void
-  nextDescSeq: () => number
-  nextPktSeq: () => number
-} => {
-  let descSeq = 0
-  let pktSeq = 0
-  let didInitFloor = false
-
-  const syncFloor = (id: string = getSelfId()): void => {
-    if (!id) {
-      return
-    }
-    const key = `${appId}\0${getRoomId()}\0${id}`
-    const prev = lastLocalSeqByRoomPeer.get(key)
-    if (!didInitFloor) {
-      didInitFloor = true
-      if (prev) {
-        descSeq = Math.max(descSeq, prev.descSeq + 1_024)
-        pktSeq = Math.max(pktSeq, prev.pktSeq + 1_024)
-      }
-    }
-    lastLocalSeqByRoomPeer.set(key, {
-      descSeq: Math.max(descSeq, prev?.descSeq ?? 0),
-      pktSeq: Math.max(pktSeq, prev?.pktSeq ?? 0)
-    })
-  }
-
-  const recordProgress = (): void => {
-    const selfId = getSelfId()
-    if (!selfId) {
-      return
-    }
-    const key = `${appId}\0${getRoomId()}\0${selfId}`
-    const prev = lastLocalSeqByRoomPeer.get(key)
-    lastLocalSeqByRoomPeer.set(key, {
-      descSeq: Math.max(descSeq, prev?.descSeq ?? 0),
-      pktSeq: Math.max(pktSeq, prev?.pktSeq ?? 0)
-    })
-  }
-
-  return {
-    syncFloor,
-    resetFloorFlag: (): void => {
-      didInitFloor = false
-    },
-    nextDescSeq: (): number => {
-      const next = ++descSeq
-      recordProgress()
-      return next
-    },
-    nextPktSeq: (): number => {
-      const next = ++pktSeq
-      recordProgress()
-      return next
-    }
-  }
-}

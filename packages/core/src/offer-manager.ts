@@ -4,100 +4,123 @@ import type {PeerHandle} from './types'
 
 const offerLeaseTtlMs = 180_000
 const defaultOfferIdSize = 20
-const offerRoomLeftErr = mkErr('room left while preparing offer')
+const offerRoomLeftErr = /*@__PURE__*/ mkErr('room left while preparing offer')
 
-export class OfferManager {
-  private leased = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
-  private destroyed = false
-  private makeOffer: () => PeerHandle
+export type OfferCheckoutFn = (
+  n: number,
+  leaseOffers: boolean,
+  encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>,
+  offerIdSize?: number
+) => Promise<OfferRecord[]>
 
-  constructor(makeOffer: () => PeerHandle) {
-    this.makeOffer = makeOffer
-  }
+export const initOfferManager = (
+  makeOffer: () => PeerHandle
+): readonly [
+  checkout: OfferCheckoutFn,
+  getOffers: (
+    n: number,
+    encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>
+  ) => Promise<OfferRecord[]>,
+  claimLeased: (peer: PeerHandle) => void,
+  reclaimLeased: (peer: PeerHandle) => void,
+  destroy: () => void
+] => {
+  const leased = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
+  let destroyed = false
 
-  claimLeased(peer: PeerHandle): void {
-    const timer = this.leased.get(peer)
-
+  const claimLeased = (peer: PeerHandle): void => {
+    const timer = leased.get(peer)
     if (timer) {
       resetTimer(timer)
-      this.leased.delete(peer)
+      leased.delete(peer)
     }
   }
 
-  reclaimLeased(peer: PeerHandle): void {
-    if (this.leased.has(peer)) {
-      this.claimLeased(peer)
+  const reclaimLeased = (peer: PeerHandle): void => {
+    if (leased.has(peer)) {
+      claimLeased(peer)
       peer.destroy()
     }
   }
 
-  checkout(
-    n: number,
-    leaseOffers: boolean,
-    encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>,
-    offerIdSize: number = defaultOfferIdSize
-  ): Promise<OfferRecord[]> {
+  const checkout: OfferCheckoutFn = (
+    n,
+    leaseOffers,
+    encryptOffer,
+    offerIdSize = defaultOfferIdSize
+  ) => {
     const toRecord = async (didRetry = false): Promise<OfferRecord> => {
-      if (this.destroyed) {
+      if (destroyed) {
         throw offerRoomLeftErr
       }
-
-      const peer = this.makeOffer()
+      const peer = makeOffer()
       const offerId = genId(offerIdSize)
-
       try {
         const offer = await encryptOffer(peer, offerId)
-
-        if (this.destroyed) {
+        if (destroyed) {
           throw offerRoomLeftErr
         }
-
         if (leaseOffers) {
-          this.leased.set(
+          leased.set(
             peer,
             setTimeout(() => {
-              this.leased.delete(peer)
+              leased.delete(peer)
               peer.destroy()
             }, offerLeaseTtlMs)
           )
-
           return {
             peer,
             offer,
             offerId,
-            claim: () => this.claimLeased(peer),
-            reclaim: () => this.reclaimLeased(peer)
+            claim: () => claimLeased(peer),
+            reclaim: () => reclaimLeased(peer)
           }
         }
-
         return {peer, offer, offerId}
       } catch (error) {
         peer.destroy()
-
-        if (!didRetry && !this.destroyed) {
+        if (!didRetry && !destroyed) {
           return toRecord(true)
         }
-
         throw error
       }
     }
-
     return all(alloc(n, () => toRecord()))
   }
 
-  getOffers(
+  return [
+    checkout,
+    (n, encryptOffer) => checkout(n, true, encryptOffer),
+    claimLeased,
+    reclaimLeased,
+    () => {
+      destroyed = true
+      leased.forEach((timer, peer) => {
+        resetTimer(timer)
+        peer.destroy()
+      })
+      leased.clear()
+    }
+  ]
+}
+
+export class OfferManager {
+  claimLeased: (peer: PeerHandle) => void
+  reclaimLeased: (peer: PeerHandle) => void
+  checkout: OfferCheckoutFn
+  getOffers: (
     n: number,
     encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>
-  ): Promise<OfferRecord[]> {
-    return this.checkout(n, true, encryptOffer)
-  }
+  ) => Promise<OfferRecord[]>
+  destroy: () => void
 
-  destroy(): void {
-    this.destroyed = true
-    this.leased.forEach((timer, peer) => {
-      resetTimer(timer)
-      peer.destroy()
-    })
-    this.leased.clear()
+  constructor(makeOffer: () => PeerHandle) {
+    ;[
+      this.checkout,
+      this.getOffers,
+      this.claimLeased,
+      this.reclaimLeased,
+      this.destroy
+    ] = initOfferManager(makeOffer)
   }
 }

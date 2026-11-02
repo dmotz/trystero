@@ -1,9 +1,11 @@
 import {
   createEventEmitter,
   createSingleHandler,
+  initSingleHandler,
   lockMethods,
   type EventEmitter,
-  type SingleHandler
+  type SingleHandler,
+  type SingleHandlerTuple
 } from './emitter'
 import {
   base62Alphabet,
@@ -15,6 +17,7 @@ import {
   fromBase64Url,
   fromJson,
   hash32,
+  internalPluginSymbol,
   libId,
   libName,
   mkErr,
@@ -25,6 +28,8 @@ import {
   userIdLength
 } from './primitives'
 import type {
+  DataPayload,
+  KernelRoomErrorInput,
   PluginContext,
   RoleCertificate,
   RoomPlugin,
@@ -41,6 +46,7 @@ export {
   fromBase64,
   fromBase64Url,
   fromJson,
+  initSingleHandler,
   libId,
   libName,
   lockMethods,
@@ -50,10 +56,13 @@ export {
   toHex,
   toJson,
   type EventEmitter,
-  type SingleHandler
+  type SingleHandler,
+  type SingleHandlerTuple
 }
 
 export const authMetaKey: string = `__${libId}Auth`
+export const cmpStr = (a: string, b: string): number =>
+  a < b ? -1 : a > b ? 1 : 0
 export const internalActionPrefix = '@_'
 
 export const warn = (msg: string): void => console.warn(`${libName}: ${msg}`)
@@ -77,6 +86,15 @@ export const peerDisconnectedErr: Error =
   /*@__PURE__*/ mkErr(peerDisconnectedMsg)
 export const peerBannedMsg = 'peer banned'
 export const peerBannedErr: Error = /*@__PURE__*/ mkErr(peerBannedMsg)
+export const mkBannedErr = (
+  reason?: string,
+  peerId?: string
+): KernelRoomErrorInput => ({
+  code: 'banned',
+  message: reason ? `${peerBannedMsg}: ${reason}` : peerBannedMsg,
+  ...(reason !== undefined ? {reason} : {}),
+  ...(peerId ? {peerId} : {})
+})
 export const peerLeftRoomErr: Error = /*@__PURE__*/ mkErr('peer left room')
 export const roomLeftErr: Error = /*@__PURE__*/ mkErr('room left')
 export const roomFullMsg = 'room full'
@@ -155,6 +173,10 @@ export const resetTimer = (
   }
 
   return null
+}
+
+export const unrefTimer = (t: unknown): void => {
+  ;(t as {unref?: () => void})?.unref?.()
 }
 
 export const toErrorMessage = (reason: unknown, fallback: string): string => {
@@ -315,13 +337,65 @@ export const getConfiguredPlugins = (
 export const isSelfAsAdminPlugin = (use?: RoomPlugin | RoomPlugin[]): boolean =>
   Boolean(
     use &&
-    (Array.isArray(use) ? use : [use]).some(
-      p =>
-        Boolean(p && typeof p === 'object' && !Array.isArray(p)) &&
-        p.name === 'roles' &&
-        (p as Record<string, unknown>)['selfAsAdmin'] === true
-    )
+    [use]
+      .flat()
+      .some(
+        p =>
+          isObj(p) &&
+          p.name === 'roles' &&
+          (p as Record<string, unknown>)['selfAsAdmin'] === true
+      )
   )
+
+export const makeInternalPlugin = <
+  TKind extends 'roles' | 'scale',
+  TApi extends Record<string, unknown>,
+  TExtra extends object = Record<never, never>
+>(
+  name: TKind,
+  setup: (kernel: any, getPre?: () => any) => TApi,
+  extra?: Partial<RoomPlugin<TKind, TApi>> & TExtra,
+  selfAsAdmin = false
+): RoomPlugin<TKind, TApi> & TExtra => {
+  const plugin = {
+    name,
+    ...extra,
+    setup: (): never => {
+      throw mkErr(
+        `${name}() must be registered via joinRoom({use: [${name}()]})`
+      )
+    }
+  } as RoomPlugin<TKind, TApi> & TExtra
+  Object.defineProperty(plugin, internalPluginSymbol, {
+    value: {kind: name, selfAsAdmin, setup},
+    enumerable: false
+  })
+  return plugin
+}
+
+export const toPayloadSource = (
+  data: DataPayload
+): readonly [format: 0 | 1 | 2, source: Blob | Uint8Array] => {
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    return [2, data]
+  }
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+    return [
+      2,
+      data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    ]
+  }
+  const isText = typeof data === 'string'
+  return [isText ? 0 : 1, encodeBytes(isText ? data : toJson(data))]
+}
+
+export const hasIceUrl = (
+  servers: readonly RTCIceServer[],
+  pattern: RegExp
+): boolean =>
+  servers.some(({urls}) => [urls].flat().some(url => pattern.test(url)))
 
 export const isObj = (v: unknown): v is Record<string, unknown> =>
   Boolean(v && typeof v === 'object' && !Array.isArray(v))
@@ -351,32 +425,34 @@ export const validateRoleCertificateShape = (
   isPosSafeInt(c['iat']) &&
   isValidSig(c['sig'])
 
+export type WindowCounter = readonly [
+  hit: (id: string) => boolean,
+  reset: (id: string) => void,
+  over: (id: string) => boolean
+]
+
 export const createWindowCounter = (
   maxEntries: number,
   limit: number,
   windowMs = 30_000
-): {
-  hit: (id: string) => boolean
-  reset: (id: string) => void
-  over: (id: string) => boolean
-} => {
-  const map = createBoundedCache<string, {n: number; t: number}>(maxEntries)
-  return {
-    hit: id => {
+): WindowCounter => {
+  const map = createBoundedCache<string, [n: number, t: number]>(maxEntries)
+  return [
+    id => {
       const now = Date.now()
       let cur = map.get(id)
-      if (!cur || now - cur.t > windowMs) {
-        cur = {n: 0, t: now}
+      if (!cur || now - cur[1] > windowMs) {
+        cur = [0, now]
         map.set(id, cur)
       }
-      return ++cur.n >= limit
+      return ++cur[0] >= limit
     },
-    reset: id => {
+    id => {
       map.delete(id)
     },
-    over: id => {
+    id => {
       const cur = map.get(id)
-      return Boolean(cur && Date.now() - cur.t <= windowMs && cur.n >= limit)
+      return Boolean(cur && Date.now() - cur[1] <= windowMs && cur[0] >= limit)
     }
-  }
+  ]
 }

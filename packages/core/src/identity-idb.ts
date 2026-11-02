@@ -9,19 +9,6 @@ export type StoredIdbIdentityRecord = {
   privateKey: CryptoKey
 }
 
-export type IdbIdentityDeps = {
-  generateRecord: () => Promise<StoredIdbIdentityRecord>
-  verifyUserIdKey: (
-    userId: string,
-    pubKey: JsonWebKey
-  ) => boolean | Promise<boolean>
-  verifyWithP256: (
-    sig: Uint8Array,
-    payload: Uint8Array,
-    pubKey: JsonWebKey
-  ) => boolean | Promise<boolean>
-}
-
 const storagePrefix = `${libId}:user_identity:v1:`
 const idbDbName = `${libId}_identity_v1`
 const idbStoreName = 'identities'
@@ -52,22 +39,46 @@ const openIdentityDb = (): Promise<IDBDatabase> =>
     req.onerror = () => reject(req.error ?? idbErr('open'))
   })
 
+const idbTxReq = <T>(
+  db: IDBDatabase,
+  mode: IDBTransactionMode,
+  run: (store: IDBObjectStore) => IDBRequest,
+  op: string
+): Promise<T> =>
+  new Promise((resolve, reject) => {
+    const req = run(
+      db.transaction(idbStoreName, mode).objectStore(idbStoreName)
+    )
+    req.onsuccess = () => resolve(req.result as T)
+    req.onerror = () => reject(req.error ?? idbErr(op))
+  })
+
 const idbGetRecord = (
   db: IDBDatabase,
   appId: string
 ): Promise<StoredIdbIdentityRecord | undefined> =>
-  new Promise((resolve, reject) => {
-    const tx = db.transaction(idbStoreName, 'readonly')
-    const store = tx.objectStore(idbStoreName)
-    const req = store.get(appId)
-    req.onsuccess = () =>
-      resolve(req.result as StoredIdbIdentityRecord | undefined)
-    req.onerror = () => reject(req.error ?? idbGetErr)
-  })
+  idbTxReq(db, 'readonly', s => s.get(appId), 'get')
+
+const idbPutRecord = (
+  db: IDBDatabase,
+  appId: string,
+  candidate: StoredIdbIdentityRecord
+): Promise<StoredIdbIdentityRecord> =>
+  idbTxReq(db, 'readwrite', s => s.put(candidate, appId), 'put').then(
+    () => candidate
+  )
 
 const isValidStoredIdbRecord = async (
   rec: StoredIdbIdentityRecord | undefined,
-  deps: IdbIdentityDeps
+  verifyUserIdKey: (
+    userId: string,
+    pubKey: JsonWebKey
+  ) => boolean | Promise<boolean>,
+  verifyWithP256: (
+    sig: Uint8Array,
+    payload: Uint8Array,
+    pubKey: JsonWebKey
+  ) => boolean | Promise<boolean>
 ): Promise<boolean> => {
   if (
     !rec ||
@@ -75,132 +86,108 @@ const isValidStoredIdbRecord = async (
     !rec.userId ||
     !rec.signPubJwk ||
     !rec.privateKey ||
-    !(await deps.verifyUserIdKey(rec.userId, rec.signPubJwk))
+    !(await verifyUserIdKey(rec.userId, rec.signPubJwk))
   ) {
     return false
   }
   try {
     const sig = await ecdsaSign(rec.privateKey, idbProbeBytes as BufferSource)
-    return await deps.verifyWithP256(sig, idbProbeBytes, rec.signPubJwk)
+    return await verifyWithP256(sig, idbProbeBytes, rec.signPubJwk)
   } catch {
     return false
   }
 }
 
-const idbPutRecord = (
-  db: IDBDatabase,
-  appId: string,
-  candidate: StoredIdbIdentityRecord
-): Promise<StoredIdbIdentityRecord> =>
-  new Promise((resolve, reject) => {
-    const tx = db.transaction(idbStoreName, 'readwrite')
-    const putReq = tx.objectStore(idbStoreName).put(candidate, appId)
-    putReq.onsuccess = () => resolve(candidate)
-    putReq.onerror = () => reject(putReq.error ?? idbErr('put'))
-  })
-
-const idbAddOrGetRecord = (
-  db: IDBDatabase,
-  appId: string,
-  candidate: StoredIdbIdentityRecord,
-  deps: IdbIdentityDeps
-): Promise<StoredIdbIdentityRecord> =>
-  new Promise((resolve, reject) => {
-    const tx = db.transaction(idbStoreName, 'readwrite')
-    const store = tx.objectStore(idbStoreName)
-    const getReq = store.get(appId)
-    getReq.onsuccess = () => {
-      const existing = getReq.result as StoredIdbIdentityRecord | undefined
-      if (existing !== undefined) {
-        isValidStoredIdbRecord(existing, deps).then(valid => {
-          if (valid) {
-            resolve(existing)
-          } else {
-            idbPutRecord(db, appId, candidate).then(resolve, reject)
-          }
-        }, reject)
-        return
-      }
-      const addReq = store.add(candidate, appId)
-      addReq.onsuccess = () => resolve(candidate)
-      addReq.onerror = event => {
-        event?.preventDefault?.()
-        // ConstraintError from concurrent tab: read winner in a fresh readonly tx
-        idbGetRecord(db, appId).then(winner => {
-          if (!winner) {
-            reject(addReq.error ?? idbErr('add'))
-            return
-          }
-          isValidStoredIdbRecord(winner, deps).then(valid => {
-            if (valid) {
-              resolve(winner)
-            } else {
-              idbPutRecord(db, appId, candidate).then(resolve, reject)
-            }
-          }, reject)
-        }, reject)
-      }
-    }
-    getReq.onerror = () => reject(getReq.error ?? idbGetErr)
-  })
-
-const idbDeleteRecord = (db: IDBDatabase, appId: string): Promise<void> =>
-  new Promise((resolve, reject) => {
-    const tx = db.transaction(idbStoreName, 'readwrite')
-    const delReq = tx.objectStore(idbStoreName).delete(appId)
-    delReq.onsuccess = () => resolve()
-    delReq.onerror = () => reject(delReq.error ?? idbErr('delete'))
-  })
-
 const withNavigatorLock = async <T>(
-  lockName: string,
-  fn: () => Promise<T>
+  appId: string,
+  fn: (db: IDBDatabase) => Promise<T>
 ): Promise<T> => {
-  const nav =
+  const lockName = `${storagePrefix}${appId}`
+  const run = async (): Promise<T> => {
+    const db = await openIdentityDb()
+    try {
+      return await fn(db)
+    } finally {
+      db.close()
+    }
+  }
+  const locks =
     typeof navigator !== 'undefined'
-      ? (navigator as {
-          locks?: {
-            request?: <R>(name: string, cb: () => Promise<R>) => Promise<R>
+      ? (
+          navigator as {
+            locks?: {
+              request?: <R>(name: string, cb: () => Promise<R>) => Promise<R>
+            }
           }
-        })
+        ).locks
       : undefined
-  return nav?.locks && typeof nav.locks.request === 'function'
-    ? nav.locks.request(lockName, fn)
-    : fn()
+  return typeof locks?.request === 'function'
+    ? locks.request(lockName, run)
+    : run()
 }
 
 export const loadOrCreateIdbIdentity = (
   idbKey: string,
-  deps: IdbIdentityDeps
+  generateRecord: () => Promise<StoredIdbIdentityRecord>,
+  verifyUserIdKey: (
+    userId: string,
+    pubKey: JsonWebKey
+  ) => boolean | Promise<boolean>,
+  verifyWithP256: (
+    sig: Uint8Array,
+    payload: Uint8Array,
+    pubKey: JsonWebKey
+  ) => boolean | Promise<boolean>
 ): Promise<UserIdentity> =>
-  withNavigatorLock(`${storagePrefix}${idbKey}`, async () => {
-    const db = await openIdentityDb()
-    try {
-      const existing = await idbGetRecord(db, idbKey)
-      if (existing !== undefined) {
-        if (await isValidStoredIdbRecord(existing, deps)) {
-          return buildUserIdentityFromIdbRecord(existing)
-        }
-        const repaired = await deps.generateRecord()
-        return buildUserIdentityFromIdbRecord(
-          await idbPutRecord(db, idbKey, repaired)
-        )
-      }
-      const candidate = await deps.generateRecord()
-      return buildUserIdentityFromIdbRecord(
-        await idbAddOrGetRecord(db, idbKey, candidate, deps)
-      )
-    } finally {
-      db.close()
+  withNavigatorLock(idbKey, async db => {
+    const ensureValid = async (
+      rec: StoredIdbIdentityRecord,
+      fallback?: StoredIdbIdentityRecord
+    ): Promise<StoredIdbIdentityRecord> =>
+      (await isValidStoredIdbRecord(rec, verifyUserIdKey, verifyWithP256))
+        ? rec
+        : idbPutRecord(db, idbKey, fallback ?? (await generateRecord()))
+
+    const existing = await idbGetRecord(db, idbKey)
+    if (existing !== undefined) {
+      return buildUserIdentityFromIdbRecord(await ensureValid(existing))
     }
+    const candidate = await generateRecord()
+    const resolved = await new Promise<StoredIdbIdentityRecord>(
+      (resolve, reject) => {
+        const store = db
+          .transaction(idbStoreName, 'readwrite')
+          .objectStore(idbStoreName)
+        const settleExisting = (rec: StoredIdbIdentityRecord): void => {
+          ensureValid(rec, candidate).then(resolve, reject)
+        }
+        const getReq = store.get(idbKey)
+        getReq.onsuccess = () => {
+          const found = getReq.result as StoredIdbIdentityRecord | undefined
+          if (found !== undefined) {
+            settleExisting(found)
+            return
+          }
+          const addReq = store.add(candidate, idbKey)
+          addReq.onsuccess = () => resolve(candidate)
+          addReq.onerror = event => {
+            event?.preventDefault?.()
+            idbGetRecord(db, idbKey).then(
+              winner =>
+                winner
+                  ? settleExisting(winner)
+                  : reject(addReq.error ?? idbErr('add')),
+              reject
+            )
+          }
+        }
+        getReq.onerror = () => reject(getReq.error ?? idbGetErr)
+      }
+    )
+    return buildUserIdentityFromIdbRecord(resolved)
   })
 
 export const deleteIdbIdentity = (appId: string): Promise<void> =>
-  withNavigatorLock(`${storagePrefix}${appId}`, async () => {
-    const db = await openIdentityDb()
-    try {
-      await idbDeleteRecord(db, appId)
-    } finally {
-      db.close()
-    }
-  })
+  withNavigatorLock(appId, db =>
+    idbTxReq<void>(db, 'readwrite', s => s.delete(appId), 'delete')
+  )

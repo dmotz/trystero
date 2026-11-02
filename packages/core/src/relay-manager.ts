@@ -8,10 +8,7 @@ const defaultRetryMs = 3333
 const maxRetryMs = 60_000
 const socketRetryPeriods: Record<string, number> = {}
 
-type SocketController = {
-  disconnect: () => void
-  reconnect: () => void
-}
+type SocketController = [disconnect: () => void, reconnect: () => void]
 
 const socketControllers = /*@__PURE__*/ new Set<SocketController>()
 const keysByRelay = /*@__PURE__*/ new WeakMap<object, string>()
@@ -35,7 +32,7 @@ export const getRelays = <
 
 const holdRelaySockets = (): void => {
   isRelayOffline = true
-  socketControllers.forEach(controller => controller.disconnect())
+  socketControllers.forEach(c => c[0]())
 }
 
 const reconnectRelaySockets = (): void => {
@@ -43,23 +40,17 @@ const reconnectRelaySockets = (): void => {
   keys(socketRetryPeriods).forEach(url => {
     socketRetryPeriods[url] = defaultRetryMs
   })
-  socketControllers.forEach(controller => controller.reconnect())
+  socketControllers.forEach(c => c[1]())
 }
 
 const attachOnlineWatcher = (): void => {
   if (stopWatchingOnline || typeof addEventListener !== 'function') {
     return
   }
-
   const controller = new AbortController()
-
-  addEventListener('online', reconnectRelaySockets, {
-    signal: controller.signal
-  })
-  addEventListener('offline', holdRelaySockets, {
-    signal: controller.signal
-  })
-
+  const {signal} = controller
+  addEventListener('online', reconnectRelaySockets, {signal})
+  addEventListener('offline', holdRelaySockets, {signal})
   stopWatchingOnline = () => controller.abort()
 }
 
@@ -74,38 +65,25 @@ export const setRelayConnectivity = (
   if (mode === undefined) {
     return relayConnectivity
   }
-
   if (mode !== 'online' && mode !== 'offline' && mode !== 'auto') {
     throw mkErr(`invalid relay connectivity mode "${String(mode)}"`)
   }
-
-  if (mode === 'offline') {
-    detachOnlineWatcher()
-    relayConnectivity = 'offline'
-    holdRelaySockets()
-    return relayConnectivity
-  }
-
-  if (mode === 'online') {
-    detachOnlineWatcher()
-    relayConnectivity = 'online'
-    reconnectRelaySockets()
-    return relayConnectivity
-  }
-
-  if (relayConnectivity === 'auto') {
+  if (mode === 'auto') {
+    const wasOffline = relayConnectivity !== 'auto' && isRelayOffline
+    relayConnectivity = 'auto'
     attachOnlineWatcher()
+    if (wasOffline) {
+      reconnectRelaySockets()
+    }
     return relayConnectivity
   }
-
-  const wasOffline = isRelayOffline
-  relayConnectivity = 'auto'
-  attachOnlineWatcher()
-
-  if (wasOffline) {
+  detachOnlineWatcher()
+  relayConnectivity = mode
+  if (mode === 'offline') {
+    holdRelaySockets()
+  } else {
     reconnectRelaySockets()
   }
-
   return relayConnectivity
 }
 
@@ -114,7 +92,11 @@ export const makeSocket = (
   onMessage: (data: string) => void,
   onReconnect?: () => void
 ): SocketClient => {
-  const client = {} as SocketClient
+  const client = {
+    url,
+    isClosed: false,
+    send: noOp
+  } as unknown as SocketClient
   let didOpen = false
   let isReconnectPending = false
   let initialFailure: Error | null = null
@@ -123,27 +105,21 @@ export const makeSocket = (
   const initialFailureWaiters = new Set<(err: Error | null) => void>()
 
   const settleInitialAttempt = (err: Error | null): void => {
-    initialFailureWaiters.forEach(waiter => waiter(err))
+    initialFailureWaiters.forEach(w => w(err))
     initialFailureWaiters.clear()
   }
 
-  client.url = url
-  client.isClosed = false
-  client.send = noOp
   client.ready = new Promise(res => (resolveReady = res))
 
   void Object.defineProperty(client.ready, socketInitialFailureSymbol, {
-    value: (): Promise<Error | null> => {
-      if (didOpen || client.isClosed || isRelayOffline) {
-        return Promise.resolve(null)
-      }
-      if (initialFailure) {
-        return Promise.resolve(initialFailure)
-      }
-      return new Promise<Error | null>(res => {
-        initialFailureWaiters.add(res)
-      })
-    },
+    value: (): Promise<Error | null> =>
+      didOpen || client.isClosed || isRelayOffline
+        ? Promise.resolve(null)
+        : initialFailure
+          ? Promise.resolve(initialFailure)
+          : new Promise<Error | null>(res => {
+              initialFailureWaiters.add(res)
+            }),
     enumerable: false,
     configurable: true
   })
@@ -159,21 +135,18 @@ export const makeSocket = (
     }
   }
 
-  const detachSocket = (socket: WebSocket | undefined): void => {
-    if (!socket) {
-      return
+  const closeSocket = (): void => {
+    const socket = client.socket
+    if (socket) {
+      socket.onopen = socket.onclose = socket.onmessage = null
+      socket.close()
     }
-
-    socket.onopen = null
-    socket.onclose = null
-    socket.onmessage = null
   }
 
   const init = (): void => {
     if (client.isClosed || isRelayOffline) {
       return
     }
-
     clearRetryTimer()
     isReconnectPending = false
 
@@ -185,23 +158,18 @@ export const makeSocket = (
       if (client.isClosed || isReconnectPending || client.socket !== socket) {
         return
       }
-
       isReconnectPending = true
-
       if (isRelayOffline) {
         if (!didOpen) {
           settleInitialAttempt(null)
         }
         return
       }
-
       if (!didOpen) {
         initialFailure = mkErr(`failed to connect to relay ${client.url}`)
         settleInitialAttempt(initialFailure)
       }
-
       const period = (socketRetryPeriods[url] ??= defaultRetryMs)
-
       retryTimer = setTimeout(init, Math.random() * period)
       socketRetryPeriods[url] = min(period * 2, maxRetryMs)
     }
@@ -212,15 +180,12 @@ export const makeSocket = (
       if (client.isClosed || client.socket !== socket) {
         return
       }
-
       const isReconnect = didOpen
-
       didOpen = true
       initialFailure = null
       settleInitialAttempt(null)
       resolveReady(client)
       socketRetryPeriods[url] = defaultRetryMs
-
       if (isReconnect) {
         onReconnect?.()
       }
@@ -233,34 +198,26 @@ export const makeSocket = (
     }
   }
 
-  const controller: SocketController = {
-    disconnect: () => {
-      if (client.isClosed) {
-        return
-      }
-
-      clearRetryTimer()
-
-      if (!isReconnectPending) {
-        isReconnectPending = true
-        const socket = client.socket
-        detachSocket(socket)
-        socket?.close()
+  const controller: SocketController = [
+    () => {
+      if (!client.isClosed) {
+        clearRetryTimer()
+        if (!isReconnectPending) {
+          isReconnectPending = true
+          closeSocket()
+        }
       }
     },
-    reconnect: () => {
-      if (client.isClosed) {
-        return
-      }
-
-      socketRetryPeriods[url] = defaultRetryMs
-      clearRetryTimer()
-
-      if (isReconnectPending) {
-        init()
+    () => {
+      if (!client.isClosed) {
+        socketRetryPeriods[url] = defaultRetryMs
+        clearRetryTimer()
+        if (isReconnectPending) {
+          init()
+        }
       }
     }
-  }
+  ]
 
   socketControllers.add(controller)
 
@@ -269,9 +226,7 @@ export const makeSocket = (
     settleInitialAttempt(null)
     socketControllers.delete(controller)
     clearRetryTimer()
-    const socket = client.socket
-    detachSocket(socket)
-    socket?.close()
+    closeSocket()
   }
 
   if (isRelayOffline) {
@@ -288,13 +243,13 @@ export type RelayScopedStore<T, TRelay extends object> = {
   forRelay: (relay: TRelay) => Record<string, T>
 }
 
+const unregisteredRelayErr = /*@__PURE__*/ mkErr('unregistered relay client')
+
 const getRegisteredRelayKey = (relay: object): string => {
   const key = keysByRelay.get(relay)
-
   if (!key) {
-    throw mkErr('unregistered relay client')
+    throw unregisteredRelayErr
   }
-
   return key
 }
 
@@ -303,7 +258,6 @@ export const createRelayScopedStore = <T, TRelay extends object = SocketClient>(
 ): RelayScopedStore<T, TRelay> => {
   const store: Record<string, Record<string, T>> = {}
   const forKey = (key: string): Record<string, T> => (store[key] ??= {})
-
   return {
     forKey,
     forRelay: relay => forKey(resolveKey(relay))
@@ -323,31 +277,22 @@ export const createRelayManager = <TRelay extends object>(
 
   const keyOf = (relay: TRelay): string => {
     const key = localKeys.get(relay)
-
     if (!key) {
-      throw mkErr('unregistered relay client')
+      throw unregisteredRelayErr
     }
-
     return key
-  }
-
-  const store = (key: string, relay: TRelay): TRelay => {
-    relays[key] = relay
-    localKeys.set(relay, key)
-    keysByRelay.set(relay, key)
-
-    return relay
   }
 
   return {
     register: (key, createRelay) => {
-      const relay = relays[key]
-
-      if (relay) {
-        return relay
+      let relay = relays[key]
+      if (!relay) {
+        relay = createRelay()
+        relays[key] = relay
+        localKeys.set(relay, key)
+        keysByRelay.set(relay, key)
       }
-
-      return store(key, createRelay())
+      return relay
     },
     keyOf,
     scoped: <T>() => createRelayScopedStore<T, TRelay>(keyOf),
@@ -355,7 +300,6 @@ export const createRelayManager = <TRelay extends object>(
       fromEntries(
         entries(relays).flatMap(([key, relay]) => {
           const socket = getSocket(relay)
-
           return socket ? [[key, socket]] : []
         })
       ) as Record<string, WebSocket>

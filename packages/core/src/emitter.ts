@@ -26,25 +26,22 @@ export const lockMethods = <T extends object>(
   return target
 }
 
-export type EventEmitter<Args extends unknown[]> = {
+export type EventEmitter<Args extends unknown[]> = readonly [
   subscribe: (
     handler: (...args: Args) => unknown,
     options?: ReplayListenerOptions,
     getReplayItems?: () => Iterable<Args>
-  ) => Unsubscribe
-  emit: (...args: Args) => void
+  ) => Unsubscribe,
+  emit: (...args: Args) => void,
+  clear: () => void,
   hasListeners: () => boolean
-  clear: () => void
-}
+]
 
 export const createEventEmitter = <Args extends unknown[]>(
   kind: string,
   onActiveChange?: (active: boolean) => void
 ): EventEmitter<Args> => {
-  const subs = new Set<{
-    call: (...args: Args) => void
-    unsub: () => void
-  }>()
+  const subs = new Set<[call: (...args: Args) => void, unsub: () => void]>()
 
   const invoke = (handler: (...args: Args) => unknown, args: Args): void => {
     try {
@@ -57,85 +54,136 @@ export const createEventEmitter = <Args extends unknown[]>(
     }
   }
 
-  const subscribe = (
-    handler: (...args: Args) => unknown,
-    options?: ReplayListenerOptions,
-    getReplayItems?: () => Iterable<Args>
-  ): Unsubscribe => {
-    if (typeof handler !== 'function') {
-      const label = kind.endsWith('handler') ? kind : `${kind} handler`
-      throw mkErr(`${label} must be a function`)
-    }
-    const signal = options?.signal
-    if (signal?.aborted) {
-      return noOp
-    }
-    const once = Boolean(options?.once)
-    let active = true
-    let added = false
-    const entry = {
-      call: (...args: Args): void => {
+  return [
+    (handler, options, getReplayItems) => {
+      if (typeof handler !== 'function') {
+        throw mkErr(
+          `${kind.endsWith('handler') ? kind : `${kind} handler`} must be a function`
+        )
+      }
+      const signal = options?.signal
+      if (signal?.aborted) {
+        return noOp
+      }
+      const once = Boolean(options?.once)
+      let active = true
+      let added = false
+      const unsub: Unsubscribe = () => {
         if (!active) {
           return
         }
-        if (once) {
-          unsub()
+        active = false
+        signal?.removeEventListener('abort', unsub)
+        if (added && subs.delete(entry) && subs.size === 0) {
+          onActiveChange?.(false)
         }
-        invoke(handler, args)
-      },
-      unsub: noOp
-    }
-    const unsub: Unsubscribe = () => {
-      if (!active) {
-        return
       }
-      active = false
-      signal?.removeEventListener('abort', unsub)
-      if (added && subs.delete(entry) && subs.size === 0) {
-        onActiveChange?.(false)
-      }
-    }
-    entry.unsub = unsub
-    signal?.addEventListener('abort', unsub, {once: true})
+      const entry: [call: (...args: Args) => void, unsub: () => void] = [
+        (...args: Args): void => {
+          if (!active) {
+            return
+          }
+          if (once) {
+            unsub()
+          }
+          invoke(handler, args)
+        },
+        unsub
+      ]
+      signal?.addEventListener('abort', unsub, {once: true})
 
-    if (options?.replay && getReplayItems) {
-      for (const item of getReplayItems()) {
-        if (!active) {
-          break
+      if (options?.replay && getReplayItems) {
+        for (const item of getReplayItems()) {
+          if (!active) {
+            break
+          }
+          if (once) {
+            unsub()
+          }
+          invoke(handler, item)
         }
-        if (once) {
-          unsub()
+      }
+
+      if (active) {
+        const wasEmpty = subs.size === 0
+        added = true
+        subs.add(entry)
+        if (wasEmpty) {
+          onActiveChange?.(true)
         }
-        invoke(handler, item)
       }
-    }
 
-    if (active) {
-      const wasEmpty = subs.size === 0
-      added = true
-      subs.add(entry)
-      if (wasEmpty) {
-        onActiveChange?.(true)
-      }
-    }
-
-    return unsub
-  }
-
-  return {
-    subscribe,
-    emit: (...args: Args): void => {
+      return unsub
+    },
+    (...args: Args): void => {
       for (const sub of Array.from(subs)) {
-        sub.call(...args)
+        sub[0](...args)
       }
     },
-    hasListeners: (): boolean => subs.size > 0,
-    clear: (): void => {
+    (): void => {
       for (const sub of Array.from(subs)) {
-        sub.unsub()
+        sub[1]()
       }
-    }
-  }
+    },
+    (): boolean => subs.size > 0
+  ]
+}
+
+export type SingleHandlerTuple<F extends (...args: any[]) => any> = readonly [
+  set: (handler: F, options?: ListenerOptions) => Unsubscribe,
+  get: () => F | null,
+  clear: () => void
+]
+
+export const initSingleHandler = <F extends (...args: any[]) => any>(
+  name: string,
+  onChange?: (handler: F | null) => void
+): SingleHandlerTuple<F> => {
+  let current: [call: F, unsub: () => void] | null = null
+
+  return [
+    (handler, options) => {
+      if (typeof handler !== 'function') {
+        throw mkErr(`${name} handler must be a function`)
+      }
+      const signal = options?.signal
+      if (signal?.aborted) {
+        return noOp
+      }
+      if (current) {
+        throw mkErr(`${name} handler already registered; unsubscribe first`)
+      }
+      const once = Boolean(options?.once)
+      let active = true
+      const unsub: Unsubscribe = () => {
+        if (!active) {
+          return
+        }
+        active = false
+        signal?.removeEventListener('abort', unsub)
+        if (current === entry) {
+          current = null
+          onChange?.(null)
+        }
+      }
+      const call = ((...args: Parameters<F>): ReturnType<F> => {
+        if (!active) {
+          return undefined as ReturnType<F>
+        }
+        if (once) {
+          unsub()
+        }
+        return handler(...args)
+      }) as F
+      const entry: [call: F, unsub: () => void] = [call, unsub]
+      current = entry
+      signal?.addEventListener('abort', unsub, {once: true})
+      onChange?.(call)
+      return unsub
+    },
+    (): F | null => current?.[0] ?? null,
+    (): void => current?.[1]()
+  ]
 }
 
 export type SingleHandler<F extends (...args: any[]) => any> = {
@@ -148,51 +196,6 @@ export const createSingleHandler = <F extends (...args: any[]) => any>(
   name: string,
   onChange?: (handler: F | null) => void
 ): SingleHandler<F> => {
-  let current: {call: F; unsub: () => void} | null = null
-
-  const set = (handler: F, options?: ListenerOptions): Unsubscribe => {
-    if (typeof handler !== 'function') {
-      throw mkErr(`${name} handler must be a function`)
-    }
-    const signal = options?.signal
-    if (signal?.aborted) {
-      return noOp
-    }
-    if (current) {
-      throw mkErr(`${name} handler already registered; unsubscribe first`)
-    }
-    const once = Boolean(options?.once)
-    let active = true
-    const unsub: Unsubscribe = () => {
-      if (!active) {
-        return
-      }
-      active = false
-      signal?.removeEventListener('abort', unsub)
-      if (current === entry) {
-        current = null
-        onChange?.(null)
-      }
-    }
-    const call = ((...args: Parameters<F>): ReturnType<F> => {
-      if (!active) {
-        return undefined as ReturnType<F>
-      }
-      if (once) {
-        unsub()
-      }
-      return handler(...args)
-    }) as F
-    const entry = {call, unsub}
-    current = entry
-    signal?.addEventListener('abort', unsub, {once: true})
-    onChange?.(call)
-    return unsub
-  }
-
-  return {
-    set,
-    get: (): F | null => current?.call ?? null,
-    clear: (): void => current?.unsub()
-  }
+  const [set, get, clear] = initSingleHandler(name, onChange)
+  return {set, get, clear}
 }

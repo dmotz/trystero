@@ -4,11 +4,9 @@ const decoder = /*@__PURE__*/ new TextDecoder()
 export const libName = 'Trystero'
 export const libId = 'trystero'
 
-export const socketInitialFailureSymbol: unique symbol = Symbol(
-  'socketInitialFailure'
-)
-export const internalPluginSymbol: unique symbol = Symbol('internalPlugin')
-export const signalingBridgeSymbol: unique symbol = Symbol('signalingBridge')
+export const socketInitialFailureSymbol: unique symbol = /*@__PURE__*/ Symbol()
+export const internalPluginSymbol: unique symbol = /*@__PURE__*/ Symbol()
+export const signalingBridgeSymbol: unique symbol = /*@__PURE__*/ Symbol()
 
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
@@ -109,35 +107,28 @@ export const createBoundedCache = <K, V>(
   maxSize = 4_096
 ): BoundedCache<K, V> => {
   const map = new Map<K, V>()
-  return {
-    get size(): number {
-      return map.size
-    },
-    get: key => {
-      const value = map.get(key)
-      if (value !== undefined || map.has(key)) {
-        map.delete(key)
-        map.set(key, value as V)
-      }
-      return value
-    },
-    has: key => map.has(key),
-    set: (key, value) => {
-      if (map.has(key)) {
-        map.delete(key)
-      } else if (map.size >= maxSize) {
-        const oldest = map.keys().next().value
-        if (oldest !== undefined) {
-          map.delete(oldest)
-        }
-      }
-      map.set(key, value)
-    },
-    delete: key => map.delete(key),
-    clear: () => map.clear(),
-    keys: () => map.keys(),
-    entries: () => map.entries()
+  const rawGet = map.get.bind(map)
+  const rawSet = map.set.bind(map)
+  map.get = key => {
+    const value = rawGet(key)
+    if (value !== undefined || map.has(key)) {
+      map.delete(key)
+      rawSet(key, value as V)
+    }
+    return value
   }
+  map.set = (key, value) => {
+    if (map.has(key)) {
+      map.delete(key)
+    } else if (map.size >= maxSize) {
+      const oldest = map.keys().next().value
+      if (oldest !== undefined) {
+        map.delete(oldest)
+      }
+    }
+    return rawSet(key, value)
+  }
+  return map
 }
 
 export type BoundedSet<T> = {

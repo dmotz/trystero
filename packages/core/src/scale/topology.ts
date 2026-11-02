@@ -1,5 +1,5 @@
 import {hash32} from '../crypto'
-import {createBoundedCache, mkErr, toJson} from '../utils'
+import {cmpStr, createBoundedCache, mkErr, toJson} from '../utils'
 import type {ScaleConfig, TopologyMode, TopologyRoute} from '../types'
 
 export const defaultMaxConnections = 6
@@ -112,9 +112,9 @@ export const computeTargetNeighbors = (
   for (let r = 0; r < numRings; r++) {
     const ringSalt = toJson([roomSalt, 'ring', r])
     const ringSorted = uniqueList
-      .map(id => ({id, key: hashRingKey(ringSalt, id)}))
-      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-      .map(entry => entry.id)
+      .map(id => [id, hashRingKey(ringSalt, id)] as const)
+      .sort((a, b) => cmpStr(a[1], b[1]))
+      .map(e => e[0])
     const idx = ringSorted.indexOf(localPeerId)
     if (idx < 0) {
       continue
@@ -183,19 +183,18 @@ export const computeShortestPathRoutes = (
   const directSet = new Set(directPeerIds)
   const graph = buildUndirectedGraph(adjacency, localPeerId, directSet)
 
-  const visited = new Map<string, {nextHop: string; hops: number}>()
+  const visited = new Map<string, [nextHop: string, hops: number]>()
   const backupNextHops = new Map<string, string>()
-  const queue: Array<{node: string; nextHop: string; hops: number}> = []
+  const queue: Array<[node: string, nextHop: string, hops: number]> = []
 
-  const sortedDirect = [...directSet].sort()
-  for (const d of sortedDirect) {
-    visited.set(d, {nextHop: d, hops: 1})
-    queue.push({node: d, nextHop: d, hops: 1})
+  for (const d of [...directSet].sort()) {
+    visited.set(d, [d, 1])
+    queue.push([d, d, 1])
   }
 
   let head = 0
   while (head < queue.length) {
-    const {node, nextHop, hops} = queue[head++]!
+    const [node, nextHop, hops] = queue[head++]!
     if (hops >= maxHops) {
       continue
     }
@@ -211,12 +210,9 @@ export const computeShortestPathRoutes = (
 
       const existing = visited.get(neighbor)
       if (!existing) {
-        visited.set(neighbor, {nextHop, hops: hops + 1})
-        queue.push({node: neighbor, nextHop, hops: hops + 1})
-      } else if (
-        existing.nextHop !== nextHop &&
-        !backupNextHops.has(neighbor)
-      ) {
+        visited.set(neighbor, [nextHop, hops + 1])
+        queue.push([neighbor, nextHop, hops + 1])
+      } else if (existing[0] !== nextHop && !backupNextHops.has(neighbor)) {
         backupNextHops.set(neighbor, nextHop)
       }
     }
@@ -225,85 +221,11 @@ export const computeShortestPathRoutes = (
   for (const [peerId, info] of visited.entries()) {
     const backup = backupNextHops.get(peerId)
     routes[peerId] = {
-      nextHop: info.nextHop,
-      hops: info.hops,
+      nextHop: info[0],
+      hops: info[1],
       ...(backup ? {backupNextHop: backup} : {})
     }
   }
 
   return routes
-}
-
-export const capRosterPeersPerUser = (
-  baseRoster: Set<string>,
-  selfId: string,
-  activeMode: 'mesh' | 'gossip',
-  maxConnections: number,
-  getDescriptorUserId: (peerId: string) => string | undefined
-): Set<string> => {
-  if (activeMode === 'mesh' || baseRoster.size <= maxConnections + 1) {
-    return baseRoster
-  }
-  const maxSlotsPerUser = Math.max(1, Math.floor(maxConnections / 3))
-  const byUser = new Map<string, string[]>()
-  for (const id of baseRoster) {
-    if (id === selfId) {
-      continue
-    }
-    const uid = getDescriptorUserId(id)
-    if (!uid) {
-      continue
-    }
-    let list = byUser.get(uid)
-    if (!list) {
-      list = []
-      byUser.set(uid, list)
-    }
-    list.push(id)
-  }
-  if (byUser.size === 0) {
-    return baseRoster
-  }
-  const filtered = new Set<string>(baseRoster)
-  for (const [, userPeers] of byUser.entries()) {
-    if (userPeers.length <= maxSlotsPerUser) {
-      continue
-    }
-    const otherPeerCount = baseRoster.size - 1 - userPeers.length
-    if (otherPeerCount < maxConnections) {
-      continue
-    }
-    const sorted = [...userPeers].sort()
-    for (let i = maxSlotsPerUser; i < sorted.length; i++) {
-      filtered.delete(sorted[i]!)
-    }
-  }
-  return filtered
-}
-
-export const isAssignedGatekeeper = (
-  selfId: string,
-  candidateId: string,
-  cappedRoster: Set<string>,
-  roomSalt: string,
-  isExcluded: (peerId: string) => boolean
-): boolean => {
-  const gateSalt = toJson([roomSalt, 'gate', candidateId])
-  const lowerVerified: Array<{id: string; key: string}> = []
-  for (const u of cappedRoster) {
-    if (u < candidateId && !isExcluded(u)) {
-      lowerVerified.push({id: u, key: hashRingKey(gateSalt, u)})
-    }
-  }
-  if (lowerVerified.length === 0) {
-    return false
-  }
-  lowerVerified.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-  const gatekeeperCount = Math.min(2, lowerVerified.length)
-  for (let i = 0; i < gatekeeperCount; i++) {
-    if (lowerVerified[i]?.id === selfId) {
-      return true
-    }
-  }
-  return false
 }
