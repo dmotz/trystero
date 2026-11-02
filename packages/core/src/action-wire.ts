@@ -13,6 +13,11 @@ import {
   transferTimeoutMs
 } from './data-limits'
 import {
+  createDirectPeerTransport,
+  type ActionFrameKind,
+  type PeerDataTransport
+} from './peer-registry'
+import {
   actionRedefinedErr,
   all,
   decodeBytes,
@@ -45,10 +50,6 @@ const chunkHeaderSize = 14 // control header, float64 byte offset
 const chunkSize = maxFrameBytes - chunkHeaderSize
 const defaultMaxReceiveBytes = 256 * 1024 ** 2
 const maxControlBufferedBytes = 1024 ** 2
-const buffLowEvent = 'bufferedamountlow'
-const channelCloseEvent = 'close'
-const channelErrorEvent = 'error'
-const backpressureWaitTimeoutMs = 10_000
 
 export type ActionErrorKind =
   | 'timeout'
@@ -110,7 +111,11 @@ type Outgoing = {
 }
 type ActionWireManagerDeps = {
   onPeerError: (peerId: string, error: Error) => void
-  getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
+  getTransport?: (
+    id: string,
+    includePending: boolean
+  ) => PeerDataTransport | undefined
+  getPeer?: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
   broadcastInline?: (
@@ -133,59 +138,9 @@ const packet = (
   return bytes
 }
 const transferError = makeActionError
-const waitForBufferedAmountLow = (
-  channel: RTCDataChannel,
-  signal?: AbortSignal,
-  timeoutMs = backpressureWaitTimeoutMs
-): Promise<boolean> => {
-  if (
-    channel.readyState !== 'open' ||
-    channel.bufferedAmount <= channel.bufferedAmountLowThreshold
-  ) {
-    return Promise.resolve(channel.readyState === 'open')
-  }
-
-  return new Promise<boolean>(res => {
-    let settled = false
-    let timeout: ReturnType<typeof setTimeout> | null = null
-
-    const finish = (didDrain: boolean): void => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      channel.removeEventListener(buffLowEvent, onBufferLow)
-      channel.removeEventListener(channelCloseEvent, onCloseOrError)
-      channel.removeEventListener(channelErrorEvent, onCloseOrError)
-      signal?.removeEventListener('abort', onCloseOrError)
-
-      resetTimer(timeout)
-      res(didDrain)
-    }
-
-    const onBufferLow = (): void => finish(true)
-    const onCloseOrError = (): void => finish(false)
-
-    channel.addEventListener(buffLowEvent, onBufferLow)
-    channel.addEventListener(channelCloseEvent, onCloseOrError)
-    channel.addEventListener(channelErrorEvent, onCloseOrError)
-    signal?.addEventListener('abort', onCloseOrError, {once: true})
-
-    timeout = setTimeout(() => finish(false), timeoutMs)
-
-    if (channel.readyState !== 'open' || signal?.aborted) {
-      finish(false)
-      return
-    }
-
-    if (channel.bufferedAmount <= channel.bufferedAmountLowThreshold) {
-      finish(true)
-    }
-  })
-}
 
 export const createActionWireManager = ({
+  getTransport,
   getPeer,
   getPeerIds,
   canReceiveFromPeer,
@@ -204,9 +159,31 @@ export const createActionWireManager = ({
   if (!Number.isSafeInteger(maxReceiveBytes) || maxReceiveBytes <= 0) {
     throw posSafeIntErr('maxReceiveBytes')
   }
+  const peerTransportCache = new WeakMap<PeerHandle, PeerDataTransport>()
+  const resolveTransport = (
+    peerId: string,
+    includePending: boolean
+  ): PeerDataTransport | undefined => {
+    if (getTransport) {
+      return getTransport(peerId, includePending)
+    }
+    const peer = getPeer?.(peerId, includePending)
+    if (!peer) {
+      return undefined
+    }
+    let cached = peerTransportCache.get(peer)
+    if (!cached) {
+      cached = createDirectPeerTransport(peer, () => {
+        const cur = getPeer?.(peerId, true) ?? getPeer?.(peerId, false)
+        return Boolean(cur && !cur.isDead)
+      })
+      peerTransportCache.set(peer, cached)
+    }
+    return cached
+  }
   const actions = new Map<string, WireAction>()
   const outgoing = new Map<string, Map<number, Outgoing>>()
-  const failedPeers = new WeakSet<PeerHandle>()
+  const failedTransports = new WeakSet<PeerDataTransport>()
   let nextId = 0
   const disconnectedTransferErr = (): ActionError =>
     transferError('disconnected', peerDisconnectedMsg)
@@ -226,11 +203,33 @@ export const createActionWireManager = ({
     receiver.clearPeer(peerId)
   }
   const failPeer = (peerId: string, reason: string): void => {
-    const peer = getPeer(peerId, true)
-    if (peer && !failedPeers.has(peer)) {
-      failedPeers.add(peer)
+    const target = resolveTransport(peerId, true)
+    if (target && !failedTransports.has(target)) {
+      failedTransports.add(target)
       warn(`${reason}; disconnecting peer ${peerId}`)
       onPeerError(peerId, mkErr(reason))
+    }
+  }
+  const sendControlFrame = (
+    peerId: string,
+    target: PeerDataTransport | undefined,
+    id: number,
+    kind: number,
+    reason = ''
+  ): void => {
+    if (!target || !target.isOpen) {
+      return
+    }
+    const text = encodeBytes(reason).subarray(0, 200)
+    const bytes = packet(kind, id, controlHeaderSize + text.length)
+    bytes.set(text, controlHeaderSize)
+    try {
+      if (target.bufferedAmount > maxControlBufferedBytes) {
+        throw mkErr('control send buffer is full')
+      }
+      target.sendFrame(bytes, {transferId: id, kind: 'control'})
+    } catch {
+      failPeer(peerId, 'unable to send action control')
     }
   }
   const control = (
@@ -239,21 +238,7 @@ export const createActionWireManager = ({
     kind: number,
     reason = ''
   ): void => {
-    const peer = getPeer(peerId, true)
-    if (!peer) {
-      return
-    }
-    const text = encodeBytes(reason).subarray(0, 200)
-    const bytes = packet(kind, id, controlHeaderSize + text.length)
-    bytes.set(text, controlHeaderSize)
-    try {
-      if ((peer.channel?.bufferedAmount ?? 0) > maxControlBufferedBytes) {
-        throw mkErr('control send buffer is full')
-      }
-      peer.sendData(bytes)
-    } catch {
-      failPeer(peerId, 'unable to send action control')
-    }
+    sendControlFrame(peerId, resolveTransport(peerId, true), id, kind, reason)
   }
   const makeInternalAction = <T extends DataPayload = DataPayload>(
     type: string,
@@ -366,51 +351,34 @@ export const createActionWireManager = ({
             : getPeerIds(normalizedOptions.sendToPending)
           await all(
             [...new Set(ids)].map(async peerId => {
-              const initialPeer = getPeer(
+              // Pin a single PeerDataTransport for the entire transfer so direct
+              // WebRTC promotion never overtakes earlier multi-hop chunks in flight.
+              const transport = resolveTransport(
                 peerId,
                 normalizedOptions.sendToPending
               )
-              if (!initialPeer) {
+              if (!transport) {
                 warnNoPeer(peerId)
                 return
               }
-              let peer = initialPeer
               let failure: Error | null = null
-              let isRegisteredTransfer = false
               const check = (): void => {
                 if (failure) {
                   throw failure
                 }
                 checkAborted(signal)
-                const currentPeer = getPeer(
-                  peerId,
-                  normalizedOptions.sendToPending
-                )
-                if (
-                  isRegisteredTransfer &&
-                  currentPeer &&
-                  currentPeer !== peer &&
-                  !currentPeer.isDead
-                ) {
-                  peer = currentPeer
-                }
-                if (
-                  currentPeer !== peer ||
-                  peer.isDead ||
-                  peer.channel?.readyState === 'closed'
-                ) {
+                if (!transport.isOpen) {
                   throw disconnectedTransferErr()
                 }
               }
-              const sendFrame = async (bytes: Uint8Array): Promise<void> => {
+              const sendFrame = async (
+                bytes: Uint8Array,
+                frameKind: ActionFrameKind
+              ): Promise<void> => {
                 check()
-                const channel = peer.channel
-                if (
-                  channel &&
-                  (channel.readyState !== 'open' ||
-                    channel.bufferedAmount > channel.bufferedAmountLowThreshold)
-                ) {
-                  if (!(await waitForBufferedAmountLow(channel, signal))) {
+                const drain = transport.waitForDrain(signal)
+                if (drain !== true) {
+                  if (!(await drain)) {
                     checkAborted(signal)
                     throw transferError(
                       'disconnected',
@@ -420,13 +388,18 @@ export const createActionWireManager = ({
                   check()
                 }
                 try {
-                  peer.sendData(bytes)
+                  transport.sendFrame(
+                    bytes,
+                    small
+                      ? {kind: frameKind}
+                      : {transferId: id, kind: frameKind}
+                  )
                 } catch {
                   throw disconnectedTransferErr()
                 }
               }
               if (small) {
-                await sendFrame(start)
+                await sendFrame(start, 'inline')
                 onProgress?.(1, peerId, metadata)
                 return
               }
@@ -470,7 +443,6 @@ export const createActionWireManager = ({
                 }
               }
               transfers.set(id, state)
-              isRegisteredTransfer = true
               const expire = (): void => {
                 const remaining = transferTimeoutMs - (Date.now() - lastSeen)
                 if (remaining > 0) {
@@ -489,7 +461,7 @@ export const createActionWireManager = ({
               }
               signal?.addEventListener('abort', abort, {once: true})
               try {
-                await sendFrame(start)
+                await sendFrame(start, 'offer')
                 didSendOffer = true
                 await permission
                 for (let offset = 0; offset < size; offset += chunkSize) {
@@ -510,7 +482,7 @@ export const createActionWireManager = ({
                       : source.subarray(offset, offset + length),
                     chunkHeaderSize
                   )
-                  await sendFrame(bytes)
+                  await sendFrame(bytes, 'chunk')
                   for (const pending of transfers.values()) {
                     pending.touch()
                   }
@@ -521,13 +493,10 @@ export const createActionWireManager = ({
                 if (
                   didSendOffer &&
                   !settledByReceiver &&
-                  getPeer(peerId, true) === peer &&
-                  (!peer.channel ||
-                    (peer.channel.readyState === 'open' &&
-                      (peer.channel.bufferedAmount ?? 0) <=
-                        maxControlBufferedBytes))
+                  transport.isOpen &&
+                  transport.bufferedAmount <= maxControlBufferedBytes
                 ) {
-                  control(peerId, id, cancelled)
+                  sendControlFrame(peerId, transport, id, cancelled)
                 }
                 throw error
               } finally {

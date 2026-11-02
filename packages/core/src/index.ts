@@ -20,7 +20,7 @@ export {
 
 export {roles} from './authority'
 
-export {scale} from './overlay'
+export {scale} from './scale'
 
 export {
   clearUserIdentity,

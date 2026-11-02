@@ -1,7 +1,8 @@
 import type {ActionOptions, InternalAction} from './action-wire'
 import type {OfferManager} from './offer-manager'
+import type {ActionFrameKind, PeerDataTransport} from './peer-registry'
 
-export type {ActionOptions, InternalAction}
+export type {ActionFrameKind, ActionOptions, InternalAction, PeerDataTransport}
 
 export type JsonPrimitive = null | string | number | boolean
 
@@ -341,17 +342,20 @@ export type KernelRolesProvider = {
 
 export type KernelScaleProvider = {
   getActiveMode: () => 'mesh' | 'gossip'
+  isDirectPeer: (peerId: string) => boolean
+  isVirtualPeer: (peerId: string) => boolean
+  getSnapshot: () => TopologySnapshot
   handleFrame: (fromPeerId: string, data: ArrayBuffer) => boolean
   addDirectPeer: (peerId: string, peer: PeerHandle) => void
   removeDirectPeer: (peerId: string, peer?: PeerHandle, reason?: Error) => void
-  prepareMediaPeer?: (peerId: string, peer: PeerHandle) => Promise<PeerHandle>
+  prepareMediaPeer?: (peerId: string) => Promise<PeerHandle>
   getRoute: (peerId: string) => TopologyRoute | undefined
   broadcastInline: (
     frame: Uint8Array,
     onProgress?: (peerId: string) => void
   ) => Promise<boolean>
   requireDirectPeer: (peerId: string) => void
-  notePeerDiscovered: (peerId: string) => void
+  notePeerDiscovered: (peerId: string) => boolean
   shouldConnectPeer: (
     peerId: string,
     direction: 'outbound' | 'inbound'
@@ -426,7 +430,7 @@ export type RoomKernel = {
     listener: () => unknown,
     options?: ListenerOptions
   ) => Unsubscribe
-  activateVirtualPeer: (peerId: string, vPeer: PeerHandle) => boolean
+  activateVirtualPeer: (peerId: string, transport: PeerDataTransport) => boolean
   deactivateVirtualPeer: (peerId: string, reason?: Error) => void
   purgeBannedUserState?: (userId: string) => void
 }

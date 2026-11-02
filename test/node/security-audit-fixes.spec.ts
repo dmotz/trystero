@@ -67,6 +67,7 @@ import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import type {
   AuthoritativeStateRecord,
   JsonValue,
+  PeerDataTransport,
   PeerHandle,
   RoleCertificate,
   Room,
@@ -2138,8 +2139,8 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
   }
 })
 
-void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNextHop, and amortizes unicast stream signatures via lease', async () => {
-  let virtualDestHandle: PeerHandle | null = null
+void test('D9: virtual PeerDataTransport exposes backpressure, fails over to backupNextHop, and amortizes unicast stream signatures via lease', async () => {
+  let virtualDestTransport: PeerDataTransport | null = null
   const received: string[] = []
   let viaRelay1 = 0
   let viaRelay2 = 0
@@ -2152,7 +2153,7 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
     topology: {mode: 'gossip', maxConnections: 4},
     onVirtualPeerJoin: (id, vp) => {
       if (id === dstId) {
-        virtualDestHandle = vp
+        virtualDestTransport = vp
       }
     },
     onVirtualPeerLeave: () => {},
@@ -2217,14 +2218,15 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
     await waitFor(
       () =>
         Boolean(
-          virtualDestHandle && src.getSnapshot().routes[dstId!]?.backupNextHop
+          virtualDestTransport &&
+          src.getSnapshot().routes[dstId!]?.backupNextHop
         ),
       2_000
     )
 
     // 1. Congest primary relay1 (> 256 KiB): virtual peer reports healthy backup's bufferedAmount and routes via relay2!
     r1State.bufferedAmount = 512 * 1024
-    assert.equal(virtualDestHandle!.channel?.bufferedAmount, 1_024)
+    assert.equal(virtualDestTransport!.bufferedAmount, 1_024)
 
     // 2. Measure ECDSA sign count across a 100-packet unicast burst (must amortize via signed UnicastLeaseTuple!)
     const origSign = crypto.subtle.sign.bind(crypto.subtle)
@@ -2244,7 +2246,7 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
 
     try {
       for (let i = 0; i < 100; i++) {
-        virtualDestHandle!.sendData(encodeBytes(`pkt-${i}`))
+        virtualDestTransport!.sendFrame(encodeBytes(`pkt-${i}`))
       }
       await waitFor(() => received.length === 100, 3_000)
     } finally {
@@ -2258,11 +2260,11 @@ void test('D9: virtual PeerHandle exposes backpressure, fails over to backupNext
       `expected <= 3 ECDSA signs for 100-packet leased unicast stream, got ${ecdsaSigns}`
     )
 
-    // 3. When both direct relays die, virtualDestHandle.sendData fails synchronously instead of blackholing
+    // 3. When both direct relays die, virtualDestTransport.sendFrame fails synchronously instead of blackholing
     r1State.alive = false
     r2State.alive = false
-    assert.equal(virtualDestHandle!.channel?.readyState, 'closed')
-    assert.throws(() => virtualDestHandle!.sendData(encodeBytes('dead')))
+    assert.equal(virtualDestTransport!.isOpen, false)
+    assert.throws(() => virtualDestTransport!.sendFrame(encodeBytes('dead')))
   } finally {
     src.destroy()
     relay1.destroy()

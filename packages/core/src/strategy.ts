@@ -394,8 +394,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       announceIntervalMs,
       selfIdP,
       onPeerDiscovered: peerId => {
-        bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)
-        syncOverlayNeighbors()
+        if (bridgeRef.current?.getScaleProvider()?.notePeerDiscovered(peerId)) {
+          syncOverlayNeighbors()
+        }
       },
       shouldConnectPeer: (peerId, direction) =>
         (bridgeRef.current?.canConnectPeer(peerId) ?? true) &&

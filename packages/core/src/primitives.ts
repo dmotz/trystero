@@ -89,11 +89,14 @@ export const hash32 = (str: string): number => {
 }
 
 export type BoundedCache<K, V> = {
+  readonly size: number
   get: (key: K) => V | undefined
   has: (key: K) => boolean
   set: (key: K, value: V) => void
   delete: (key: K) => boolean
   clear: () => void
+  keys: () => IterableIterator<K>
+  entries: () => IterableIterator<[K, V]>
 }
 
 export const createBoundedCache = <K, V>(
@@ -101,6 +104,9 @@ export const createBoundedCache = <K, V>(
 ): BoundedCache<K, V> => {
   const map = new Map<K, V>()
   return {
+    get size(): number {
+      return map.size
+    },
     get: key => {
       const value = map.get(key)
       if (value !== undefined || map.has(key)) {
@@ -122,7 +128,9 @@ export const createBoundedCache = <K, V>(
       map.set(key, value)
     },
     delete: key => map.delete(key),
-    clear: () => map.clear()
+    clear: () => map.clear(),
+    keys: () => map.keys(),
+    entries: () => map.entries()
   }
 }
 

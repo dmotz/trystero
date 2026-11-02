@@ -1659,10 +1659,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   _(Added to `Room` when `scale(...)` is included in `use: [...]`; available
   after `await room.ready`)_ Returns a `TopologySnapshot` describing how peers
   in the room are currently connected and routing data: `mode`, `activeMode`
-  (`'mesh' | 'gossip'`), `selfId`, `directPeerIds`, `roomPeerIds`, `routes`,
-  `mediaTrees`, and `stats` (`messagesSent`, `messagesReceived`,
-  `messagesForwarded`, `duplicatesDropped`, `signatureFailures`,
-  `treeReparents`).
+  (`'mesh' | 'gossip'`), `selfId`, `directPeerIds`, `roomPeerIds`, `routes`, and
+  `stats` (`messagesSent`, `messagesReceived`, `messagesForwarded`,
+  `duplicatesDropped`, `signatureFailures`).
 
 - ### `makeState(namespace, [initialValue], [config])`
 

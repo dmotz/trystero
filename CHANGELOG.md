@@ -9,21 +9,20 @@
   small groups (`<= 12` peers) and automatically switching to a bounded-degree
   `'gossip'` relay overlay (`maxConnections: 6` by default) as rooms grow to
   dozens or hundreds of peers. You can also opt into `'gossip'`, or pass a
-  `ScaleConfig` object (`{mode, maxConnections, autoThreshold, fanout}`) to
-  customize connection limits. Apps that do not import `scale()` tree-shake the
-  entire overlay plugin out of their bundle.
+  `ScaleConfig` object (`{mode, maxConnections, autoThreshold}`) to customize
+  connection limits. Apps that do not import `scale()` tree-shake the entire
+  overlay plugin out of their bundle.
 - All room APIs (`makeAction`, `makeState`, `addStream`, `replaceTrack`, `ping`,
   `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work transparently across both
-  direct and multi-hop peers. Broadcast media in scalable topologies routes
-  hop-by-hop through a branching tree with automatic reparenting if an upstream
-  peer disconnects. Targeted media establishes direct 1-hop WebRTC connections
-  to its recipients, which can exceed the topology's `maxConnections` target.
-  Multi-hop data messages are ECDSA-signed (with ECDH + AES-GCM end-to-end
-  encryption for targeted data sends) so intermediate relays cannot forge or
-  read data traffic.
+  direct and multi-hop peers. Media streams (`addStream` / `replaceTrack`)
+  automatically promote virtual overlay recipients to direct 1-hop WebRTC
+  connections on demand, which can exceed the topology's `maxConnections`
+  target. Multi-hop data messages are ECDSA-signed (with ECDH + AES-GCM
+  end-to-end encryption for targeted data sends) so intermediate relays cannot
+  forge or read data traffic.
 - Added `room.getTopology()` (on rooms configured with `scale()`) to inspect the
-  active topology mode, direct and multi-hop peer lists, routing paths, media
-  broadcast trees, and forwarding stats.
+  active topology mode, direct and multi-hop peer lists, routing paths, and
+  forwarding stats.
 - 👑 **Opt-in, tree-shakeable room admins, custom roles, and peer banning
   (`roles()`)** - added `roles()` plugin for
   `joinRoom({appId, use: [roles(...)]})` (`roles()`,

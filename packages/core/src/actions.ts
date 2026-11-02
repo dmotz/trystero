@@ -41,6 +41,7 @@ import type {
   MessageAction,
   MessageActionConfig,
   MessageContext,
+  PeerDataTransport,
   PeerHandle,
   PeerResult,
   RequestAction,
@@ -97,7 +98,11 @@ type ResponseMetadata = {
 type ActionManagerDeps = {
   onPeerError: (peerId: string, error: Error) => void
   maxReceiveBytes?: number
-  getPeer: (id: string, includePending: boolean) => PeerHandle | undefined
+  getTransport?: (
+    id: string,
+    includePending: boolean
+  ) => PeerDataTransport | undefined
+  getPeer?: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
   broadcastInline?: (
@@ -188,6 +193,7 @@ const unwrapAuthUserMetadata = (
 }
 
 export const createActionManager = ({
+  getTransport,
   getPeer,
   getPeerIds,
   canReceiveFromPeer,
@@ -215,11 +221,16 @@ export const createActionManager = ({
 } => {
   const userIdOf = (peerId: string): string =>
     getPeerUserId ? getPeerUserId(peerId) : peerId
+  const hasActivePeer = (peerId: string): boolean =>
+    Boolean(
+      getTransport ? getTransport(peerId, false) : getPeer?.(peerId, false)
+    )
   const publicActions: Record<string, PublicActionState> = Object.create(null)
   const pendingRequestWaiters: Record<string, PendingRequestWaiter> = {}
   const activeRequestControllers = new Map<string, Set<AbortController>>()
   const wire = createActionWireManager({
-    getPeer,
+    ...(getTransport ? {getTransport} : {}),
+    ...(getPeer ? {getPeer} : {}),
     getPeerIds,
     canReceiveFromPeer,
     onPeerError,
@@ -721,7 +732,7 @@ export const createActionManager = ({
         ? (resolveRequestTarget(target) ?? target)
         : target
 
-      if (!getPeer(resolvedTarget, false)) {
+      if (!hasActivePeer(resolvedTarget)) {
         throw makeActionError('disconnected', noActivePeerMsg(target))
       }
 
