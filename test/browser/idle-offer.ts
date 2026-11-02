@@ -1,11 +1,12 @@
 import {expect, test} from '@playwright/test'
+import type {StrategyConfig} from '../strategy-configs'
 import {sleep, withStrategyBrowserPair} from './harness'
 import {joinRoomAndWaitForPeer, leaveRoom, ping} from './room-helpers'
 
 test('Trystero: browser: restarting an unanswered data channel offer retains its media section', async ({
   page
 }) => {
-  await page.goto(`https://127.0.0.1:${process.env.TRYSTERO_TEST_PORT}/test`)
+  await page.goto(`https://127.0.0.1:${process.env['TRYSTERO_TEST_PORT']}/test`)
   const offers = await page.evaluate(async () => {
     const peerModule = '../packages/core/dist/peer.mjs'
     const {default: initPeer} = await import(peerModule)
@@ -49,17 +50,20 @@ withStrategyBrowserPair(
 
     try {
       await idlePage.evaluate(
-        ([roomId, config]) => {
+        ([roomId, config]: [string, StrategyConfig]) => {
           window[roomId] = window.trystero.joinRoom(config, roomId)
         },
-        [roomId, roomConfig]
+        [roomId, roomConfig] satisfies [string, StrategyConfig]
       )
       // Let any prewarmed native ICE gather, then advance only Date past its TTL.
       await sleep(250)
       await idlePage.clock.setFixedTime(Date.now() + 62_000)
 
       expect(
-        await freshPage.evaluate(joinRoomAndWaitForPeer, [roomId, roomConfig])
+        await freshPage.evaluate(joinRoomAndWaitForPeer, [
+          roomId,
+          roomConfig
+        ] satisfies [string, StrategyConfig])
       ).toBe(idleId)
       await expect
         .poll(() =>
@@ -69,9 +73,12 @@ withStrategyBrowserPair(
           )
         )
         .toEqual([freshId])
-      expect(await idlePage.evaluate(ping, [roomId, freshId])).toBeLessThan(
-        1000
-      )
+      expect(
+        await idlePage.evaluate(ping, [roomId, freshId] satisfies [
+          string,
+          string
+        ])
+      ).toBeLessThan(1000)
     } finally {
       await idlePage.clock.resume()
       await Promise.all([

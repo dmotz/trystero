@@ -1,267 +1,19 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {createTopicStrategy, scale} from '../../packages/core/src/index.ts'
 import {
-  createSortedJoinRooms,
-  joinAsTestPeer,
-  wait,
-  waitFor
-} from './peer-harness.ts'
+  type Room,
+  type RoomError,
+  scale
+} from '../../packages/core/src/index.ts'
+import {createMemorySignalBus} from './memory-rtc.ts'
+import {createSortedJoinRooms, wait, waitFor} from './peer-harness.ts'
 
-class LinkedDataChannel {
-  label: string
-  ordered = true
-  readyState: 'connecting' | 'open' | 'closing' | 'closed' = 'connecting'
-  binaryType = 'arraybuffer'
-  bufferedAmount = 0
-  bufferedAmountLowThreshold = 0
-  onmessage: ((ev: {data: any}) => void) | null = null
-  onopen: (() => void) | null = null
-  onclose: (() => void) | null = null
-  onerror: ((ev: any) => void) | null = null
-  partner: LinkedDataChannel | null = null
-  listeners: Record<string, Set<(...args: any[]) => void>> = {}
-
-  constructor(label = 'trystero') {
-    this.label = label
-  }
-
-  addEventListener(event: string, fn: (...args: any[]) => void) {
-    ;(this.listeners[event] ??= new Set()).add(fn)
-  }
-
-  removeEventListener(event: string, fn: (...args: any[]) => void) {
-    this.listeners[event]?.delete(fn)
-  }
-
-  send(data: Uint8Array | ArrayBuffer | string) {
-    if (this.readyState !== 'open' || !this.partner) {
-      return
-    }
-    const partner = this.partner
-    const payload =
-      typeof data === 'string'
-        ? data
-        : data instanceof ArrayBuffer
-          ? data.slice(0)
-          : data.buffer.slice(
-              data.byteOffset,
-              data.byteOffset + data.byteLength
-            )
-
-    queueMicrotask(() => {
-      if (partner.readyState === 'open') {
-        partner.onmessage?.({data: payload})
-        partner.listeners['message']?.forEach(fn => fn({data: payload}))
-      }
-    })
-  }
-
-  close() {
-    if (this.readyState === 'closed') {
-      return
-    }
-    this.readyState = 'closed'
-    this.onclose?.()
-    this.listeners['close']?.forEach(fn => fn())
-    const partner = this.partner
-    this.partner = null
-    if (partner && partner.readyState !== 'closed') {
-      queueMicrotask(() => partner.close())
-    }
-  }
-}
-
-const offerMap = new Map<string, InMemoryRTCPeerConnection>()
-const answerMap = new Map<
-  string,
-  {offerPc: InMemoryRTCPeerConnection; answerPc: InMemoryRTCPeerConnection}
->()
-let sdpCounter = 0
-
-class InMemoryRTCPeerConnection {
-  iceGatheringState = 'complete'
-  connectionState = 'new'
-  iceConnectionState = 'new'
-  signalingState = 'stable'
-  localDescription: {type: string; sdp: string} | null = null
-  remoteDescription: {type: string; sdp: string} | null = null
-  onnegotiationneeded: (() => void) | null = null
-  onconnectionstatechange: (() => void) | null = null
-  ontrack: ((ev: any) => void) | null = null
-  ondatachannel: ((ev: {channel: LinkedDataChannel}) => void) | null = null
-  listeners: Record<string, Set<(...args: any[]) => void>> = {}
-  dataChannel: LinkedDataChannel | null = null
-  matchedOfferPc: InMemoryRTCPeerConnection | null = null
-  partnerPc: InMemoryRTCPeerConnection | null = null
-  dtlsFingerprint = (() => {
-    const n = ++sdpCounter
-    const b0 = ((n >>> 8) & 0xff).toString(16).padStart(2, '0').toUpperCase()
-    const b1 = (n & 0xff).toString(16).padStart(2, '0').toUpperCase()
-    return `sha-256 AA:BB:CC:DD:${b0}:${b1}`
-  })()
-
-  createDataChannel(label: string) {
-    const ch = new LinkedDataChannel(label)
-    this.dataChannel = ch
-    return ch
-  }
-
-  addEventListener(event: string, fn: (...args: any[]) => void) {
-    ;(this.listeners[event] ??= new Set()).add(fn)
-  }
-
-  removeEventListener(event: string, fn: (...args: any[]) => void) {
-    this.listeners[event]?.delete(fn)
-  }
-
-  restartIce() {}
-
-  async createOffer() {
-    const sdp = `v=0\r\na=fingerprint:${this.dtlsFingerprint}\r\na=mid:${++sdpCounter}\r\n`
-    offerMap.set(sdp, this)
-    return {type: 'offer', sdp}
-  }
-
-  async createAnswer() {
-    const sdp = `v=0\r\na=fingerprint:${this.dtlsFingerprint}\r\na=mid:${++sdpCounter}\r\n`
-    if (this.matchedOfferPc) {
-      answerMap.set(sdp, {offerPc: this.matchedOfferPc, answerPc: this})
-    }
-    return {type: 'answer', sdp}
-  }
-
-  async setLocalDescription(description?: {type: string; sdp: string}) {
-    if (description?.type === 'rollback') {
-      this.signalingState = 'stable'
-      return
-    }
-    const next =
-      description ??
-      (this.remoteDescription?.type === 'offer'
-        ? await this.createAnswer()
-        : await this.createOffer())
-    this.localDescription = next
-    this.signalingState = next.type === 'offer' ? 'have-local-offer' : 'stable'
-    this.listeners['icegatheringstatechange']?.forEach(fn => fn())
-  }
-
-  async setRemoteDescription(description: {type: string; sdp: string}) {
-    this.remoteDescription = description
-    if (description.type === 'offer') {
-      this.matchedOfferPc = offerMap.get(description.sdp) ?? null
-      this.signalingState = 'have-remote-offer'
-      return
-    }
-    if (description.type === 'answer') {
-      this.signalingState = 'stable'
-      const match = answerMap.get(description.sdp)
-      if (!match || match.offerPc !== this) {
-        return
-      }
-      const {answerPc} = match
-      if (
-        this.connectionState === 'closed' ||
-        answerPc.connectionState === 'closed'
-      ) {
-        return
-      }
-      this.partnerPc = answerPc
-      answerPc.partnerPc = this
-      const offerCh = this.dataChannel ?? new LinkedDataChannel('trystero')
-      const answerCh = new LinkedDataChannel(offerCh.label)
-      offerCh.partner = answerCh
-      answerCh.partner = offerCh
-      answerPc.dataChannel = answerCh
-
-      queueMicrotask(() => {
-        if (
-          this.connectionState === 'closed' ||
-          answerPc.connectionState === 'closed'
-        ) {
-          return
-        }
-        this.connectionState = 'connected'
-        this.iceConnectionState = 'connected'
-        answerPc.connectionState = 'connected'
-        answerPc.iceConnectionState = 'connected'
-        this.onconnectionstatechange?.()
-        answerPc.onconnectionstatechange?.()
-
-        answerPc.ondatachannel?.({channel: answerCh})
-        offerCh.readyState = 'open'
-        answerCh.readyState = 'open'
-        offerCh.onopen?.()
-        answerCh.onopen?.()
-      })
-    }
-  }
-
-  close() {
-    if (this.connectionState === 'closed') {
-      return
-    }
-    this.connectionState = 'closed'
-    this.iceConnectionState = 'closed'
-    this.dataChannel?.close()
-    this.onconnectionstatechange?.()
-    const partner = this.partnerPc
-    this.partnerPc = null
-    if (partner && partner.connectionState !== 'closed') {
-      queueMicrotask(() => partner.close())
-    }
-  }
-
-  getSenders() {
-    return []
-  }
-
-  addTrack() {
-    return {}
-  }
-
-  removeTrack() {}
-}
-
-const createMemorySignalBus = () => {
-  const topicHandlers = new Map<
-    string,
-    Set<(topic: string, data: any) => void>
-  >()
-
-  const makeJoinRoom = (peerId?: string) => {
-    const join = createTopicStrategy({
-      steadyAnnounceIntervalMs: 120,
-      init: () => ({}),
-      subscribeTopic: (_relay, topic, onTopicMessage) => {
-        let set = topicHandlers.get(topic)
-        if (!set) {
-          set = new Set()
-          topicHandlers.set(topic, set)
-        }
-        set.add(onTopicMessage)
-        return () => {
-          set?.delete(onTopicMessage)
-        }
-      },
-      publishTopic: (_relay, topic, message) => {
-        const handlers = topicHandlers.get(topic)
-        if (!handlers) {
-          return
-        }
-        for (const handler of handlers) {
-          queueMicrotask(() => handler(topic, message))
-        }
-      }
-    })
-    return peerId ? joinAsTestPeer(peerId, join) : join
-  }
-
-  return {makeJoinRoom}
-}
+type RecordedError = RoomError & {peerId?: string | undefined}
 
 void test('Trystero: validates config.limit as a positive safe integer', () => {
-  const {makeJoinRoom} = createMemorySignalBus()
+  const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus({
+    delivery: 'microtask'
+  })
   const joinRoom = makeJoinRoom()
 
   for (const invalidLimit of [0, -1, -100, 1.5, NaN, Infinity, -Infinity]) {
@@ -271,7 +23,7 @@ void test('Trystero: validates config.limit as a positive safe integer', () => {
           {
             appId: 'limit-validation-app',
             limit: invalidLimit,
-            rtcPolyfill: InMemoryRTCPeerConnection as any
+            rtcPolyfill
           },
           'room-1'
         ),
@@ -284,7 +36,9 @@ void test(
   'Trystero: limit: 1 allows a solo occupant, rejects subsequent joiners with "room full", and allows join after occupant leaves',
   {timeout: 10_000},
   async () => {
-    const {makeJoinRoom} = createMemorySignalBus()
+    const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus({
+      delivery: 'microtask'
+    })
     const appId = `limit-1-${Date.now()}`
     const roomId = 'solo-room'
 
@@ -295,7 +49,7 @@ void test(
     )
     const hostJoin = hostSlot!.joinRoom
     const lateJoin = lateSlot!.joinRoom
-    const hostErrors: any[] = []
+    const hostErrors: RecordedError[] = []
     const hostJoins: string[] = []
     const hostLeaves: string[] = []
 
@@ -303,7 +57,7 @@ void test(
       {
         appId,
         limit: 1,
-        rtcPolyfill: InMemoryRTCPeerConnection as any
+        rtcPolyfill
       },
       roomId
     )
@@ -313,17 +67,17 @@ void test(
 
     await wait(60)
 
-    const lateErrors: any[] = []
+    const lateErrors: RecordedError[] = []
     const lateJoins: string[] = []
 
-    let lateRoom: any
-    let nextRoom: any
+    let lateRoom: Room | undefined
+    let nextRoom: Room | undefined
     try {
       lateRoom = lateJoin(
         {
           appId,
           limit: 1,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -338,12 +92,12 @@ void test(
         1,
         'rejected joiner should receive onError once'
       )
-      assert.equal(lateErrors[0].code, 'room-full')
-      assert.equal(lateErrors[0].message, 'room full')
-      assert.equal(lateErrors[0].appId, appId)
-      assert.equal(lateErrors[0].roomId, roomId)
+      assert.equal(lateErrors[0]!.code, 'room-full')
+      assert.equal(lateErrors[0]!.message, 'room full')
+      assert.equal(lateErrors[0]!.appId, appId)
+      assert.equal(lateErrors[0]!.roomId, roomId)
       const {peerId: hostPeerId} = await hostRoom.getSelf()
-      assert.equal(lateErrors[0].peerId, hostPeerId)
+      assert.equal(lateErrors[0]!.peerId, hostPeerId)
       assert.deepEqual(lateJoins, [])
       assert.deepEqual(hostErrors, [], 'host must not receive onError')
       assert.deepEqual(
@@ -363,12 +117,12 @@ void test(
       await wait(50)
 
       const nextJoin = makeJoinRoom('peer-next')
-      const nextErrors: any[] = []
+      const nextErrors: RecordedError[] = []
       nextRoom = nextJoin(
         {
           appId,
           limit: 1,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -390,7 +144,9 @@ void test(
   'Trystero: limit: 2 admits 2 peers, rejects a 3rd with "room full", and admits a 4th after one peer leaves',
   {timeout: 10_000},
   async () => {
-    const {makeJoinRoom} = createMemorySignalBus()
+    const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus({
+      delivery: 'microtask'
+    })
     const appId = `limit-2-seq-${Date.now()}`
     const roomId = 'duel-room'
 
@@ -404,10 +160,10 @@ void test(
     const joinC = slotC!.joinRoom
     const joinD = slotD!.joinRoom
 
-    const errorsA: any[] = []
-    const errorsB: any[] = []
-    const errorsC: any[] = []
-    const errorsD: any[] = []
+    const errorsA: RecordedError[] = []
+    const errorsB: RecordedError[] = []
+    const errorsC: RecordedError[] = []
+    const errorsD: RecordedError[] = []
 
     const joinsA: string[] = []
     const leavesA: string[] = []
@@ -416,16 +172,16 @@ void test(
     const joinsC: string[] = []
     const joinsD: string[] = []
 
-    let roomA: any
-    let roomB: any
-    let roomC: any
-    let roomD: any
+    let roomA: Room | undefined
+    let roomB: Room | undefined
+    let roomC: Room | undefined
+    let roomD: Room | undefined
     try {
       roomA = joinA(
         {
           appId,
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -437,7 +193,7 @@ void test(
         {
           appId,
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -459,7 +215,7 @@ void test(
         {
           appId,
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -474,12 +230,12 @@ void test(
         1,
         'Peer C must receive onError exactly once'
       )
-      assert.equal(errorsC[0].code, 'room-full')
-      assert.equal(errorsC[0].message, 'room full')
-      assert.equal(errorsC[0].appId, appId)
-      assert.equal(errorsC[0].roomId, roomId)
+      assert.equal(errorsC[0]!.code, 'room-full')
+      assert.equal(errorsC[0]!.message, 'room full')
+      assert.equal(errorsC[0]!.appId, appId)
+      assert.equal(errorsC[0]!.roomId, roomId)
       assert.ok(
-        errorsC[0].peerId === peerA || errorsC[0].peerId === peerB,
+        errorsC[0]!.peerId === peerA || errorsC[0]!.peerId === peerB,
         'rejecting peerId should be one of the existing members'
       )
       assert.deepEqual(joinsC, [], 'Peer C must not activate any peers')
@@ -487,7 +243,11 @@ void test(
       assert.deepEqual(errorsB, [], 'Peer B must not receive onError')
       assert.deepEqual(joinsA, [peerB], 'Peer A must not fire onPeerJoin for C')
       assert.deepEqual(joinsB, [peerA], 'Peer B must not fire onPeerJoin for C')
-      assert.deepEqual(leavesA, [], 'Peer A must not fire onPeerLeave for C')
+      assert.deepEqual<string[]>(
+        leavesA,
+        [],
+        'Peer A must not fire onPeerLeave for C'
+      )
       assert.deepEqual(leavesB, [], 'Peer B must not fire onPeerLeave for C')
 
       // Rejected Peer C cleans up and Peer B leaves, freeing 1 seat (1/2)
@@ -500,7 +260,7 @@ void test(
         {
           appId,
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -530,7 +290,9 @@ void test(
   'Trystero: advisory burst join caps each peer view at limit without self-eviction, and burst newcomers cannot evict existing peers',
   {timeout: 10_000},
   async () => {
-    const {makeJoinRoom} = createMemorySignalBus()
+    const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus({
+      delivery: 'microtask'
+    })
     const appId = `limit-burst-${Date.now()}`
     const roomId = 'burst-room'
     const slots = await createSortedJoinRooms(8, () => makeJoinRoom(), appId)
@@ -541,8 +303,8 @@ void test(
     const stateByPeer = new Map<
       string,
       {
-        room: any
-        errors: any[]
+        room: Room
+        errors: RecordedError[]
         joins: string[]
         leaves: string[]
       }
@@ -550,14 +312,14 @@ void test(
 
     // Launch all 5 peers concurrently in the same tick on an empty limit: 2 room
     for (const {joinRoom, peerId} of initialSlots) {
-      const errors: any[] = []
+      const errors: RecordedError[] = []
       const joins: string[] = []
       const leaves: string[] = []
       const room = joinRoom(
         {
           appId,
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -567,7 +329,7 @@ void test(
       stateByPeer.set(peerId, {room, errors, joins, leaves})
     }
 
-    const burstNewcomers: any[] = []
+    const burstNewcomers: Room[] = []
     try {
       await waitFor(
         () =>
@@ -626,16 +388,16 @@ void test(
       await wait(60)
 
       const newcomerIds = newcomerSlots.map(s => s.peerId)
-      const newcomerRooms = new Map<string, any>()
-      const newcomerErrors = new Map<string, any[]>()
+      const newcomerRooms = new Map<string, Room>()
+      const newcomerErrors = new Map<string, RecordedError[]>()
       for (const {joinRoom, peerId: newcomerId} of newcomerSlots) {
-        const errs: any[] = []
+        const errs: RecordedError[] = []
         newcomerErrors.set(newcomerId, errs)
         const room = joinRoom(
           {
             appId,
             limit: 2,
-            rtcPolyfill: InMemoryRTCPeerConnection as any
+            rtcPolyfill
           },
           roomId
         )
@@ -666,8 +428,8 @@ void test(
           assert.equal(errs.length, 1)
         }
         if (errs.length === 1) {
-          assert.equal(errs[0].code, 'room-full')
-          assert.equal(errs[0].message, 'room full')
+          assert.equal(errs[0]!.code, 'room-full')
+          assert.equal(errs[0]!.message, 'room full')
         }
       }
       // Existing pair (pairA, pairB) is never evicted by lower peerId 'peer-0'
@@ -696,7 +458,9 @@ void test(
   'Trystero: per-link rejection semantics: one peer claiming room full does not force newcomer to leave or drop other peers even when newcomer has limit set',
   {timeout: 10_000},
   async () => {
-    const {makeJoinRoom} = createMemorySignalBus()
+    const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus({
+      delivery: 'microtask'
+    })
     const appId = `limit-asym-${Date.now()}`
     const roomId = 'asym-room'
 
@@ -706,15 +470,15 @@ void test(
       appId
     )
 
-    let hostRoom: any
-    let guest1Room: any
-    let guest2Room: any
+    let hostRoom: Room | undefined
+    let guest1Room: Room | undefined
+    let guest2Room: Room | undefined
     try {
       hostRoom = hostSlot!.joinRoom(
         {
           appId,
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -723,7 +487,7 @@ void test(
         {
           appId,
           // guest-1 omits limit and must not adopt unauthenticated limit from host-peer
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -738,17 +502,17 @@ void test(
       await waitFor(
         () =>
           guest1Joins.includes(hostPeerId) &&
-          Object.keys(hostRoom.getPeers()).includes(guest1PeerId),
+          Object.keys(hostRoom!.getPeers()).includes(guest1PeerId),
         3_000
       )
 
-      const guest2Errors: any[] = []
+      const guest2Errors: RecordedError[] = []
       guest2Room = guest2Slot!.joinRoom(
         {
           appId,
           // guest-2 has limit: 3 and must not self-evict or drop guest-1 when host-peer rejects as full
           limit: 3,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -759,12 +523,12 @@ void test(
         () =>
           guest2Errors.some(e => e.peerId === hostPeerId) &&
           guest1Joins.includes(guest2PeerId) &&
-          Object.keys(guest2Room.getPeers()).includes(guest1PeerId),
+          Object.keys(guest2Room!.getPeers()).includes(guest1PeerId),
         3_000
       )
-      assert.equal(guest2Errors[0].code, 'room-full')
-      assert.equal(guest2Errors[0].message, 'room full')
-      assert.equal(guest2Errors[0].peerId, hostPeerId)
+      assert.equal(guest2Errors[0]!.code, 'room-full')
+      assert.equal(guest2Errors[0]!.message, 'room full')
+      assert.equal(guest2Errors[0]!.peerId, hostPeerId)
       assert.deepEqual(Object.keys(hostRoom.getPeers()), [guest1PeerId])
       assert.ok(Object.keys(guest1Room.getPeers()).includes(guest2PeerId))
       assert.ok(Object.keys(guest2Room.getPeers()).includes(guest1PeerId))
@@ -782,7 +546,9 @@ void test(
   'Trystero: limit with password checks password before capacity',
   {timeout: 10_000},
   async () => {
-    const {makeJoinRoom} = createMemorySignalBus()
+    const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus({
+      delivery: 'microtask'
+    })
     const appId = `limit-pw-hs-${Date.now()}`
     const roomId = 'secure-duel'
 
@@ -792,17 +558,17 @@ void test(
       appId
     )
 
-    let roomA: any
-    let roomB: any
-    let wrongPwRoom: any
-    let rightPwFullRoom: any
+    let roomA: Room | undefined
+    let roomB: Room | undefined
+    let wrongPwRoom: Room | undefined
+    let rightPwFullRoom: Room | undefined
     try {
       roomA = slotA!.joinRoom(
         {
           appId,
           password: 'correct-password',
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -812,7 +578,7 @@ void test(
           appId,
           password: 'correct-password',
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -823,19 +589,19 @@ void test(
       ])
       await waitFor(
         () =>
-          Object.keys(roomA.getPeers()).includes(peerB) &&
-          Object.keys(roomB.getPeers()).includes(peerA),
+          Object.keys(roomA!.getPeers()).includes(peerB) &&
+          Object.keys(roomB!.getPeers()).includes(peerA),
         3_000
       )
 
       // 1. Peer with WRONG password must NOT receive 'room full' (must fail with password error)
-      const wrongPwErrors: any[] = []
+      const wrongPwErrors: RecordedError[] = []
       wrongPwRoom = slotWrongPw!.joinRoom(
         {
           appId,
           password: 'wrong-password',
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -849,13 +615,13 @@ void test(
       await wrongPwRoom.leave().catch(() => {})
 
       // 2. Peer with CORRECT password when room is full receives 'room full'
-      const fullErrors: any[] = []
+      const fullErrors: RecordedError[] = []
       rightPwFullRoom = slotC!.joinRoom(
         {
           appId,
           password: 'correct-password',
           limit: 2,
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -863,8 +629,8 @@ void test(
 
       await waitFor(() => fullErrors.length > 0, 3_000)
       assert.equal(fullErrors.length, 1)
-      assert.equal(fullErrors[0].code, 'room-full')
-      assert.equal(fullErrors[0].message, 'room full')
+      assert.equal(fullErrors[0]!.code, 'room-full')
+      assert.equal(fullErrors[0]!.message, 'room full')
     } finally {
       await Promise.all([
         roomA?.leave().catch(() => {}),
@@ -880,14 +646,16 @@ void test(
   'Trystero: enforces limit across multi-hop overlay topologies',
   {timeout: 10_000},
   async () => {
-    const {makeJoinRoom} = createMemorySignalBus()
+    const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus({
+      delivery: 'microtask'
+    })
     const appId = `limit-overlay-${Date.now()}`
     const roomId = 'tree-room'
     const scaleConfig = {mode: 'gossip' as const, maxConnections: 4}
 
     const slots = await createSortedJoinRooms(7, () => makeJoinRoom(), appId)
-    const rooms: any[] = []
-    let fifthRoom: any
+    const rooms: Room[] = []
+    let fifthRoom: Room | undefined
 
     try {
       for (const {joinRoom} of slots.slice(0, 6)) {
@@ -896,7 +664,7 @@ void test(
             appId,
             limit: 6,
             use: [scale(scaleConfig)],
-            rtcPolyfill: InMemoryRTCPeerConnection as any
+            rtcPolyfill
           },
           roomId
         )
@@ -909,13 +677,13 @@ void test(
       )
 
       // 7th peer tries to join the 6-peer multi-hop overlay room
-      const fifthErrors: any[] = []
+      const fifthErrors: RecordedError[] = []
       fifthRoom = slots[6]!.joinRoom(
         {
           appId,
           limit: 6,
           use: [scale(scaleConfig)],
-          rtcPolyfill: InMemoryRTCPeerConnection as any
+          rtcPolyfill
         },
         roomId
       )
@@ -923,8 +691,8 @@ void test(
 
       await waitFor(() => fifthErrors.length > 0, 3_000)
       assert.equal(fifthErrors.length, 1)
-      assert.equal(fifthErrors[0].code, 'room-full')
-      assert.equal(fifthErrors[0].message, 'room full')
+      assert.equal(fifthErrors[0]!.code, 'room-full')
+      assert.equal(fifthErrors[0]!.message, 'room full')
       for (const r of rooms) {
         assert.equal(Object.keys(r.getPeers()).length, 5)
       }

@@ -11,6 +11,7 @@ import {
   waitFor
 } from './peer-harness.ts'
 import createRoom from '../../packages/core/src/room.ts'
+import type {PeerHandle} from '../../packages/core/src/types.ts'
 
 const metadataAction = (type: string, key: string) => {
   const payload = new TextEncoder().encode(JSON.stringify({k: key}))
@@ -24,7 +25,7 @@ for (const fault of ['wire', 'stream']) {
   void test(`a ${fault} fault removes and destroys the room peer`, async t => {
     t.mock.method(console, 'warn', () => {})
     const peer = new MockPeer()
-    let connect
+    let connect!: (peer: PeerHandle, id: string) => void
     const room = createRoom(
       callback => {
         connect = callback
@@ -32,11 +33,11 @@ for (const fault of ['wire', 'stream']) {
       () => {},
       () => {}
     )
-    connect(peer, 'peer')
+    connect(peer as unknown as PeerHandle, 'peer')
     t.after(async () => {
       await room.leave()
     })
-    peer.handlers.data(encodeInternalAction('hsready'))
+    peer.handlers.data!(encodeInternalAction('hsready'))
     await waitFor(() => 'peer' in room.getPeers())
     let leaves = 0
     room.onPeerLeave(() => {
@@ -49,7 +50,7 @@ for (const fault of ['wire', 'stream']) {
     const ping = room.ping('peer').catch(error => error.message)
     const malformed = new Uint8Array(36).buffer
     for (let i = 0; i < (fault === 'wire' ? 1 : 65); i++) {
-      peer.handlers.data(
+      peer.handlers.data!(
         fault === 'wire' ? malformed : metadataAction(fault, String(i))
       )
     }
@@ -68,7 +69,7 @@ const fileOffer = (id: number, type = 'file', size = 20_000) =>
 
 for (const saturation of ['policies', 'transfers']) {
   void test(`media control messages bypass saturated ${saturation} and retain their size limit`, async t => {
-    let connect
+    let connect!: (peer: PeerHandle, id: string) => void
     const room = createRoom(
       callback => {
         connect = callback
@@ -78,8 +79,8 @@ for (const saturation of ['policies', 'transfers']) {
     )
     const peer = new MockPeer()
     t.after(() => room.leave())
-    connect(peer, 'peer')
-    peer.handlers.data(encodeInternalAction('hsready'))
+    connect(peer as unknown as PeerHandle, 'peer')
+    peer.handlers.data!(encodeInternalAction('hsready'))
     await waitFor(() => 'peer' in room.getPeers())
     const approvals: ((allow: boolean) => void)[] = []
     t.after(() => approvals.forEach(resolve => resolve(false)))
@@ -89,7 +90,7 @@ for (const saturation of ['policies', 'transfers']) {
       file.onReceive(() => new Promise(resolve => approvals.push(resolve)))
     }
     for (let id = 0; id < (saturation === 'policies' ? 8 : 64); id++) {
-      peer.handlers.data(fileOffer(id))
+      peer.handlers.data!(fileOffer(id))
     }
     let streams = 0
     room.onPeerStream(() => {
@@ -97,23 +98,23 @@ for (const saturation of ['policies', 'transfers']) {
     })
     const track = {id: 'track'}
     const stream = {id: 'stream', getTracks: () => [track]}
-    peer.handlers.data(metadataAction('stream', 's'))
-    peer.handlers.stream(stream)
+    peer.handlers.data!(metadataAction('stream', 's'))
+    peer.handlers.stream!(stream)
     assert.equal(streams, 1)
     const controls: number[] = []
     peer.sendData = (bytes?: Uint8Array) => {
       if (bytes) {
-        controls.push(bytes[1] & 15)
+        controls.push((bytes[1] ?? 0) & 15)
       }
     }
-    peer.handlers.data(fileOffer(100, `${internalActionPrefix}stream`, 65_537))
+    peer.handlers.data!(fileOffer(100, `${internalActionPrefix}stream`, 65_537))
     assert.deepEqual(controls, [4])
     assert.ok('peer' in room.getPeers())
   })
 }
 
 void test('application policy saturation does not block new peer handshakes', async t => {
-  let connect
+  let connect!: (peer: PeerHandle, id: string) => void
   const proofs: string[] = []
   const room = createRoom(
     callback => {
@@ -134,18 +135,18 @@ void test('application policy saturation does not block new peer handshakes', as
   const file = room.makeAction('file')
   file.onMessage(() => {})
   file.onReceive(() => new Promise(resolve => approvals.push(resolve)))
-  const join = id => {
+  const join = (id: string) => {
     const peer = new MockPeer()
-    connect(peer, id)
-    peer.handlers.data(encodeInternalAction('hsdata'))
-    peer.handlers.data(encodeInternalAction('hsready'))
+    connect(peer as unknown as PeerHandle, id)
+    peer.handlers.data!(encodeInternalAction('hsdata'))
+    peer.handlers.data!(encodeInternalAction('hsready'))
     return peer
   }
   const peers = Array.from({length: 16}, (_, index) => join(`peer-${index}`))
   await waitFor(() => Object.keys(room.getPeers()).length === 16)
   for (const peer of peers) {
     for (let id = 0; id < 8; id++) {
-      peer.handlers.data(fileOffer(id))
+      peer.handlers.data!(fileOffer(id))
     }
   }
   assert.equal(approvals.length, 128)
@@ -159,8 +160,8 @@ void test('room peer errors and handshake failures notify the remote peer to exi
   t.mock.method(console, 'warn', () => {})
   const createPair = (rejectHandshake = false) => {
     const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
-    let connectA
-    let connectB
+    let connectA!: (peer: PeerHandle, id: string) => void
+    let connectB!: (peer: PeerHandle, id: string) => void
     const roomA = createRoom(
       callback => {
         connectA = callback
@@ -182,8 +183,8 @@ void test('room peer errors and handshake failures notify the remote peer to exi
       () => {},
       () => {}
     )
-    connectA(peerA, 'peer-b')
-    connectB(peerB, 'peer-a')
+    connectA(peerA as unknown as PeerHandle, 'peer-b')
+    connectB(peerB as unknown as PeerHandle, 'peer-a')
     return {roomA, roomB, peerA, peerB}
   }
   const bad = createPair()
@@ -198,7 +199,7 @@ void test('room peer errors and handshake failures notify the remote peer to exi
     remoteLeaves++
   })
   // Trigger a room-level wire fault on bad.roomA; bad.roomB should also exit.
-  bad.peerA.handlers.data(new Uint8Array(36).buffer)
+  bad.peerA.handlers.data!(new Uint8Array(36).buffer)
   await waitFor(() => !('peer-a' in bad.roomB.getPeers()))
   assert.equal(remoteLeaves, 1)
 

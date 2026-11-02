@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import type {
+  Room,
+  StrategyMessage,
+  StrategyOnMessage
+} from '../../packages/core/src/index.ts'
+import type {PeerState} from '../../packages/core/src/internal-types.ts'
 import {
   buildSignalAad,
   prunePeerStates
@@ -19,11 +25,7 @@ import {
 type Subscriber = {
   rootTopic: string
   selfTopic: string
-  onMessage: (
-    topic: string,
-    msg: unknown,
-    signalPeer: (peerTopic: string, signal: string) => void
-  ) => Promise<void> | void
+  onMessage: StrategyOnMessage
 }
 
 void test(
@@ -48,7 +50,7 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
     const room = joinRoom(config, 'test-room')
@@ -60,7 +62,7 @@ void test(
       assert.equal(announceCount, 0, 'passive peer should not announce on join')
       assert.equal('isPassive' in room, false)
 
-      const sub = subscribers[0]
+      const sub = subscribers[0]!
       await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-1'}, () => {})
 
       const encryptedOffer = await encrypt(
@@ -107,7 +109,7 @@ void test(
     const appId = `active-announce-${Date.now()}`
     const config = {
       appId,
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
     const room = joinRoom(config, 'test-room')
@@ -145,14 +147,15 @@ void test(
       {
         appId,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'test-room'
     )
 
     try {
       await waitFor(() => subscribers.length >= 1)
-      const sub = subscribers[0]
+      const sub = subscribers[0]!
 
       await sub.onMessage(
         sub.rootTopic,
@@ -164,7 +167,7 @@ void test(
 
       await waitFor(() => signalPayloads.length > 0, 5_000)
 
-      const firstSignal = JSON.parse(signalPayloads[0])
+      const firstSignal = JSON.parse(signalPayloads[0]!)
       assert.equal(typeof firstSignal.offer, 'string')
       assert.equal('passive' in firstSignal, false)
     } finally {
@@ -194,7 +197,8 @@ void test(
       {
         appId,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'test-room'
     )
@@ -202,7 +206,7 @@ void test(
     try {
       const {peerId: selfId} = await room.getSelf()
       await waitFor(() => subscribers.length >= 1)
-      const sub = subscribers[0]
+      const sub = subscribers[0]!
 
       await sub.onMessage(
         sub.rootTopic,
@@ -214,7 +218,7 @@ void test(
 
       await waitFor(() => signalPayloads.length === 1)
 
-      const reply = JSON.parse(signalPayloads[0])
+      const reply = JSON.parse(signalPayloads[0]!)
       assert.deepEqual(reply, {peerId: selfId})
     } finally {
       await room.leave().catch(() => {})
@@ -243,14 +247,15 @@ void test(
       {
         appId,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'test-room'
     )
 
     try {
       await waitFor(() => subscribers.length >= 1)
-      const sub = subscribers[0]
+      const sub = subscribers[0]!
       const onSignal = () => {
         signalsSent++
       }
@@ -258,7 +263,11 @@ void test(
       await sub.onMessage(sub.rootTopic, {}, onSignal)
       await sub.onMessage('wrong-topic', {peerId: 'active-peer'}, onSignal)
       await sub.onMessage('not json', 'not-json', onSignal)
-      await sub.onMessage(sub.rootTopic, null, onSignal)
+      await sub.onMessage(
+        sub.rootTopic,
+        null as unknown as StrategyMessage,
+        onSignal
+      )
       await sub.onMessage(
         sub.rootTopic,
         {peerId: 'active-peer', offer: {sdp: 'not-a-string'}},
@@ -300,7 +309,8 @@ void test(
       {
         appId,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'test-room'
     )
@@ -308,7 +318,8 @@ void test(
       {
         appId,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'test-room'
     )
@@ -345,7 +356,7 @@ void test(
     const config = {
       appId: `passive-leave-${Date.now()}`,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
     const room = joinRoom(config, 'test-room')
@@ -361,7 +372,16 @@ void test(
 )
 
 void test('Trystero: prunePeerStates deletes only completely idle peer states', () => {
-  const peerStates: Record<string, any> = {
+  type TestPeerState = {
+    answeringPeer: MockPeer | null
+    connectedPeer: MockPeer | null
+    lastExchangeAt: number
+    offerId: string | null
+    offerInitPromise: Promise<unknown> | null
+    offerPeer: MockPeer | null
+    offerRelays: Array<{timeout: ReturnType<typeof setTimeout>}>
+  }
+  const peerStates: Record<string, TestPeerState> = {
     idle: {
       answeringPeer: null,
       connectedPeer: null,
@@ -392,20 +412,20 @@ void test('Trystero: prunePeerStates deletes only completely idle peer states', 
   }
 
   try {
-    prunePeerStates(peerStates)
+    prunePeerStates(peerStates as unknown as Record<string, PeerState>)
     assert.equal('idle' in peerStates, false)
     assert.equal('connected' in peerStates, true)
     assert.equal('retrying' in peerStates, true)
 
-    peerStates.connected.connectedPeer = null
-    clearTimeout(peerStates.retrying.offerRelays[0].timeout)
-    peerStates.retrying.offerRelays = []
-    peerStates.retrying.offerPeer = null
+    peerStates['connected']!.connectedPeer = null
+    clearTimeout(peerStates['retrying']!.offerRelays[0]!.timeout)
+    peerStates['retrying']!.offerRelays = []
+    peerStates['retrying']!.offerPeer = null
 
-    prunePeerStates(peerStates)
+    prunePeerStates(peerStates as unknown as Record<string, PeerState>)
     assert.deepEqual(peerStates, {})
   } finally {
-    clearTimeout(peerStates.retrying?.offerRelays?.[0]?.timeout)
+    clearTimeout(peerStates['retrying']?.offerRelays[0]?.timeout)
   }
 })
 
@@ -432,11 +452,12 @@ void test(
       {
         appId,
         passive: true,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'test-room'
     )
-    let activeRoom: any = null
+    let activeRoom: Room | null = null
     const {peerA, peerB} = linkPeers(new BufferedPeer(), new BufferedPeer())
 
     try {
@@ -455,7 +476,8 @@ void test(
       )(
         {
           appId,
-          rtcPolyfill: MockRTCPeerConnection as any
+          rtcPolyfill:
+            MockRTCPeerConnection as unknown as typeof RTCPeerConnection
         },
         'test-room'
       )
@@ -464,7 +486,7 @@ void test(
       const [{peerId: passivePeerId}, {peerId: activePeerId}] =
         await Promise.all([room.getSelf(), activeRoom.getSelf()])
 
-      const sub = subscribers[0]
+      const sub = subscribers[0]!
       const roomKey = genKey('', appId, 'test-room')
       const encryptedAnswerForPassive = await encrypt(
         roomKey,
@@ -487,8 +509,8 @@ void test(
         'answer-sdp',
         buildSignalAad('answer', passivePeerId, 'offer-1')
       )
-      await subscribers[1].onMessage(
-        subscribers[1].rootTopic,
+      await subscribers[1]!.onMessage(
+        subscribers[1]!.rootTopic,
         {
           peerId: passivePeerId,
           offerId: 'offer-1',

@@ -1,55 +1,66 @@
-import {rmSync} from 'node:fs'
-import {createServer} from 'node:net'
+import {createServer, type Server} from 'node:net'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {devices} from '@playwright/test'
 
 const minPort = 10_000
 
-const getFreePort = async (exclude: number[] = []): Promise<number> => {
-  for (;;) {
-    const port = await new Promise<number>((resolve, reject) => {
-      const server = createServer()
-      server.unref()
-      server.once('error', reject)
-      server.listen(0, () => {
-        const address = server.address()
-        const allocated =
-          address && typeof address === 'object' ? address.port : 0
-        server.close(err => (err ? reject(err) : resolve(allocated)))
-      })
-    })
-    if (port >= minPort && !exclude.includes(port)) {
-      return port
+const getFreePorts = async (
+  count: number,
+  exclude: number[] = []
+): Promise<number[]> => {
+  const servers: Server[] = []
+  const ports: number[] = []
+  const forbidden = new Set(exclude)
+
+  try {
+    while (ports.length < count) {
+      const {server, port} = await new Promise<{server: Server; port: number}>(
+        (resolve, reject) => {
+          const s = createServer()
+          s.unref()
+          s.once('error', reject)
+          s.listen(0, () => {
+            const address = s.address()
+            const allocated =
+              address && typeof address === 'object' ? address.port : 0
+            resolve({server: s, port: allocated})
+          })
+        }
+      )
+      servers.push(server)
+      if (port >= minPort && !forbidden.has(port)) {
+        forbidden.add(port)
+        ports.push(port)
+      }
     }
+    return ports
+  } finally {
+    await Promise.all(
+      servers.map(s => new Promise<void>(resolve => s.close(() => resolve())))
+    )
   }
 }
 
 const configuredPort = Number(process.env['TRYSTERO_TEST_PORT'])
-const testPort =
+const hasValidTestPort =
   Number.isInteger(configuredPort) &&
   configuredPort >= minPort &&
   configuredPort <= 65_535
-    ? configuredPort
-    : await getFreePort()
-
-const testUrl = `https://127.0.0.1:${testPort}/test`
-const defaultCompletionLogPath = join(
-  tmpdir(),
-  `trystero-test-completions-${process.cwd().replaceAll(/\W/g, '_')}.jsonl`
-)
 const configuredWsRelayPorts = (process.env['TRYSTERO_WS_RELAY_PORTS'] ?? '')
   .split(',')
   .map(Number)
   .filter(port => Number.isInteger(port) && port >= minPort && port <= 65_535)
-const wsRelayPorts =
-  configuredWsRelayPorts.length > 0
-    ? [...configuredWsRelayPorts]
-    : [await getFreePort([testPort])]
 
-if (wsRelayPorts.length === 1) {
-  wsRelayPorts.push(await getFreePort([testPort, ...wsRelayPorts]))
-}
+const neededRelayPorts = Math.max(0, 2 - configuredWsRelayPorts.length)
+const allocatedPorts = await getFreePorts(
+  (hasValidTestPort ? 0 : 1) + neededRelayPorts,
+  [...(hasValidTestPort ? [configuredPort] : []), ...configuredWsRelayPorts]
+)
+
+const testPort = hasValidTestPort ? configuredPort : allocatedPorts.shift()!
+const testUrl = `https://127.0.0.1:${testPort}/test`
+const wsRelayPorts = [...configuredWsRelayPorts, ...allocatedPorts]
 
 process.env['TRYSTERO_TEST_PORT'] = String(testPort)
 process.env['TRYSTERO_WS_RELAY_PORTS'] = wsRelayPorts.join(',')
@@ -64,13 +75,9 @@ process.env['TRYSTERO_TEST_COMPLETION_LOG_PATH'] ??= join(
   tmpdir(),
   `trystero-test-completions-${process.pid}-${Date.now()}.jsonl`
 )
-if (!process.env['TEST_WORKER_INDEX']) {
-  rmSync(process.env['TRYSTERO_DIAGNOSTIC_LOG_PATH'], {force: true})
-  rmSync(process.env['TRYSTERO_TEST_COMPLETION_LOG_PATH'], {force: true})
-  rmSync(defaultCompletionLogPath, {force: true})
-}
 
 export default {
+  globalSetup: './test/playwright-global-setup.ts',
   timeout: 53_333,
   testIgnore: '**/node/**',
   reporter: [['list'], ['./test/connection-timing-reporter.ts']],

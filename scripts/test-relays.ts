@@ -42,7 +42,7 @@ const pool = <T>(
   const run = async (): Promise<void> => {
     while (next < tasks.length) {
       const i = next++
-      results[i] = await tasks[i]()
+      results[i] = await tasks[i]!()
       onProgress(++done, tasks.length)
     }
   }

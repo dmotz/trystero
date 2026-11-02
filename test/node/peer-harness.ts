@@ -1,6 +1,13 @@
 import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
-import createRoom from '../../packages/core/src/room.ts'
+import createRoom, {
+  getRoomSignalingBridge
+} from '../../packages/core/src/room.ts'
+import type {
+  PeerHandle,
+  Room,
+  UserIdentity
+} from '../../packages/core/src/types.ts'
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 import {
   allocTestPeerIds,
@@ -21,7 +28,19 @@ export {
   withTestPeerId
 }
 
-type PeerHandlers = Record<string, (...args: any[]) => void>
+type PeerHandlers = {
+  connect?: () => void
+  close?: () => void
+  data?: (data: ArrayBuffer) => void
+  stream?: (stream: TestMediaStream | MediaStream) => void
+  track?: (
+    track: TestMediaTrack | MediaStreamTrack,
+    stream: TestMediaStream | MediaStream
+  ) => void
+  signal?: (sdp: unknown) => void
+  error?: (err: Error) => void
+  [key: string]: ((...args: any[]) => void) | undefined
+}
 type TestMediaTrack = {id: string}
 type TestMediaStream = {
   id: string
@@ -52,7 +71,7 @@ export const waitFor = async (
   }
 }
 
-export const withTimeout = (promise, ms = 500) =>
+export const withTimeout = <T>(promise: Promise<T>, ms = 500): Promise<T> =>
   Promise.race([
     promise,
     wait(ms).then(() => {
@@ -60,7 +79,7 @@ export const withTimeout = (promise, ms = 500) =>
     })
   ])
 
-export const encodeInternalAction = type => {
+export const encodeInternalAction = (type: string): ArrayBuffer => {
   const wireType = type.startsWith(internalActionPrefix)
     ? type
     : `${internalActionPrefix}${type}`
@@ -116,17 +135,17 @@ export class MockDataChannel {
   binaryType = 'arraybuffer'
   bufferedAmount = 0
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((ev: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((ev: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
     this.onclose?.()
   }
 
-  send() {}
+  send(_data?: unknown) {}
 }
 
 export class MockRTCPeerConnection {
@@ -134,23 +153,23 @@ export class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  remoteDescription = null
-  onnegotiationneeded = null
-  onconnectionstatechange = null
-  ontrack = null
-  ondatachannel = null
-  listeners = {}
+  localDescription: {type: string; sdp: string} | null = null
+  remoteDescription: {type: string; sdp: string} | null = null
+  onnegotiationneeded: (() => void) | null = null
+  onconnectionstatechange: (() => void) | null = null
+  ontrack: ((ev: unknown) => void) | null = null
+  ondatachannel: ((ev: {channel: MockDataChannel}) => void) | null = null
+  listeners: Record<string, Set<(...args: any[]) => void>> = {}
 
-  createDataChannel() {
+  createDataChannel(_label?: string) {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: (...args: any[]) => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: (...args: any[]) => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -160,13 +179,15 @@ export class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: {type: string; sdp?: string}) {
     if (description?.type === 'rollback') {
       this.signalingState = 'stable'
       return
     }
 
-    const nextDescription = description ?? (await this.createOffer())
+    const nextDescription = description
+      ? {type: description.type, sdp: description.sdp ?? ''}
+      : await this.createOffer()
     this.localDescription = nextDescription
     this.signalingState =
       nextDescription.type === 'offer' ? 'have-local-offer' : 'stable'
@@ -174,8 +195,10 @@ export class MockRTCPeerConnection {
     this.listeners['icegatheringstatechange']?.forEach(listener => listener())
   }
 
-  async setRemoteDescription(description) {
-    this.remoteDescription = description ?? {type: 'answer', sdp: 'mock-answer'}
+  async setRemoteDescription(description?: {type: string; sdp?: string}) {
+    this.remoteDescription = description
+      ? {type: description.type, sdp: description.sdp ?? ''}
+      : {type: 'answer', sdp: 'mock-answer'}
     this.signalingState = 'stable'
   }
 
@@ -245,17 +268,17 @@ export class MockPeer {
     this.handlers.close?.()
   }
 
-  setHandlers(newHandlers) {
+  setHandlers(newHandlers: PeerHandlers) {
     Object.assign(this.handlers, newHandlers)
   }
 
-  addStream() {}
-  removeStream() {}
-  addTrack() {
+  addStream(_stream?: unknown) {}
+  removeStream(_stream?: unknown) {}
+  addTrack(_track?: unknown, _stream?: unknown) {
     return {}
   }
-  removeTrack() {}
-  replaceTrack() {}
+  removeTrack(_track?: unknown) {}
+  async replaceTrack(_oldTrack?: unknown, _newTrack?: unknown) {}
 }
 
 export class LinkedPeer {
@@ -264,7 +287,7 @@ export class LinkedPeer {
   handlers: PeerHandlers = {}
   offerPromise = Promise.resolve()
   partner: LinkedPeer | null = null
-  lastSentData = null
+  lastSentData: ArrayBuffer | null = null
   connection = {
     connectionState: 'connected',
     iceConnectionState: 'connected',
@@ -282,9 +305,10 @@ export class LinkedPeer {
 
   async signal() {}
 
-  sendData(data) {
-    this.lastSentData = data.slice().buffer
-    this.partner?.handlers.data?.(data.slice().buffer)
+  sendData(data: Uint8Array | ArrayBuffer) {
+    const view = data instanceof Uint8Array ? data : new Uint8Array(data)
+    this.lastSentData = view.slice().buffer
+    this.partner?.handlers.data?.(view.slice().buffer)
   }
 
   destroy() {
@@ -298,7 +322,7 @@ export class LinkedPeer {
     this.handlers.close?.()
   }
 
-  setHandlers(newHandlers) {
+  setHandlers(newHandlers: PeerHandlers) {
     Object.assign(this.handlers, newHandlers)
   }
 
@@ -318,8 +342,9 @@ export class BufferedPeer extends LinkedPeer {
     this.handlers.connect?.()
   }
 
-  override sendData(data: Uint8Array) {
-    const payload = data.slice().buffer
+  override sendData(data: Uint8Array | ArrayBuffer) {
+    const view = data instanceof Uint8Array ? data : new Uint8Array(data)
+    const payload = view.slice().buffer
     const partner = this.partner as BufferedPeer
 
     queueMicrotask(() => {
@@ -328,14 +353,15 @@ export class BufferedPeer extends LinkedPeer {
     })
   }
 
-  override setHandlers(handlers) {
+  override setHandlers(handlers: PeerHandlers) {
     super.setHandlers(handlers)
     this.flush()
   }
 
   flush() {
-    if (this.handlers.data) {
-      this.inbox.splice(0).forEach(data => this.handlers.data(data))
+    const onData = this.handlers.data
+    if (onData) {
+      this.inbox.splice(0).forEach(data => onData(data))
     }
   }
 }
@@ -448,8 +474,8 @@ export const linkPeers = <A extends LinkedPeer, B extends LinkedPeer>(
 }
 
 export const createJoinedRooms = async () => {
-  let registerPeerA = null
-  let registerPeerB = null
+  let registerPeerA: ((peer: PeerHandle, id: string) => void) | null = null
+  let registerPeerB: ((peer: PeerHandle, id: string) => void) | null = null
   const roomA = createRoom(
     f => {
       registerPeerA = f
@@ -468,10 +494,17 @@ export const createJoinedRooms = async () => {
   const joinB = new Promise(resolve => roomB.onPeerJoin(resolve, {once: true}))
   const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
 
-  assert.ok(registerPeerA, 'expected first room to register its peer callback')
-  assert.ok(registerPeerB, 'expected second room to register its peer callback')
-  registerPeerA(peerA, 'peer-b')
-  registerPeerB(peerB, 'peer-a')
+  if (!registerPeerA || !registerPeerB) {
+    assert.fail('expected both rooms to register their peer callbacks')
+  }
+  ;(registerPeerA as (peer: PeerHandle, id: string) => void)(
+    peerA as unknown as PeerHandle,
+    'peer-b'
+  )
+  ;(registerPeerB as (peer: PeerHandle, id: string) => void)(
+    peerB as unknown as PeerHandle,
+    'peer-a'
+  )
 
   await Promise.all([joinA, joinB])
 
@@ -483,15 +516,14 @@ export const linkedActions = (maxReceiveBytes?: number) => {
   const frames: {from: string; kind: number; id: number}[] = []
   const peer = (from: string, deliver: (data: ArrayBuffer) => void) => ({
     sendData: (bytes: Uint8Array) => {
+      const b1 = bytes[1] ?? 0
       frames.push({
         from,
-        kind: bytes[1] & 15,
+        kind: b1 & 15,
         id:
-          (bytes[1] & 15) === 0
+          (b1 & 15) === 0
             ? -1
-            : new DataView(bytes.buffer).getUint32(
-                (bytes[1] & 15) === 1 ? 36 : 2
-              )
+            : new DataView(bytes.buffer).getUint32((b1 & 15) === 1 ? 36 : 2)
       })
       deliver(bytes.slice().buffer)
     },
@@ -530,4 +562,155 @@ export const linkedActions = (maxReceiveBytes?: number) => {
       right.clearPeer('left', new Error('closed'))
     }
   }
+}
+
+export const makeTrack = (
+  id: string,
+  readyState: MediaStreamTrackState = 'live'
+): MediaStreamTrack =>
+  ({
+    id,
+    kind: 'video',
+    readyState
+  }) as unknown as MediaStreamTrack
+
+export const makeStream = (
+  id: string,
+  tracks: MediaStreamTrack[],
+  active?: boolean
+): MediaStream =>
+  ({
+    id,
+    ...(active === undefined ? {} : {active}),
+    getTracks: () => tracks
+  }) as unknown as MediaStream
+
+export const createLinkedHandlePair = () => {
+  let handlersA: Parameters<PeerHandle['setHandlers']>[0] = {}
+  let handlersB: Parameters<PeerHandle['setHandlers']>[0] = {}
+  let deadA = false
+  let deadB = false
+
+  const makeEndpoint = (
+    isA: boolean
+  ): PeerHandle & {
+    emitRemoteStream: (stream: MediaStream) => void
+  } => ({
+    get isDead() {
+      return isA ? deadA : deadB
+    },
+    connection: {
+      connectionState: 'connected',
+      iceConnectionState: 'connected',
+      signalingState: 'stable',
+      getSenders: () => [],
+      getTransceivers: () => []
+    } as unknown as RTCPeerConnection,
+    channel: {
+      readyState: 'open',
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    } as unknown as RTCDataChannel,
+    getOffer: async () => undefined,
+    signal: async () => undefined,
+    sendData: data => {
+      const copy = new Uint8Array(data.byteLength)
+      copy.set(
+        data instanceof Uint8Array
+          ? data
+          : new Uint8Array(data as ArrayBufferLike)
+      )
+      queueMicrotask(() => {
+        const target = isA ? handlersB : handlersA
+        const targetDead = isA ? deadB : deadA
+        if (!targetDead) {
+          target.data?.(copy.buffer)
+        }
+      })
+    },
+    destroy: () => {
+      if (isA) {
+        if (deadA) {
+          return
+        }
+        deadA = true
+        queueMicrotask(() => {
+          if (!deadB) {
+            deadB = true
+            handlersB.close?.()
+          }
+        })
+      } else {
+        if (deadB) {
+          return
+        }
+        deadB = true
+        queueMicrotask(() => {
+          if (!deadA) {
+            deadA = true
+            handlersA.close?.()
+          }
+        })
+      }
+    },
+    setHandlers: next => {
+      if (isA) {
+        handlersA = {...handlersA, ...next}
+      } else {
+        handlersB = {...handlersB, ...next}
+      }
+    },
+    addStream: stream => {
+      const target = isA ? handlersB : handlersA
+      queueMicrotask(() => {
+        target.stream?.(stream)
+      })
+    },
+    removeStream: () => {},
+    addTrack: (_track, stream) => {
+      const target = isA ? handlersB : handlersA
+      queueMicrotask(() => {
+        target.stream?.(stream)
+      })
+      return {} as RTCRtpSender
+    },
+    removeTrack: () => {},
+    replaceTrack: async () => {},
+    emitRemoteStream: stream => {
+      const local = isA ? handlersA : handlersB
+      local.stream?.(stream)
+    }
+  })
+
+  return {
+    peerA: makeEndpoint(true),
+    peerB: makeEndpoint(false)
+  }
+}
+
+export const connectVerifiedPeers = (
+  regMap: Map<string, (peer: PeerHandle, id: string) => void>,
+  roomA: Room,
+  idA: string,
+  userA: UserIdentity,
+  roomB: Room,
+  idB: string,
+  userB: UserIdentity
+) => {
+  const link = createLinkedHandlePair()
+  regMap.get(idA)!(link.peerA, idB)
+  regMap.get(idB)!(link.peerB, idA)
+  getRoomSignalingBridge(roomA)!.onPeerIdentityVerified(idB, {
+    userId: userB.userId,
+    peerPubKey: userB.signPubJwk,
+    userPubKey: userB.signPubJwk
+  })
+  getRoomSignalingBridge(roomB)!.onPeerIdentityVerified(idA, {
+    userId: userA.userId,
+    peerPubKey: userA.signPubJwk,
+    userPubKey: userA.signPubJwk
+  })
+  return link
 }

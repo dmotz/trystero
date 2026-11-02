@@ -6,6 +6,7 @@ import {
 } from '../../packages/core/src/media.ts'
 import initPeer from '../../packages/core/src/peer.ts'
 import createRoom from '../../packages/core/src/room.ts'
+import type {PeerHandle, Room} from '../../packages/core/src/types.ts'
 import {LinkedMediaPeer, MockPeer, linkPeers, turn} from './peer-harness.ts'
 
 void test('media metadata keeps one current alias per native object and preserves native ID lookup', () => {
@@ -87,12 +88,12 @@ void test(
       id: 'video-stream',
       getTracks: () => [...currentTracks]
     }
-    let directRoomA = null
-    let directRoomB = null
+    let directRoomA: Room | null = null
+    let directRoomB: Room | null = null
 
     try {
-      let registerDirectA = null
-      let registerDirectB = null
+      let registerDirectA!: (peer: PeerHandle, id: string) => void
+      let registerDirectB!: (peer: PeerHandle, id: string) => void
       directRoomA = createRoom(
         f => {
           registerDirectA = f
@@ -108,17 +109,17 @@ void test(
         () => {}
       )
       const joinDirectA = new Promise(resolve =>
-        directRoomA.onPeerJoin(resolve, {once: true})
+        directRoomA!.onPeerJoin(resolve, {once: true})
       )
       const joinDirectB = new Promise(resolve =>
-        directRoomB.onPeerJoin(resolve, {once: true})
+        directRoomB!.onPeerJoin(resolve, {once: true})
       )
       const {peerA: directPeerA, peerB: directPeerB} = linkPeers(
         new LinkedMediaPeer(),
         new LinkedMediaPeer()
       )
-      registerDirectA(directPeerA, 'peer-b')
-      registerDirectB(directPeerB, 'peer-a')
+      registerDirectA(directPeerA as unknown as PeerHandle, 'peer-b')
+      registerDirectB(directPeerB as unknown as PeerHandle, 'peer-a')
       await Promise.all([joinDirectA, joinDirectB])
 
       const streamEvents: Array<{
@@ -136,7 +137,7 @@ void test(
         })
       })
 
-      await directRoomA.addStream(localStream as any, {
+      await directRoomA.addStream(localStream as unknown as MediaStream, {
         target: 'peer-b',
         metadata: {mode: 'camera'}
       })
@@ -151,7 +152,7 @@ void test(
       ])
 
       // Re-calling addStream with identical tracks and metadata is a no-op on senders and does not re-fire onPeerStream
-      await directRoomA.addStream(localStream as any, {
+      await directRoomA.addStream(localStream as unknown as MediaStream, {
         target: 'peer-b',
         metadata: {mode: 'camera'}
       })
@@ -162,14 +163,14 @@ void test(
 
       // replaceTrack swaps at the sender level without renegotiation
       await directRoomA.replaceTrack(
-        initialTrack as any,
-        replacementTrack as any,
+        initialTrack as unknown as MediaStreamTrack,
+        replacementTrack as unknown as MediaStreamTrack,
         {target: 'peer-b'}
       )
       assert.equal(directPeerA.replaceTrackCalls, 1)
 
       // Re-announcing stream with updated metadata after replaceTrack keeps the replaced track (no removeTrack/addTrack churn) and fires onPeerStream again
-      await directRoomA.addStream(localStream as any, {
+      await directRoomA.addStream(localStream as unknown as MediaStream, {
         target: 'peer-b',
         metadata: {mode: 'screenshare'}
       })
@@ -185,7 +186,7 @@ void test(
 
       // Adding a track to the local stream and calling addStream syncs only the added track
       currentTracks = [initialTrack, extraAudioTrack]
-      await directRoomA.addStream(localStream as any, {
+      await directRoomA.addStream(localStream as unknown as MediaStream, {
         target: 'peer-b',
         metadata: {mode: 'screenshare'}
       })
@@ -201,7 +202,7 @@ void test(
 
       // Removing a track from the local stream and calling addStream removes that track's sender
       currentTracks = [initialTrack]
-      await directRoomA.addStream(localStream as any, {
+      await directRoomA.addStream(localStream as unknown as MediaStream, {
         target: 'peer-b',
         metadata: {mode: 'screenshare'}
       })
@@ -224,12 +225,12 @@ void test(
   'Trystero: multi-track stream emits onPeerStream once and preserves subsequent stream metadata',
   {timeout: 10_000},
   async () => {
-    let roomA = null
-    let roomB = null
+    let roomA: Room | null = null
+    let roomB: Room | null = null
 
     try {
-      let registerPeerA = null
-      let registerPeerB = null
+      let registerPeerA!: (peer: PeerHandle, id: string) => void
+      let registerPeerB!: (peer: PeerHandle, id: string) => void
       roomA = createRoom(
         f => {
           registerPeerA = f
@@ -245,17 +246,17 @@ void test(
         () => {}
       )
       const joinA = new Promise(resolve =>
-        roomA.onPeerJoin(resolve, {once: true})
+        roomA!.onPeerJoin(resolve, {once: true})
       )
       const joinB = new Promise(resolve =>
-        roomB.onPeerJoin(resolve, {once: true})
+        roomB!.onPeerJoin(resolve, {once: true})
       )
       const {peerA, peerB} = linkPeers(
         new LinkedMediaPeer(),
         new LinkedMediaPeer()
       )
-      registerPeerA(peerA, 'peer-b')
-      registerPeerB(peerB, 'peer-a')
+      registerPeerA(peerA as unknown as PeerHandle, 'peer-b')
+      registerPeerB(peerB as unknown as PeerHandle, 'peer-a')
       await Promise.all([joinA, joinB])
 
       const receivedStreams: Array<{
@@ -277,11 +278,11 @@ void test(
       }
 
       await Promise.all([
-        roomA.addStream(avStream as any, {
+        roomA.addStream(avStream as unknown as MediaStream, {
           target: 'peer-b',
           metadata: {kind: 'camera'}
         }),
-        roomA.addStream(screenStream as any, {
+        roomA.addStream(screenStream as unknown as MediaStream, {
           target: 'peer-b',
           metadata: {kind: 'screen'}
         })
@@ -303,7 +304,7 @@ void test(
 )
 
 void test('recycled transceiver sender after removeTrack is not stopped when original stream is removed', () => {
-  type FakeSender = {kind: string; track: any}
+  type FakeSender = {kind: string; track: MediaStreamTrack | null}
   const senders: FakeSender[] = []
 
   class RecyclingPeerConnection {
@@ -318,7 +319,7 @@ void test('recycled transceiver sender after removeTrack is not stopped when ori
     getSenders() {
       return senders
     }
-    addTrack(track: any) {
+    addTrack(track: MediaStreamTrack) {
       let sender = senders.find(s => s.kind === track.kind && s.track === null)
       if (sender) {
         sender.track = track
@@ -335,7 +336,7 @@ void test('recycled transceiver sender after removeTrack is not stopped when ori
 
   const peer = initPeer(false, {
     appId: 'test',
-    rtcPolyfill: RecyclingPeerConnection as any
+    rtcPolyfill: RecyclingPeerConnection as unknown as typeof RTCPeerConnection
   })
 
   const audioTrack = {id: 'mic', kind: 'audio'} as unknown as MediaStreamTrack

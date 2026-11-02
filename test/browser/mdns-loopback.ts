@@ -81,7 +81,18 @@ export const installLoopbackMdnsInWindow = (): void => {
       options?: boolean | AddEventListenerOptions
     ): void {
       if (type !== 'icecandidate' || !listener) {
-        super.addEventListener(type, listener, options)
+        if (options === undefined) {
+          super.addEventListener(
+            type,
+            listener as EventListenerOrEventListenerObject
+          )
+        } else {
+          super.addEventListener(
+            type,
+            listener as EventListenerOrEventListenerObject,
+            options
+          )
+        }
         return
       }
       let wrapped = this.#listenerMap.get(listener)
@@ -96,7 +107,11 @@ export const installLoopbackMdnsInWindow = (): void => {
         }
         this.#listenerMap.set(listener, wrapped)
       }
-      super.addEventListener(type, wrapped, options)
+      if (options === undefined) {
+        super.addEventListener(type, wrapped)
+      } else {
+        super.addEventListener(type, wrapped, options)
+      }
     }
 
     override removeEventListener(
@@ -105,7 +120,18 @@ export const installLoopbackMdnsInWindow = (): void => {
       options?: boolean | EventListenerOptions
     ): void {
       const wrapped = listener ? this.#listenerMap.get(listener) : undefined
-      super.removeEventListener(type, wrapped ?? listener, options)
+      if (options === undefined) {
+        super.removeEventListener(
+          type,
+          (wrapped ?? listener) as EventListenerOrEventListenerObject
+        )
+      } else {
+        super.removeEventListener(
+          type,
+          (wrapped ?? listener) as EventListenerOrEventListenerObject,
+          options
+        )
+      }
     }
 
     override setRemoteDescription(

@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import room from '../../packages/core/src/room.ts'
+import type {
+  DataPayload,
+  MessageActionConfig,
+  PeerHandle,
+  PeerResult
+} from '../../packages/core/src/types.ts'
 import {
   createJoinedRooms,
   encodeInternalAction,
@@ -9,9 +15,9 @@ import {
 } from './peer-harness.ts'
 
 void test('Trystero: remote leave packets fire peer-leave callbacks once', async () => {
-  let registerPeer = null
-  const strategyPeerLeaves = []
-  const roomPeerLeaves = []
+  let registerPeer = null as ((peer: PeerHandle, id: string) => void) | null
+  const strategyPeerLeaves: string[] = []
+  const roomPeerLeaves: string[] = []
   const roomRef = room(
     f => {
       registerPeer = f
@@ -28,14 +34,14 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
   const peer = new MockPeer()
 
   assert.ok(registerPeer, 'expected room to register its peer callback')
-  registerPeer(peer, 'remote-peer')
+  registerPeer(peer as unknown as PeerHandle, 'remote-peer')
 
   await tick()
-  peer.handlers.data?.(encodeInternalAction('hsready') as any)
+  peer.handlers.data?.(encodeInternalAction('hsready'))
 
   assert.equal(await joinPromise, 'remote-peer')
 
-  peer.handlers.data?.(encodeInternalAction('leave') as any)
+  peer.handlers.data?.(encodeInternalAction('leave'))
   await tick()
 
   assert.equal(peer.destroyCount, 1)
@@ -109,7 +115,7 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
 })
 
 void test('Trystero: action creation uses action objects', async () => {
-  let registerPeer = null
+  let registerPeer = null as ((peer: PeerHandle, id: string) => void) | null
   const roomRef = room(
     f => {
       registerPeer = f
@@ -137,7 +143,7 @@ void test('Trystero: action creation uses action objects', async () => {
       () =>
         roomRef.makeAction('bad-request', {
           onRequest: () => true
-        } as any),
+        } as unknown as MessageActionConfig),
       /makeAction config does not accept event handlers/
     )
     assert.throws(() => roomRef.makeAction('question'), /cannot be redefined/)
@@ -147,8 +153,8 @@ void test('Trystero: action creation uses action objects', async () => {
 })
 
 void test('Trystero: room event methods fan out and unsubscribe cleanly', async () => {
-  let registerPeer = null
-  const joined = []
+  let registerPeer = null as ((peer: PeerHandle, id: string) => void) | null
+  const joined: string[] = []
   const roomRef = room(
     f => {
       registerPeer = f
@@ -169,16 +175,16 @@ void test('Trystero: room event methods fan out and unsubscribe cleanly', async 
     assert.ok(registerPeer, 'expected room to register its peer callback')
     const peer = new MockPeer()
 
-    registerPeer(peer, 'remote-peer')
+    registerPeer(peer as unknown as PeerHandle, 'remote-peer')
     await tick()
-    peer.handlers.data?.(encodeInternalAction('hsready') as any)
+    peer.handlers.data?.(encodeInternalAction('hsready'))
     await tick()
 
     assert.deepEqual(joined, ['second:remote-peer'])
 
     unsubSecond()
     assert.throws(() => {
-      ;(roomRef as any).onPeerJoin = null
+      ;(roomRef as unknown as Record<string, unknown>)['onPeerJoin'] = null
     }, TypeError)
   } finally {
     await roomRef.leave()
@@ -236,7 +242,7 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
       /timed out/
     )
 
-    const fanoutResults = []
+    const fanoutResults: PeerResult<DataPayload>[] = []
     const many = await isEvenA.requestMany(6, {
       targets: ['missing-peer', 'peer-b'],
       timeoutMs: 1_000,

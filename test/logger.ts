@@ -1,20 +1,27 @@
 import {readFileSync} from 'node:fs'
-import {fileURLToPath} from 'node:url'
 import {dirname, join} from 'node:path'
+import {fileURLToPath} from 'node:url'
+import type {ConsoleMessage, Page} from '@playwright/test'
 import chalk from 'chalk'
-import {SourceMapConsumer} from 'source-map'
+import {SourceMapConsumer, type RawSourceMap} from 'source-map'
 import {recordDiagnosticLog} from './diagnostic-log'
+import type {StrategyName} from './strategy-configs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const projectRoot = join(__dirname, '..')
-const sourceMapCache = new Map()
+const sourceMapCache = new Map<string, SourceMapConsumer>()
 
-const colorize = ['magenta', 'yellow', 'blue', 'red', 'green', 'cyan'].map(
-  k => chalk[k]
-)
+const colorize = [
+  chalk.magenta,
+  chalk.yellow,
+  chalk.blue,
+  chalk.red,
+  chalk.green,
+  chalk.cyan
+]
 
-export const emojis = {
+export const emojis: Record<StrategyName, string> = {
   nostr: '🐦',
   mqtt: '📡',
   torrent: '🌊',
@@ -23,61 +30,83 @@ export const emojis = {
   'ws-relay': '🔌'
 }
 
-export const shortBrowsers = {
+export type BrowserName = 'chromium' | 'webkit' | 'firefox'
+
+export const shortBrowsers: Record<string, string> = {
   chromium: chalk.green('CH'),
   webkit: chalk.blue('WK'),
   firefox: chalk.yellow('FF')
 }
 
-const logPrefix = (strategy, browser, pageN) =>
-  `${emojis[strategy]} ${colorize[pageN - 1](strategy)} ${shortBrowsers[browser]}${pageN}:`
+const logPrefix = (
+  strategy: StrategyName,
+  browser: string,
+  pageN: number
+): string => {
+  const colorFn = colorize[(pageN - 1) % colorize.length] ?? chalk.white
+  return `${emojis[strategy]} ${colorFn(strategy)} ${shortBrowsers[browser] ?? browser}${pageN}:`
+}
 
-const recordPageLog = (strategy, browser, pageN, values, suffix) => {
+const recordPageLog = (
+  strategy: StrategyName,
+  browser: string,
+  pageN: number,
+  values: unknown[],
+  suffix: string
+): void => {
   recordDiagnosticLog('log', logPrefix(strategy, browser, pageN), [
     ...values,
     suffix
   ])
 }
 
-const onConsole = (strategy, browser, pageN) => async msg => {
-  const values = []
-  const loc = msg.location()
+const onConsole =
+  (strategy: StrategyName, browser: string, pageN: number) =>
+  async (msg: ConsoleMessage): Promise<void> => {
+    const values: unknown[] = []
+    const loc = msg.location()
 
-  for (const arg of msg.args()) {
-    try {
-      values.push(await arg.jsonValue())
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+    for (const arg of msg.args()) {
+      try {
+        values.push(await arg.jsonValue())
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
 
-      if (message.includes('Target page, context or browser has been closed')) {
-        return
+        if (
+          message.includes('Target page, context or browser has been closed')
+        ) {
+          return
+        }
+
+        values.push('[Unable to serialize]')
       }
-
-      values.push('[Unable to serialize]')
     }
+
+    const text = msg.text()
+    const logValues = values.length ? values : [text]
+
+    const originalLoc = await resolveSourceMapLocation(
+      loc.url,
+      loc.lineNumber,
+      loc.columnNumber
+    )
+
+    const sourceLocation = `@${originalLoc.lineNumber}:${originalLoc.columnNumber}`
+    const sourceFile = originalLoc.url.includes('src/')
+      ? originalLoc.url.split('src/').pop()
+      : originalLoc.url.split('/').pop()
+
+    const suffix = `(${sourceFile}${sourceLocation})`
+
+    console.log(logPrefix(strategy, browser, pageN), ...logValues, suffix)
+    recordPageLog(strategy, browser, pageN, logValues, suffix)
   }
 
-  const text = msg.text()
-  const logValues = values.length ? values : [text]
-
-  const originalLoc = await resolveSourceMapLocation(
-    loc.url,
-    loc.lineNumber,
-    loc.columnNumber
-  )
-
-  const sourceLocation = `@${originalLoc.lineNumber}:${originalLoc.columnNumber}`
-  const sourceFile = originalLoc.url.includes('src/')
-    ? originalLoc.url.split('src/').pop()
-    : originalLoc.url.split('/').pop()
-
-  const suffix = `(${sourceFile}${sourceLocation})`
-
-  console.log(logPrefix(strategy, browser, pageN), ...logValues, suffix)
-  recordPageLog(strategy, browser, pageN, logValues, suffix)
-}
-
-const resolveSourceMapLocation = async (url, lineNumber, columnNumber) => {
+const resolveSourceMapLocation = async (
+  url: string,
+  lineNumber: number,
+  columnNumber: number
+): Promise<{url: string; lineNumber: number; columnNumber: number}> => {
   if (!url.includes('/test/dist/trystero-') || !url.endsWith('.js')) {
     return {url, lineNumber, columnNumber}
   }
@@ -101,7 +130,7 @@ const resolveSourceMapLocation = async (url, lineNumber, columnNumber) => {
 
     if (!consumer) {
       const sourceMapContent = readFileSync(sourceMapPath, 'utf-8')
-      const sourceMap = JSON.parse(sourceMapContent)
+      const sourceMap = JSON.parse(sourceMapContent) as RawSourceMap
       consumer = await new SourceMapConsumer(sourceMap)
       sourceMapCache.set(sourceMapPath, consumer)
     }
@@ -127,7 +156,44 @@ const resolveSourceMapLocation = async (url, lineNumber, columnNumber) => {
   return {url, lineNumber, columnNumber}
 }
 
-const previewValue = prop => {
+type CdpPreviewProperty = {
+  name: string
+  value?: unknown
+  type?: string
+  valuePreview?: {
+    description?: string
+    value?: unknown
+  }
+}
+
+type CdpPreview = {
+  subtype?: string
+  description?: string
+  properties?: CdpPreviewProperty[]
+}
+
+type CdpRemoteObject = {
+  type?: string
+  description?: string
+  value?: unknown
+  unserializableValue?: string
+  preview?: CdpPreview
+  objectId?: string
+}
+
+type CdpConsoleEvent = {
+  type: string
+  args?: CdpRemoteObject[]
+  stackTrace?: {
+    callFrames?: Array<{
+      url: string
+      lineNumber: number
+      columnNumber: number
+    }>
+  }
+}
+
+const previewValue = (prop: CdpPreviewProperty): unknown => {
   if ('value' in prop) {
     return prop.value
   }
@@ -147,13 +213,16 @@ const previewValue = prop => {
   return undefined
 }
 
-const buildPreviewObject = preview => {
+const buildPreviewObject = (preview?: CdpPreview): unknown => {
   if (!preview?.properties?.length) {
     return null
   }
 
   if (preview.subtype === 'array') {
-    const arr = []
+    const arr: unknown[] & Record<string, unknown> = Object.assign(
+      [] as unknown[],
+      {} as Record<string, unknown>
+    )
 
     for (const prop of preview.properties) {
       if (prop.name === 'length') {
@@ -172,7 +241,7 @@ const buildPreviewObject = preview => {
     return arr
   }
 
-  const obj = {}
+  const obj: Record<string, unknown> = {}
 
   for (const prop of preview.properties) {
     obj[prop.name] = previewValue(prop)
@@ -181,7 +250,7 @@ const buildPreviewObject = preview => {
   return obj
 }
 
-const formatCdpArg = arg => {
+const formatCdpArg = (arg: CdpRemoteObject): unknown => {
   if ('value' in arg && arg.value !== null) {
     return arg.value
   }
@@ -206,59 +275,71 @@ const formatCdpArg = arg => {
     return '[Object]'
   }
 
-  return String(arg)
+  return arg.description ?? JSON.stringify(arg)
 }
 
-const createCdpConsoleHandler = (strategy, browser, pageN) => async event => {
-  if (!['log', 'info', 'warn', 'error', 'debug'].includes(event.type)) {
-    return
+const createCdpConsoleHandler =
+  (strategy: StrategyName, browser: string, pageN: number) =>
+  async (event: CdpConsoleEvent): Promise<void> => {
+    if (!['log', 'info', 'warn', 'error', 'debug'].includes(event.type)) {
+      return
+    }
+
+    const values =
+      event.args?.map(arg => {
+        try {
+          return formatCdpArg(arg)
+        } catch {
+          return '[Unable to serialize]'
+        }
+      }) || []
+
+    const text = values.map(v => String(v)).join(' ')
+    const logValues = values.length ? values : [text]
+
+    const callFrame = event.stackTrace?.callFrames?.[0]
+
+    if (!callFrame) {
+      console.log(logPrefix(strategy, browser, pageN), ...logValues, '@?:?')
+      recordPageLog(strategy, browser, pageN, logValues, '@?:?')
+      return
+    }
+
+    const originalLoc = await resolveSourceMapLocation(
+      callFrame.url,
+      callFrame.lineNumber,
+      callFrame.columnNumber
+    )
+
+    const sourceLocation = `@${originalLoc.lineNumber}:${originalLoc.columnNumber}`
+    const sourceFile = originalLoc.url.includes('src/')
+      ? originalLoc.url.split('src/').pop()
+      : originalLoc.url.split('/').pop()
+
+    const suffix = `(${sourceFile}${sourceLocation})`
+
+    console.log(logPrefix(strategy, browser, pageN), ...logValues, suffix)
+    recordPageLog(strategy, browser, pageN, logValues, suffix)
   }
 
-  const values =
-    event.args?.map(arg => {
-      try {
-        return formatCdpArg(arg)
-      } catch {
-        return '[Unable to serialize]'
-      }
-    }) || []
-
-  const text = values.map(v => String(v)).join(' ')
-  const logValues = values.length ? values : [text]
-
-  const callFrame = event.stackTrace?.callFrames?.[0]
-
-  if (!callFrame) {
-    console.log(logPrefix(strategy, browser, pageN), ...logValues, '@?:?')
-    recordPageLog(strategy, browser, pageN, logValues, '@?:?')
-    return
+const onError =
+  (strategy: StrategyName, browser: string, pageN: number) =>
+  (err: Error): void => {
+    console.log('❌', logPrefix(strategy, browser, pageN), err)
+    recordDiagnosticLog('error', `❌ ${logPrefix(strategy, browser, pageN)}`, [
+      err
+    ])
   }
 
-  const originalLoc = await resolveSourceMapLocation(
-    callFrame.url,
-    callFrame.lineNumber,
-    callFrame.columnNumber
-  )
-
-  const sourceLocation = `@${originalLoc.lineNumber}:${originalLoc.columnNumber}`
-  const sourceFile = originalLoc.url.includes('src/')
-    ? originalLoc.url.split('src/').pop()
-    : originalLoc.url.split('/').pop()
-
-  const suffix = `(${sourceFile}${sourceLocation})`
-
-  console.log(logPrefix(strategy, browser, pageN), ...logValues, suffix)
-  recordPageLog(strategy, browser, pageN, logValues, suffix)
-}
-
-const onError = (strategy, browser, pageN) => err => {
-  console.log('❌', logPrefix(strategy, browser, pageN), err)
-  recordDiagnosticLog('error', `❌ ${logPrefix(strategy, browser, pageN)}`, [
-    err
-  ])
-}
-
-export const attachPageLogging = async ({strategy, browserName, pages}) => {
+export const attachPageLogging = async ({
+  strategy,
+  browserName,
+  pages
+}: {
+  strategy: StrategyName
+  browserName: string
+  pages: Page[]
+}): Promise<void> => {
   let useCdp = false
 
   if (browserName === 'chromium') {

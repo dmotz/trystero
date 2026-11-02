@@ -1,19 +1,31 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {joinRoom} from '../../packages/torrent/src/index.ts'
 import {MockRTCPeerConnection, wait} from './peer-harness.ts'
 
+type SentTrackerAnnounce = {
+  action: string
+  info_hash: string
+  peer_id: string
+  left?: number
+  numwant: number
+  offers: Array<{
+    offer_id: string
+    offer: {type: string; sdp: string}
+  }>
+}
+
 class MockWebSocket {
-  static sockets = []
+  static sockets: MockWebSocket[] = []
 
   readyState = 0
-  sent = []
-  onopen = null
-  onclose = null
-  onmessage = null
-  url
+  sent: SentTrackerAnnounce[] = []
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onmessage: ((event: {data: string}) => void) | null = null
+  url: string
 
-  constructor(url) {
+  constructor(url: string) {
     this.url = url
     MockWebSocket.sockets.push(this)
 
@@ -23,8 +35,8 @@ class MockWebSocket {
     })
   }
 
-  send(data) {
-    const msg = JSON.parse(data)
+  send(data: string) {
+    const msg = JSON.parse(data) as SentTrackerAnnounce
     this.sent.push(msg)
 
     if (msg.action === 'announce') {
@@ -48,20 +60,21 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
 
     const room = joinRoom(
       {
         appId: `torrent-announcement-rate-${Date.now()}`,
         relayConfig: {urls: [`wss://torrent-rate-${Date.now()}.test`]},
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'room'
     )
 
     try {
       await wait(2_500)
-      const socket = MockWebSocket.sockets[0]
+      const socket = MockWebSocket.sockets[0]!
 
       assert.equal(
         socket.sent.length,
@@ -73,7 +86,7 @@ void test(
         'torrent should advertise one offer while requesting up to three peers'
       )
       assert.equal(
-        new Set(socket.sent.map(msg => msg.offers[0].offer_id)).size,
+        new Set(socket.sent.map(msg => msg.offers[0]!.offer_id)).size,
         1,
         'repeated announcements should reuse the outstanding offer'
       )
@@ -97,14 +110,15 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
 
     const room = joinRoom(
       {
         appId: `torrent-passive-rate-${Date.now()}`,
         passive: true,
         relayConfig: {urls: [`wss://torrent-passive-${Date.now()}.test`]},
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'room'
     )
@@ -112,7 +126,7 @@ void test(
     try {
       await wait(1_000)
       assert.equal(
-        MockWebSocket.sockets[0].sent.length,
+        MockWebSocket.sockets[0]!.sent.length,
         1,
         'passive rooms must register with the tracker without joining the active warmup'
       )

@@ -439,7 +439,7 @@ async function run(label: string, module: string, scenario: string) {
               : relays.map(relay => relay.url)
           })
     }
-    peers[0].child.send({
+    peers[0]!.child.send({
       roomId,
       config: {
         appId,
@@ -451,7 +451,7 @@ async function run(label: string, module: string, scenario: string) {
     if (joinDelayMs) {
       await wait(joinDelayMs)
     }
-    peers[1].child.send({
+    peers[1]!.child.send({
       roomId,
       config: {appId, rtcConfig: {iceServers: []}, relayConfig}
     })

@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {joinRoom} from '../../packages/ws-relay/src/index.ts'
+import type {WsRelayClientMessage} from '../../packages/ws-relay/src/protocol.ts'
 import {MockRTCPeerConnection, wait, waitFor} from './peer-harness.ts'
 
 class MockWebSocket {
-  static sockets = []
+  static sockets: MockWebSocket[] = []
 
   readyState = 0
-  sent = []
-  onopen = null
-  onclose = null
-  onmessage = null
-  url
+  sent: WsRelayClientMessage[] = []
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onmessage: ((event: {data: string}) => void) | null = null
+  url: string
 
-  constructor(url) {
+  constructor(url: string) {
     this.url = url
     MockWebSocket.sockets.push(this)
 
@@ -23,8 +24,8 @@ class MockWebSocket {
     })
   }
 
-  send(data) {
-    this.sent.push(JSON.parse(data))
+  send(data: string) {
+    this.sent.push(JSON.parse(data) as WsRelayClientMessage)
   }
 
   close() {
@@ -33,12 +34,12 @@ class MockWebSocket {
   }
 }
 
-const announcementCount = socket =>
+const announcementCount = (socket: MockWebSocket) =>
   socket.sent.filter(
     msg =>
       msg.type === 'publish' &&
       typeof msg.payload === 'string' &&
-      JSON.parse(msg.payload).peerId
+      (JSON.parse(msg.payload) as {peerId?: string}).peerId
   ).length
 
 void test(
@@ -48,21 +49,22 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     const originalRandom = Math.random
     MockWebSocket.sockets.length = 0
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
     Math.random = () => 0
 
     const room = joinRoom(
       {
         appId: `ws-relay-announcement-rate-${Date.now()}`,
         relayConfig: {urls: [`wss://ws-relay-rate-${Date.now()}.test`]},
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'room'
     )
 
     try {
       await wait(2_500)
-      const firstSocket = MockWebSocket.sockets[0]
+      const firstSocket = MockWebSocket.sockets[0]!
 
       assert.equal(announcementCount(firstSocket), 4)
 
@@ -74,13 +76,13 @@ void test(
       firstSocket.close()
       await waitFor(() => MockWebSocket.sockets.length === 2)
 
-      const reconnectFrames = MockWebSocket.sockets[1].sent
+      const reconnectFrames = MockWebSocket.sockets[1]!.sent
       assert.deepEqual(
         reconnectFrames.slice(0, 2).map(msg => msg.type),
         ['subscribe', 'subscribe']
       )
       assert.equal(reconnectFrames[2]?.type, 'publish')
-      assert.equal(announcementCount(MockWebSocket.sockets[1]), 1)
+      assert.equal(announcementCount(MockWebSocket.sockets[1]!), 1)
     } finally {
       await room.leave().catch(() => {})
       Math.random = originalRandom

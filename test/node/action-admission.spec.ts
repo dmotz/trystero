@@ -87,7 +87,7 @@ void test('response approval cannot block another request to the same peer', asy
     await fast.request('', {target: 'right', timeoutMs: 100}),
     'fast'
   )
-  approve(true)
+  approve!(true)
   assert.equal(await pending, 'slow')
 })
 
@@ -114,7 +114,7 @@ void test('concurrent requests on the same action have independent response admi
     await action.request('second', {target: 'right', timeoutMs: 100}),
     'second'
   )
-  approve(true)
+  approve!(true)
   assert.equal(await first, 'first')
 })
 
@@ -151,8 +151,8 @@ for (const cancel of ['timeout', 'abort'] as const) {
       controller.abort()
     }
     assert.equal(await pending, cancel === 'abort' ? 'aborted' : 'timeout')
-    assert.equal(admissionSignal.aborted, true)
-    approve(true)
+    assert.equal(admissionSignal!.aborted, true)
+    approve!(true)
     await turn()
     assert.equal(pair.frames.filter(frame => frame.kind === 2).length, 0)
     assert.ok(
@@ -165,7 +165,7 @@ for (const hasPolicy of [false, true]) {
   void test(`cancelling a streaming response releases its slot (policy: ${hasPolicy})`, async t => {
     const pair = linkedActions()
     t.after(pair.close)
-    let unblock: () => void
+    let unblock = () => {}
     const blocked = new Promise<void>(resolve => {
       unblock = resolve
     })
@@ -215,7 +215,7 @@ for (const hasPolicy of [false, true]) {
     controller.abort()
     assert.equal(await pending, 'aborted')
     if (hasPolicy) {
-      assert.equal(admissionSignal.aborted, true)
+      assert.equal(admissionSignal!.aborted, true)
     }
     const result = await file.request('next', {target: 'right', timeoutMs: 100})
     assert.ok(result instanceof Uint8Array)

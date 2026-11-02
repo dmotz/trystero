@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 class MockDataChannel {
   readyState = 'connecting'
   binaryType = 'arraybuffer'
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((ev: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((ev: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
@@ -24,19 +24,19 @@ class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  onconnectionstatechange = null
-  listeners = {}
+  localDescription: {type: string; sdp?: string} | null = null
+  onconnectionstatechange: (() => void) | null = null
+  listeners: Record<string, Set<() => void>> = {}
 
   createDataChannel() {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: () => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: () => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -46,7 +46,7 @@ class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: {type: string; sdp?: string}) {
     if (description?.type === 'rollback') {
       this.signalingState = 'stable'
       return
@@ -84,20 +84,22 @@ void test(
   {timeout: 5_000},
   async () => {
     let announceCount = 0
-    const warnings = []
+    const warnings: unknown[][] = []
     const realWarn = console.warn
 
     // Without the fix, queueAnnounce throws an unhandled rejection that
     // node:test would catch first. Swallow it so the assertion runs.
     const realEmit = process.emit.bind(process)
-    process.emit = (event, ...args) => {
+    process.emit = ((event: string | symbol, ...args: unknown[]) => {
       if (event === 'unhandledRejection') {
         return true
       }
 
-      return realEmit(event, ...args)
-    }
-    console.warn = (...args) => warnings.push(args)
+      return (
+        realEmit as (event: string | symbol, ...args: unknown[]) => boolean
+      )(event, ...args)
+    }) as typeof process.emit
+    console.warn = (...args: unknown[]) => warnings.push(args)
 
     const joinRoom = createStrategy({
       init: () => ({}),
@@ -117,7 +119,8 @@ void test(
       {
         appId: `trystero-announce-supervision-${Date.now()}-${Math.random()}`,
         password: 'announce-supervision-test',
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'r'
     )
@@ -148,9 +151,9 @@ void test(
   {timeout: 5_000},
   async () => {
     let announceCount = 0
-    const warnings = []
+    const warnings: unknown[][] = []
     const realWarn = console.warn
-    console.warn = (...args) => warnings.push(args)
+    console.warn = (...args: unknown[]) => warnings.push(args)
 
     const joinRoom = createStrategy({
       init: () => ({}),
@@ -166,7 +169,8 @@ void test(
         appId: `trystero-disabled-relay-warnings-${Date.now()}-${Math.random()}`,
         password: 'disabled-relay-warnings-test',
         relayConfig: {warnOnRelayFailure: false},
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'r'
     )

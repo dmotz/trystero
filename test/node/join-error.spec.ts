@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import type {StrategyOnMessage} from '../../packages/core/src/index.ts'
 import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {MockRTCPeerConnection, waitFor} from './peer-harness.ts'
@@ -8,11 +9,7 @@ import {MockRTCPeerConnection, waitFor} from './peer-harness.ts'
 type Subscriber = {
   rootTopic: string
   selfTopic: string
-  onMessage: (
-    topic: string,
-    msg: unknown,
-    signalPeer: (peerTopic: string, signal: string) => void
-  ) => Promise<void> | void
+  onMessage: StrategyOnMessage
 }
 
 class FailingRTCPeerConnection extends MockRTCPeerConnection {
@@ -23,7 +20,7 @@ class FailingRTCPeerConnection extends MockRTCPeerConnection {
     FailingRTCPeerConnection.instances.push(this)
   }
 
-  async setLocalDescription(description?: RTCSessionDescriptionInit) {
+  override async setLocalDescription(description?: RTCSessionDescriptionInit) {
     if (!description && this.remoteDescription?.type === 'offer') {
       this.localDescription = {
         type: 'answer',
@@ -73,7 +70,11 @@ void test(
       turnConfigured?: boolean
     }> = []
     const room = joinRoom(
-      {appId, rtcPolyfill: FailingRTCPeerConnection as any},
+      {
+        appId,
+        rtcPolyfill:
+          FailingRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
       roomId
     )
     room.onError(err =>
@@ -90,14 +91,14 @@ void test(
       const {peerId: selfId} = await room.getSelf()
       const remotePeerId = nextHigherPeerId(selfId)
       await waitFor(() => subscribers.length >= 1)
-      const sub = subscribers[0]
-      let offerPayload: Record<string, string> | null = null
+      const sub = subscribers[0]!
+      let offerPayload = null as {offer?: string; offerId?: string} | null
 
       await sub.onMessage(
         sub.rootTopic,
         {peerId: remotePeerId},
         (_topic, msg) => {
-          offerPayload = JSON.parse(msg) as Record<string, string>
+          offerPayload = JSON.parse(msg) as {offer?: string; offerId?: string}
         }
       )
 
@@ -130,11 +131,11 @@ void test(
       offerPeerConnection.failIce()
 
       await waitFor(() => errors.length > 0)
-      assert.equal(errors[0].code, 'peer-connect-failed')
-      assert.equal(errors[0].turnConfigured, false)
-      assert.match(errors[0].message, /could not connect to peer/)
-      assert.match(errors[0].message, /after exchanging SDP/)
-      assert.match(errors[0].message, /TURN/)
+      assert.equal(errors[0]!.code, 'peer-connect-failed')
+      assert.equal(errors[0]!.turnConfigured, false)
+      assert.match(errors[0]!.message, /could not connect to peer/)
+      assert.match(errors[0]!.message, /after exchanging SDP/)
+      assert.match(errors[0]!.message, /TURN/)
     } finally {
       await room.leave().catch(() => {})
     }
@@ -157,7 +158,11 @@ void test(
       turnConfigured?: boolean
     }> = []
     const room = joinRoom(
-      {appId, rtcPolyfill: FailingRTCPeerConnection as any},
+      {
+        appId,
+        rtcPolyfill:
+          FailingRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
       roomId
     )
     room.onError(err =>
@@ -172,13 +177,13 @@ void test(
 
     try {
       await waitFor(() => subscribers.length >= 1)
-      const sub = subscribers[0]
+      const sub = subscribers[0]!
       const encryptedOffer = await encrypt(
         genKey('', appId, roomId),
         'mock-offer',
         buildSignalAad('offer', remotePeerId, 'offer-1')
       )
-      let answerPayload: Record<string, string> | null = null
+      let answerPayload = null as {answer?: string} | null
 
       await sub.onMessage(
         sub.selfTopic,
@@ -188,7 +193,7 @@ void test(
           offer: encryptedOffer
         },
         (_topic, msg) => {
-          answerPayload = JSON.parse(msg) as Record<string, string>
+          answerPayload = JSON.parse(msg) as {answer?: string}
         }
       )
 
@@ -200,11 +205,11 @@ void test(
       answerPeerConnection.failIce()
 
       await waitFor(() => errors.length > 0)
-      assert.equal(errors[0].code, 'peer-connect-failed')
-      assert.equal(errors[0].turnConfigured, false)
-      assert.match(errors[0].message, /could not connect to peer/)
-      assert.match(errors[0].message, /after exchanging SDP/)
-      assert.match(errors[0].message, /TURN/)
+      assert.equal(errors[0]!.code, 'peer-connect-failed')
+      assert.equal(errors[0]!.turnConfigured, false)
+      assert.match(errors[0]!.message, /could not connect to peer/)
+      assert.match(errors[0]!.message, /after exchanging SDP/)
+      assert.match(errors[0]!.message, /TURN/)
     } finally {
       await room.leave().catch(() => {})
     }
@@ -214,7 +219,10 @@ void test(
 for (const failure of ['decrypt', 'remote SDP'] as const) {
   void test(`Trystero: failed ${failure} disposes answering peers before room leave`, async () => {
     class RejectedOfferConnection extends FailingRTCPeerConnection {
-      override async setRemoteDescription(description) {
+      override async setRemoteDescription(description?: {
+        type: string
+        sdp?: string
+      }) {
         if (failure === 'remote SDP') {
           throw new Error('invalid remote SDP')
         }
@@ -242,8 +250,8 @@ for (const failure of ['decrypt', 'remote SDP'] as const) {
                 'invalid SDP',
                 buildSignalAad('offer', 'remote', offerId)
               )
-        await subscribers[0].onMessage(
-          subscribers[0].rootTopic,
+        await subscribers[0]!.onMessage(
+          subscribers[0]!.rootTopic,
           {peerId: 'remote', offer, offerId},
           () => {}
         )

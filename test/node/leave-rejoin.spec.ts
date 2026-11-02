@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {createTopicStrategy} from '../../packages/core/src/index.ts'
+import {
+  createTopicStrategy,
+  type StrategyMessage
+} from '../../packages/core/src/index.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
 import {MockPeer, MockRTCPeerConnection, waitFor} from './peer-harness.ts'
@@ -9,7 +12,10 @@ for (const channelState of ['closed', 'connecting']) {
   const title = `Trystero: issue 195 can rejoin after ${channelState} channel interrupts leave`
 
   void test(title, async () => {
-    let root
+    let root = null as {
+      topic: string
+      onMessage: (topic: string, msg: StrategyMessage) => void | Promise<void>
+    } | null
     let initCount = 0
     const joinRoom = createTopicStrategy({
       init: () => {
@@ -27,11 +33,11 @@ for (const channelState of ['closed', 'connecting']) {
     })
     const config = {
       appId: `leave-rejoin-${channelState}-${Date.now()}`,
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
     const room = joinRoom(config, 'room')
     const peer = new MockPeer()
-    let rejoinedRoom
+    let rejoinedRoom: ReturnType<typeof joinRoom> | undefined
     let sendCount = 0
 
     try {
@@ -41,12 +47,12 @@ for (const channelState of ['closed', 'connecting']) {
         'answer-sdp',
         buildSignalAad('answer', 'remote-peer', 'offer-1')
       )
-      await root.onMessage(root.topic, {
+      await root!.onMessage(root!.topic, {
         peerId: 'remote-peer',
         offerId: 'offer-1',
         answer,
         peer
-      })
+      } as unknown as StrategyMessage)
       await waitFor(() => Boolean(peer.handlers.data))
 
       peer.sendData = () => {

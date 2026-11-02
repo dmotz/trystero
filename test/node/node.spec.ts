@@ -110,7 +110,7 @@ const startPeer = ({
 }
 
 const runNodeTests = (
-  strategy: string,
+  strategy: keyof typeof strategyConfigs,
   options: {timeout?: number; skip?: boolean} = {}
 ) => {
   const {timeout = 120_000, skip = false} = options
@@ -238,7 +238,7 @@ runNodeTests('supabase', {timeout: 20_000, skip: true})
 runNodeTests('ws-relay', {timeout: 20_000})
 
 const runPassiveNodeTest = (
-  strategy: string,
+  strategy: keyof typeof strategyConfigs,
   options: {timeout?: number; skip?: boolean} = {}
 ) => {
   const {timeout = 120_000, skip = false} = options

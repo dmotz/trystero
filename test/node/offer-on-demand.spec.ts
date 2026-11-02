@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import {OfferManager} from '../../packages/core/src/offer-manager.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
+import type {PeerHandle} from '../../packages/core/src/types.ts'
 
 void test(
   'Trystero: strategy creates offers on demand and reclaims unused peers',
@@ -11,10 +12,10 @@ void test(
       readyState = 'connecting'
       binaryType = 'arraybuffer'
       bufferedAmountLowThreshold = 0
-      onmessage = null
-      onopen = null
-      onclose = null
-      onerror = null
+      onmessage: ((ev: {data: unknown}) => void) | null = null
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: ((ev: unknown) => void) | null = null
 
       close() {
         this.readyState = 'closed'
@@ -32,13 +33,13 @@ void test(
       connectionState = 'new'
       iceConnectionState = 'new'
       signalingState = 'stable'
-      localDescription = null
-      onnegotiationneeded = null
-      onconnectionstatechange = null
-      ontrack = null
-      ondatachannel = null
+      localDescription: {type: string; sdp?: string} | null = null
+      onnegotiationneeded: (() => void) | null = null
+      onconnectionstatechange: (() => void) | null = null
+      ontrack: ((ev: unknown) => void) | null = null
+      ondatachannel: ((ev: unknown) => void) | null = null
       offerNum = 0
-      listeners = {}
+      listeners: Record<string, Set<() => void>> = {}
 
       constructor() {
         CountingRTCPeerConnection.created += 1
@@ -48,11 +49,11 @@ void test(
         return new MockDataChannel()
       }
 
-      addEventListener(event, fn) {
+      addEventListener(event: string, fn: () => void) {
         ;(this.listeners[event] ??= new Set()).add(fn)
       }
 
-      removeEventListener(event, fn) {
+      removeEventListener(event: string, fn: () => void) {
         this.listeners[event]?.delete(fn)
       }
 
@@ -63,7 +64,7 @@ void test(
         return {type: 'offer', sdp: `mock-offer-${this.offerNum}`}
       }
 
-      async setLocalDescription(description) {
+      async setLocalDescription(description?: {type: string; sdp?: string}) {
         if (description?.type === 'rollback') {
           this.signalingState = 'stable'
           return
@@ -101,11 +102,11 @@ void test(
       removeTrack() {}
     }
 
-    let complete = null
+    let complete: (() => void) | undefined
     let createdBeforeRequest = -1
     let createdAfterRequest = -1
     let closedAfterReclaim = -1
-    const completePromise = new Promise(res => {
+    const completePromise = new Promise<void>(res => {
       complete = res
     })
 
@@ -127,7 +128,8 @@ void test(
       {
         appId: `trystero-on-demand-offers-${Date.now()}`,
         password: 'offer-test',
-        rtcPolyfill: CountingRTCPeerConnection as any
+        rtcPolyfill:
+          CountingRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'room'
     )
@@ -149,7 +151,7 @@ void test('Trystero: leaving during offer creation closes the pending peer', asy
   let closed = 0
   const pendingOffer = new Promise<string>(resolve => (release = resolve))
   const manager = new OfferManager(
-    () => ({destroy: () => (closed += 1)}) as any
+    () => ({destroy: () => (closed += 1)}) as unknown as PeerHandle
   )
 
   const result = manager.checkout(1, false, async () => pendingOffer)

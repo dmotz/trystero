@@ -387,9 +387,9 @@ const probeTrystero = async (
         )
       )
     )
-    assert.notEqual(results[0].selfId, results[1].selfId)
+    assert.notEqual(results[0]!.selfId, results[1]!.selfId)
     for (const [i, result] of results.entries()) {
-      assert.equal(result.peerId, results[1 - i].selfId)
+      assert.equal(result.peerId, results[1 - i]!.selfId)
       assert.equal(result.response, result.selfId)
     }
     return performance.now() - start
@@ -433,7 +433,12 @@ const main = async (browser: Browser, siteUrl: string) => {
         (now - Math.max(...reports.map(report => report.created_at))) / 3600
       const rtts = reports.flatMap(report =>
         report.tags
-          .filter(tag => ['rtt-open', 'rtt-read', 'rtt-write'].includes(tag[0]))
+          .filter(
+            (tag): tag is [string, string, ...string[]] =>
+              typeof tag[0] === 'string' &&
+              ['rtt-open', 'rtt-read', 'rtt-write'].includes(tag[0]) &&
+              typeof tag[1] === 'string'
+          )
           .map(tag => Number(tag[1]))
           .filter(value => Number.isFinite(value) && value > 0)
       )
@@ -462,6 +467,9 @@ const main = async (browser: Browser, siteUrl: string) => {
     Array.from({length: 10}, async () => {
       while (next < candidates.length) {
         const candidate = candidates[next++]
+        if (!candidate) {
+          break
+        }
         try {
           log(
             `Preliminary ${next}/${candidates.length}: checking NIP-11 policy at ${candidate.url}`
@@ -518,6 +526,9 @@ const main = async (browser: Browser, siteUrl: string) => {
     Array.from({length: 3}, async () => {
       while (next < preliminary.length) {
         const candidate = preliminary[next++]
+        if (!candidate) {
+          break
+        }
         try {
           log(
             `Trystero ${next}/${preliminary.length}: preparing isolated clients for ${candidate.url}`

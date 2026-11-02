@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createPeer from '../../packages/core/src/peer.ts'
+import type {PeerHandle} from '../../packages/core/src/types.ts'
 import {
   MockPeer,
   MockRTCPeerConnection,
@@ -11,7 +12,7 @@ import {
 
 void test('local leave completes without receipts from a connected peer', async t => {
   t.mock.timers.enable({apis: ['setTimeout', 'Date']})
-  let acceptPeer
+  let acceptPeer: ((peer: PeerHandle, id: string) => void) | undefined
   let left = false
   const room = createRoom(
     callback => {
@@ -23,8 +24,8 @@ void test('local leave completes without receipts from a connected peer', async 
     }
   )
   const peer = new MockPeer()
-  acceptPeer(peer, 'peer')
-  peer.handlers.data(encodeInternalAction('hsready'))
+  acceptPeer!(peer as unknown as PeerHandle, 'peer')
+  peer.handlers.data!(encodeInternalAction('hsready'))
   await turn()
   const leaving = room.leave()
   t.mock.timers.tick(100)
@@ -35,7 +36,7 @@ void test('local leave completes without receipts from a connected peer', async 
 
 void test('local leave also cancels a blocked data-channel send', async t => {
   t.mock.timers.enable({apis: ['setTimeout', 'Date']})
-  let acceptPeer
+  let acceptPeer: ((peer: PeerHandle, id: string) => void) | undefined
   let left = false
   const room = createRoom(
     callback => {
@@ -56,14 +57,15 @@ void test('local leave also cancels a blocked data-channel send', async t => {
   }
   peer.channel.bufferedAmount = 100_000
   Object.assign(peer.channel, {
-    addEventListener: (event, fn) => {
-      const listeners = events.get(event) ?? new Set()
+    addEventListener: (event: string, fn: () => void) => {
+      const listeners = events.get(event) ?? new Set<() => void>()
       listeners.add(fn)
       events.set(event, listeners)
     },
-    removeEventListener: (event, fn) => events.get(event)?.delete(fn)
+    removeEventListener: (event: string, fn: () => void) =>
+      events.get(event)?.delete(fn)
   })
-  acceptPeer(peer, 'peer')
+  acceptPeer!(peer as unknown as PeerHandle, 'peer')
   await turn()
   const leaving = room.leave()
   t.mock.timers.tick(100)
@@ -112,11 +114,11 @@ void test('intentional SCTP aborts close the peer without reporting a transport 
     )
     channel.onerror!({error} as RTCErrorEvent)
   }
-  assert.deepEqual(errors, [])
+  assert.deepEqual<Error[]>(errors, [])
   channel.onclose!({} as Event)
   channel.onerror!({error: new Error('late channel error')} as RTCErrorEvent)
   assert.equal(closes, 1)
-  assert.deepEqual(errors, [])
+  assert.deepEqual<Error[]>(errors, [])
 
   const failed = createPeer(true, {
     appId: 'test',

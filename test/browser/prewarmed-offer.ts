@@ -8,7 +8,7 @@ test('Trystero: torrent: a prewarmed offer attaches after its data channel opens
   if (browserName !== 'chromium') {
     await installLoopbackMdnsPeerConnection(page)
   }
-  await page.goto(`https://127.0.0.1:${process.env.TRYSTERO_TEST_PORT}/test`)
+  await page.goto(`https://127.0.0.1:${process.env['TRYSTERO_TEST_PORT']}/test`)
   const attached = await page.evaluate(async () => {
     const peerModule = '../packages/core/dist/peer.mjs'
     const {default: initPeer} = await import(peerModule)
@@ -20,7 +20,7 @@ test('Trystero: torrent: a prewarmed offer attaches after its data channel opens
     }
     const initiator = initPeer(true, config)
     const answerer = initPeer(false, config)
-    const joined = [0, 0]
+    const joined: [number, number] = [0, 0]
 
     try {
       // The offer is published before a signaling handler exists, as with Torrent.

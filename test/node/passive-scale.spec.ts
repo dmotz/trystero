@@ -1,26 +1,23 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
+import type {Room, StrategyOnMessage} from '../../packages/core/src/index.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 type Subscriber = {
   roomId?: string
   rootTopic: string
   selfTopic: string
-  onMessage: (
-    topic: string,
-    msg: unknown,
-    signalPeer: (peerTopic: string, signal: string) => void
-  ) => Promise<void> | void
+  onMessage: StrategyOnMessage
 }
 
 class MockDataChannel {
   readyState = 'connecting'
   binaryType = 'arraybuffer'
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((ev: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((ev: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
@@ -35,22 +32,22 @@ class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  onnegotiationneeded = null
-  onconnectionstatechange = null
-  ontrack = null
-  ondatachannel = null
-  listeners = {}
+  localDescription: {type: string; sdp?: string} | null = null
+  onnegotiationneeded: (() => void) | null = null
+  onconnectionstatechange: (() => void) | null = null
+  ontrack: ((ev: unknown) => void) | null = null
+  ondatachannel: ((ev: unknown) => void) | null = null
+  listeners: Record<string, Set<() => void>> = {}
 
   createDataChannel() {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: () => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: () => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -60,7 +57,7 @@ class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: {type: string; sdp?: string}) {
     if (description?.type === 'rollback') {
       this.signalingState = 'stable'
       return
@@ -136,13 +133,13 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
     const memBefore = process.memoryUsage()
     const timeBefore = performance.now()
 
-    const rooms = []
+    const rooms: Room[] = []
     for (let i = 0; i < roomCount; i++) {
       rooms.push(joinRoom(config, `room-${i}`))
     }
@@ -221,17 +218,17 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
-    const rooms = []
+    const rooms: Room[] = []
     for (let i = 0; i < roomCount; i++) {
       rooms.push(joinRoom(config, `room-${i}`))
     }
 
     await waitFor(() => subscribers.length >= roomCount, 60_000)
 
-    const sub0 = subscribers[0]
+    const sub0 = subscribers[0]!
     await sub0.onMessage(sub0.rootTopic, {peerId: '~active-peer'}, () => {
       signaledRooms.add(0)
     })
@@ -271,10 +268,10 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
-    const rooms = []
+    const rooms: Room[] = []
     for (let i = 0; i < roomCount; i++) {
       rooms.push(joinRoom(config, `room-${i}`))
     }

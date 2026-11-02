@@ -1,15 +1,45 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {joinRoom} from '../../packages/nostr/src/index.ts'
+
+type SdpInit = {type: string; sdp?: string}
+
+type NostrReqFilter = {
+  kinds: number[]
+  since: number
+  '#x': string[]
+}
+
+type NostrSignedEvent = {
+  id: string
+  pubkey: string
+  created_at: number
+  kind: number
+  tags: string[][]
+  content: string
+  sig: string
+}
+
+type NostrReqFrame = ['REQ', string, NostrReqFilter]
+type NostrCloseFrame = ['CLOSE', string]
+type NostrEventFrame = ['EVENT', NostrSignedEvent]
+type NostrClientFrame = NostrReqFrame | NostrCloseFrame | NostrEventFrame
+
+type AnnouncementPayload = {
+  peerId?: string
+  offer?: unknown
+  answer?: unknown
+  candidate?: unknown
+}
 
 class MockDataChannel {
   readyState = 'connecting'
   binaryType = 'arraybuffer'
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((event: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((event: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
@@ -24,19 +54,19 @@ class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  onconnectionstatechange = null
-  listeners = {}
+  localDescription: SdpInit | null = null
+  onconnectionstatechange: (() => void) | null = null
+  listeners: Record<string, Set<() => void>> = {}
 
   createDataChannel() {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: () => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: () => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -46,7 +76,7 @@ class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: SdpInit) {
     const next = description ?? (await this.createOffer())
     this.localDescription = next
     this.signalingState = next.type === 'offer' ? 'have-local-offer' : 'stable'
@@ -79,18 +109,18 @@ class MockWebSocket {
   static OPEN = 1 as const
   static CLOSING = 2 as const
   static CLOSED = 3 as const
-  static sockets = []
+  static sockets: MockWebSocket[] = []
   static rateLimitAnnouncements = false
   static rejectAnnouncements = false
 
   readyState = 0
-  sent = []
-  onopen = null
-  onclose = null
-  onmessage = null
-  url
+  sent: NostrClientFrame[] = []
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onmessage: ((event: {data: string}) => void) | null = null
+  url: string
 
-  constructor(url) {
+  constructor(url: string) {
     this.url = url
     MockWebSocket.sockets.push(this)
 
@@ -100,8 +130,8 @@ class MockWebSocket {
     })
   }
 
-  send(data) {
-    const msg = JSON.parse(data)
+  send(data: string) {
+    const msg = JSON.parse(data) as NostrClientFrame
     this.sent.push(msg)
 
     if (
@@ -109,7 +139,7 @@ class MockWebSocket {
         MockWebSocket.rejectAnnouncements) &&
       msg[0] === 'EVENT'
     ) {
-      const payload = JSON.parse(msg[1].content)
+      const payload = JSON.parse(msg[1].content) as AnnouncementPayload
 
       if (
         payload.peerId &&
@@ -164,7 +194,7 @@ const announcementCount = (socket: MockWebSocket): number =>
       return false
     }
 
-    const payload = JSON.parse(msg[1].content)
+    const payload = JSON.parse(msg[1].content) as AnnouncementPayload
 
     return (
       payload.peerId && !payload.offer && !payload.answer && !payload.candidate
@@ -176,24 +206,24 @@ const joinTestRoom = (url: string) =>
     {
       appId: `nostr-announcement-rate-${Date.now()}-${Math.random()}`,
       relayConfig: {urls: [url], warnOnRelayFailure: false},
-      rtcPolyfill: MockRTCPeerConnection as any
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'room'
   )
 
 void test('Nostr late EOSE replays discovery once without blocking startup', async () => {
   const previous = globalThis.WebSocket
-  globalThis.WebSocket = MockWebSocket as any
+  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
   const room = joinTestRoom(`wss://late-eose-${Date.now()}.test`)
   try {
-    const socket = MockWebSocket.sockets.at(-1)
+    const socket = MockWebSocket.sockets.at(-1)!
     await waitFor(() => announcementCount(socket) > 0)
-    const req = socket.sent.find(msg => msg[0] === 'REQ')
+    const req = socket.sent.find(msg => msg[0] === 'REQ')!
     await wait(1100)
     const before = announcementCount(socket)
-    socket.onmessage({data: JSON.stringify(['EOSE', req[1]])})
+    socket.onmessage!({data: JSON.stringify(['EOSE', req[1]])})
     await waitFor(() => announcementCount(socket) === before + 1, 300)
-    socket.onmessage({data: JSON.stringify(['EOSE', req[1]])})
+    socket.onmessage!({data: JSON.stringify(['EOSE', req[1]])})
     await wait(100)
     assert.equal(announcementCount(socket), before + 1)
   } finally {
@@ -209,17 +239,17 @@ void test(
     const previousSocket = globalThis.WebSocket
     const previousNow = Date.now
     const frozen = Date.now()
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
     Date.now = () => frozen
     const room = joinTestRoom(`wss://unique-announcement-${frozen}.test`)
     try {
-      const socket = MockWebSocket.sockets.at(-1)
+      const socket = MockWebSocket.sockets.at(-1)!
       await waitFor(() => announcementCount(socket) >= 2)
       const events = socket.sent
         .filter(msg => msg[0] === 'EVENT')
         .map(msg => msg[1])
-      assert.equal(events[0].created_at, events[1].created_at)
-      assert.notEqual(events[0].id, events[1].id)
+      assert.equal(events[0]!.created_at, events[1]!.created_at)
+      assert.notEqual(events[0]!.id, events[1]!.id)
     } finally {
       Date.now = previousNow
       await room.leave()
@@ -233,13 +263,13 @@ void test(
   {timeout: 8000},
   async () => {
     const previous = globalThis.WebSocket
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
     const room = joinTestRoom(`wss://closed-retry-${Date.now()}.test`)
     try {
-      const socket = MockWebSocket.sockets.at(-1)
+      const socket = MockWebSocket.sockets.at(-1)!
       await waitFor(() => announcementCount(socket) > 0)
-      const req = socket.sent.find(msg => msg[0] === 'REQ')
-      socket.onmessage({
+      const req = socket.sent.find(msg => msg[0] === 'REQ')!
+      socket.onmessage!({
         data: JSON.stringify([
           'CLOSED',
           req[1],
@@ -251,7 +281,7 @@ void test(
         () => socket.sent.filter(msg => msg[0] === 'REQ').length === 2,
         6000
       )
-      await waitFor(() => socket.sent.at(-1)[0] === 'EVENT')
+      await waitFor(() => socket.sent.at(-1)![0] === 'EVENT')
     } finally {
       await room.leave()
       globalThis.WebSocket = previous
@@ -265,18 +295,19 @@ for (const recovered of [false, true]) {
     {timeout: 8000},
     async () => {
       const previous = globalThis.WebSocket
-      globalThis.WebSocket = MockWebSocket as any
+      globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
       const room = joinTestRoom(
         `wss://pending-retry-${recovered}-${Date.now()}.test`
       )
       try {
-        const socket = MockWebSocket.sockets.at(-1)
+        const socket = MockWebSocket.sockets.at(-1)!
         await waitFor(() => announcementCount(socket) > 0)
-        const req = socket.sent.find(msg => msg[0] === 'REQ')
-        const deliver = frame => socket.onmessage({data: JSON.stringify(frame)})
+        const req = socket.sent.find(msg => msg[0] === 'REQ')!
+        const deliver = (frame: unknown[]) =>
+          socket.onmessage!({data: JSON.stringify(frame)})
         deliver(['CLOSED', req[1], 'error: retry later'])
         if (recovered) {
-          socket.onopen()
+          socket.onopen!()
           deliver(['EOSE', req[1]])
         } else {
           deliver(['CLOSED', req[1], 'rate-limited: slow down'])
@@ -294,13 +325,13 @@ for (const recovered of [false, true]) {
 
 void test('Nostr temporary event errors do not retire the relay or cancel discovery', async () => {
   const previous = globalThis.WebSocket
-  globalThis.WebSocket = MockWebSocket as any
+  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
   const room = joinTestRoom(`wss://temporary-error-${Date.now()}.test`)
   try {
-    const socket = MockWebSocket.sockets.at(-1)
+    const socket = MockWebSocket.sockets.at(-1)!
     await waitFor(() => announcementCount(socket) > 0)
-    const event = socket.sent.find(msg => msg[0] === 'EVENT')[1]
-    socket.onmessage({
+    const event = socket.sent.find(msg => msg[0] === 'EVENT')![1]
+    socket.onmessage!({
       data: JSON.stringify([
         'OK',
         event.id,
@@ -318,16 +349,16 @@ void test('Nostr temporary event errors do not retire the relay or cancel discov
 
 void test('Nostr successful late ACKs cannot cancel an active rate-limit cooldown', async () => {
   const previous = globalThis.WebSocket
-  globalThis.WebSocket = MockWebSocket as any
+  globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
   const room = joinTestRoom(`wss://cooldown-ack-${Date.now()}.test`)
   try {
-    const socket = MockWebSocket.sockets.at(-1)
+    const socket = MockWebSocket.sockets.at(-1)!
     await waitFor(() => announcementCount(socket) > 0)
-    const event = socket.sent.find(msg => msg[0] === 'EVENT')[1]
-    socket.onmessage({
+    const event = socket.sent.find(msg => msg[0] === 'EVENT')![1]
+    socket.onmessage!({
       data: JSON.stringify(['OK', event.id, false, 'rate-limited: slow down'])
     })
-    socket.onmessage({data: JSON.stringify(['OK', event.id, true, ''])})
+    socket.onmessage!({data: JSON.stringify(['OK', event.id, true, ''])})
     await wait(850)
     assert.equal(announcementCount(socket), 1)
   } finally {
@@ -342,28 +373,32 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
     const originalSetTimeout = globalThis.setTimeout
-    const heldZeroDelayTimers = []
+    const heldZeroDelayTimers: Array<() => void> = []
     const nativeWait = (ms: number) =>
       new Promise<void>(resolve => originalSetTimeout(resolve, ms))
 
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
-    globalThis.WebSocket = MockWebSocket as any
-    globalThis.setTimeout = ((fn, delay, ...args) => {
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
+    globalThis.setTimeout = ((
+      fn: (...args: unknown[]) => void,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
       if (delay === 0) {
         heldZeroDelayTimers.push(() => fn(...args))
         return {heldZeroDelayTimer: heldZeroDelayTimers.length}
       }
 
       return originalSetTimeout(fn, delay, ...args)
-    }) as any
+    }) as unknown as typeof setTimeout
 
     const room = joinTestRoom(
       `wss://nostr-subscription-order-${Date.now()}.test`
     )
 
     try {
-      const socket = MockWebSocket.sockets[0]
+      const socket = MockWebSocket.sockets[0]!
       const publishWonRace = await Promise.race([
         waitFor(() => announcementCount(socket) > 0, 1_000, nativeWait).then(
           () => true
@@ -386,14 +421,14 @@ void test(
           return false
         }
 
-        const payload = JSON.parse(msg[1].content)
+        const payload = JSON.parse(msg[1].content) as AnnouncementPayload
         return payload.peerId && !payload.offer && !payload.answer
       })
 
       assert.ok(firstReqIndex >= 0)
       assert.ok(firstReqIndex < firstAnnouncementIndex)
       assert.equal(
-        socket.sent[firstReqIndex][2]['#x'].length,
+        (socket.sent[firstReqIndex] as NostrReqFrame)[2]['#x'].length,
         2,
         'self and root topics should remain in one batched subscription'
       )
@@ -413,13 +448,13 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
 
     const room = joinTestRoom(`wss://nostr-healthy-${Date.now()}.test`)
 
     try {
       await wait(2_500)
-      const socket = MockWebSocket.sockets[0]
+      const socket = MockWebSocket.sockets[0]!
 
       assert.equal(
         announcementCount(socket),
@@ -453,7 +488,7 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = true
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
 
     const room = joinTestRoom(`wss://nostr-rate-limited-${Date.now()}.test`)
 
@@ -461,12 +496,12 @@ void test(
       await wait(2_500)
 
       assert.equal(
-        announcementCount(MockWebSocket.sockets[0]),
+        announcementCount(MockWebSocket.sockets[0]!),
         1,
         'rate-limited relay should suppress the rest of the startup burst'
       )
       assert.equal(
-        MockWebSocket.sockets[0].readyState,
+        MockWebSocket.sockets[0]!.readyState,
         1,
         'a temporary rate limit should not retire the relay'
       )
@@ -485,7 +520,7 @@ void test(
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
     MockWebSocket.rejectAnnouncements = true
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
 
     const room = joinTestRoom(`wss://nostr-rejecting-${Date.now()}.test`)
 
@@ -493,12 +528,12 @@ void test(
       await wait(2_500)
 
       assert.equal(
-        announcementCount(MockWebSocket.sockets[0]),
+        announcementCount(MockWebSocket.sockets[0]!),
         1,
         'rejecting relay should suppress the rest of the startup burst'
       )
       assert.equal(
-        MockWebSocket.sockets[0].readyState,
+        MockWebSocket.sockets[0]!.readyState,
         3,
         'rejecting relay should be closed instead of retried forever'
       )
@@ -517,7 +552,7 @@ void test(
     const originalWebSocket = globalThis.WebSocket
     MockWebSocket.sockets.length = 0
     MockWebSocket.rateLimitAnnouncements = false
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
 
     const url = `wss://nostr-missing-ack-${Date.now()}.test`
     const firstRoom = joinTestRoom(url)
@@ -526,7 +561,7 @@ void test(
       await wait(8_000)
       await firstRoom.leave()
 
-      const socket = MockWebSocket.sockets[0]
+      const socket = MockWebSocket.sockets[0]!
       const previousCount = announcementCount(socket)
       const retryRoom = joinTestRoom(url)
 
@@ -547,14 +582,14 @@ void test(
   {timeout: 5_000},
   async () => {
     const previous = globalThis.WebSocket
-    globalThis.WebSocket = MockWebSocket as any
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket
     const room = joinTestRoom(`wss://closed-terminal-${Date.now()}.test`)
 
     try {
-      const socket = MockWebSocket.sockets.at(-1)
+      const socket = MockWebSocket.sockets.at(-1)!
       await waitFor(() => announcementCount(socket) > 0)
-      const req = socket.sent.find(msg => msg[0] === 'REQ')
-      socket.onmessage({
+      const req = socket.sent.find(msg => msg[0] === 'REQ')!
+      socket.onmessage!({
         data: JSON.stringify([
           'CLOSED',
           req[1],

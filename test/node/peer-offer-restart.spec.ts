@@ -25,7 +25,10 @@ void test('unanswered offer restarts preserve the pending data channel without r
   class TrackingRTCPeerConnection extends MockRTCPeerConnection {
     rollbacks = 0
 
-    async setLocalDescription(description) {
+    override async setLocalDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       if (description?.type === 'rollback') {
         this.rollbacks++
       }
@@ -107,7 +110,10 @@ void test('non-trickle offer resolves once gathered candidates settle without wa
   class StalledGatheringRTCPeerConnection extends MockRTCPeerConnection {
     override iceGatheringState = 'gathering'
 
-    override async setLocalDescription(description) {
+    override async setLocalDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       const nextDescription = description ?? (await this.createOffer())
       this.localDescription = {
         type: nextDescription.type,
@@ -121,7 +127,7 @@ void test('non-trickle offer resolves once gathered candidates settle without wa
           'candidate:2 1 udp 1677729535 203.0.113.5 50000 typ srflx raddr 0.0.0.0 rport 0'
         this.localDescription = {
           type: 'offer',
-          sdp: `${this.localDescription.sdp}a=${candidateLine}\r\n`
+          sdp: `${this.localDescription!.sdp}a=${candidateLine}\r\n`
         }
         this.listeners['icecandidate']?.forEach(listener =>
           listener({candidate: {candidate: candidateLine}})
@@ -151,9 +157,9 @@ void test('non-trickle offer resolves once gathered candidates settle without wa
 })
 
 void test('polite peer glare offer while makingOffer in stable state answers without invalid rollback', async t => {
-  let resolveCreateOffer:
+  let resolveCreateOffer = null as
     | ((offer: {type: string; sdp: string}) => void)
-    | null = null
+    | null
 
   class PoliteGlareRTCPeerConnection extends MockRTCPeerConnection {
     answersCreated = 0
@@ -169,13 +175,21 @@ void test('polite peer glare offer while makingOffer in stable state answers wit
       return {type: 'answer', sdp: 'polite-answer'}
     }
 
-    override async setRemoteDescription(description) {
+    override async setRemoteDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       this.remoteDescription = description
+        ? {type: description.type, sdp: description.sdp ?? ''}
+        : null
       this.signalingState =
         description?.type === 'offer' ? 'have-remote-offer' : 'stable'
     }
 
-    override async setLocalDescription(description) {
+    override async setLocalDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       if (
         description?.type === 'rollback' &&
         this.signalingState === 'stable'
@@ -250,7 +264,10 @@ void test('queued remote candidates drop stale ufrags and evict oldest entries a
   class CandidateTrackingRTCPeerConnection extends MockRTCPeerConnection {
     addedCandidates: Array<{candidate: string; usernameFragment?: string}> = []
 
-    async addIceCandidate(candidate) {
+    async addIceCandidate(candidate: {
+      candidate: string
+      usernameFragment?: string
+    }) {
       this.addedCandidates.push(candidate)
     }
   }
@@ -291,7 +308,7 @@ void test('queued remote candidates drop stale ufrags and evict oldest entries a
   assert.ok(
     pc.addedCandidates.every(c => c.usernameFragment === 'active-ufrag')
   )
-  assert.match(pc.addedCandidates[0].candidate, /^candidate:132 /)
+  assert.match(pc.addedCandidates[0]!.candidate, /^candidate:132 /)
   assert.match(pc.addedCandidates.at(-1)!.candidate, /^candidate:259 /)
 })
 
@@ -342,8 +359,8 @@ for (const server of ['stun', 'turn'] as const) {
       const pc = peer.connection as unknown as GatheringConnection
       const candidateType = server === 'turn' ? 'relay' : 'srflx'
       const candidate = `candidate:2 1 udp 1 203.0.113.1 6000 typ ${candidateType}`
-      pc.localDescription.sdp += `a=${candidate}\r\n`
-      pc.listeners['icecandidate'].forEach(fn => fn({candidate: {candidate}}))
+      pc.localDescription!.sdp += `a=${candidate}\r\n`
+      pc.listeners['icecandidate']!.forEach(fn => fn({candidate: {candidate}}))
       t.mock.timers.tick(150)
       await flushMicrotasks()
       assert.equal(settled, true)
@@ -351,8 +368,8 @@ for (const server of ['stun', 'turn'] as const) {
       assert.ok(offer)
       assert.equal(offer.type, type)
       assert.ok(offer.sdp.includes(`typ ${candidateType}`))
-      assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
-      assert.equal(pc.listeners['icecandidate'].size, 0)
+      assert.equal(pc.listeners['icegatheringstatechange']!.size, 0)
+      assert.equal(pc.listeners['icecandidate']!.size, 0)
     })
   }
 }
@@ -393,8 +410,8 @@ for (const localOnly of [false, true]) {
     assert.ok(offer)
     assert.match(offer.sdp, /typ host/)
     const pc = peer.connection as unknown as GatheringConnection
-    assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
-    assert.equal(pc.listeners['icecandidate'].size, 0)
+    assert.equal(pc.listeners['icegatheringstatechange']!.size, 0)
+    assert.equal(pc.listeners['icecandidate']!.size, 0)
   })
 }
 
@@ -422,12 +439,12 @@ for (const exit of ['timeout', 'destroy', 'complete'] as const) {
       peer.destroy()
     } else {
       pc.iceGatheringState = 'complete'
-      pc.listeners['icegatheringstatechange'].forEach(fn => fn())
+      pc.listeners['icegatheringstatechange']!.forEach(fn => fn())
     }
     await flushMicrotasks()
     assert.equal(settled, true)
-    assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
-    assert.equal(pc.listeners['icecandidate'].size, 0)
+    assert.equal(pc.listeners['icegatheringstatechange']!.size, 0)
+    assert.equal(pc.listeners['icecandidate']!.size, 0)
     await offering
   })
 }

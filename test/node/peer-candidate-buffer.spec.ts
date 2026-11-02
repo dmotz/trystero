@@ -1,23 +1,26 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import initPeer from '../../packages/core/src/peer.ts'
 
 class MockRTCPeerConnection {
   connectionState = 'new'
   signalingState = 'stable'
-  remoteDescription = null
-  localDescription = null
+  remoteDescription: {type: string; sdp: string} | null = null
+  localDescription: {type: string; sdp: string} | null = null
   iceGatheringState = 'complete'
-  candidates = []
+  candidates: Array<{candidate: string; sdpMLineIndex?: number}> = []
 
   addEventListener() {}
   removeEventListener() {}
 
-  async addIceCandidate(candidate) {
+  async addIceCandidate(candidate: {
+    candidate: string
+    sdpMLineIndex?: number
+  }) {
     this.candidates.push(candidate)
   }
 
-  async setRemoteDescription(description) {
+  async setRemoteDescription(description: {type: string; sdp: string}) {
     this.remoteDescription = description
   }
 

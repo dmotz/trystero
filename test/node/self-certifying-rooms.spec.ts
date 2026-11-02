@@ -1,0 +1,547 @@
+import assert from 'node:assert/strict'
+import {execFileSync} from 'node:child_process'
+import {readFileSync} from 'node:fs'
+import {resolve} from 'node:path'
+import test from './test.ts'
+import * as corePublicExports from '../../packages/core/src/index.ts'
+import {definePlugin, roles} from '../../packages/core/src/index.ts'
+import {createMemorySignalBus} from './memory-rtc.ts'
+
+void test('Production build (no DEV labels): custom plugin setup(kernel) sees resolved 20-char kernel.selfId on the first room, and built .d.mts omits _test_only_* and __config', () => {
+  const distIndexMjs = resolve(
+    import.meta.dirname,
+    '../../packages/core/dist/index.mjs'
+  )
+  const distIndexDmts = resolve(
+    import.meta.dirname,
+    '../../packages/core/dist/index.d.mts'
+  )
+
+  const script = `
+    import assert from 'node:assert/strict'
+    import {createTopicStrategy, definePlugin} from ${JSON.stringify(distIndexMjs)}
+
+    let setupSelfId = null
+    const customPlugin = definePlugin('custom-selfid-check', {
+      setup(kernel) {
+        setupSelfId = kernel.selfId
+        return {
+          getCapturedSelfId: () => setupSelfId
+        }
+      }
+    })
+
+    const joinRoom = createTopicStrategy({
+      init: () => ({}),
+      subscribeTopic: () => () => {},
+      publishTopic: () => {}
+    })
+
+    const room = joinRoom(
+      {
+        appId: 'prod-first-room-app',
+        use: [customPlugin]
+      },
+      'room-1'
+    )
+
+    assert.equal(room.getCapturedSelfId, undefined)
+    await room.ready
+    assert.equal(typeof room.getCapturedSelfId, 'function')
+
+    const self = await room.getSelf()
+    assert.equal(typeof setupSelfId, 'string')
+    assert.match(setupSelfId, /^[0-9A-Za-z]{20}$/, 'kernel.selfId in setup() must be a resolved 20-char peerId in production build')
+    assert.equal(setupSelfId, self.peerId)
+    assert.equal(room.getCapturedSelfId(), self.peerId)
+    await room.leave()
+  `
+
+  execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    stdio: 'pipe'
+  })
+
+  const dtsContent = readFileSync(distIndexDmts, 'utf8')
+  const typesDtsContent = readFileSync(
+    resolve(import.meta.dirname, '../../packages/core/dist/types.d.mts'),
+    'utf8'
+  )
+  const distBundles = ['strategy.mjs', 'identity.mjs', 'room.mjs', 'peer.mjs']
+    .map(name =>
+      readFileSync(
+        resolve(import.meta.dirname, `../../packages/core/dist/${name}`),
+        'utf8'
+      )
+    )
+    .join('\n')
+
+  for (const forbidden of [
+    'forcedPeerId',
+    'scopeAppId',
+    'registerTestForcedPeerId',
+    'endpointIdentityByPeerId',
+    'registeredTestForcedPeerIds',
+    'resolvedTestEndpointCanonicalJwk',
+    'getDefaultTestUserIdentity',
+    'setDevIdentityProvider',
+    'devIdentityProvider',
+    'TestOnlyRoomConfig',
+    '_test_only_mdnsHostFallbackToLoopback'
+  ]) {
+    assert.equal(
+      distBundles.includes(forbidden),
+      false,
+      `production dist bundle must not contain "${forbidden}"`
+    )
+    assert.equal(
+      dtsContent.includes(forbidden),
+      false,
+      `built index.d.mts must not contain "${forbidden}"`
+    )
+    assert.equal(
+      typesDtsContent.includes(forbidden),
+      false,
+      `built types.d.mts must not contain "${forbidden}"`
+    )
+  }
+  assert.equal(
+    dtsContent.includes('_test_only_mdnsHostFallbackToLoopback'),
+    false,
+    'built .d.mts must not expose _test_only_mdnsHostFallbackToLoopback'
+  )
+  assert.equal(
+    dtsContent.includes('__config?:'),
+    false,
+    'built .d.mts must hide phantom config behind a unique symbol'
+  )
+})
+
+void test('Plugin API safety: rejects reserved room property names, duplicate plugin names, and duplicate plugin API property names', async () => {
+  const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus()
+  const joinRoom = makeJoinRoom()
+
+  assert.throws(
+    () => definePlugin('ready', {setup: () => ({})}),
+    /plugin name "ready" is a reserved room property/
+  )
+  assert.throws(
+    () => definePlugin('leave', {setup: () => ({})}),
+    /plugin name "leave" is a reserved room property/
+  )
+  assert.throws(
+    () => definePlugin('onPeerJoin', {setup: () => ({})}),
+    /plugin name "onPeerJoin" is a reserved room property/
+  )
+
+  const shadowLeavePlugin = definePlugin('shadow-leave', {
+    setup: () => ({
+      leave: () => Promise.resolve()
+    })
+  })
+  await assert.rejects(
+    () =>
+      joinRoom(
+        {
+          appId: 'shadow-test',
+          use: [shadowLeavePlugin],
+          rtcPolyfill
+        },
+        'room-shadow-1'
+      ).ready,
+    /cannot override reserved room property "leave"/
+  )
+
+  const shadowGetPeersPlugin = definePlugin('shadow-peers', {
+    setup: () => ({
+      getPeers: () => ({})
+    })
+  })
+  await assert.rejects(
+    () =>
+      joinRoom(
+        {
+          appId: 'shadow-test',
+          use: [shadowGetPeersPlugin],
+          rtcPolyfill
+        },
+        'room-shadow-2'
+      ).ready,
+    /cannot override reserved room property "getPeers"/
+  )
+
+  const pluginA = definePlugin('plugin-a', {
+    setup: () => ({sharedFn: () => 1})
+  })
+  const pluginB = definePlugin('plugin-b', {
+    setup: () => ({sharedFn: () => 2})
+  })
+
+  assert.throws(
+    () =>
+      joinRoom(
+        {
+          appId: 'dup-plugin-test',
+          use: [pluginA, pluginA],
+          rtcPolyfill
+        },
+        'room-dup-1'
+      ),
+    /duplicate plugin "plugin-a"/
+  )
+
+  await assert.rejects(
+    () =>
+      joinRoom(
+        {
+          appId: 'dup-api-test',
+          use: [pluginA, pluginB],
+          rtcPolyfill
+        },
+        'room-dup-2'
+      ).ready,
+    /defines duplicate room property "sharedFn"/
+  )
+})
+
+void test('makeState widens primitive literals, isPassive is removed, and core exports/types are pruned', async () => {
+  const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus()
+  const joinRoom = makeJoinRoom()
+
+  const room = joinRoom(
+    {
+      appId: 'state-widening-app',
+      identity: 'none',
+      use: [roles({selfAsAdmin: true})],
+      rtcPolyfill
+    },
+    'state-widening-room'
+  )
+
+  assert.equal(
+    'isPassive' in room,
+    false,
+    'isPassive() method must be removed from Room'
+  )
+  assert.equal(
+    typeof room.makeState,
+    'function',
+    'makeState is synchronously available on Room before room.ready'
+  )
+  assert.equal(
+    typeof room.makeUserState,
+    'function',
+    'makeUserState is synchronously available on Room before room.ready'
+  )
+  assert.equal(
+    'grantRole' in room,
+    false,
+    'plugin methods attach when room.ready resolves'
+  )
+
+  await room.ready
+  assert.equal(typeof room.grantRole, 'function')
+
+  const counter = room.makeState('counter', 0)
+  await counter.set(1)
+  await counter.set(n => n + 1)
+  // @ts-expect-error widened number state must reject string
+  void counter.set('not-a-number').catch(() => {})
+  assert.equal(counter.get(), 2)
+
+  const label = room.makeState('label', 'initial')
+  await label.set('updated')
+  assert.equal(label.get(), 'updated')
+
+  const flag = room.makeState('flag', false)
+  await flag.set(true)
+  assert.equal(flag.get(), true)
+
+  const nested = room.makeState('nested', {
+    count: 0,
+    tags: ['a'],
+    active: false
+  })
+  await nested.set({count: 2, tags: ['a', 'b'], active: true})
+  assert.deepEqual(nested.get(), {count: 2, tags: ['a', 'b'], active: true})
+
+  await room.leave()
+
+  const coreExports = corePublicExports
+  for (const pruned of [
+    'hashWith',
+    'sha1',
+    'all',
+    'entries',
+    'getConfiguredPlugins',
+    'keys',
+    'pauseRelayReconnection',
+    'resumeRelayReconnection',
+    'socketGetter',
+    'strToNum',
+    'toHex',
+    'values'
+  ]) {
+    assert.equal(
+      pruned in coreExports,
+      false,
+      `"${pruned}" must not be exported from @trystero-p2p/core`
+    )
+  }
+  assert.equal(coreExports.libName, 'Trystero')
+
+  for (const kept of [
+    'createStrategy',
+    'createTopicStrategy',
+    'createRelayManager',
+    'makeSocket',
+    'getRelays',
+    'hashTopic',
+    'toJson',
+    'fromJson',
+    'encodeBytes',
+    'decodeBytes',
+    'genId',
+    'roles',
+    'scale',
+    'definePlugin',
+    'clearUserIdentity',
+    'createUserIdentity',
+    'exportUserIdentity',
+    'importUserIdentity',
+    'setRelayConnectivity'
+  ]) {
+    assert.equal(
+      typeof (coreExports as Record<string, unknown>)[kept],
+      'function',
+      `"${kept}" must remain exported from @trystero-p2p/core`
+    )
+  }
+
+  const distCore = await import('../../packages/core/dist/index.mjs')
+  assert.equal(typeof distCore.clearUserIdentity, 'function')
+  assert.equal('createAdminRoom' in distCore, false)
+  for (const pkg of [
+    'trystero',
+    'nostr',
+    'mqtt',
+    'torrent',
+    'firebase',
+    'supabase',
+    'ws-relay'
+  ]) {
+    const mod = await import(`../../packages/${pkg}/dist/index.mjs`)
+    assert.equal(
+      mod.clearUserIdentity,
+      distCore.clearUserIdentity,
+      `packages/${pkg} must re-export clearUserIdentity`
+    )
+    assert.equal(
+      'createAdminRoom' in mod,
+      false,
+      `packages/${pkg} must not export createAdminRoom`
+    )
+    assert.equal(
+      'createEvent' in mod,
+      false,
+      `packages/${pkg} must not leak Nostr createEvent`
+    )
+    assert.equal(
+      'subscribe' in mod,
+      false,
+      `packages/${pkg} must not leak dead subscribe helper`
+    )
+  }
+
+  // Importing trystero / @trystero-p2p/nostr must not invoke CSPRNG / keygen at import time
+  execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+        import assert from 'node:assert/strict'
+        import {resolve} from 'node:path'
+
+        let rngCalls = 0
+        const origGetRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto)
+        globalThis.crypto.getRandomValues = array => {
+          rngCalls += 1
+          return origGetRandomValues(array)
+        }
+
+        await import(resolve('packages/nostr/dist/index.mjs'))
+        await import(resolve('packages/trystero/dist/index.mjs'))
+        assert.equal(rngCalls, 0, 'importing nostr/trystero must not run CSPRNG keygen')
+      `
+    ],
+    {stdio: 'pipe'}
+  )
+
+  const publicDts = readFileSync(
+    resolve(process.cwd(), 'packages/core/dist/public.d.mts'),
+    'utf8'
+  )
+  const collectDtsExportedNames = (dts: string, out = new Set<string>()) => {
+    for (const m of dts.matchAll(
+      /^export (?:type|interface|declare const) (\w+)\b/gm
+    )) {
+      if (m[1]) {
+        out.add(m[1])
+      }
+    }
+    for (const m of dts.matchAll(/^export \{([^}]+)\}/gm)) {
+      for (const part of (m[1] ?? '').split(',')) {
+        const cleaned = part
+          .trim()
+          .replace(/^type\s+/, '')
+          .split(/\s+as\s+/)
+          .at(-1)
+          ?.trim()
+        if (cleaned) {
+          out.add(cleaned)
+        }
+      }
+    }
+    return out
+  }
+
+  for (const strategyPkg of [
+    'nostr',
+    'mqtt',
+    'torrent',
+    'firebase',
+    'supabase',
+    'ws-relay'
+  ]) {
+    const strategyDts = readFileSync(
+      resolve(process.cwd(), `packages/${strategyPkg}/dist/index.d.mts`),
+      'utf8'
+    )
+    assert.equal(
+      /^export\s+(?:type\s+)?\*\s+from\s+['"]@trystero-p2p\/core['"]/m.test(
+        strategyDts
+      ),
+      false,
+      `packages/${strategyPkg}/dist/index.d.mts must not wildcard re-export @trystero-p2p/core root`
+    )
+    const exportedNames = collectDtsExportedNames(strategyDts)
+    if (
+      /^export\s+\*\s+from\s+['"]@trystero-p2p\/core\/public['"]/m.test(
+        strategyDts
+      )
+    ) {
+      collectDtsExportedNames(publicDts, exportedNames)
+    }
+
+    for (const leaked of [
+      'ActionOptions',
+      'AuthoritativeStateRecord',
+      'BaseRelayConfig',
+      'BaseRoomConfig',
+      'InferPluginApi',
+      'InternalAction',
+      'JoinError',
+      'JoinErrorHandler',
+      'JoinRoom',
+      'JoinRoomCallbacks',
+      'JsonPrimitive',
+      'KernelRolesProvider',
+      'KernelRoomErrorInput',
+      'KernelScaleProvider',
+      'MaybePromise',
+      'OfferRecord',
+      'PeerBanRecord',
+      'PeerHandle',
+      'PeerHandlers',
+      'ResolvedIdentityPersistence',
+      'RoleRevocationRecord',
+      'RoomKernel',
+      'Signal',
+      'SignalPeer',
+      'SocketClient',
+      'StrategyAdapter',
+      'StrategyContext',
+      'StrategyMessage',
+      'StrategyOnMessage',
+      'TargetPeers',
+      'TopicPublishContext',
+      'TopicStrategyAdapter',
+      'TopicSubscriptionContext',
+      'UserIdentityPersistence',
+      'WsRelayClientMessage',
+      'WsRelayServerMessage',
+      'createEvent',
+      'subscribe'
+    ]) {
+      assert.equal(
+        exportedNames.has(leaked),
+        false,
+        `${leaked} must not be exported from packages/${strategyPkg}/dist/index.d.mts`
+      )
+    }
+    for (const kept of [
+      'Room',
+      'RoomError',
+      'RoomErrorCode',
+      'RoomErrorHandler',
+      'RoomWithPlugins',
+      'RoomPlugin',
+      'ListenerOptions',
+      'ReplayListenerOptions',
+      'Unsubscribe',
+      'MessageAction',
+      'RequestAction',
+      'SendOptions',
+      'SharedState',
+      'AuthoritativeState',
+      'UserState',
+      'UserStateConfig',
+      'UserStateChangeContext',
+      'UserIdentity',
+      'SelfInfo',
+      'PeerInfo',
+      'UserInfo'
+    ]) {
+      assert.equal(
+        exportedNames.has(kept),
+        true,
+        `${kept} must remain exported from packages/${strategyPkg}/dist/index.d.mts`
+      )
+    }
+  }
+
+  const indexDts = readFileSync(
+    resolve(process.cwd(), 'packages/core/dist/index.d.mts'),
+    'utf8'
+  )
+  const typesDts = readFileSync(
+    resolve(process.cwd(), 'packages/core/dist/types.d.mts'),
+    'utf8'
+  )
+  for (const removedType of [
+    'AuthorityConfig',
+    'TopologyConfig',
+    'RolesInput',
+    'RoomAuthorityInfo',
+    'AdminRoomInfo',
+    'createAdminRoom',
+    'manualReconnection',
+    'UserStateRetentionConfig',
+    'UserStateGetAllOptions'
+  ]) {
+    assert.equal(
+      indexDts.includes(removedType),
+      false,
+      `${removedType} must not appear in packages/core/dist/index.d.mts`
+    )
+    assert.equal(
+      typesDts.includes(removedType),
+      false,
+      `${removedType} must not appear in packages/core/dist/types.d.mts`
+    )
+  }
+  assert.equal(indexDts.includes('RolesConfig'), true)
+  assert.equal(indexDts.includes('ScaleConfig'), true)
+  assert.equal(indexDts.includes('RelayConnectivity'), true)
+  assert.equal(indexDts.includes('setRelayConnectivity'), true)
+})

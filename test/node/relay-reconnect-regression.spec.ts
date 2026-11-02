@@ -1,16 +1,18 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {joinRoom} from '../../packages/nostr/src/index.ts'
+
+type SdpInit = {type: string; sdp?: string}
 
 class MockDataChannel {
   readyState = 'connecting'
   binaryType = 'arraybuffer'
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((event: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((event: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
@@ -25,22 +27,22 @@ class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  onnegotiationneeded = null
-  onconnectionstatechange = null
-  ontrack = null
-  ondatachannel = null
-  listeners = {}
+  localDescription: SdpInit | null = null
+  onnegotiationneeded: (() => void) | null = null
+  onconnectionstatechange: (() => void) | null = null
+  ontrack: ((event: unknown) => void) | null = null
+  ondatachannel: ((event: {channel: MockDataChannel}) => void) | null = null
+  listeners: Record<string, Set<() => void>> = {}
 
   createDataChannel() {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: () => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: () => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -50,7 +52,7 @@ class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: SdpInit) {
     const nextDescription = description ?? (await this.createOffer())
     this.localDescription = nextDescription
     this.signalingState =
@@ -80,16 +82,16 @@ class MockRTCPeerConnection {
 }
 
 class AutoOpenWebSocket {
-  static sockets = []
+  static sockets: AutoOpenWebSocket[] = []
 
   readyState = 0
-  sent = []
-  onopen = null
-  onclose = null
-  onmessage = null
-  url
+  sent: unknown[][] = []
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onmessage: ((event: {data: string}) => void) | null = null
+  url: string
 
-  constructor(url) {
+  constructor(url: string) {
     this.url = url
     AutoOpenWebSocket.sockets.push(this)
 
@@ -99,8 +101,8 @@ class AutoOpenWebSocket {
     }, 0)
   }
 
-  send(data) {
-    this.sent.push(JSON.parse(data))
+  send(data: string) {
+    this.sent.push(JSON.parse(data) as unknown[])
   }
 
   close() {
@@ -132,7 +134,7 @@ void test(
   async () => {
     const originalWebSocket = globalThis.WebSocket
 
-    globalThis.WebSocket = AutoOpenWebSocket as any
+    globalThis.WebSocket = AutoOpenWebSocket as unknown as typeof WebSocket
     AutoOpenWebSocket.sockets.length = 0
 
     const room = joinRoom(
@@ -144,17 +146,19 @@ void test(
     )
 
     try {
-      await waitFor(() =>
-        AutoOpenWebSocket.sockets[0]?.sent.some(msg => msg[0] === 'REQ')
+      await waitFor(
+        () =>
+          AutoOpenWebSocket.sockets[0]?.sent.some(msg => msg[0] === 'REQ') ===
+          true
       )
 
-      const firstSocket = AutoOpenWebSocket.sockets[0]
+      const firstSocket = AutoOpenWebSocket.sockets[0]!
       firstSocket.close()
 
       await waitFor(() => AutoOpenWebSocket.sockets.length >= 2, 5_000)
       await wait(50)
 
-      const secondSocket = AutoOpenWebSocket.sockets[1]
+      const secondSocket = AutoOpenWebSocket.sockets[1]!
       const resentReqs = secondSocket.sent.filter(msg => msg[0] === 'REQ')
 
       assert.ok(
@@ -172,8 +176,8 @@ void test(
   'Trystero: relay announcements keep retrying after a rejected announce',
   {timeout: 10_000},
   async () => {
-    const unhandledRejections = []
-    const onUnhandledRejection = reason => {
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => {
       unhandledRejections.push(reason)
     }
 
@@ -195,7 +199,8 @@ void test(
     const room = joinRoom(
       {
         appId: `announce-supervision-${Date.now()}`,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'room'
     )
@@ -230,7 +235,8 @@ void test(
     const room = joinRoom(
       {
         appId: `announce-stop-${Date.now()}`,
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'room'
     )

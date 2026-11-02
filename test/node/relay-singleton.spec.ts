@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {
   createRelayManager,
   makeSocket
 } from '../../packages/core/src/relay-manager.ts'
+import type {Room} from '../../packages/core/src/types.ts'
 import {joinRoom as joinNostrRoom} from '../../packages/nostr/src/index.ts'
 import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
 import {joinRoom as joinWsRelayRoom} from '../../packages/ws-relay/src/index.ts'
@@ -27,16 +28,16 @@ const waitFor = async (
 }
 
 class AutoOpenWebSocket {
-  static sockets = []
+  static sockets: AutoOpenWebSocket[] = []
 
   readyState = 0
-  sent = []
-  onopen = null
-  onclose = null
-  onmessage = null
-  url
+  sent: string[] = []
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onmessage: ((event: {data: string}) => void) | null = null
+  url: string
 
-  constructor(url) {
+  constructor(url: string) {
     this.url = url
     AutoOpenWebSocket.sockets.push(this)
 
@@ -46,7 +47,7 @@ class AutoOpenWebSocket {
     }, 0)
   }
 
-  send(data) {
+  send(data: string) {
     this.sent.push(data)
   }
 
@@ -85,17 +86,17 @@ void test(
     const realWebSocket = globalThis.WebSocket
     const realSetTimeout = globalThis.setTimeout
 
-    const sockets = []
-    const pendingReconnects = []
+    const sockets: ManualSocket[] = []
+    const pendingReconnects: Array<() => void> = []
 
     class ManualSocket {
       readyState = 0
-      onopen = null
-      onclose = null
-      onmessage = null
-      url
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onmessage: ((event: {data: string}) => void) | null = null
+      url: string
 
-      constructor(url) {
+      constructor(url: string) {
         this.url = url
         sockets.push(this)
       }
@@ -109,16 +110,16 @@ void test(
     }
 
     try {
-      globalThis.WebSocket = ManualSocket as any
-      globalThis.setTimeout = (fn => {
+      globalThis.WebSocket = ManualSocket as unknown as typeof WebSocket
+      globalThis.setTimeout = ((fn: () => void) => {
         pendingReconnects.push(fn)
         return {}
-      }) as any
+      }) as unknown as typeof setTimeout
 
       makeSocket(`ws://socket-singleton-${Date.now()}`, () => {})
 
-      sockets[0].close()
-      sockets[0].close()
+      sockets[0]!.close()
+      sockets[0]!.close()
       pendingReconnects.forEach(fn => fn())
 
       assert.equal(
@@ -138,13 +139,19 @@ void test(
   }
 )
 
+type RelayReuseConfig = {
+  appId: string
+  rtcPolyfill: typeof RTCPeerConnection
+  relayConfig: {urls: string[]}
+}
+
 const runRelayReuseTests = (
   strategy: string,
-  joinRoom: typeof joinNostrRoom
+  joinRoom: (config: RelayReuseConfig, roomId: string) => Room
 ): void => {
-  const makeConfig = (suffix: string) => ({
+  const makeConfig = (suffix: string): RelayReuseConfig => ({
     appId: `relay-singleton-${strategy}-${suffix}-${Date.now()}`,
-    rtcPolyfill: MockRTCPeerConnection as any,
+    rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection,
     relayConfig: {urls: [`wss://relay-singleton-${strategy}-${suffix}.test`]}
   })
 
@@ -154,7 +161,7 @@ const runRelayReuseTests = (
     async () => {
       const realWebSocket = globalThis.WebSocket
 
-      globalThis.WebSocket = AutoOpenWebSocket as any
+      globalThis.WebSocket = AutoOpenWebSocket as unknown as typeof WebSocket
       AutoOpenWebSocket.sockets.length = 0
 
       const config = makeConfig('cycles')

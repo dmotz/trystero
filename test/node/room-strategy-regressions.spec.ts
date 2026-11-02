@@ -88,7 +88,6 @@ void test('Bug 1.10: concurrent joinRoom calls run init(effectiveConfig) per roo
   const checkDefault = joinWithDefaultCheck(
     {
       appId: 'bug-1-10-defaults',
-      trickleIce: undefined,
       rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'r1'
@@ -309,7 +308,7 @@ void test('Bug 1.11: concurrent limit: 2 admission across all 3 peerId orderings
 
 void test('Bug 1.12: sequential resolveRoomId chaining, PublicScaleProvider, virtual peers in getActivePeerIds, and narrowed PluginContext', async () => {
   const adminIdentity = await createUserIdentity()
-  let capturedKernel: PluginContext | null = null
+  let capturedKernel = null as PluginContext | null
   const seenRoomIdsInResolvers: string[] = []
 
   const suffixPlugin = definePlugin('env-suffix', {
@@ -418,7 +417,7 @@ void test('Bug 1.12: sequential resolveRoomId chaining, PublicScaleProvider, vir
   }
 
   // Verify 2-hop virtual peer appears in kernel.getActivePeerIds()
-  let observerKernel: PluginContext | null = null
+  let observerKernel = null as PluginContext | null
   const observerPlugin = definePlugin('observer', {
     setup(kernel) {
       observerKernel = kernel

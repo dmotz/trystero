@@ -1,5 +1,6 @@
 import {expect} from '@playwright/test'
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
+import type {StrategyConfig, StrategyName} from '../strategy-configs'
 import {sleep, withStrategyBrowserPair} from './harness'
 import {
   joinEagerRoom,
@@ -9,7 +10,18 @@ import {
   rejoinRoomAndWaitForPeer
 } from './room-helpers'
 
-export const registerPeerLifecycleTests = (strategy, overrides) =>
+type JoinErrorResult = {
+  code: string
+  message: string
+  appId: string
+  roomId: string
+  peerId: string
+}
+
+export const registerPeerLifecycleTests = (
+  strategy: StrategyName,
+  overrides: StrategyConfig = {}
+): void =>
   withStrategyBrowserPair(
     strategy,
     overrides,
@@ -20,19 +32,25 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
         makeRoomId: () =>
           `lifecycle-seed-${Math.random().toString().replace('.', '')}`,
         join: joinEagerRoom,
-        makeArgs: nextRoomId => [nextRoomId, roomConfig, 33]
+        makeArgs: (nextRoomId): [string, StrategyConfig, number] => [
+          nextRoomId,
+          roomConfig,
+          33
+        ]
       })
       const [peer2Data, peer1Data] = values
       const [peer2Id, peer1Id] = [peer2Data[1], peer1Data[1]]
 
-      const dropOutgoingPings = prefix => {
+      const dropOutgoingPings = (prefix: string) => {
         const desc = Object.getOwnPropertyDescriptor(
           RTCDataChannel.prototype,
           'send'
         )!
-        ;(window as any).__origDcSendDesc = desc
+        window['__origDcSendDesc'] = desc
         const pingHeader = new TextEncoder().encode(`${prefix}ping`)
-        RTCDataChannel.prototype.send = function (data: any) {
+        RTCDataChannel.prototype.send = function (
+          data: string | Blob | ArrayBuffer | ArrayBufferView
+        ) {
           const bytes =
             data instanceof ArrayBuffer
               ? new Uint8Array(data)
@@ -47,28 +65,34 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
           ) {
             return
           }
-          return (desc.value as (this: RTCDataChannel, d: any) => void).call(
-            this,
-            data
-          )
+          return (
+            desc.value as (
+              this: RTCDataChannel,
+              d: string | Blob | ArrayBuffer | ArrayBufferView
+            ) => void
+          ).call(this, data)
         }
       }
 
       const restoreOutgoingPings = () => {
-        if ((window as any).__origDcSendDesc) {
+        if (window['__origDcSendDesc']) {
           Object.defineProperty(
             RTCDataChannel.prototype,
             'send',
-            (window as any).__origDcSendDesc
+            window['__origDcSendDesc'] as PropertyDescriptor
           )
-          delete (window as any).__origDcSendDesc
+          delete window['__origDcSendDesc']
         }
       }
 
-      const pendingPing = ([roomId, id]) =>
+      const pendingPing = ([roomId, id]: [string, string]): Promise<{
+        status: string
+        ms?: number
+        message?: string
+      }> =>
         window[roomId].ping(id).then(
-          ms => ({status: 'resolved', ms}),
-          err => ({
+          (ms: number) => ({status: 'resolved', ms}),
+          (err: Error | null | undefined) => ({
             status: 'rejected',
             message: String(err?.message ?? err)
           })
@@ -76,12 +100,18 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
 
       await page.evaluate(dropOutgoingPings, internalActionPrefix)
 
-      const disconnectedPing = page.evaluate(pendingPing, [roomNs, peer2Id])
+      const disconnectedPing = page.evaluate(pendingPing, [
+        roomNs,
+        peer2Id
+      ] satisfies [string, string])
 
       const peer1onLeaveId = page.evaluate(
-        roomId =>
-          new Promise(res =>
-            window[roomId].onPeerLeave(({peerId}) => res(peerId), {once: true})
+        (roomId: string) =>
+          new Promise<string>(res =>
+            window[roomId].onPeerLeave(
+              ({peerId}: {peerId: string}) => res(peerId),
+              {once: true}
+            )
           ),
         roomNs
       )
@@ -89,8 +119,14 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
       const overlapRoomNs = roomNs + '-overlap'
 
       const [overlapPeer1, overlapPeer2] = await Promise.all([
-        page.evaluate(joinRoomAndWaitForPeer, [overlapRoomNs, roomConfig]),
-        page2.evaluate(joinRoomAndWaitForPeer, [overlapRoomNs, roomConfig])
+        page.evaluate(joinRoomAndWaitForPeer, [
+          overlapRoomNs,
+          roomConfig
+        ] satisfies [string, StrategyConfig]),
+        page2.evaluate(joinRoomAndWaitForPeer, [
+          overlapRoomNs,
+          roomConfig
+        ] satisfies [string, StrategyConfig])
       ])
 
       expect(overlapPeer1).toEqual(selfId2)
@@ -108,39 +144,51 @@ export const registerPeerLifecycleTests = (strategy, overrides) =>
       expect(await peer1onLeaveId).toEqual(peer2Id)
 
       expect(
-        await page.evaluate(ping, [overlapRoomNs, overlapPeer1])
+        await page.evaluate(ping, [overlapRoomNs, overlapPeer1] satisfies [
+          string,
+          string
+        ])
       ).toBeLessThan(1000)
       expect(
-        await page2.evaluate(ping, [overlapRoomNs, overlapPeer2])
+        await page2.evaluate(ping, [overlapRoomNs, overlapPeer2] satisfies [
+          string,
+          string
+        ])
       ).toBeLessThan(1000)
 
       expect(
-        await page2.evaluate(rejoinRoomAndWaitForPeer, [roomNs, roomConfig])
+        await page2.evaluate(rejoinRoomAndWaitForPeer, [
+          roomNs,
+          roomConfig
+        ] satisfies [string, StrategyConfig])
       ).toBe(selfId1)
 
       const nextRoomNs = roomNs + '2'
 
       const joinError = await Promise.race([
         page.evaluate(
-          ([roomId, config]) =>
-            new Promise(res => {
+          ([roomId, config]: [string, StrategyConfig]) =>
+            new Promise<JoinErrorResult>(res => {
               const room = window.trystero.joinRoom(config, roomId)
               room.onError(res, {once: true})
             }),
-          [nextRoomNs, roomConfig]
+          [nextRoomNs, roomConfig] satisfies [string, StrategyConfig]
         ),
 
         sleep(3333).then(() =>
           page2.evaluate(
-            ([roomId, config]) =>
-              new Promise(res => {
+            ([roomId, config]: [string, StrategyConfig]) =>
+              new Promise<JoinErrorResult>(res => {
                 const room = (window[roomId] = window.trystero.joinRoom(
                   config,
                   roomId
                 ))
                 room.onError(res, {once: true})
               }),
-            [nextRoomNs, {...roomConfig, password: 'waste'}]
+            [nextRoomNs, {...roomConfig, password: 'waste'}] satisfies [
+              string,
+              StrategyConfig
+            ]
           )
         )
       ])

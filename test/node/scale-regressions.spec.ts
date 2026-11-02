@@ -9,7 +9,6 @@ import {
   type ScalePluginApi,
   type UserIdentity
 } from '../../packages/core/src/index.ts'
-import type {PeerHandshake} from '../../packages/core/src/types.ts'
 import {formatSelfCertifyingRoomId} from '../../packages/core/src/authority.ts'
 import createRoom, {
   getRoomSignalingBridge
@@ -26,9 +25,9 @@ import {
   type OverlayManager
 } from '../../packages/core/src/scale/index.ts'
 import {encodeBytes, peerBannedErr} from '../../packages/core/src/utils.ts'
+import {createTestScaleCluster} from './overlay-harness.ts'
 import {
   allocTestPeerIds,
-  LinkedMediaPeer,
   LinkedPeer,
   linkPeers,
   testEndpoint,
@@ -36,232 +35,6 @@ import {
 } from './peer-harness.ts'
 
 let nextRegClusterSeq = 0
-
-type ClusterPeerOptions = {
-  peerCount: number
-  maxConnections?: number
-  media?: boolean
-  delayMs?: number
-  adminId?: string
-  identities?: Map<string, UserIdentity>
-  onPeerHandshakeByRoom?: (ownerId: string) => PeerHandshake | undefined
-}
-
-const createTestScaleCluster = async ({
-  peerCount,
-  maxConnections = 4,
-  media = false,
-  delayMs = 1,
-  adminId,
-  identities,
-  onPeerHandshakeByRoom
-}: ClusterPeerOptions) => {
-  const peerIds = allocTestPeerIds(peerCount)
-  const adminIdentity = adminId ? identities?.get(adminId) : undefined
-  const roomId = adminIdentity
-    ? formatSelfCertifyingRoomId(
-        `scale-reg-${++nextRegClusterSeq}`,
-        adminIdentity.userId
-      )
-    : `scale-reg-${++nextRegClusterSeq}`
-
-  const registerCallbacks = new Map<
-    string,
-    (peer: PeerHandle, id: string) => void
-  >()
-  const rooms = new Map<
-    string,
-    Room & ScalePluginApi & Partial<RolesPluginApi>
-  >()
-  const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
-  const joinedByPeer = new Map<string, Set<string>>()
-  const leftByPeer = new Map<string, Set<string>>()
-
-  class DelayedClusterPeer extends (media ? LinkedMediaPeer : LinkedPeer) {
-    private timers = new Set<ReturnType<typeof setTimeout>>()
-
-    override sendData(data: Uint8Array) {
-      if (this.isDead) {
-        return
-      }
-      const copy = data.slice()
-      if (delayMs <= 0) {
-        super.sendData(copy)
-        return
-      }
-      const t = setTimeout(() => {
-        this.timers.delete(t)
-        if (!this.isDead) {
-          super.sendData(copy)
-        }
-      }, delayMs)
-      this.timers.add(t)
-    }
-
-    override destroy() {
-      for (const t of this.timers) {
-        clearTimeout(t)
-      }
-      this.timers.clear()
-      super.destroy()
-    }
-  }
-
-  const linkKey = (a: string, b: string) => (a < b ? `${a}:${b}` : `${b}:${a}`)
-
-  const connectPair = (idA: string, idB: string) => {
-    if (idA === idB) {
-      return
-    }
-    const key = linkKey(idA, idB)
-    if (directLinks.has(key)) {
-      return
-    }
-    const regA = registerCallbacks.get(idA)
-    const regB = registerCallbacks.get(idB)
-    if (!regA || !regB) {
-      return
-    }
-    const {peerA, peerB} = linkPeers(
-      new DelayedClusterPeer(),
-      new DelayedClusterPeer()
-    )
-    directLinks.set(key, {peerA, peerB})
-    if (idA < idB) {
-      regA(peerA as unknown as PeerHandle, idB)
-      regB(peerB as unknown as PeerHandle, idA)
-    } else {
-      regB(peerA as unknown as PeerHandle, idA)
-      regA(peerB as unknown as PeerHandle, idB)
-    }
-  }
-
-  for (const id of peerIds) {
-    const joined = new Set<string>()
-    const left = new Set<string>()
-    joinedByPeer.set(id, joined)
-    leftByPeer.set(id, left)
-    const userIdentity = identities?.get(id)
-    const onPeerHandshake = onPeerHandshakeByRoom?.(id)
-
-    const plugins = adminIdentity
-      ? [roles(), scale({mode: 'gossip', maxConnections})]
-      : [scale({mode: 'gossip', maxConnections})]
-
-    const room = createRoom(
-      f => registerCallbacks.set(id, f),
-      peerId => {
-        const k = linkKey(id, peerId)
-        const pair = directLinks.get(k)
-        if (pair) {
-          directLinks.delete(k)
-          pair.peerA.destroy()
-          pair.peerB.destroy()
-        }
-      },
-      () => {},
-      {
-        selfId: id,
-        appId: 'scale-reg-app',
-        roomId,
-        ...(userIdentity ? {identity: userIdentity} : {}),
-        ...(onPeerHandshake ? {onPeerHandshake} : {}),
-        use: plugins
-      }
-    )
-
-    room.onPeerJoin(({peerId}) => {
-      left.delete(peerId)
-      joined.add(peerId)
-    })
-    room.onPeerLeave(({peerId}) => {
-      joined.delete(peerId)
-      left.add(peerId)
-    })
-
-    const bridge = getRoomSignalingBridge(room)
-    bridge?.setOnScaleTargetsChanged(targets => {
-      for (const targetId of targets) {
-        if (directLinks.has(linkKey(id, targetId))) {
-          continue
-        }
-        const canOut =
-          (bridge.canConnectPeer(targetId) ?? true) &&
-          (bridge.getScaleProvider()?.shouldConnectPeer(targetId, 'outbound') ??
-            true)
-        if (!canOut) {
-          continue
-        }
-        const targetRoom = rooms.get(targetId)
-        const targetBridge = targetRoom
-          ? getRoomSignalingBridge(targetRoom)
-          : undefined
-        const canIn = targetBridge
-          ? (targetBridge.canConnectPeer(id) ?? true) &&
-            (targetBridge
-              .getScaleProvider()
-              ?.shouldConnectPeer(id, 'inbound') ??
-              true)
-          : true
-        if (canIn) {
-          connectPair(id, targetId)
-        }
-      }
-    })
-
-    rooms.set(
-      id,
-      room as unknown as Room & ScalePluginApi & Partial<RolesPluginApi>
-    )
-  }
-
-  for (const id of peerIds) {
-    const sp = getRoomSignalingBridge(rooms.get(id)!)?.getScaleProvider()
-    for (const otherId of peerIds) {
-      if (otherId !== id) {
-        sp?.notePeerDiscovered(otherId)
-      }
-    }
-  }
-  for (const id of peerIds) {
-    const sp = getRoomSignalingBridge(rooms.get(id)!)?.getScaleProvider()
-    for (const targetId of sp?.getTargetNeighbors() ?? []) {
-      connectPair(id, targetId)
-    }
-  }
-
-  await waitFor(() => {
-    for (const id of peerIds) {
-      const snap = rooms.get(id)!.getTopology()
-      if (
-        snap.roomPeerIds.length !== peerIds.length - 1 ||
-        Object.keys(snap.routes).length !== peerIds.length - 1
-      ) {
-        return false
-      }
-    }
-    return true
-  }, 5_000)
-
-  const cleanup = async () => {
-    await Promise.all([...rooms.values()].map(r => r.leave()))
-    for (const pair of directLinks.values()) {
-      pair.peerA.destroy()
-      pair.peerB.destroy()
-    }
-    directLinks.clear()
-  }
-
-  return {
-    peerIds,
-    rooms,
-    directLinks,
-    joinedByPeer,
-    leftByPeer,
-    connectPair,
-    cleanup
-  }
-}
 
 void test('Bug 1.1: broadcast addStream in 15-peer gossip room promotes all virtual peers and bounds remote connect spam', async () => {
   const cluster = await createTestScaleCluster({
@@ -375,7 +148,6 @@ void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge
   const cluster = await createTestScaleCluster({
     peerCount,
     maxConnections: 4,
-    adminId: undefined,
     onPeerHandshakeByRoom: ownerId => async remotePeerId => {
       if (ownerId && remotePeerId === rejectInHandshakeTarget) {
         throw peerBannedErr

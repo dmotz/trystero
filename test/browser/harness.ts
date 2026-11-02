@@ -1,31 +1,63 @@
-import {expect, test} from '@playwright/test'
+import {expect, test, type Page} from '@playwright/test'
 import {attachPageLogging, emojis, shortBrowsers} from '../logger'
-import {strategyConfigs} from '../strategy-configs'
+import {
+  strategyConfigs,
+  type StrategyConfig,
+  type StrategyName
+} from '../strategy-configs'
 import {installLoopbackMdnsPeerConnection} from './mdns-loopback'
 
-const testPort = process.env.TRYSTERO_TEST_PORT ?? '8080'
+const testPort = process.env['TRYSTERO_TEST_PORT'] ?? '8080'
 // Firefox may gather no host ICE candidates when the page uses localhost.
 const testUrl = `https://127.0.0.1:${testPort}/test`
-const proxy = process.env.PROXY
+const proxy = process.env['PROXY']
 const useTestOnlyMdnsFallback =
-  process.env.TRYSTERO_TEST_FORCE_LOOPBACK_MDNS !== '0'
+  process.env['TRYSTERO_TEST_FORCE_LOOPBACK_MDNS'] !== '0'
 
-export const sleep = ms => new Promise(res => setTimeout(res, ms))
+export const sleep = (ms: number): Promise<void> =>
+  new Promise(res => setTimeout(res, ms))
 
-export const concurrentRooms = strategy => (strategy === 'torrent' ? 1 : 3)
+export const concurrentRooms = (strategy: StrategyName): number =>
+  strategy === 'torrent' ? 1 : 3
 
 const defaultRelayRedundancy = 4
 
+export type JoinPairWithRetryOptions<TArg, TResult> = {
+  label: string
+  makeRoomId: (attempt: number) => string
+  join: (arg: TArg) => Promise<TResult> | TResult
+  makeArgs: (roomId: string) => TArg
+  timeoutMs?: number
+  attempts?: number
+}
+
+export type BrowserPairContext = {
+  browserName: string
+  config: StrategyConfig
+  initialConnectionResults: Array<number | 'failed'>
+  isRelayStrategy: boolean
+  joinPairWithRetry: <TArg, TResult>(
+    opts: JoinPairWithRetryOptions<TArg, TResult>
+  ) => Promise<{roomId: string; values: [TResult, TResult]}>
+  page: Page
+  page2: Page
+  redundancy: number
+  roomConfig: StrategyConfig & {appId: string; password: string}
+  selfId1: string
+  selfId2: string
+  strategy: StrategyName
+}
+
 export const withStrategyBrowserPair = (
-  strategy,
-  overrides,
-  name,
-  fn,
+  strategy: StrategyName,
+  overrides: StrategyConfig = {},
+  name: string,
+  fn: (ctx: BrowserPairContext) => Promise<void>,
   options: {
-    skip?: (ctx: {browserName: string; strategy: string}) => boolean
+    skip?: (ctx: {browserName: string; strategy: StrategyName}) => boolean
   } = {}
-) => {
-  const config = {...strategyConfigs[strategy], ...overrides}
+): void => {
+  const config: StrategyConfig = {...strategyConfigs[strategy], ...overrides}
 
   test(`Trystero: ${strategy}: ${name}`, async ({
     page,
@@ -36,7 +68,7 @@ export const withStrategyBrowserPair = (
       test.skip()
     }
 
-    const initialConnectionResults = []
+    const initialConnectionResults: Array<number | 'failed'> = []
 
     const run = async () => {
       if (strategy === 'torrent') {
@@ -44,7 +76,7 @@ export const withStrategyBrowserPair = (
       }
 
       console.log(
-        `  🐎   ${shortBrowsers[browserName]}: ${emojis[strategy]} ${strategy} ${name}`
+        `  🐎   ${shortBrowsers[browserName] ?? browserName}: ${emojis[strategy]} ${strategy} ${name}`
       )
 
       if (proxy) {
@@ -87,7 +119,8 @@ export const withStrategyBrowserPair = (
         await page.goto(testUrl)
         await page2.goto(testUrl)
 
-        const loadLib = async path => (window.trystero = await import(path))
+        const loadLib = async (path: string) =>
+          (window.trystero = await import(path))
 
         await page.evaluate(loadLib, scriptUrl)
         await page2.evaluate(loadLib, scriptUrl)
@@ -96,10 +129,13 @@ export const withStrategyBrowserPair = (
           strategy === 'torrent' || strategy === 'nostr' || strategy === 'mqtt'
 
         const redundancy = isRelayStrategy
-          ? (config.relayConfig?.urls?.length ??
+          ? (config.relayConfig?.redundancy ??
+            config.relayConfig?.urls?.length ??
             Math.min(
               defaultRelayRedundancy,
-              await page.evaluate(() => window.trystero.defaultRelayUrls.length)
+              await page.evaluate(
+                () => (window.trystero.defaultRelayUrls as string[]).length
+              )
             ))
           : 0
 
@@ -114,13 +150,13 @@ export const withStrategyBrowserPair = (
           ...(isRelayStrategy || config.relayConfig ? {relayConfig} : {})
         }
 
-        const getSelfId = async cfg => {
+        const getSelfId = async (cfg: StrategyConfig): Promise<string> => {
           const probe = window.trystero.joinRoom(
             {...cfg, passive: true},
             '__self_id_probe__'
           )
           try {
-            return (await probe.getSelf()).peerId
+            return (await probe.getSelf()).peerId as string
           } finally {
             await probe.leave().catch(() => {})
           }
@@ -132,37 +168,46 @@ export const withStrategyBrowserPair = (
         expect(selfId1).toHaveLength(20)
         expect(selfId1).not.toEqual(selfId2)
 
-        const evaluateWithTimeout = async (
-          targetPage,
-          pageFunction,
-          arg,
-          timeoutMs,
-          label
-        ) =>
+        const evaluateWithTimeout = async <TArg, TResult>(
+          targetPage: Page,
+          pageFunction: (arg: TArg) => Promise<TResult> | TResult,
+          arg: TArg,
+          timeoutMs: number,
+          label: string
+        ): Promise<TResult> =>
           Promise.race([
-            targetPage.evaluate(pageFunction, arg),
+            targetPage.evaluate(
+              pageFunction as never,
+              arg as never
+            ) as Promise<TResult>,
             sleep(timeoutMs).then(() => {
               throw new Error(`${label} timed out after ${timeoutMs}ms`)
             })
           ])
 
-        const leaveNamedRoom = async (targetPage, roomId) => {
+        const leaveNamedRoom = async (
+          targetPage: Page,
+          roomId: string
+        ): Promise<void> => {
           await targetPage
-            .evaluate(id => {
+            .evaluate((id: string) => {
               clearInterval(window[id]?.__eagerSendInterval)
               return window[id]?.leave?.()
             }, roomId)
             .catch(() => {})
         }
 
-        const joinPairWithRetry = async ({
+        const joinPairWithRetry = async <TArg, TResult>({
           label,
           makeRoomId,
           join,
           makeArgs,
           timeoutMs = 18_000,
           attempts = browserName === 'firefox' ? 3 : 2
-        }) => {
+        }: JoinPairWithRetryOptions<TArg, TResult>): Promise<{
+          roomId: string
+          values: [TResult, TResult]
+        }> => {
           let lastError = new Error(`${label} failed before any attempt ran`)
 
           for (let attempt = 1; attempt <= attempts; attempt++) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import {once} from 'node:events'
-import test from 'node:test'
+import test from './test.ts'
 import WebSocket from 'ws'
 import {createWsRelayServer} from '@trystero-p2p/ws-relay/server'
 

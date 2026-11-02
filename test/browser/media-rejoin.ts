@@ -1,4 +1,5 @@
 import {expect} from '@playwright/test'
+import type {StrategyConfig} from '../strategy-configs'
 import {withStrategyBrowserPair} from './harness'
 import {joinRoomAndWaitForPeer} from './room-helpers'
 
@@ -11,29 +12,29 @@ withStrategyBrowserPair(
       label: 'media rejoin',
       makeRoomId: () => `media-rejoin-${Math.random()}`,
       join: joinRoomAndWaitForPeer,
-      makeArgs: roomId => [roomId, roomConfig]
+      makeArgs: (roomId): [string, StrategyConfig] => [roomId, roomConfig]
     })
 
     try {
-      const prepareViewer = roomId => {
+      const prepareViewer = (roomId: string) => {
         const video = document.createElement('video')
         video.id = 'media-rejoin-video'
         video.autoplay = true
         video.muted = true
         video.playsInline = true
         document.body.append(video)
-        window[roomId].onPeerStream(stream => {
+        window[roomId].onPeerStream((stream: MediaStream) => {
           video.srcObject = stream
           void video.play().catch(() => {})
         })
       }
 
       await page2.evaluate(prepareViewer, roomId)
-      await page.evaluate(async roomId => {
+      await page.evaluate(async (roomId: string) => {
         const stream = await navigator.mediaDevices.getUserMedia({video: true})
         window.__streamSwitchLocalStream = stream
         window[roomId].onPeerJoin(
-          ({peerId}) => {
+          ({peerId}: {peerId: string}) => {
             void window[roomId].addStream(stream, {target: peerId})
           },
           {replay: true}
@@ -55,18 +56,18 @@ withStrategyBrowserPair(
       await page2.evaluate(roomId => window[roomId].leave(), roomId)
 
       await page2.evaluate(
-        ([roomId, config]) => {
+        ([roomId, config]: [string, StrategyConfig]) => {
           window[roomId] = window.trystero.joinRoom(config, roomId)
           const video = document.querySelector<HTMLVideoElement>(
             '#media-rejoin-video'
           )!
           video.srcObject = null
-          window[roomId].onPeerStream(stream => {
+          window[roomId].onPeerStream((stream: MediaStream) => {
             video.srcObject = stream
             void video.play().catch(() => {})
           })
         },
-        [roomId, roomConfig]
+        [roomId, roomConfig] satisfies [string, StrategyConfig]
       )
 
       await expect
