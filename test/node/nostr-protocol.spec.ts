@@ -1,31 +1,32 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {
-  computePayloadDigest,
-  createRoomAuthority,
-  signActionAuth,
-  verifyActionAuth
-} from '../../packages/core/src/authority.ts'
-import {
   decrypt,
   derivePairwiseAesKey,
-  ecdhKeyAlgo,
   encrypt,
   genKey,
   hashTopic,
+  isLowSP256Signature,
   isValidP256PrivateScalar,
-  p256N,
+  normalizeLowSP256Signature,
   sha256,
   signRoomAuth,
   verifyRoomAuth
 } from '../../packages/core/src/crypto.ts'
 import {
   createUserIdentity,
-  fromBase64Url,
   pubJwkToUncompressedBytes
 } from '../../packages/core/src/identity.ts'
+import {fromBase64Url} from '../../packages/core/src/primitives.ts'
 import {genId, shuffle, strToNum} from '../../packages/core/src/utils.ts'
 import {createEvent, createSigner} from '../../packages/nostr/src/protocol.ts'
+
+const ecdhKeyAlgo: EcKeyGenParams = {
+  name: 'ECDH',
+  namedCurve: 'P-256'
+}
+const p256N =
+  0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
 
 void test('D1: genKey uses 600k-iteration PBKDF2-SHA256 for passwords with appId/roomId domain separation', async () => {
   const k1 = genKey('CorrectHorseBatteryStaple!', 'd1-app', 'room-a')
@@ -46,7 +47,7 @@ void test('D1: genKey uses 600k-iteration PBKDF2-SHA256 for passwords with appId
   await assert.rejects(() => decrypt(kLegacySha256, ct, 'offer|peer1|oid1'))
 })
 
-void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, computePayloadDigest tag separation & small-Blob parity, 12-byte GCM, 22-char Base62 userId, unbiased genId, and Nostr kind dispersion', async () => {
+void test('Crypto audit fixes: single-PBKDF2 -> HKDF roomAES/roomHMAC split, HKDF pairwise ECDH, low-S P-256 normalization, 12-byte GCM, 22-char Base62 userId, unbiased genId, and Nostr kind dispersion', async () => {
   // 1. signRoomAuth / verifyRoomAuth uses PBKDF2-HMAC-SHA256 with canonical JSON framing (no ':' collisions or single-SHA256 oracle)
   const validToken = await signRoomAuth(
     'pa:ss',
@@ -157,62 +158,68 @@ void test('Crypto audit fixes: PBKDF2-HMAC roomAuth, HKDF pairwise ECDH, compute
   )
   await assert.rejects(() => decrypt(Promise.resolve(kShifted), e2eCt, 'aad1'))
 
-  // 3. computePayloadDigest: small Blob (<= 256 KiB) matches Uint8Array AND chunked (> 256 KiB, tag 0x04) cannot collide with unchunked (tag 0x02)
-  const smallBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])
-  const smallBlob = new Blob([smallBytes])
-  assert.equal(
-    await computePayloadDigest(smallBlob),
-    await computePayloadDigest(smallBytes),
-    'small Blob (<= 256 KiB) digest must match decoded Uint8Array digest on receiver'
-  )
-  assert.equal(
-    await computePayloadDigest(smallBlob, {m: 1}),
-    await computePayloadDigest(smallBytes, {m: 1})
-  )
+  // 3. Single PBKDF2 -> HKDF split (Q3=A): room AES key and room HMAC key share cached PBKDF2 master derivation while remaining cryptographically independent
+  const sharedSecret = `single-pbkdf2-${Date.now()}`
+  let deriveBitsCalls = 0
+  const origDeriveBits = crypto.subtle.deriveBits.bind(crypto.subtle)
+  crypto.subtle.deriveBits = (async (
+    ...args: Parameters<SubtleCrypto['deriveBits']>
+  ) => {
+    const [algorithm] = args
+    if (
+      typeof algorithm === 'object' &&
+      algorithm !== null &&
+      'name' in algorithm &&
+      algorithm.name === 'PBKDF2'
+    ) {
+      deriveBitsCalls++
+    }
+    return origDeriveBits(...args)
+  }) as SubtleCrypto['deriveBits']
+  try {
+    const aesP = genKey(sharedSecret, 'q3-app', 'q3-room')
+    const ct = await encrypt(aesP, 'q3-payload', 'aad')
+    const mac = await signRoomAuth(
+      sharedSecret,
+      'q3-app',
+      'q3-room',
+      'PeerA123456789012345',
+      1
+    )
+    assert.equal(await decrypt(aesP, ct, 'aad'), 'q3-payload')
+    assert.equal(
+      await verifyRoomAuth(
+        sharedSecret,
+        'q3-app',
+        'q3-room',
+        'PeerA123456789012345',
+        1,
+        mac
+      ),
+      true
+    )
+    assert.equal(
+      deriveBitsCalls,
+      1,
+      'genKey + signRoomAuth + verifyRoomAuth for the same (secret, appId, roomId) must execute PBKDF2 only once'
+    )
+  } finally {
+    crypto.subtle.deriveBits = origDeriveBits
+  }
+
   const admin = await createUserIdentity()
   assert.match(admin.userId, /^[0-9A-Za-z]{22}$/)
-  const blobAuth = createRoomAuthority({
-    selfId: 'blob-admin-peer',
-    appId: 'blob-app',
-    initialRoomId: `blob-room~${admin.userId}`,
-    admin: {selfAsAdmin: true},
-    getLocalUserIdentity: async () => admin
-  })
-  await blobAuth.getAuthorityInfo()
-  const blobCert = await blobAuth.issueRoleCertificate(admin.userId, ['admin'])
-  const blobEnv = await signActionAuth(admin.sign, admin.signPubJwk, blobCert, {
-    appId: 'blob-app',
-    roomId: `blob-room~${admin.userId}`,
-    namespace: 'media',
-    peerId: 'blob-admin-peer',
-    seq: 1,
-    data: smallBlob,
-    meta: {mime: 'application/octet-stream'}
-  })
-  const blobVerified = await verifyActionAuth(blobEnv, {
-    appId: 'blob-app',
-    roomId: `blob-room~${admin.userId}`,
-    namespace: 'media',
-    peerId: 'blob-admin-peer',
-    expectedUserId: admin.userId,
-    data: smallBytes,
-    requiredRoles: ['admin'],
-    rootUserIds: new Set([admin.userId])
-  })
-  assert.equal(blobVerified.valid, true)
-
-  const chunkedBytes = new Uint8Array(300_000)
-  chunkedBytes.fill(0xab)
-  const chunkedDigest = await computePayloadDigest(chunkedBytes)
-  const forgedMerkleBody = new Uint8Array(8 + 2 * 32)
-  new DataView(forgedMerkleBody.buffer).setBigUint64(0, 300_000n, false)
-  forgedMerkleBody.set(await sha256(chunkedBytes.subarray(0, 262_144)), 8)
-  forgedMerkleBody.set(await sha256(chunkedBytes.subarray(262_144)), 40)
-  assert.notEqual(
-    await computePayloadDigest(forgedMerkleBody),
-    chunkedDigest,
-    'small Uint8Array containing Merkle chunk hashes must have a distinct domain tag from chunked payload'
-  )
+  const sig = await admin.sign(new Uint8Array([1, 2, 3, 4]))
+  assert.equal(isLowSP256Signature(sig), true)
+  const highSSig = sig.slice()
+  let highS =
+    p256N - BigInt('0x' + Buffer.from(sig.subarray(32, 64)).toString('hex'))
+  for (let i = 63; i >= 32; i--) {
+    highSSig[i] = Number(highS & 0xffn)
+    highS >>= 8n
+  }
+  assert.equal(isLowSP256Signature(highSSig), false)
+  assert.deepEqual(normalizeLowSP256Signature(highSSig), sig)
 
   // 4. 12-byte AES-GCM base64url wire format & delimiter-safe keyless genKey
   const kKeylessA = genKey('', 'a:b', 'c')

@@ -7,7 +7,6 @@
     "types": ["node"],
     "paths": {
       "@trystero-p2p/core": ["./packages/core/src/index.ts"],
-      "@trystero-p2p/core/public": ["./packages/core/src/public.ts"],
       "@trystero-p2p/firebase": ["./packages/firebase/src/index.ts"],
       "@trystero-p2p/mqtt": ["./packages/mqtt/src/index.ts"],
       "@trystero-p2p/nostr": ["./packages/nostr/src/index.ts"],

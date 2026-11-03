@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {
+  createEndpointIdentity,
   createUserIdentity,
-  getDefaultEndpointIdentity,
-  resolveUserIdentity,
-  toBase64Url,
   userEndpointProofPayload
 } from '../../packages/core/src/identity.ts'
 import {
@@ -21,21 +19,31 @@ import createRoom, {
   getRoomSignalingBridge
 } from '../../packages/core/src/room.ts'
 import type {PeerHandle} from '../../packages/core/src/types.ts'
-import {encodeBytes, toBase64} from '../../packages/core/src/utils.ts'
+import {
+  encodeBytes,
+  toBase64,
+  toBase64Url
+} from '../../packages/core/src/utils.ts'
 import {linkHandles, makeOverlayPipe} from './overlay-harness.ts'
-import {allocTestPeerIds, testPeerId, wait, waitFor} from './peer-harness.ts'
+import {
+  allocTestPeerIds,
+  getTestEndpointByPeerId,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 type PeerDescriptor = Parameters<typeof packGossipControlFrames>[0][number]
 
 void test('S1: multi-ring expander guarantees 100% reachability within deriveMaxHops and hop-caps computeShortestPathRoutes', () => {
   const cases = [
-    {peerCount: 250, maxConnections: 6},
-    {peerCount: 300, maxConnections: 6},
-    {peerCount: 500, maxConnections: 6},
-    {peerCount: 100, maxConnections: 4}
+    {peerCount: 250, maxDirectPeers: 6},
+    {peerCount: 300, maxDirectPeers: 6},
+    {peerCount: 500, maxDirectPeers: 6},
+    {peerCount: 100, maxDirectPeers: 4}
   ]
 
-  for (const {peerCount, maxConnections} of cases) {
+  for (const {peerCount, maxDirectPeers} of cases) {
     const peerIds = Array.from(
       {length: peerCount},
       (_, i) => `peer-${String(i).padStart(4, '0')}`
@@ -45,18 +53,17 @@ void test('S1: multi-ring expander guarantees 100% reachability within deriveMax
       const targets = computeTargetNeighbors(
         id,
         peerIds,
-        'gossip',
-        maxConnections,
+        maxDirectPeers,
         's1-app\0s1-room'
       )
       assert.ok(
-        targets.size <= maxConnections,
-        `degree ${targets.size} exceeded maxConnections ${maxConnections}`
+        targets.size <= maxDirectPeers,
+        `degree ${targets.size} exceeded maxDirectPeers ${maxDirectPeers}`
       )
       adjacency.set(id, targets)
     }
 
-    const maxHops = deriveMaxHops(peerCount, maxConnections)
+    const maxHops = deriveMaxHops(peerCount, maxDirectPeers)
     // Verify 100% reachability from sample sources across the graph within maxHops
     const sampleIndices = [
       0,
@@ -75,7 +82,7 @@ void test('S1: multi-ring expander guarantees 100% reachability within deriveMax
       assert.equal(
         Object.keys(routes).length,
         peerCount - 1,
-        `expected 100% reachability for N=${peerCount}, maxConnections=${maxConnections}, maxHops=${maxHops}`
+        `expected 100% reachability for N=${peerCount}, maxDirectPeers=${maxDirectPeers}, maxHops=${maxHops}`
       )
       for (const r of Object.values(routes)) {
         assert.ok(r.hops <= maxHops)
@@ -111,11 +118,17 @@ void test('S1: multi-ring expander guarantees 100% reachability within deriveMax
   assert.equal(cappedRoutes['chain-5'], undefined)
 })
 
-void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verify and cannot bypass activateVirtualPeer', async () => {
+void test('S6: Sybil descriptor flood is capped by room maxUsers before ECDSA verify and cannot bypass activateVirtualPeer', async () => {
   let hostReg: ((peer: PeerHandle, id: string) => void) | null = null
   let attackerReg: ((peer: PeerHandle, id: string) => void) | null = null
   const hostId = testPeerId('host-s6')
   const attackerId = testPeerId('attacker-s6')
+  const [hostUsr, attackerUsr] = await Promise.all([
+    createUserIdentity(),
+    createUserIdentity()
+  ])
+  const hostEp = getTestEndpointByPeerId(hostId)
+  const attackerEp = getTestEndpointByPeerId(attackerId)
 
   const hostRoom = createRoom(
     f => {
@@ -124,11 +137,12 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
     () => {},
     () => {},
     {
-      selfId: hostId,
+      endpointIdentity: hostEp,
+      identity: hostUsr,
       appId: 's6-app',
       roomId: 's6-room',
-      limit: 3,
-      use: [scale({mode: 'gossip', maxConnections: 4})]
+      maxUsers: 3,
+      use: [scale({maxDirectPeers: 4})]
     }
   )
   const attackerRoom = createRoom(
@@ -138,11 +152,12 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
     () => {},
     () => {},
     {
-      selfId: attackerId,
+      endpointIdentity: attackerEp,
+      identity: attackerUsr,
       appId: 's6-app',
       roomId: 's6-room',
-      limit: 3,
-      use: [scale({mode: 'gossip', maxConnections: 4})]
+      maxUsers: 3,
+      use: [scale({maxDirectPeers: 4})]
     }
   )
 
@@ -151,12 +166,13 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
     hostReg!(peerA, attackerId)
     attackerReg!(peerB, hostId)
     await waitFor(() => attackerId in hostRoom.getPeers(), 2_000)
+    await wait(60)
 
     // Mint 12 distinct valid self-certifying Sybil identities & descriptors claiming mutual edges with attacker
     const sybilDescs: PeerDescriptor[] = []
     const sybilIds: string[] = []
     for (let i = 0; i < 12; i++) {
-      const ep = await getDefaultEndpointIdentity(undefined, `s6-sybil-${i}`)
+      const ep = await createEndpointIdentity()
       const usr = await createUserIdentity()
       sybilIds.push(ep.peerId)
       const userProof = toBase64Url(
@@ -188,13 +204,6 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
     }
 
     // Also build a valid attacker descriptor listing all 12 Sybils + host as neighbors (13 <= maxDescriptorNeighbors)
-    const attackerEp = await getDefaultEndpointIdentity(attackerId, 's6-app')
-    const attackerUsr = await resolveUserIdentity(
-      's6-app',
-      's6-room',
-      undefined,
-      attackerId
-    )
     const attackerNeighbors = [hostId, ...sybilIds].sort()
     const attackerUserProof = toBase64Url(
       await attackerUsr.sign(
@@ -226,11 +235,7 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
 
     // Inject gossip control frames directly over the attacker -> host channel while counting WebCrypto verifies
     const frames = packGossipControlFrames([attackerDesc, ...sybilDescs])
-    const hostScale = getRoomSignalingBridge(
-      hostRoom
-    )!.getScaleProvider()! as unknown as {
-      handleOverlayFrame: (fromPeerId: string, data: ArrayBuffer) => void
-    }
+    const hostScale = getRoomSignalingBridge(hostRoom)!.getScaleProvider()!
 
     const origVerify = crypto.subtle.verify.bind(crypto.subtle)
     let verifyCalls = 0
@@ -241,19 +246,19 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
 
     try {
       for (const f of frames) {
-        hostScale.handleOverlayFrame(attackerId, f.slice().buffer)
+        hostScale.handleFrame(attackerId, f.slice().buffer)
       }
       await wait(100)
     } finally {
       crypto.subtle.verify = origVerify
     }
 
-    // Host has limit: 3 (host + attacker + exactly 1 virtual Sybil = 2 remote peers!)
+    // Host has maxUsers: 3 (host + attacker + exactly 1 virtual Sybil = 2 remote peers!)
     const admittedRemotePeers = Object.keys(hostRoom.getPeers())
     assert.equal(
       admittedRemotePeers.length,
       2,
-      `expected 2 remote peers (attacker + 1 virtual Sybil) under limit=3, got ${admittedRemotePeers.length}`
+      `expected 2 remote peers (attacker + 1 virtual Sybil) under maxUsers=3, got ${admittedRemotePeers.length}`
     )
     // Out of 12 Sybils (24 potential verifies), pre-verify maxUsers cap skips 11 Sybils before ECDSA verify!
     assert.ok(
@@ -265,7 +270,7 @@ void test('S6: Sybil descriptor flood is capped by room limit before ECDSA verif
   }
 })
 
-void test('S8: signaling discovery spam cannot flip established auto mesh, displace verified gossip targets, or trigger unicast flood', async () => {
+void test('S8: signaling discovery spam cannot displace verified gossip targets or trigger unicast flood', async () => {
   let relayForwardedCount = 0
   const nodeAId = testPeerId('node-a')
   const nodeBId = testPeerId('node-b')
@@ -273,7 +278,8 @@ void test('S8: signaling discovery spam cannot flip established auto mesh, displ
     selfId: nodeAId,
     appId: 's8-app',
     roomId: 's8-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(nodeAId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -282,7 +288,8 @@ void test('S8: signaling discovery spam cannot flip established auto mesh, displ
     selfId: nodeBId,
     appId: 's8-app',
     roomId: 's8-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(nodeBId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -341,7 +348,8 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
     selfId: honestIds[0]!,
     appId: 'd5-app',
     roomId: 'd5-room',
-    topology: {mode: 'gossip', maxConnections: 6},
+    config: {maxDirectPeers: 6},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(honestIds[0]!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -352,7 +360,8 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
       selfId: honestIds[1]!,
       appId: 'd5-app',
       roomId: 'd5-room',
-      topology: {mode: 'gossip', maxConnections: 6},
+      config: {maxDirectPeers: 6},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(honestIds[1]!),
       onVirtualPeerJoin: () => {},
       onVirtualPeerLeave: () => {},
       onDeliverData: () => {}
@@ -361,12 +370,21 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
       honestIds[1]!,
       makeOverlayPipe(honestIds[0]!, dummyRelay)
     )
+    dummyRelay.addDirectPeer(
+      honestIds[0]!,
+      makeOverlayPipe(honestIds[1]!, victim)
+    )
+    await waitFor(
+      () => victim.getPeerSignPublicKey(honestIds[1]!) !== undefined,
+      2_000
+    )
 
     const descriptors: PeerDescriptor[] = []
     for (let i = 1; i < honestIds.length; i++) {
       const id = honestIds[i]!
-      const ep = await getDefaultEndpointIdentity(id, 'd5-app')
+      const ep = getTestEndpointByPeerId(id)
       const u = await createUserIdentity()
+      const descSeq = 10
       const userProof = toBase64Url(
         await u.sign(
           userEndpointProofPayload({
@@ -374,13 +392,13 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
             roomId: 'd5-room',
             peerId: id,
             peerPubJwk: ep.signPubJwk,
-            seq: 1
+            seq: descSeq
           })
         )
       )
       const desc: PeerDescriptor = {
         peerId: id,
-        seq: 1,
+        seq: descSeq,
         neighbors: [honestIds[0]!],
         signPubKey: ep.signPubJwk,
         userId: u.userId,
@@ -399,7 +417,7 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
     const sybilOwner = await createUserIdentity()
     const sybilIds: string[] = []
     for (let i = 0; i < 14; i++) {
-      const ep = await getDefaultEndpointIdentity(undefined, `d5-sybil-${i}`)
+      const ep = await createEndpointIdentity()
       sybilIds.push(ep.peerId)
       const userProof = toBase64Url(
         await sybilOwner.sign(
@@ -448,7 +466,7 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
     ).length
     assert.ok(
       sybilTargetCount <= 2,
-      `single userId must occupy at most floor(maxConnections/3)=2 target slots, got ${sybilTargetCount}`
+      `single userId must occupy at most floor(maxDirectPeers/3)=2 target slots, got ${sybilTargetCount}`
     )
     assert.ok(
       [...targets].some(id => honestIds.includes(id)),

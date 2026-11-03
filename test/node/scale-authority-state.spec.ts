@@ -1,20 +1,26 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import type {
+  PeerHandle,
   RolesPluginApi,
   Room,
-  ScalePluginApi
+  ScalePluginApi,
+  UserIdentity
 } from '../../packages/core/src/index.ts'
-import {compareStateRecords, roles} from '../../packages/core/src/authority.ts'
+import {actionWireVersion} from '../../packages/core/src/action-wire.ts'
+import {roles} from '../../packages/core/src/authority.ts'
 import {createUserIdentity} from '../../packages/core/src/identity.ts'
+import createRoom from '../../packages/core/src/room.ts'
 import {
   createOverlayManager,
   overlayBroadcastKind,
-  unpackOverlayBinary
+  scale,
+  unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
-import createRoom from '../../packages/core/src/room.ts'
+import {compareStateRecords} from '../../packages/core/src/state.ts'
 import {encodeBytes} from '../../packages/core/src/utils.ts'
 import {
+  getTestEndpointByPeerId,
   LinkedPeer,
   linkPeers,
   testPeerId,
@@ -33,36 +39,41 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   const appId = 'state-test-app'
   const coAdmins = [adminUser1.userId, adminUser2.userId]
 
-  const regMap = new Map<string, (peer: any, id: string) => void>()
+  const admin1Id = testPeerId('state-admin-1')
+  const admin2Id = testPeerId('state-admin-2')
+  const viewer1Id = testPeerId('state-viewer-1')
+  const viewer2Id = testPeerId('state-viewer-2')
+
+  const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
   const makePeerRoom = (
     id: string,
-    identity: typeof adminUser1
-  ): Room & RolesPluginApi =>
+    identity: UserIdentity
+  ): Room & RolesPluginApi & ScalePluginApi =>
     createRoom(
       f => regMap.set(id, f),
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId,
         roomId,
         identity,
-        use: [roles({admins: coAdmins})]
+        use: [scale({maxDirectPeers: 4}), roles({admins: coAdmins})]
       }
-    )
+    ) as unknown as Room & RolesPluginApi & ScalePluginApi
 
   const directHandles = new Map<string, LinkedPeer>()
   const connectDirect = (a: string, b: string) => {
     const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
     directHandles.set(`${a}->${b}`, peerA)
     directHandles.set(`${b}->${a}`, peerB)
-    regMap.get(a)!(peerA, b)
-    regMap.get(b)!(peerB, a)
+    regMap.get(a)!(peerA as unknown as PeerHandle, b)
+    regMap.get(b)!(peerB as unknown as PeerHandle, a)
   }
 
-  const admin1 = makePeerRoom('admin-1', adminUser1)
-  const admin2 = makePeerRoom('admin-2', adminUser2)
-  const viewer1 = makePeerRoom('viewer-1', viewerUser1)
+  const admin1 = makePeerRoom(admin1Id, adminUser1)
+  const admin2 = makePeerRoom(admin2Id, adminUser2)
+  const viewer1 = makePeerRoom(viewer1Id, viewerUser1)
 
   type GameState = {round: number; leader: string}
   const validateGame = (next: GameState, {prev}: {prev: GameState}) =>
@@ -89,9 +100,9 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
     viewerChanges.push({val, prev: ctx.prev, by: ctx.peerId})
   })
 
-  connectDirect('admin-1', 'admin-2')
-  connectDirect('admin-1', 'viewer-1')
-  connectDirect('admin-2', 'viewer-1')
+  connectDirect(admin1Id, admin2Id)
+  connectDirect(admin1Id, viewer1Id)
+  connectDirect(admin2Id, viewer1Id)
 
   await waitFor(
     () =>
@@ -115,7 +126,7 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
     2_000
   )
   assert.deepEqual(stateViewer1.get(), {round: 2, leader: 'admin-1'})
-  assert.equal(stateViewer1.getMeta()?.peerId, 'admin-1')
+  assert.equal(stateViewer1.getMeta()?.peerId, admin1Id)
   assert.equal(typeof stateViewer1.getMeta()?.timestamp, 'number')
   assert.ok(viewerChanges.length >= 1)
 
@@ -145,13 +156,13 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   const finalExpectedTs = stateViewer1.getMeta()?.timestamp
   await Promise.all([admin1.leave(), admin2.leave()])
 
-  const viewer2 = makePeerRoom('viewer-2', viewerUser2)
+  const viewer2 = makePeerRoom(viewer2Id, viewerUser2)
   const stateViewer2 = viewer2.makeState<GameState>(
     'game',
     {round: 0, leader: 'none'},
     {validate: validateGame}
   )
-  connectDirect('viewer-1', 'viewer-2')
+  connectDirect(viewer1Id, viewer2Id)
 
   await waitFor(() => stateViewer2.get().round === 3, 2_000)
   assert.deepEqual(stateViewer2.get(), finalExpectedState)
@@ -160,8 +171,12 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   // Verify compareStateRecords deterministic ordering
   assert.equal(
     compareStateRecords(
-      {hlc: 200, userId: 'a', peerId: 'p1', sig: '11'} as any,
-      {hlc: 100, userId: 'b', peerId: 'p2', sig: '22'} as any
+      {hlc: 200, userId: 'a', peerId: 'p1', sig: '11'} as Parameters<
+        typeof compareStateRecords
+      >[0],
+      {hlc: 100, userId: 'b', peerId: 'p2', sig: '22'} as Parameters<
+        typeof compareStateRecords
+      >[1]
     ) > 0,
     true
   )
@@ -169,18 +184,31 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   await Promise.all([viewer1.leave(), viewer2.leave()])
 })
 
-void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcement', async () => {
-  // 1. Hop-1 relay drops unauthorized overlay broadcast before forwarding downstream
+void test('Hop-1 unauthorized broadcast drop and multi-hop room.ban / room.unban enforcement across scale()', async () => {
+  // 1. Hop-1 relay drops unauthorized overlay broadcast before forwarding downstream, while forwarding authorized ones
   const forwardedToDownstream: Uint8Array[] = []
+  let deliveredOnRelay = 0
   const malloryOvId = testPeerId('mallory-ov')
   const relayOvId = testPeerId('relay-ov')
   const adminOvId = testPeerId('admin-ov')
   const downstreamOvId = testPeerId('downstream-ov')
+
   const malloryOverlay = createOverlayManager({
     selfId: malloryOvId,
     appId: 'hop1-app',
     roomId: 'hop1-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(malloryOvId),
+    onVirtualPeerJoin: () => {},
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+  const adminOverlay = createOverlayManager({
+    selfId: adminOvId,
+    appId: 'hop1-app',
+    roomId: 'hop1-room',
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(adminOvId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -189,21 +217,24 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
     selfId: relayOvId,
     appId: 'hop1-app',
     roomId: 'hop1-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayOvId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
-    onDeliverData: () => {},
-    canPeerSendAction: peerId => peerId === adminOvId
+    onDeliverData: () => {
+      deliveredOnRelay++
+    },
+    authorizePeerAction: peerId => peerId === adminOvId
   })
   hop1RelayOverlay.registerActionAuthority('admin-cmd', ['admin'])
 
   const makeSimplePipe = (
     fromId: string,
     toManager: ReturnType<typeof createOverlayManager>
-  ) => ({
+  ): PeerHandle => ({
     isDead: false,
-    connection: {} as any,
-    channel: {readyState: 'open'} as any,
+    connection: {} as RTCPeerConnection,
+    channel: {readyState: 'open'} as RTCDataChannel,
     getOffer: async () => undefined,
     signal: async () => undefined,
     sendData: (data: Uint8Array) => {
@@ -215,147 +246,238 @@ void test('Hop-1 unauthorized broadcast drop and multi-layer room.ban enforcemen
     setHandlers: () => {},
     addStream: () => {},
     removeStream: () => {},
-    addTrack: () => ({}) as any,
+    addTrack: () => ({}) as RTCRtpSender,
     removeTrack: () => {},
     replaceTrack: async () => {}
   })
 
-  malloryOverlay.addDirectPeer(
-    relayOvId,
-    makeSimplePipe(malloryOvId, hop1RelayOverlay)
-  )
-  hop1RelayOverlay.addDirectPeer(
-    malloryOvId,
-    makeSimplePipe(relayOvId, malloryOverlay)
-  )
-  hop1RelayOverlay.addDirectPeer(downstreamOvId, {
-    ...makeSimplePipe(relayOvId, malloryOverlay),
-    sendData: (data: Uint8Array) => {
-      const parsed = unpackOverlayBinary(data)
-      if (parsed?.kind === overlayBroadcastKind) {
-        forwardedToDownstream.push(data.slice())
+  try {
+    malloryOverlay.addDirectPeer(
+      relayOvId,
+      makeSimplePipe(malloryOvId, hop1RelayOverlay)
+    )
+    hop1RelayOverlay.addDirectPeer(
+      malloryOvId,
+      makeSimplePipe(relayOvId, malloryOverlay)
+    )
+    adminOverlay.addDirectPeer(
+      relayOvId,
+      makeSimplePipe(adminOvId, hop1RelayOverlay)
+    )
+    hop1RelayOverlay.addDirectPeer(
+      adminOvId,
+      makeSimplePipe(relayOvId, adminOverlay)
+    )
+    hop1RelayOverlay.addDirectPeer(downstreamOvId, {
+      ...makeSimplePipe(relayOvId, malloryOverlay),
+      sendData: (data: Uint8Array) => {
+        const parsed = unpackOverlayFrame(data)
+        if (parsed?.[0] === overlayBroadcastKind) {
+          forwardedToDownstream.push(data.slice())
+        }
       }
-    }
-  })
+    })
 
-  await waitFor(
-    () => hop1RelayOverlay.getSnapshot().directPeerIds.includes(malloryOvId),
-    1_000
-  )
-  await wait(40)
+    await waitFor(
+      () =>
+        hop1RelayOverlay.getSnapshot().directPeerIds.includes(malloryOvId) &&
+        hop1RelayOverlay.getSnapshot().directPeerIds.includes(adminOvId) &&
+        Boolean(hop1RelayOverlay.getPeerSignPublicKey(malloryOvId)) &&
+        Boolean(hop1RelayOverlay.getPeerSignPublicKey(adminOvId)),
+      1_500
+    )
 
-  // Mallory broadcasts an action wire frame (v2 header: byte[0]=2, bytes[2..34]=namespace) claiming privileged action 'admin-cmd'
-  const fakePrivPayload = new Uint8Array(40)
-  fakePrivPayload[0] = 2
-  fakePrivPayload.set(encodeBytes('admin-cmd'), 2)
-  const relaySigFailBefore =
-    hop1RelayOverlay.getSnapshot().stats.signatureFailures
-  await malloryOverlay.broadcastInline(fakePrivPayload)
-  await wait(50)
-  assert.equal(
-    hop1RelayOverlay.getSnapshot().stats.signatureFailures,
-    relaySigFailBefore + 1,
-    'Hop-1 relay must reject unauthorized broadcast on privileged action and increment signatureFailures'
-  )
-  assert.equal(
-    forwardedToDownstream.length,
-    0,
-    'Hop-1 relay must NOT forward unauthorized privileged broadcast downstream'
-  )
-  malloryOverlay.destroy()
-  hop1RelayOverlay.destroy()
+    // Mallory broadcasts an action wire frame (v3 header: byte[0]=actionWireVersion, bytes[2..34]=namespace)
+    // claiming privileged action 'admin-cmd' -> dropped at Hop-1 without delivering or forwarding
+    const fakePrivPayload = new Uint8Array(40)
+    fakePrivPayload[0] = actionWireVersion
+    fakePrivPayload.set(encodeBytes('admin-cmd'), 2)
+    await malloryOverlay.broadcastInline(fakePrivPayload)
+    await wait(50)
 
-  // 3. Multi-layer room.ban(peerId) enforcement
-  const banAdminIdentity = await createUserIdentity()
+    assert.equal(
+      deliveredOnRelay,
+      0,
+      'Hop-1 relay must NOT deliver unauthorized privileged broadcast locally'
+    )
+    assert.equal(
+      forwardedToDownstream.length,
+      0,
+      'Hop-1 relay must NOT forward unauthorized privileged broadcast downstream'
+    )
+
+    // Authorized admin broadcast on 'admin-cmd' IS delivered and forwarded downstream
+    await adminOverlay.broadcastInline(fakePrivPayload)
+    await waitFor(
+      () => deliveredOnRelay === 1 && forwardedToDownstream.length === 1,
+      1_000
+    )
+  } finally {
+    malloryOverlay.destroy()
+    adminOverlay.destroy()
+    hop1RelayOverlay.destroy()
+  }
+
+  // 2. Multi-hop room.ban and room.unban enforcement across scale() overlay
+  //    Line topology: admin -- honest -- relay -- mallory
+  const [banAdminIdentity, honestUser, relayUser, malloryUser] =
+    await Promise.all([
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity()
+    ])
   const roomId = `ban-test-room~${banAdminIdentity.userId}`
   const appId = 'ban-test-app'
 
-  const regMap = new Map<string, (peer: any, id: string) => void>()
-  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
-  const peerIds = ['admin', 'honest', 'mallory']
+  const adminId = testPeerId('ban-admin')
+  const honestId = testPeerId('ban-honest')
+  const relayId = testPeerId('ban-relay')
+  const malloryId = testPeerId('ban-mallory-1')
+  const malloryRetryBannedId = testPeerId('ban-mallory-2')
+  const malloryRejoinUnbannedId = testPeerId('ban-mallory-3')
 
-  for (const id of peerIds) {
-    const peerIdentity =
-      id === 'admin' ? banAdminIdentity : await createUserIdentity()
+  const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
+  const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
+  const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
+  const linkKey = (a: string, b: string) => (a < b ? `${a}:${b}` : `${b}:${a}`)
+
+  const spawnRoom = (id: string, identity: UserIdentity) => {
     const room = createRoom(
       f => regMap.set(id, f),
-      () => {},
+      pid => {
+        const pair = directLinks.get(linkKey(id, pid))
+        if (pair) {
+          directLinks.delete(linkKey(id, pid))
+          pair.peerA.destroy()
+          pair.peerB.destroy()
+        }
+      },
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId,
         roomId,
-        use: [roles()],
-        identity: peerIdentity
+        use: [scale({maxDirectPeers: 4}), roles()],
+        identity
       }
-    )
-    rooms.set(id, room as any)
+    ) as unknown as Room & RolesPluginApi & ScalePluginApi
+    rooms.set(id, room)
+    return room
   }
 
-  const directHandles = new Map<string, LinkedPeer>()
   const connectDirect = (a: string, b: string) => {
+    const k = linkKey(a, b)
+    if (directLinks.has(k)) {
+      return
+    }
     const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
-    directHandles.set(`${a}->${b}`, peerA)
-    directHandles.set(`${b}->${a}`, peerB)
-    regMap.get(a)!(peerA, b)
-    regMap.get(b)!(peerB, a)
+    directLinks.set(k, {peerA, peerB})
+    regMap.get(a)!(peerA as unknown as PeerHandle, b)
+    regMap.get(b)!(peerB as unknown as PeerHandle, a)
   }
+
+  spawnRoom(adminId, banAdminIdentity)
+  spawnRoom(honestId, honestUser)
+  spawnRoom(relayId, relayUser)
+  spawnRoom(malloryId, malloryUser)
 
   try {
-    connectDirect('admin', 'honest')
-    connectDirect('admin', 'mallory')
-    connectDirect('honest', 'mallory')
+    connectDirect(adminId, honestId)
+    connectDirect(honestId, relayId)
+    connectDirect(relayId, malloryId)
 
     await waitFor(
       () =>
-        Object.keys(rooms.get('admin')!.getPeers()).length === 2 &&
-        Object.keys(rooms.get('honest')!.getPeers()).length === 2,
+        [adminId, honestId, relayId, malloryId].every(
+          id => rooms.get(id)!.getTopology().roomPeerIds.length === 3
+        ),
+      3_000
+    )
+
+    // Grant 'moderator' to honestId and verify neither viewer nor moderator can ban/unban (Q6=A)
+    await rooms.get(adminId)!.grantRole(honestId, 'moderator')
+    await waitFor(
+      () => rooms.get(honestId)!.getRoles(honestId).includes('moderator'),
       2_000
     )
 
-    const honestChatReceived: Array<{msg: string; from: string}> = []
-    for (const id of peerIds) {
-      const chatAction = rooms.get(id)!.makeAction<string>('chat')
-      chatAction.onMessage((msg, {peerId}) => {
-        if (id === 'honest') {
-          honestChatReceived.push({msg, from: peerId})
-        }
-      })
-      ;(rooms.get(id) as any).sendChat = chatAction.send
-    }
-
-    // Non-admin cannot ban a peer
     await assert.rejects(
-      () => rooms.get('honest')!.ban('mallory'),
-      /only an admin can ban a peer/
+      () => rooms.get(relayId)!.ban(malloryId),
+      /insufficient authority: only a root admin can ban a peer/
+    )
+    await assert.rejects(
+      () => rooms.get(honestId)!.ban(malloryId),
+      /insufficient authority: only a root admin can ban a peer/
+    )
+    await assert.rejects(
+      () => rooms.get(honestId)!.unban(malloryUser.userId),
+      /insufficient authority: only a root admin can unban a peer/
+    )
+    await assert.rejects(
+      () => rooms.get(adminId)!.ban(adminId),
+      /cannot ban a root admin/
     )
 
-    // Admin bans Mallory
-    await rooms.get('admin')!.ban('mallory', {reason: 'abusive behavior'})
+    // Root admin bans 3-hop virtual peer Mallory
+    await rooms.get(adminId)!.ban(malloryId, {reason: 'abusive behavior'})
     await waitFor(
       () =>
-        rooms.get('admin')!.isBanned('mallory') &&
-        rooms.get('honest')!.isBanned('mallory'),
-      2_000
+        rooms.get(adminId)!.isBanned(malloryUser.userId) &&
+        rooms.get(honestId)!.isBanned(malloryUser.userId) &&
+        rooms.get(relayId)!.isBanned(malloryUser.userId) &&
+        !(malloryId in rooms.get(adminId)!.getPeers()) &&
+        !(malloryId in rooms.get(honestId)!.getPeers()) &&
+        !(malloryId in rooms.get(relayId)!.getPeers()),
+      3_000
     )
 
-    assert.equal(rooms.get('admin')!.isBanned('mallory'), true)
-    assert.equal(rooms.get('honest')!.isBanned('mallory'), true)
+    // Even if Mallory tries to rejoin on a fresh endpoint while banned, Relay rejects/evicts her
+    spawnRoom(malloryRetryBannedId, malloryUser)
+    connectDirect(relayId, malloryRetryBannedId)
+    await wait(80)
     assert.equal(
-      'mallory' in rooms.get('honest')!.getPeers(),
+      malloryRetryBannedId in rooms.get(relayId)!.getPeers(),
       false,
-      'banned peer must be immediately disconnected from honest peers'
+      'banned user reconnection attempt on new endpoint must be rejected'
     )
 
-    // Even if Mallory tries to reconnect to Honest with a new peer connection, Honest immediately rejects/destroys it
-    connectDirect('honest', 'mallory')
-    await wait(50)
-    assert.equal(
-      'mallory' in rooms.get('honest')!.getPeers(),
-      false,
-      'banned peer reconnection attempt must be rejected'
+    // Root admin lifts the ban via room.unban(userId) (Q22=A: syncs PeerModerationRecord op='unban' via @_auth)
+    await rooms.get(adminId)!.unban(malloryUser.userId)
+    await waitFor(
+      () =>
+        !rooms.get(adminId)!.isBanned(malloryUser.userId) &&
+        !rooms.get(honestId)!.isBanned(malloryUser.userId) &&
+        !rooms.get(relayId)!.isBanned(malloryUser.userId),
+      3_000
     )
+
+    // Unbanned Mallory can now rejoin cleanly and exchange messages across the multi-hop overlay
+    const unbannedRoom = spawnRoom(malloryRejoinUnbannedId, malloryUser)
+    const adminPingReceived: string[] = []
+    rooms
+      .get(adminId)!
+      .makeAction<string>('rejoin-hello')
+      .onMessage((msg, {peerId}) => {
+        adminPingReceived.push(`${peerId}:${msg}`)
+      })
+    const rejoinHello = unbannedRoom.makeAction<string>('rejoin-hello')
+
+    connectDirect(relayId, malloryRejoinUnbannedId)
+    await waitFor(
+      () =>
+        malloryRejoinUnbannedId in rooms.get(relayId)!.getPeers() &&
+        malloryRejoinUnbannedId in rooms.get(honestId)!.getPeers() &&
+        malloryRejoinUnbannedId in rooms.get(adminId)!.getPeers(),
+      3_000
+    )
+
+    await rejoinHello.send('back-in-good-standing', {target: adminId})
+    await waitFor(() => adminPingReceived.length === 1, 2_000)
+    assert.deepEqual(adminPingReceived, [
+      `${malloryRejoinUnbannedId}:back-in-good-standing`
+    ])
   } finally {
-    await Promise.all(peerIds.map(id => rooms.get(id)!.leave()))
+    await Promise.all([...rooms.values()].map(r => r.leave()))
   }
 })

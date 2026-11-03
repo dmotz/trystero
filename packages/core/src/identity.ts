@@ -8,51 +8,44 @@ import {
   sha256
 } from './crypto'
 import {
+  buildUserIdentityFromIdbRecord,
+  deleteIdbIdentity,
+  loadOrCreateIdbIdentity,
+  type StoredIdbIdentityRecord
+} from './identity-idb'
+import {
   base62Alphabet,
   bytesMatch,
   bytesToBigInt,
   createBoundedCache,
   decodeBytes,
+  domainTag,
   encodeBytes,
   fromBase64Url,
   fromJson,
   libId,
   mkErr,
   peerIdLength,
-  toBase64,
   toBase64Url,
-  toHex,
   toJson,
   userIdLength
 } from './primitives'
-import {
-  buildUserIdentityFromIdbRecord,
-  deleteIdbIdentity,
-  loadOrCreateIdbIdentity,
-  type StoredIdbIdentityRecord
-} from './identity-idb'
-import {invalidP256KeyErr, noOp, requiredErr, userIdRegex, warn} from './utils'
 import type {
   ResolvedIdentityPersistence,
   UserIdentity,
   UserIdentityConfig,
   UserIdentityPersistence
 } from './types'
-
-export {
-  base62Alphabet,
-  decodeBytes,
-  encodeBytes,
-  fromBase64Url,
-  peerIdLength,
-  toBase64Url,
-  userIdLength
-}
+import {invalidP256KeyErr, noOp, requiredErr, userIdRegex, warn} from './utils'
 
 const base62Radix = 62n
 const userKeyPrefix = `${libId}_uk_`
 const maxCachedSigPayloadBytes = 4_096
-const keyPairTestPayload = /*@__PURE__*/ new Uint8Array([0x74])
+const maxSigCacheTotalBytes = 2 * 1024 * 1024
+const maxSigCacheEntries = 8_192
+const keyPairTestPayload = /*@__PURE__*/ encodeBytes(
+  domainTag('identity-self-test', 1)
+)
 
 const invalidKeyMaterialErr = /*@__PURE__*/ mkErr(
   'invalid user identity key material; expected exported userKey or P-256 JWK'
@@ -63,8 +56,11 @@ const userIdMismatchErr = /*@__PURE__*/ mkErr(
 const invalidCustomIdentityErr = /*@__PURE__*/ mkErr(
   'invalid custom user identity; use "local", "none", loader, or importUserIdentity()'
 )
+const invalidCustomSignatureErr = /*@__PURE__*/ mkErr(
+  'invalid custom user identity signature; sign() must return a valid 64-byte IEEE P1363 ECDSA P-256 SHA-256 signature'
+)
 
-export const encodeBase62 = (bytes: Uint8Array, length: number): string => {
+const encodeBase62 = (bytes: Uint8Array, length: number): string => {
   const modulus = base62Radix ** BigInt(length)
   let val = bytesToBigInt(bytes) % modulus
   let out = ''
@@ -138,28 +134,6 @@ export const compactPubToJwk = (pub: string): JsonWebKey | null => {
   return pubJwkToUncompressedBytes(jwk) ? jwk : null
 }
 
-export const encodePublicKey = (jwk: JsonWebKey): string =>
-  toBase64Url(encodeBytes(canonicalizePubJwk(jwk)))
-
-export const decodePublicKey = (encoded: string): JsonWebKey | null => {
-  if (typeof encoded !== 'string') {
-    return null
-  }
-  const trimmed = encoded.trim()
-  const compact = compactPubToJwk(trimmed)
-  if (compact) {
-    return compact
-  }
-  try {
-    const parsed = fromJson<JsonWebKey>(
-      trimmed.startsWith('{') ? trimmed : decodeBytes(fromBase64Url(trimmed))
-    )
-    return parsed && parsed.kty === 'EC' && parsed.x && parsed.y ? parsed : null
-  } catch {
-    return null
-  }
-}
-
 export type VerifiedPubKeyRecord = readonly [
   canonicalJwk: string,
   compactPub: string,
@@ -183,7 +157,7 @@ const pendingPubKeyCache = new Map<
   Promise<VerifiedPubKeyRecord | null>
 >()
 
-export const getCachedPubKeyRecord = (
+const getCachedPubKeyRecord = (
   pubKeyOrJwk: JsonWebKey | string
 ): VerifiedPubKeyRecord | undefined => {
   if (typeof pubKeyOrJwk === 'object' && pubKeyOrJwk !== null) {
@@ -193,7 +167,7 @@ export const getCachedPubKeyRecord = (
     }
   }
   const jwk =
-    typeof pubKeyOrJwk === 'string' ? decodePublicKey(pubKeyOrJwk) : pubKeyOrJwk
+    typeof pubKeyOrJwk === 'string' ? compactPubToJwk(pubKeyOrJwk) : pubKeyOrJwk
   return jwk && typeof jwk.x === 'string' && typeof jwk.y === 'string'
     ? resolvedPubKeyCache.get(canonicalizePubJwk(jwk))
     : undefined
@@ -210,7 +184,7 @@ export const getVerifiedPubKeyRecord = (
     }
   }
   const jwk =
-    typeof pubKeyOrJwk === 'string' ? decodePublicKey(pubKeyOrJwk) : pubKeyOrJwk
+    typeof pubKeyOrJwk === 'string' ? compactPubToJwk(pubKeyOrJwk) : pubKeyOrJwk
   const uncompressed = jwk ? pubJwkToUncompressedBytes(jwk) : null
   if (!jwk || !uncompressed) {
     return Promise.resolve(null)
@@ -285,10 +259,45 @@ export const deriveUserId = (
 export const isValidUserId = (id: string): boolean =>
   typeof id === 'string' && userIdRegex.test(id)
 
-const verifiedSigPayloads = /*@__PURE__*/ createBoundedCache<
-  string,
-  Uint8Array
->(8_192)
+const createByteBoundedPayloadCache = () => {
+  const map = new Map<string, Uint8Array>()
+  let totalBytes = 0
+  return {
+    get: (key: string): Uint8Array | undefined => {
+      const val = map.get(key)
+      if (val !== undefined) {
+        map.delete(key)
+        map.set(key, val)
+      }
+      return val
+    },
+    set: (key: string, val: Uint8Array): void => {
+      const prev = map.get(key)
+      if (prev !== undefined) {
+        totalBytes -= prev.byteLength
+        map.delete(key)
+      }
+      while (
+        map.size >= maxSigCacheEntries ||
+        (map.size > 0 && totalBytes + val.byteLength > maxSigCacheTotalBytes)
+      ) {
+        const oldestKey = map.keys().next().value
+        if (oldestKey === undefined) {
+          break
+        }
+        const oldestVal = map.get(oldestKey)
+        if (oldestVal) {
+          totalBytes -= oldestVal.byteLength
+        }
+        map.delete(oldestKey)
+      }
+      map.set(key, val)
+      totalBytes += val.byteLength
+    }
+  }
+}
+
+const verifiedSigPayloads = /*@__PURE__*/ createByteBoundedPayloadCache()
 const inFlightSigVerifies = new Map<
   string,
   [bytes: Uint8Array, promise: Promise<boolean>]
@@ -305,7 +314,7 @@ export const verifyWithP256 = (
   const cachedRec = getCachedPubKeyRecord(pubKeyOrJwk)
   if (cachedRec && payload.byteLength <= maxCachedSigPayloadBytes) {
     const cached = verifiedSigPayloads.get(
-      `${cachedRec[1]}:${toBase64(sigBytes)}`
+      `${cachedRec[1]}:${toBase64Url(sigBytes)}`
     )
     if (cached) {
       return bytesMatch(cached, payload)
@@ -339,7 +348,7 @@ const verifyWithP256Async = async (
     }
   }
 
-  const cacheKey = `${rec[1]}:${toBase64(sigBytes)}`
+  const cacheKey = `${rec[1]}:${toBase64Url(sigBytes)}`
   const cached = verifiedSigPayloads.get(cacheKey)
   if (cached) {
     return bytesMatch(cached, payload)
@@ -436,12 +445,8 @@ const generateP256KeyMaterial = async (
   return [keyPair, rawJwk, rec]
 }
 
-const appIdentityEpoch = /*@__PURE__*/ createBoundedCache<string, number>(256)
+const appIdentityEpoch = new Map<string, number>()
 const appEndpointCache = /*@__PURE__*/ createBoundedCache<
-  string,
-  Promise<EndpointIdentity>
->()
-const ownEndpointCache = /*@__PURE__*/ createBoundedCache<
   string,
   Promise<EndpointIdentity>
 >()
@@ -459,8 +464,8 @@ const slotForApp = (appId?: string, clientId = ''): string => {
   return `${clientId}\0${appIdentityEpoch.get(normalizedApp) ?? 0}\0${normalizedApp}`
 }
 
-export const createEndpointIdentity = (): Promise<EndpointIdentity> => {
-  const promise = generateP256KeyMaterial(false).then(([keyPair, , rec]) => ({
+export const createEndpointIdentity = (): Promise<EndpointIdentity> =>
+  generateP256KeyMaterial(false).then(([keyPair, , rec]) => ({
     peerId: rec[5],
     signPrivateKey: keyPair.privateKey,
     signPublicKey: keyPair.publicKey,
@@ -468,45 +473,28 @@ export const createEndpointIdentity = (): Promise<EndpointIdentity> => {
     sign: (payload: Uint8Array) =>
       ecdsaSign(keyPair.privateKey, payload as BufferSource)
   }))
-  return promise.then(id => {
-    ownEndpointCache.set(id.peerId, promise)
-    return id
-  })
-}
 
 export const getDefaultEndpointIdentity = (
-  peerId?: string,
   appId?: string,
   clientId?: string
 ): Promise<EndpointIdentity> => {
-  if (peerId) {
-    const own = ownEndpointCache.get(peerId)
-    if (own) {
-      return own
-    }
-  }
   const slot = slotForApp(appId, clientId)
   const existing = appEndpointCache.get(slot)
   if (existing) {
     return existing
   }
   const created = createEndpointIdentity()
+  created.catch(() => {
+    if (appEndpointCache.get(slot) === created) {
+      appEndpointCache.delete(slot)
+    }
+  })
   appEndpointCache.set(slot, created)
   return created
 }
 
-export const resolveSelfId = (
-  explicitSelfId?: string,
-  appId?: string,
-  clientId?: string
-): Promise<string> =>
-  explicitSelfId
-    ? Promise.resolve(explicitSelfId)
-    : getDefaultEndpointIdentity(undefined, appId, clientId).then(
-        id => id.peerId
-      )
-
 const extractableUserKeys = new WeakMap<UserIdentity, string>()
+const trustedUserIdentities = new WeakSet<UserIdentity>()
 
 const buildExtractableUserIdentity = (
   privateKey: CryptoKey,
@@ -527,12 +515,12 @@ const buildExtractableUserIdentity = (
     )
   const identity: UserIdentity = {
     userId: rec[6],
-    publicKey: encodePublicKey(cleanJwk),
     signPubJwk: cleanJwk,
     sign: (payload: Uint8Array) =>
       ecdsaSign(privateKey, payload as BufferSource)
   }
   extractableUserKeys.set(identity, userKey)
+  trustedUserIdentities.add(identity)
   return identity
 }
 
@@ -546,14 +534,17 @@ const generateNonExtractableIdbRecord =
     const [keyPair, , rec] = await generateP256KeyMaterial(false)
     return {
       userId: rec[6],
-      publicKey: encodePublicKey(rec[2]),
       signPubJwk: rec[2],
       privateKey: keyPair.privateKey
     }
   }
 
 const createNonExtractableUserIdentity = (): Promise<UserIdentity> =>
-  generateNonExtractableIdbRecord().then(buildUserIdentityFromIdbRecord)
+  generateNonExtractableIdbRecord().then(rec => {
+    const id = buildUserIdentityFromIdbRecord(rec)
+    trustedUserIdentities.add(id)
+    return id
+  })
 
 const tryParsePrivateJwk = (
   keyOrJwk: string | JsonWebKey
@@ -612,11 +603,6 @@ const tryParsePrivateJwk = (
   }
 }
 
-const importedUserIdentityCache = /*@__PURE__*/ createBoundedCache<
-  string,
-  Promise<UserIdentity>
->(256)
-
 export const importUserIdentity = async (
   keyOrJwk: string | JsonWebKey
 ): Promise<UserIdentity> => {
@@ -624,51 +610,42 @@ export const importUserIdentity = async (
   if (!parsed) {
     throw invalidKeyMaterialErr
   }
-  const cacheKey = toHex(await sha256(toJson(parsed)))
-  const existing = importedUserIdentityCache.get(cacheKey)
-  if (existing) {
-    return existing
-  }
-
-  const p = (async (): Promise<UserIdentity> => {
-    try {
-      const [privateKey, rec] = await Promise.all([
-        crypto.subtle.importKey(
-          'jwk',
-          {
-            crv: 'P-256',
-            d: parsed[0],
-            ext: true,
-            key_ops: ['sign'],
-            kty: 'EC',
-            x: parsed[1],
-            y: parsed[2]
-          },
-          ecdsaKeyAlgo,
-          true,
-          ['sign']
-        ),
-        getVerifiedPubKeyRecord(makeP256Jwk(parsed[1], parsed[2]))
-      ])
-      if (
-        !rec ||
-        !(await ecdsaVerify(
-          rec[3],
-          (await ecdsaSign(privateKey, keyPairTestPayload)) as BufferSource,
-          keyPairTestPayload
-        ))
-      ) {
-        throw invalidKeyMaterialErr
-      }
-      return buildExtractableUserIdentity(privateKey, rec, parsed[0])
-    } catch {
-      importedUserIdentityCache.delete(cacheKey)
+  try {
+    const [privateKey, rec] = await Promise.all([
+      crypto.subtle.importKey(
+        'jwk',
+        {
+          crv: 'P-256',
+          d: parsed[0],
+          ext: true,
+          key_ops: ['sign'],
+          kty: 'EC',
+          x: parsed[1],
+          y: parsed[2]
+        },
+        ecdsaKeyAlgo,
+        true,
+        ['sign']
+      ),
+      getVerifiedPubKeyRecord(makeP256Jwk(parsed[1], parsed[2]))
+    ])
+    if (
+      !rec ||
+      !(await ecdsaVerify(
+        rec[3],
+        (await ecdsaSign(
+          privateKey,
+          keyPairTestPayload as BufferSource
+        )) as BufferSource,
+        keyPairTestPayload as BufferSource
+      ))
+    ) {
       throw invalidKeyMaterialErr
     }
-  })()
-
-  importedUserIdentityCache.set(cacheKey, p)
-  return p
+    return buildExtractableUserIdentity(privateKey, rec, parsed[0])
+  } catch {
+    throw invalidKeyMaterialErr
+  }
 }
 
 export const exportUserIdentity = (identity: UserIdentity): string => {
@@ -692,35 +669,60 @@ const isUserIdentityObjectStructural = (val: unknown): val is UserIdentity =>
 
 const withPersistence = (
   val: UserIdentity,
-  persistence: ResolvedIdentityPersistence,
-  persisted: boolean
-): UserIdentity => ({
-  userId: val.userId,
-  publicKey: val.publicKey,
-  signPubJwk: val.signPubJwk,
-  sign:
-    persistence === 'custom'
-      ? async (payload: Uint8Array) =>
-          normalizeLowSP256Signature(new Uint8Array(await val.sign(payload)))
-      : val.sign,
-  persisted,
-  persistence
-})
+  persistence: ResolvedIdentityPersistence
+): UserIdentity => {
+  const isKnownTrusted = trustedUserIdentities.has(val)
+  const wrapped: UserIdentity = {
+    userId: val.userId,
+    signPubJwk: val.signPubJwk,
+    sign: isKnownTrusted
+      ? val.sign
+      : async (payload: Uint8Array) =>
+          normalizeLowSP256Signature(new Uint8Array(await val.sign(payload))),
+    persistence
+  }
+  const userKey = extractableUserKeys.get(val)
+  if (userKey !== undefined) {
+    extractableUserKeys.set(wrapped, userKey)
+  }
+  if (isKnownTrusted) {
+    trustedUserIdentities.add(wrapped)
+  }
+  return wrapped
+}
 
 const coerceCustomUserIdentity = async (
   val: unknown
 ): Promise<UserIdentity> => {
-  if (isUserIdentityObjectStructural(val)) {
-    if (await verifyUserIdKey(val.userId, val.signPubJwk)) {
-      return withPersistence(
-        val,
-        val.persistence ?? 'custom',
-        val.persisted ?? true
-      )
-    }
+  if (!isUserIdentityObjectStructural(val)) {
+    throw invalidCustomIdentityErr
+  }
+  const rec = await getVerifiedPubKeyRecord(val.signPubJwk)
+  if (!rec || rec[6] !== val.userId) {
     throw userIdMismatchErr
   }
-  throw invalidCustomIdentityErr
+  if (!trustedUserIdentities.has(val)) {
+    let rawSig: Uint8Array
+    try {
+      rawSig = new Uint8Array(await val.sign(keyPairTestPayload))
+    } catch (cause) {
+      throw mkErr(
+        `custom user identity sign() failed startup check: ${cause instanceof Error ? cause.message : String(cause)}`
+      )
+    }
+    const normalizedSig = normalizeLowSP256Signature(rawSig)
+    if (
+      normalizedSig.byteLength !== 64 ||
+      !(await ecdsaVerify(
+        rec[3],
+        normalizedSig as BufferSource,
+        keyPairTestPayload as BufferSource
+      ))
+    ) {
+      throw invalidCustomSignatureErr
+    }
+  }
+  return withPersistence(val, val.persistence ?? 'custom')
 }
 
 const hasIndexedDB = (): boolean => {
@@ -734,8 +736,6 @@ const hasIndexedDB = (): boolean => {
     return false
   }
 }
-
-export const canPersistLocalIdentity: () => boolean = hasIndexedDB
 
 export const isEphemeralIdentityConfig = (
   identity?: UserIdentityConfig
@@ -773,12 +773,14 @@ const getOrCreateRuntimeUserIdentity = (
     return existing
   }
   const created = createNonExtractableUserIdentity()
+  created.catch(() => {
+    if (runtimeUserIdentityBySlot.get(slot) === created) {
+      runtimeUserIdentityBySlot.delete(slot)
+    }
+  })
   runtimeUserIdentityBySlot.set(slot, created)
   return created
 }
-
-export const getDefaultUserIdentity = (): Promise<UserIdentity> =>
-  getOrCreateRuntimeUserIdentity()
 
 const inflightLocalLoadByApp = new Map<string, Promise<UserIdentity>>()
 const localOpTailByApp = new Map<string, Promise<unknown>>()
@@ -799,18 +801,16 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
   if (inflight) {
     return inflight
   }
-  const promise = enqueueLocalOp(appId, async () =>
-    withPersistence(
-      await loadOrCreateIdbIdentity(
-        appId,
-        generateNonExtractableIdbRecord,
-        verifyUserIdKey,
-        verifyWithP256
-      ),
-      'local',
-      true
+  const promise = enqueueLocalOp(appId, async () => {
+    const id = await loadOrCreateIdbIdentity(
+      appId,
+      generateNonExtractableIdbRecord,
+      verifyUserIdKey,
+      verifyWithP256
     )
-  ).finally(() => {
+    trustedUserIdentities.add(id)
+    return withPersistence(id, 'local')
+  }).finally(() => {
     if (inflightLocalLoadByApp.get(appId) === promise) {
       inflightLocalLoadByApp.delete(appId)
     }
@@ -835,7 +835,6 @@ export const clearUserIdentity = async (appId: string): Promise<void> => {
   bumpAppIdentityEpoch(appId)
 
   return enqueueLocalOp(appId, async () => {
-    bumpAppIdentityEpoch(appId)
     if (hasIndexedDB()) {
       await deleteIdbIdentity(appId)
     }
@@ -868,8 +867,7 @@ export const resolveUserIdentity = async (
     }
     return withPersistence(
       await getOrCreateRuntimeUserIdentity(appId, clientId),
-      'none',
-      false
+      'none'
     )
   }
 
@@ -895,7 +893,7 @@ export const userEndpointProofPayload = (params: {
 }): Uint8Array =>
   encodeBytes(
     toJson([
-      `${libId}-user-proof-v1`,
+      domainTag('user-proof', 2),
       params.appId,
       params.roomId,
       params.peerId,

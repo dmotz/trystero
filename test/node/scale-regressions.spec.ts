@@ -9,6 +9,7 @@ import {
   type ScalePluginApi,
   type UserIdentity
 } from '../../packages/core/src/index.ts'
+import {actionWireVersion} from '../../packages/core/src/action-wire.ts'
 import {formatSelfCertifyingRoomId} from '../../packages/core/src/authority.ts'
 import createRoom, {
   getRoomSignalingBridge
@@ -17,17 +18,19 @@ import {
   canonicalBroadcastHeader,
   createOverlayManager,
   overlayBroadcastKind,
+  overlayFrameVersion,
+  overlayUnicastKind,
   packGossipControlFrames,
   packOverlayBinary,
   scale,
   signOverlayPayload,
-  signPeerDescriptor,
-  type OverlayManager
+  signPeerDescriptor
 } from '../../packages/core/src/scale/index.ts'
 import {encodeBytes, peerBannedErr} from '../../packages/core/src/utils.ts'
 import {createTestScaleCluster} from './overlay-harness.ts'
 import {
   allocTestPeerIds,
+  getTestEndpointByPeerId,
   LinkedPeer,
   linkPeers,
   testEndpoint,
@@ -39,7 +42,7 @@ let nextRegClusterSeq = 0
 void test('Bug 1.1: broadcast addStream in 15-peer gossip room promotes all virtual peers and bounds remote connect spam', async () => {
   const cluster = await createTestScaleCluster({
     peerCount: 15,
-    maxConnections: 4,
+    maxDirectPeers: 4,
     media: true
   })
 
@@ -74,62 +77,82 @@ void test('Bug 1.1: broadcast addStream in 15-peer gossip room promotes all virt
     await waitFor(() => receivedStreams.size === 14, 5_000)
     assert.equal(broadcaster.getTopology().directPeerIds.length, 14)
 
-    // Verify remote connect spam is bounded/rate-limited and never evicts localRequiredPeers
-    const [selfId, localPinnedId, ...spammerIds] = allocTestPeerIds(22)
-    const dialedTargets: string[] = []
+    // Verify remote connect spam is bounded/rate-limited (burst=2) and never evicts localRequiredPeers
+    const [selfId, relayId, localPinnedId, remoteSpammerId] =
+      allocTestPeerIds(4)
     const mgr = createOverlayManager({
       selfId: selfId!,
       appId: 'spam-test',
       roomId: 'spam-room',
-      topology: {mode: 'gossip', maxConnections: 4},
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(selfId!),
+      onVirtualPeerJoin: () => true,
+      onVirtualPeerLeave: () => {},
+      onDeliverData: () => {}
+    })
+    const spammerMgr = createOverlayManager({
+      selfId: remoteSpammerId!,
+      appId: 'spam-test',
+      roomId: 'spam-room',
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(remoteSpammerId!),
       onVirtualPeerJoin: () => true,
       onVirtualPeerLeave: () => {},
       onDeliverData: () => {}
     })
     try {
-      mgr.setOnTargetsChanged(ids => dialedTargets.push(...ids))
       mgr.requireDirectPeer(localPinnedId!, {dial: false})
       assert.equal(mgr.shouldConnectPeer(localPinnedId!, 'outbound'), true)
 
-      // Rapid burst from same peer hits token-bucket rate limit (burst=2)
-      const spammer0 = spammerIds[0]!
-      mgr.notePeerDiscovered(spammer0)
-      // Populate knownRoster via addDirectPeer + remove or test rate limit on known peer
-      const dummyPeer = new LinkedPeer() as unknown as PeerHandle
-      for (const sid of spammerIds) {
-        mgr.addDirectPeer(sid, dummyPeer)
+      const relayPeer = new LinkedPeer() as unknown as PeerHandle
+      mgr.addDirectPeer(relayId!, relayPeer)
+
+      // Deliver a valid signed PeerDescriptor for remoteSpammerId so it is in knownRoster
+      const spammerIdObj = await spammerMgr.getLocalCryptoIdentity()
+      const spammerDesc = await signPeerDescriptor(
+        {
+          peerId: remoteSpammerId!,
+          seq: 1,
+          neighbors: [relayId!],
+          signPubKey: spammerIdObj.signPubJwk,
+          encPubKey: spammerIdObj.encPubJwk
+        },
+        spammerIdObj,
+        'spam-test',
+        'spam-room',
+        '',
+        null
+      )
+      mgr.handleOverlayFrame(
+        relayId!,
+        packGossipControlFrames([spammerDesc])[0]!.slice().buffer
+      )
+      await waitFor(
+        () => Boolean(mgr.getPeerSignPublicKey(remoteSpammerId!)),
+        1_000
+      )
+
+      // Burst of 10 connect requests from the same remote peer: first 2 succeed, rest rate-limited
+      let accepted = 0
+      for (let i = 0; i < 10; i++) {
+        if (mgr.acceptMediaConnectRequest(remoteSpammerId!)) {
+          accepted++
+        }
       }
-      // Remove direct handles without leaving? Instead test with active virtual roster via second manager:
-      mgr.destroy()
+      assert.equal(accepted, 2)
+      // Local pinned peer remains unconditionally required regardless of remote requests
+      assert.equal(mgr.shouldConnectPeer(localPinnedId!, 'outbound'), true)
     } finally {
       mgr.destroy()
+      spammerMgr.destroy()
     }
 
     const victimBridge = getRoomSignalingBridge(
       cluster.rooms.get(cluster.peerIds[1]!)!
     )!
-    const victimScale =
-      victimBridge.getScaleProvider() as unknown as OverlayManager
+    const victimScale = victimBridge.getScaleProvider()!
     const pinnedPeer = cluster.peerIds[14]!
-    victimScale.requireDirectPeer(pinnedPeer, {dial: false})
-
-    const remotePeer = cluster.peerIds.find(
-      id =>
-        id !== cluster.peerIds[1] &&
-        !cluster.rooms
-          .get(cluster.peerIds[1]!)!
-          .getTopology()
-          .directPeerIds.includes(id)
-    )!
-    // Burst of 10 connect requests from the same remote peer: first 2 succeed, rest rate-limited
-    let accepted = 0
-    for (let i = 0; i < 10; i++) {
-      if (victimScale.acceptMediaConnectRequest(remotePeer)) {
-        accepted++
-      }
-    }
-    assert.equal(accepted, 2)
-    // Local pinned peer remains unconditionally required regardless of remote requests
+    victimScale.requireDirectPeer(pinnedPeer)
     assert.equal(victimScale.shouldConnectPeer(pinnedPeer, 'outbound'), true)
   } finally {
     await cluster.cleanup()
@@ -139,7 +162,6 @@ void test('Bug 1.1: broadcast addStream in 15-peer gossip room promotes all virt
 void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge active virtual overlay peers', async () => {
   const peerCount = 10
   const identities = new Map<string, UserIdentity>()
-  // Create identities so roles() can issue signed bans
   const createdIdentities = await Promise.all(
     Array.from({length: peerCount}, () => createUserIdentity())
   )
@@ -147,7 +169,7 @@ void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge
   let rejectInHandshakeTarget: string | null = null
   const cluster = await createTestScaleCluster({
     peerCount,
-    maxConnections: 4,
+    maxDirectPeers: 4,
     onPeerHandshakeByRoom: ownerId => async remotePeerId => {
       if (ownerId && remotePeerId === rejectInHandshakeTarget) {
         throw peerBannedErr
@@ -237,11 +259,11 @@ void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge
         },
         () => {},
         {
-          selfId: id,
+          endpointIdentity: getTestEndpointByPeerId(id),
           appId: 'ban-scale-app',
           roomId,
           identity: uid,
-          use: [roles(), scale({mode: 'gossip', maxConnections: 4})]
+          use: [roles(), scale({maxDirectPeers: 4})]
         }
       )
       r.onPeerLeave(({peerId}) => left.add(peerId))
@@ -285,7 +307,7 @@ void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge
     )
     assert.ok(!adminRoom.getTopology().roomPeerIds.includes(virtualBanId))
 
-    // Non-admin peers also evict the banned virtual peer upon receiving the signed ban record
+    // Non-admin peers also evict the banned virtual peer upon receiving the signed moderation record
     await waitFor(
       () =>
         !adminRoleCluster.rooms.get(adminClusterIds[2]!)!.getPeers()[
@@ -305,7 +327,7 @@ void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge
 void test('Bug 1.4: multi-chunk (> 64 KiB) unicast transfer survives mid-flight promotion from virtual to direct peer', async () => {
   const cluster = await createTestScaleCluster({
     peerCount: 10,
-    maxConnections: 4,
+    maxDirectPeers: 4,
     delayMs: 2
   })
 
@@ -385,10 +407,10 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
     () => {},
     () => {},
     {
-      selfId: idB!,
+      endpointIdentity: getTestEndpointByPeerId(idB!),
       appId: 'early-bcast-app',
       roomId: 'early-bcast-room',
-      use: [scale({mode: 'gossip', maxConnections: 4})]
+      use: [scale({maxDirectPeers: 4})]
     }
   ) as unknown as Room & ScalePluginApi
 
@@ -399,10 +421,10 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
     () => {},
     () => {},
     {
-      selfId: idC!,
+      endpointIdentity: getTestEndpointByPeerId(idC!),
       appId: 'early-bcast-app',
       roomId: 'early-bcast-room',
-      use: [scale({mode: 'gossip', maxConnections: 4})]
+      use: [scale({maxDirectPeers: 4})]
     }
   ) as unknown as Room & ScalePluginApi
 
@@ -416,17 +438,29 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
     regC(linkBC_C as unknown as PeerHandle, idB!)
     await waitFor(() => roomC.getTopology().directPeerIds.includes(idB!), 2_000)
 
-    const scaleC = getRoomSignalingBridge(
-      roomC
-    )!.getScaleProvider() as unknown as OverlayManager
+    const scaleC = getRoomSignalingBridge(roomC)!.getScaleProvider()!
 
     // Verify stats.messagesSent does NOT increment when sending unicast to unknown peer
-    const sentBeforeDrop = roomC.getTopology().stats.messagesSent
-    scaleC.sendUnicast(idA!, new Uint8Array([2, 0]))
-    assert.equal(roomC.getTopology().stats.messagesSent, sentBeforeDrop)
+    const probeMgr = createOverlayManager({
+      selfId: idC!,
+      appId: 'early-bcast-app',
+      roomId: 'early-bcast-room',
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(idC!),
+      onVirtualPeerJoin: () => true,
+      onVirtualPeerLeave: () => {},
+      onDeliverData: () => {}
+    })
+    try {
+      const sentBeforeDrop = probeMgr.getSnapshot().stats.messagesSent
+      probeMgr.sendUnicast(idA, new Uint8Array([actionWireVersion, 0]))
+      assert.equal(probeMgr.getSnapshot().stats.messagesSent, sentBeforeDrop)
+    } finally {
+      probeMgr.destroy()
+    }
 
     // Pre-pin A's signing key on C (e.g. from role cert or prior session) WITHOUT A's PeerDescriptor/encPubKey
-    scaleC.setPeerSignPublicKey(idA!, epA.signPubJwk)
+    scaleC.setPeerSignPublicKey(idA, epA.signPubJwk)
 
     let joinFiredOnC = false
     let receivedHelloOnC = false
@@ -449,20 +483,22 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
       }
     })
 
-    // Build a valid v2 inline action wire frame for 'hello' with text string "hi-from-A"
+    // Build a valid v3 inline action wire frame for 'hello' with text string "hi-from-A"
     const actionPayloadText = encodeBytes('hi-from-A')
     const wireFrame = new Uint8Array(36 + actionPayloadText.byteLength)
-    wireFrame[0] = 2
+    wireFrame[0] = actionWireVersion
     wireFrame[1] = 0 // inline textFormat, unchunked
     wireFrame.set(encodeBytes('hello'), 2)
     wireFrame.set(actionPayloadText, 36)
 
     // Inject A's signed broadcast into C via relay B BEFORE A's PeerDescriptor arrives
     const msgId = `${idA}:1:early001`
+    const ts = Date.now()
     const bcastCanon = canonicalBroadcastHeader(
-      idA!,
+      idA,
       msgId,
       1,
+      ts,
       'early-bcast-app',
       'early-bcast-room'
     )
@@ -474,7 +510,7 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
     const bcastPacket = packOverlayBinary(
       overlayBroadcastKind,
       4,
-      {o: idA!, q: 1, m: msgId, s: bcastSig},
+      {o: idA, q: 1, m: msgId, t: ts, s: bcastSig},
       wireFrame
     )
     linkBC_B.sendData(bcastPacket)
@@ -496,7 +532,7 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
     const forwardedToA: Uint8Array[] = []
     const origSendB = linkBC_C.sendData.bind(linkBC_C)
     linkBC_C.sendData = (bytes: Uint8Array) => {
-      if (bytes[0] === 3 && bytes[1] === 3) {
+      if (bytes[0] === overlayFrameVersion && bytes[1] === overlayUnicastKind) {
         forwardedToA.push(bytes.slice())
       }
       origSendB(bytes)
@@ -533,15 +569,13 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
       userA
     )
     // Also advertise A as a neighbor of B so shortest-path routing sees mutual edge B <-> A
-    const scaleB = getRoomSignalingBridge(
-      roomB
-    )!.getScaleProvider() as unknown as OverlayManager
-    scaleB.handleOverlayFrame(
+    const scaleB = getRoomSignalingBridge(roomB)!.getScaleProvider()!
+    scaleB.handleFrame(
       idC!,
       packGossipControlFrames([descA])[0]!.slice().buffer
     )
     const dummyPeerAOnB = new LinkedPeer() as unknown as PeerHandle
-    scaleB.addDirectPeer(idA!, dummyPeerAOnB)
+    scaleB.addDirectPeer(idA, dummyPeerAOnB)
 
     for (const frame of packGossipControlFrames([descA])) {
       linkBC_B.sendData(frame)

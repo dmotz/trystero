@@ -1,12 +1,17 @@
-export {default as createStrategy} from './strategy'
-export {default as createTopicStrategy} from './topic-strategy'
+export {roles} from './authority'
 export {hashTopic} from './crypto'
 export {
-  decodeBytes,
+  clearUserIdentity,
+  createUserIdentity,
+  exportUserIdentity,
+  importUserIdentity
+} from './identity'
+export {
   encodeBytes,
   fromJson,
-  hash32,
   libName,
+  mkErr,
+  socketInitialFailureSymbol,
   toJson
 } from './primitives'
 export {
@@ -17,24 +22,13 @@ export {
   setRelayConnectivity,
   type RelayScopedStore
 } from './relay-manager'
-export {definePlugin, genId} from './utils'
-
-export {roles} from './authority'
-
 export {scale} from './scale'
-
-export {
-  clearUserIdentity,
-  createUserIdentity,
-  exportUserIdentity,
-  importUserIdentity
-} from './identity'
+export {default as createStrategy} from './strategy'
+export {default as createTopicStrategy} from './topic-strategy'
+export {genId, unrefTimer} from './utils'
 
 export type {
-  ActionOptions,
-  InternalAction,
-  KernelRolesProvider,
-  KernelScaleProvider,
+  AnnounceResult,
   OfferRecord,
   SignalPeer,
   SocketClient,
@@ -48,6 +42,8 @@ export type {
 } from './internal-types'
 
 export type {
+  ActionError,
+  ActionErrorKind,
   ActionMessageHandler,
   ActionProgressContext,
   ActionProgressHandler,
@@ -55,15 +51,19 @@ export type {
   ActionReceiveHandler,
   ActionRequestHandler,
   AddMediaOptions,
-  AuthoritativeState,
+  AnyRoomPlugin,
+  BanOptions,
   BaseRelayConfig,
   BaseRoomConfig,
+  CandidateSignal,
   DataPayload,
+  InferPluginApi,
   JoinRoom,
   JoinRoomConfig,
+  JsonPrimitive,
   JsonValue,
-  KernelRoomErrorInput,
   ListenerOptions,
+  MaybePromise,
   MessageAction,
   MessageActionConfig,
   MessageContext,
@@ -75,12 +75,10 @@ export type {
   PeerMediaContext,
   PeerResult,
   PeerTarget,
-  PluginContext,
-  PublicRolesProvider,
-  PublicScaleProvider,
   RelayConfig,
   RelayConnectivity,
   RemoveMediaOptions,
+  ReplaceTrackOptions,
   ReplayListenerOptions,
   RequestAction,
   RequestActionConfig,
@@ -96,19 +94,17 @@ export type {
   RoomErrorBase,
   RoomErrorCode,
   RoomErrorHandler,
-  RoomKernel,
   RoomPlugin,
   RoomWithPlugins,
   ScaleConfig,
   ScalePluginApi,
   SelfInfo,
   SendOptions,
+  SessionSignal,
   SharedState,
   Signal,
   StateChangeContext,
   StateConfig,
-  TargetPeers,
-  TopologyMode,
   TopologyRoute,
   TopologySnapshot,
   TopologyStats,
@@ -116,11 +112,14 @@ export type {
   Unsubscribe,
   UserIdentity,
   UserIdentityConfig,
+  UserIdentityLoader,
+  UserIdentityLoaderContext,
   UserIdentityPersistence,
   UserInfo,
   UserJoinContext,
   UserLeaveContext,
   UserState,
   UserStateChangeContext,
-  UserStateConfig
+  UserStateConfig,
+  Widen
 } from './types'

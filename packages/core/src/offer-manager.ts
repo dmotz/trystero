@@ -1,30 +1,25 @@
-import type {OfferRecord} from './internal-types'
-import {all, alloc, genId, mkErr, resetTimer} from './utils'
+import type {OfferCheckoutFn, OfferRecord} from './internal-types'
+import {all, alloc, genId, mkErr, resetTimer, unrefTimer} from './utils'
 import type {PeerHandle} from './types'
 
 const offerLeaseTtlMs = 180_000
 const defaultOfferIdSize = 20
 const offerRoomLeftErr = /*@__PURE__*/ mkErr('room left while preparing offer')
 
-export type OfferCheckoutFn = (
-  n: number,
-  leaseOffers: boolean,
-  encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>,
-  offerIdSize?: number
-) => Promise<OfferRecord[]>
-
-export const initOfferManager = (
-  makeOffer: () => PeerHandle
-): readonly [
-  checkout: OfferCheckoutFn,
+export type OfferManager = {
+  checkout: OfferCheckoutFn
   getOffers: (
     n: number,
     encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>
-  ) => Promise<OfferRecord[]>,
-  claimLeased: (peer: PeerHandle) => void,
-  reclaimLeased: (peer: PeerHandle) => void,
+  ) => Promise<OfferRecord[]>
+  claimLeased: (peer: PeerHandle) => void
+  reclaimLeased: (peer: PeerHandle) => void
   destroy: () => void
-] => {
+}
+
+export const createOfferManager = (
+  makeOffer: () => PeerHandle
+): OfferManager => {
   const leased = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
   let destroyed = false
 
@@ -61,13 +56,12 @@ export const initOfferManager = (
           throw offerRoomLeftErr
         }
         if (leaseOffers) {
-          leased.set(
-            peer,
-            setTimeout(() => {
-              leased.delete(peer)
-              peer.destroy()
-            }, offerLeaseTtlMs)
-          )
+          const timer = setTimeout(() => {
+            leased.delete(peer)
+            peer.destroy()
+          }, offerLeaseTtlMs)
+          unrefTimer(timer)
+          leased.set(peer, timer)
           return {
             peer,
             offer,
@@ -88,12 +82,12 @@ export const initOfferManager = (
     return all(alloc(n, () => toRecord()))
   }
 
-  return [
+  return {
     checkout,
-    (n, encryptOffer) => checkout(n, true, encryptOffer),
+    getOffers: (n, encryptOffer) => checkout(n, true, encryptOffer),
     claimLeased,
     reclaimLeased,
-    () => {
+    destroy: () => {
       destroyed = true
       leased.forEach((timer, peer) => {
         resetTimer(timer)
@@ -101,26 +95,5 @@ export const initOfferManager = (
       })
       leased.clear()
     }
-  ]
-}
-
-export class OfferManager {
-  claimLeased: (peer: PeerHandle) => void
-  reclaimLeased: (peer: PeerHandle) => void
-  checkout: OfferCheckoutFn
-  getOffers: (
-    n: number,
-    encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>
-  ) => Promise<OfferRecord[]>
-  destroy: () => void
-
-  constructor(makeOffer: () => PeerHandle) {
-    ;[
-      this.checkout,
-      this.getOffers,
-      this.claimLeased,
-      this.reclaimLeased,
-      this.destroy
-    ] = initOfferManager(makeOffer)
   }
 }

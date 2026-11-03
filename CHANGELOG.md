@@ -6,24 +6,24 @@
 
 - 🕸️ **Opt-in, tree-shakeable room scaling (`scale()`)** - added `scale()`
   plugin for `joinRoom({appId, use: [scale()]})`, connecting peers directly in
-  small groups (`<= 12` peers) and automatically switching to a bounded-degree
-  `'gossip'` relay overlay (`maxConnections: 6` by default) as rooms grow to
-  dozens or hundreds of peers. You can also opt into `'gossip'`, or pass a
-  `ScaleConfig` object (`{mode, maxConnections, autoThreshold}`) to customize
-  connection limits. Apps that do not import `scale()` tree-shake the entire
-  overlay plugin out of their bundle.
-- All room APIs (`makeAction`, `makeState`, `addStream`, `replaceTrack`, `ping`,
-  `onPeerJoin`, `onPeerLeave`, and `getPeers()`) work transparently across both
-  direct and multi-hop peers. Media streams (`addStream` / `replaceTrack`)
-  automatically promote virtual overlay recipients to direct 1-hop WebRTC
-  connections on demand, which can exceed the topology's `maxConnections`
-  target. Multi-hop data messages are ECDSA-signed (with ECDH + AES-GCM
-  end-to-end encryption for targeted data sends) so intermediate relays cannot
-  forge or read data traffic.
-- Added `room.getTopology()` (on rooms configured with `scale()`) to inspect the
-  active topology mode, direct and multi-hop peer lists, routing paths, and
-  forwarding stats.
-- 👑 **Opt-in, tree-shakeable room admins, custom roles, and peer banning
+  small groups (`<= maxDirectPeers + 1` peers) with zero multi-hop routing
+  overhead and automatically forming a bounded-degree multi-hop gossip overlay
+  (`maxDirectPeers: 6` by default, configurable `4..32` via
+  `scale({maxDirectPeers})`) as rooms grow to dozens of peers. Apps that do not
+  import `scale()` tree-shake the entire overlay plugin out of their bundle.
+- All room APIs (`makeAction`, `makeState`, `makeUserState`, `addStream`,
+  `replaceTrack`, `ping`, `onUserJoin`, `onUserLeave`, `onPeerJoin`,
+  `onPeerLeave`, `getUsers()`, and `getPeers()`) work transparently across both
+  direct and multi-hop peers. Media streams (`addStream` / `replaceTrack`) and
+  large binary transfers (> 16 KiB) automatically promote virtual overlay
+  recipients to direct 1-hop WebRTC connections on demand, which can exceed the
+  topology's `maxDirectPeers` target. Multi-hop data messages are ECDSA-signed
+  (with ECDH + AES-GCM end-to-end encryption for targeted data sends) so
+  intermediate relays cannot forge or read targeted data traffic.
+- Added `room.getTopology()` (on rooms configured with `scale()`) returning a
+  `TopologySnapshot` (`{peerId, directPeerIds, roomPeerIds, routes, stats}`) to
+  inspect direct and multi-hop peer lists, routing paths, and forwarding stats.
+- 👑 **Opt-in, tree-shakeable room admins, custom roles, and peer moderation
   (`roles()`)** - added `roles()` plugin for
   `joinRoom({appId, use: [roles(...)]})` (`roles()`,
   `roles({selfAsAdmin: true})`, and `roles({admins: [...]})`) for zero-trust
@@ -31,42 +31,47 @@
   `roles({selfAsAdmin: true})` appends a `~` separator and the host's
   22-character Base62 `userId` to the room ID (`<roomId>~<userId>`) so guests
   automatically verify the room creator from the invite room ID alone (when
-  joining with `use: [roles()]`), and the host automatically regains admin
+  joining with `use: [roles()]`), and the host automatically regains root admin
   authority when rejoining with the same persistent `userId`. Joining a
   self-certifying `<roomId>~<userId>` room ID without `roles()` throws an error.
-  Apps that do not import `roles()` tree-shake the entire authority plugin out
-  of their bundle.
+  Root `'admin'` authority is reserved for the self-certifying room creator and
+  configured `admins` (`grantRole`, `revokeRole`, `ban`, and `unban` are
+  root-admin only). Apps that do not import `roles()` tree-shake the entire
+  authority plugin out of their bundle.
 - Added `room.ready` (resolving once the local endpoint identity is initialized
   and any configured `use` plugins have attached their methods to `room`),
   `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`, `room.ban()`,
-  `room.isBanned()` (on rooms configured with `roles()`), and expanded
+  `room.unban()`, `room.isBanned()` (on rooms configured with `roles()`), and
   `room.getSelf()` (returning
-  `{peerId, userId, roomId, baseRoomId, isAdmin, roles}`), plus top-level helper
-  `definePlugin()` (for authoring custom/3rd-party room plugins with TypeScript
-  return-type inference via `use: [...]`).
+  `{peerId, userId, identityPersistence, roomId, baseRoomId, isAdmin, roles}`).
 - Actions now accept a `roles` option (`makeAction(name, {roles})`) to restrict
   sending or requesting to `'admin'` or specific custom roles, with the sender's
-  verified `roles` included in `onMessage` and `onRequest` contexts.
-- 🛡️ **Authoritative shared state** - added
-  `room.makeState(namespace, initialValue, [config])` (enabled via `roles()`)
-  for official room state that any peer can read (`get()`, `onChange()`,
-  `getMeta()`) and only authorized roles (`config.roles`) can update (`set()`),
-  with optional custom `validate(next, context)` rules. `state.onChange` matches
-  React's `useSyncExternalStore` contract out of the box. Existing peers
-  automatically sync the latest signed state snapshot to late joiners even after
-  the admin has left the room.
-- 🚪 **Room size limits** - added `limit` to room config for a best-effort,
-  advisory per-peer cap on the number of unique users in a peer's room view
-  (including the local user). When a peer's view is at capacity, additional
-  joiners with a new `userId` are rejected on that peer link during handshake
-  before triggering `onPeerJoin` on existing members and receive
-  `{code: 'room-full'}` via `room.onError()`.
+  verified `roles` included in `onMessage`, `onRequest`, and `onReceive`
+  contexts.
+- 🗂️ **Built-in per-user state (`makeUserState`) and shared room state
+  (`makeState`)** - added
+  `room.makeUserState(namespace, initialValue?, config?)` (giving each `userId`
+  a cryptographically signed presence-scoped slot flushed before `onUserJoin` on
+  1-hop peers and evicted after `onUserLeave`) and
+  `room.makeState(namespace, initialValue?, config?)` (open to room members by
+  default, or fail-closed to `roles: ['admin']` when `roles()` is loaded unless
+  `roles: '*'` or custom roles are specified), with optional custom
+  `validate(next, context)` rules and `onChange` matching React's
+  `useSyncExternalStore` contract out of the box. Existing peers automatically
+  sync the latest signed state to late joiners even after the original writer
+  has left, and `room.ban()` purges state and roles held by the banned user.
+- 🚪 **Room size limits (`maxUsers`)** - added `maxUsers` to room config for a
+  best-effort, advisory per-peer cap on the number of unique users (`userId`s)
+  in a peer's room view (including the local user). When a peer's view is at
+  capacity, additional joiners with a new `userId` are rejected on that peer
+  link during handshake before triggering `onPeerJoin` on existing members and
+  receive `{code: 'room-full'}` via `room.onError()`.
 - 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every
   peer now has both a lazily generated self-certifying 20-character Base62
   endpoint `peerId` (derived from its ECDSA P-256 public key and verified with
   DTLS fingerprint binding during the direct WebRTC handshake, plus signed
-  descriptors across multi-hop overlays) and a persistent 22-character Base62
-  `userId` (derived from its ECDSA P-256 public key).
+  descriptors across multi-hop overlays) and a 22-character Base62 `userId`
+  (derived from its ECDSA P-256 public key).
 - Added `identity` to room config (`'local'` default in browsers stored in
   IndexedDB as a non-extractable `CryptoKey` across tabs and future visits,
   `'none'` for ephemeral runtime, or a custom `UserIdentity` / loader function),
@@ -75,13 +80,25 @@
 - 👥 **Multi-tab user presence & targeting** - added `room.onUserJoin`,
   `room.onUserLeave`, `room.getUsers()`, and `room.getSelf()`. Every `target` /
   `targets` option (`send`, `request`, `requestMany`, `ping`, media methods, and
-  role/ban methods) now accepts either a `peerId` or a `userId` (fanning out to
-  all of a user's open tabs on `send`/media, and deterministically routing to
-  one tab on `request`/`requestMany`/`ping`). `userId` is also included in all
-  action, state, and progress callback contexts.
+  role/moderation methods) now accepts either a `peerId` or a `userId` (fanning
+  out to all of a user's open tabs on `send`/media, and deterministically
+  routing to one tab on `request`/`requestMany`/`ping`). `userId` is also
+  included in all action, state, and progress callback contexts.
+- 📨 **Structured `ActionError`s, `requestMany` outcomes, and error
+  forwarding** - action rejections use `ActionError`
+  (`kind: 'timeout' | 'disconnected' | 'aborted' | 'rejected'`), `requestMany()`
+  settles with `'fulfilled' | 'timeout' | 'rejected' | 'disconnected'` per
+  target, throwing an `Error` inside `onRequest` forwards its `message` to the
+  caller's rejected `ActionError`, and explicit-target `send(data, {target})`
+  rejects when a targeted peer or user is not connected.
+- 🔐 **Signaling & relay hardening** - room `password` keys now use WebCrypto
+  `PBKDF2-SHA256` (`600,000` iterations) with AES-256-GCM context AAD; WebSocket
+  relay topics/frames avoid double JSON serialization and enforce stricter frame
+  and rate limits.
 - 📦 **Tree-shaking & `"sideEffects": false`** - enabled `"sideEffects": false`
-  across all packages and removed prebuilt `.min.js` release bundles in favor of
-  tree-shaking bundlers and ESM CDNs.
+  across all packages and removed prebuilt `.min.js` release bundles and the
+  experimental `@trystero-p2p/ipfs` package in favor of tree-shaking bundlers
+  and ESM CDNs.
 
 ### ⚠️ Breaking changes
 
@@ -100,18 +117,20 @@ const room = joinRoom({appId: 'my-app'}, 'room-1')
 const {peerId, userId} = await room.getSelf()
 ```
 
-All room, action, and authoritative-state event listeners now use a unified
-method subscription API (`on*(handler, options?) => Unsubscribe`) instead of
-property assignment (`room.on* = fn`) or config-object callbacks:
+All room, action, and state event listeners now use a unified method
+subscription API (`on*(handler, options?) => Unsubscribe`) instead of property
+assignment (`room.on* = fn`) or config-object callbacks:
 
 - `room.onUserJoin`, `room.onUserLeave`, `room.onPeerJoin`, `room.onPeerLeave`,
   `room.onPeerStream`, `room.onError`, `action.onMessage`,
-  `action.onReceiveProgress`, and `state.onChange` support multiple independent
-  listeners, return an idempotent `Unsubscribe` (`() => void`) function, and
-  accept `{once?: boolean, signal?: AbortSignal}` options.
-- `onUserJoin`, `onPeerJoin`, `onPeerStream`, and `state.onChange` are strictly
-  live-only by default; pass `{replay: true}` to synchronously emit currently
-  active users, peers, streams, or non-initial state to a late subscriber.
+  `action.onReceiveProgress`, `state.onChange`, and `userState.onChange` support
+  multiple independent listeners, return an idempotent `Unsubscribe`
+  (`() => void`) function, and accept `{once?: boolean, signal?: AbortSignal}`
+  options.
+- `onUserJoin`, `onPeerJoin`, `onPeerStream`, `state.onChange`, and
+  `userState.onChange` are strictly live-only by default; pass `{replay: true}`
+  to synchronously emit currently active users, peers, streams, or published
+  state to a late subscriber.
 - `joinRoom(config, roomId)` now takes 2 arguments; the 3rd `{onJoinError}`
   callbacks object and `JoinError` have been replaced by
   `room.onError(fn, options?)`, which emits a discriminated `RoomError` union
@@ -124,14 +143,15 @@ property assignment (`room.on* = fn`) or config-object callbacks:
   and `roles`); register handlers via `action.onMessage(fn)`,
   `action.onRequest(fn)`, `action.onReceive(fn)`, and
   `action.onReceiveProgress(fn)`. `onRequest` and `onReceive` enforce a single
-  active handler per action (call `unsubscribe()` before replacing).
+  active handler per action (call `unsubscribe()` before replacing). Bulk binary
+  sends (`> 16 KiB`) transmit directly from the caller's buffer without an extra
+  copy—do not mutate binary buffers passed to `send()` until its returned
+  `Promise` settles.
 - `state.onChange((value, context) => ...)` and `config.validate(next, context)`
   take 2 arguments with `StateChangeContext<T>`
-  (`{prev, peerId, userId, roles, seq, timestamp, hash}`).
-- `RoomKernel` lifecycle hooks (`onPeerActivated`, `onPeerDeactivated`,
-  `onRoomIdChanged`, `onLeave`) also return `Unsubscribe` and accept
-  `ListenerOptions` (`ReplayListenerOptions` on `onPeerActivated`), and plugins
-  can emit structured `RoomError`s via `kernel.emitError(error)`.
+  (`{prev, peerId, userId, roles, timestamp}`), and `userState.onChange` passes
+  `UserStateChangeContext<T>`
+  (`StateChangeContext<T> & {self, online, removed}`).
 - Room event handlers receive `{peerId, userId, ...}` context objects instead of
   a bare `peerId` string (with `stream` remaining first on `onPeerStream`):
 
@@ -182,14 +202,15 @@ persistence or supply a custom identity.
 
 `onPeerHandshake` and `handshakeTimeoutMs` have been removed from `joinRoom()`
 callbacks. Peer and user identity verification, password verification, room
-capacity enforcement (`config.limit`), and role/admin authorization (`roles()`,
-`roles: []`, `ban()`) are now handled automatically across both direct and
-multi-hop topologies; for per-message/request payload filtering, use
-`action.onReceive`.
+capacity enforcement (`config.maxUsers`), and role/admin authorization
+(`roles()`, `roles: []`, `ban()`, `unban()`) are now handled automatically
+across both direct and multi-hop topologies; for per-message/request payload
+filtering, use `action.onReceive`.
 
-Deprecated `trystero/<strategy>` subpath exports have been removed; `trystero`
-is now solely a convenience wrapper for `@trystero-p2p/nostr`. Import strategies
-directly from `@trystero-p2p/<strategy>` (or `'trystero'` for Nostr).
+Deprecated `trystero/<strategy>` subpath exports and `@trystero-p2p/ipfs` have
+been removed; `trystero` is now solely a convenience wrapper for
+`@trystero-p2p/nostr`. Import strategies directly from
+`@trystero-p2p/<strategy>` (or `'trystero'` for Nostr).
 
 `relayConfig.manualReconnection`, `pauseRelayReconnection()`, and
 `resumeRelayReconnection()` have been replaced by a single process-wide

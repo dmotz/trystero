@@ -9,8 +9,8 @@ import {
   roles
 } from '../../packages/core/src/index.ts'
 import {
+  compactPubToJwk,
   createEndpointIdentity,
-  decodePublicKey,
   derivePeerId,
   deriveUserId,
   getDefaultEndpointIdentity,
@@ -24,11 +24,9 @@ import {
   descriptorCanonicalPayload,
   packGossipControlFrames
 } from '../../packages/core/src/scale/index.ts'
-import {
-  ecdsaSign,
-  encodeBytes,
-  toBase64
-} from '../../packages/core/src/crypto.ts'
+import {ecdsaSign} from '../../packages/core/src/crypto.ts'
+import {encodeBytes} from '../../packages/core/src/primitives.ts'
+import {toBase64} from '../../packages/core/src/utils.ts'
 import {createMemorySignalBus} from './memory-rtc.ts'
 import {testPeerId, waitFor} from './peer-harness.ts'
 
@@ -44,18 +42,23 @@ void test('Identity primitives: peerId is 20-char Base62, userId is 22-char Base
   assert.match(user.userId, /^[0-9A-Za-z]{22}$/)
   assert.notEqual(user.userId.length, selfId.length)
   assert.equal('fingerprint' in user, false)
+  assert.equal('publicKey' in user, false)
+  assert.equal('persisted' in user, false)
 
-  assert.equal(await deriveUserId(user.publicKey), user.userId)
-  assert.equal(await verifyUserIdKey(user.userId, user.publicKey), true)
+  assert.equal(await deriveUserId(user.signPubJwk), user.userId)
+  assert.equal(await verifyUserIdKey(user.userId, user.signPubJwk), true)
 
   const otherUser = await createUserIdentity()
-  assert.equal(await verifyUserIdKey(user.userId, otherUser.publicKey), false)
+  assert.equal(await verifyUserIdKey(user.userId, otherUser.signPubJwk), false)
 
-  const derivedPeerId = await derivePeerId(user.publicKey)
+  const derivedPeerId = await derivePeerId(user.signPubJwk)
   assert.equal(derivedPeerId.length, 20)
   assert.match(derivedPeerId, /^[0-9A-Za-z]{20}$/)
-  assert.equal(await verifyPeerIdKey(derivedPeerId, user.publicKey), true)
-  assert.equal(await verifyPeerIdKey(derivedPeerId, otherUser.publicKey), false)
+  assert.equal(await verifyPeerIdKey(derivedPeerId, user.signPubJwk), true)
+  assert.equal(
+    await verifyPeerIdKey(derivedPeerId, otherUser.signPubJwk),
+    false
+  )
 
   const exported = exportUserIdentity(user)
   assert.equal('userKey' in user, false)
@@ -63,8 +66,10 @@ void test('Identity primitives: peerId is 20-char Base62, userId is 22-char Base
   const importedFromStr = await importUserIdentity(exported)
   assert.equal('userKey' in importedFromStr, false)
   assert.equal('fingerprint' in importedFromStr, false)
+  assert.equal('publicKey' in importedFromStr, false)
+  assert.equal('persisted' in importedFromStr, false)
   assert.equal(importedFromStr.userId, user.userId)
-  assert.deepEqual(importedFromStr.publicKey, user.publicKey)
+  assert.deepEqual(importedFromStr.signPubJwk, user.signPubJwk)
 
   for (const droppedHelper of [
     'selfId',
@@ -78,7 +83,8 @@ void test('Identity primitives: peerId is 20-char Base62, userId is 22-char Base
     'verifyPeerIdKey',
     'verifyUserIdKey',
     'extractPlugins',
-    'isPlugin'
+    'isPlugin',
+    'definePlugin'
   ]) {
     assert.equal(
       droppedHelper in corePublicExports,
@@ -191,47 +197,54 @@ void test('Identity config validation & persistence modes: default local, none, 
             contains: () => true
           },
           createObjectStore: () => ({}),
-          transaction: () => ({
-            objectStore: () => ({
-              get: (key: string) => {
-                const getReq: any = {
-                  result: idbStore.get(key),
-                  onsuccess: null,
-                  onerror: null
-                }
-                queueMicrotask(() => getReq.onsuccess?.())
-                return getReq
-              },
-              add: (val: any, key: string) => {
-                const addReq: any = {
-                  onsuccess: null,
-                  onerror: null
-                }
-                queueMicrotask(() => {
-                  if (idbStore.has(key)) {
-                    addReq.onerror?.({preventDefault: () => {}})
-                  } else {
-                    idbStore.set(key, val)
-                    addReq.onsuccess?.()
+          transaction: () => {
+            const tx: any = {
+              objectStore: () => ({
+                get: (key: string) => {
+                  const getReq: any = {
+                    result: idbStore.get(key),
+                    onsuccess: null,
+                    onerror: null
                   }
-                })
-                return addReq
-              },
-              put: (val: any, key: string) => {
-                const putReq: any = {
-                  onsuccess: null,
-                  onerror: null
+                  queueMicrotask(() => getReq.onsuccess?.())
+                  return getReq
+                },
+                add: (val: any, key: string) => {
+                  const addReq: any = {
+                    onsuccess: null,
+                    onerror: null
+                  }
+                  queueMicrotask(() => {
+                    if (idbStore.has(key)) {
+                      addReq.onerror?.({preventDefault: () => {}})
+                      queueMicrotask(() => tx.onerror?.())
+                    } else {
+                      idbStore.set(key, val)
+                      addReq.onsuccess?.()
+                      queueMicrotask(() => tx.oncomplete?.())
+                    }
+                  })
+                  return addReq
+                },
+                put: (val: any, key: string) => {
+                  const putReq: any = {
+                    onsuccess: null,
+                    onerror: null
+                  }
+                  queueMicrotask(() => {
+                    idbStore.set(key, val)
+                    putReq.onsuccess?.()
+                    queueMicrotask(() => tx.oncomplete?.())
+                  })
+                  return putReq
                 }
-                queueMicrotask(() => {
-                  idbStore.set(key, val)
-                  putReq.onsuccess?.()
-                })
-                return putReq
-              }
-            }),
-            onabort: null,
-            onerror: null
-          }),
+              }),
+              oncomplete: null,
+              onabort: null,
+              onerror: null
+            }
+            return tx
+          },
           close: () => {}
         },
         onupgradeneeded: null,
@@ -275,9 +288,9 @@ void test('Identity config validation & persistence modes: default local, none, 
       noIdbDefaultRoom.getSelf(),
       noIdbLocalRoom.getSelf()
     ])
-    assert.equal(selfNoIdbD.persisted, false)
+    assert.equal('persisted' in selfNoIdbD, false)
     assert.equal(selfNoIdbD.identityPersistence, 'none')
-    assert.equal(selfNoIdbL.persisted, false)
+    assert.equal('persisted' in selfNoIdbL, false)
     assert.equal(selfNoIdbL.identityPersistence, 'none')
     assert.notEqual(selfNoIdbD.userId, selfNoIdbL.userId)
     assert.equal(sessionStore.size, 0)
@@ -327,7 +340,7 @@ void test('Identity config validation & persistence modes: default local, none, 
     ])
 
     assert.equal(selfD1.userId, selfD2.userId)
-    assert.equal(selfD1.persisted, true)
+    assert.equal('persisted' in selfD1, false)
     assert.equal(selfD1.identityPersistence, 'local')
     assert.notEqual(selfD1.peerId, selfD2.peerId)
     assert.notEqual(selfD1.userId, selfDOther.userId)
@@ -346,12 +359,12 @@ void test('Identity config validation & persistence modes: default local, none, 
       'r-none'
     )
     const selfNone = await noneRoom.getSelf()
-    assert.equal(selfNone.persisted, false)
+    assert.equal('persisted' in selfNone, false)
     assert.equal(selfNone.identityPersistence, 'none')
     assert.equal(idbStore.has('app-none-explicit'), false)
     await noneRoom.leave()
 
-    // Custom loader receives {appId, roomId} and returns UserIdentity or exported key
+    // Custom loader receives {appId, roomId} and returns UserIdentity; startup self-test rejects broken signers (H3 / Q2=A)
     const customUser = await createUserIdentity()
     let loaderContext: any = null
     const cRoom = makeJoinRoom('peer-c1')(
@@ -367,11 +380,35 @@ void test('Identity config validation & persistence modes: default local, none, 
     )
     const selfC = await cRoom.getSelf()
     assert.equal(selfC.userId, customUser.userId)
+    assert.equal('persisted' in selfC, false)
+    assert.equal(selfC.identityPersistence, 'custom')
     assert.deepEqual(loaderContext, {
       appId: 'app-custom',
       roomId: 'room-custom'
     })
     await cRoom.leave()
+
+    // H3: Custom UserIdentity whose sign() fails signature verification against signPubJwk rejects room.ready and emits identity-failed
+    const brokenSignerRoom = makeJoinRoom('peer-bad-sig')(
+      {
+        appId: 'app-custom-bad-sig',
+        identity: {
+          ...customUser,
+          sign: async () => new Uint8Array(64)
+        },
+        rtcPolyfill
+      },
+      'room-bad-sig'
+    )
+    const badSigErrors: string[] = []
+    brokenSignerRoom.onError(err => {
+      badSigErrors.push(err.code)
+    })
+    await assert.rejects(
+      () => brokenSignerRoom.ready,
+      /signature|verification|signer|invalid/i
+    )
+    assert.deepEqual(badSigErrors, ['identity-failed'])
   } finally {
     ;(globalThis as any).sessionStorage = prevSession
     ;(globalThis as any).localStorage = prevLocal
@@ -431,12 +468,17 @@ void test('clearUserIdentity without IndexedDB resets runtime userId and peerId 
   assert.equal(selfB2.peerId, selfB1.peerId)
 })
 
-void test('Canonical JWK & compact pubkey normalization: decodePublicKey accepts compact x.y, and overlay key-pinning tolerates JWK property order / ext / key_ops permutations', async () => {
+void test('Canonical JWK & compact pubkey normalization: compactPubToJwk accepts compact x.y, and overlay key-pinning tolerates JWK property order / ext / key_ops permutations', async () => {
   const remoteEp = await createEndpointIdentity()
   const remoteUser = await createUserIdentity()
   const compact = jwkToCompactPub(remoteUser.signPubJwk)
   assert.equal(compact.length, 87)
-  assert.deepEqual(decodePublicKey(compact), remoteUser.signPubJwk)
+  assert.deepEqual(compactPubToJwk(compact), {
+    crv: 'P-256',
+    kty: 'EC',
+    x: remoteUser.signPubJwk.x,
+    y: remoteUser.signPubJwk.y
+  })
 
   const appId = `jwk-canon-${Date.now()}`
   const roomId = 'canon-room'
@@ -446,7 +488,7 @@ void test('Canonical JWK & compact pubkey normalization: decodePublicKey accepts
     selfId: observerId,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {},

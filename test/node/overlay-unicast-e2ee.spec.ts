@@ -11,19 +11,23 @@ import {
   overlayUnicastKind,
   packOverlayBinary,
   packOverlayControl,
-  unpackOverlayBinary
+  unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
 import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
 import {createOverlayCluster} from './overlay-harness.ts'
-import {testPeerId, wait, waitFor} from './peer-harness.ts'
+import {
+  getTestEndpointByPeerId,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 void test('Multi-hop unicast: targeted send, ping, RPC request/requestMany, and chunked binary transfer (>16 KiB)', async () => {
   const peerCount = 40
   const cluster = await createOverlayCluster({
     peerCount,
     topology: {
-      mode: 'gossip',
-      maxConnections: 4
+      maxDirectPeers: 4
     }
   })
 
@@ -187,7 +191,8 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     appId: 'sec-app',
     roomId: 'sec-room',
     password: 'correct-horse-battery-staple',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (_origin, data) => {
@@ -200,7 +205,8 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     appId: 'sec-app',
     roomId: 'sec-room',
     password: 'correct-horse-battery-staple',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -211,7 +217,8 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     appId: 'sec-app',
     roomId: 'sec-room',
     password: 'correct-horse-battery-staple',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (origin, data) => {
@@ -300,6 +307,7 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
     {
       o: aliceId,
       q: 2,
+      t: Date.now(),
       m: `${aliceId}:forged-msg-1`,
       s: 'AAAA_invalid_ecdsa_signature_AAAA'
     },
@@ -322,7 +330,7 @@ void test('Security: ECDSA P-256 packet signing, TOFU key pinning, tamper reject
   const unsignedSpoofPacket = packOverlayBinary(
     overlayBroadcastKind,
     6,
-    {o: aliceId, q: 3, m: `${aliceId}:unsigned-spoof-2`},
+    {o: aliceId, q: 3, t: Date.now(), m: `${aliceId}:unsigned-spoof-2`},
     encodeBytes('UNSIGNED-SPOOF')
   )
   const failuresBefore = bob.getSnapshot().stats.signatureFailures
@@ -373,7 +381,8 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
     selfId: alicePid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(alicePid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -382,7 +391,8 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
     selfId: carolPid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(carolPid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -391,7 +401,8 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
     selfId: bobPid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobPid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (_from, data) =>
@@ -446,20 +457,22 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
     await alice.broadcastInline(encodeBytes('alice-msg-seq-1'))
     await waitFor(() => bobDelivered.includes('alice-msg-seq-1'), 1_000)
     const aliceBroadcast1 = capturedFromAlice.find(
-      f => unpackOverlayBinary(f)?.kind === overlayBroadcastKind
+      f => unpackOverlayFrame(f)?.[0] === overlayBroadcastKind
     )!
     assert.ok(aliceBroadcast1)
-    assert.equal(unpackOverlayBinary(aliceBroadcast1)?.header['q'], 1)
+    assert.equal(unpackOverlayFrame(aliceBroadcast1)?.[2]['q'], 1)
 
     // 2. Flood > 4,500 valid signed broadcasts from Carol to completely flush Bob's 4,096-entry seenMsgIds cache!
     const carolId = await carol.getLocalCryptoIdentity()
     for (let seq = 1; seq <= 4_500; seq++) {
       const msgId = `${carolPid}:flush-${seq}`
+      const ts = Date.now()
       const payload = encodeBytes(`c-${seq}`)
       const canonical = canonicalBroadcastHeader(
         carolPid,
         msgId,
         seq,
+        ts,
         appId,
         roomId
       )
@@ -472,7 +485,7 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
       const pkt = packOverlayBinary(
         overlayBroadcastKind,
         4,
-        {o: carolPid, q: seq, m: msgId, s: sig},
+        {o: carolPid, q: seq, t: ts, m: msgId, s: sig},
         payload
       )
       bob.handleOverlayFrame(carolPid, pkt.slice().buffer)
@@ -500,11 +513,13 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
     const aliceId = await alice.getLocalCryptoIdentity()
     const makeSignedAliceBroadcast = async (seq: number, text: string) => {
       const msgId = `${alicePid}:${seq}:ooo`
+      const ts = Date.now()
       const payload = encodeBytes(text)
       const canonical = canonicalBroadcastHeader(
         alicePid,
         msgId,
         seq,
+        ts,
         appId,
         roomId
       )
@@ -517,7 +532,7 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
       return packOverlayBinary(
         overlayBroadcastKind,
         4,
-        {o: alicePid, q: seq, m: msgId, s: sig},
+        {o: alicePid, q: seq, t: ts, m: msgId, s: sig},
         payload
       )
     }
@@ -544,7 +559,8 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
       selfId: bobPid,
       appId,
       roomId: 'bound-room-B', // Different roomId!
-      topology: {mode: 'gossip', maxConnections: 4},
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobPid),
       onVirtualPeerJoin: () => {},
       onVirtualPeerLeave: () => {},
       onDeliverData: (_from, data) =>
@@ -600,12 +616,12 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
     await waitFor(
       () =>
         capturedFromAlice.some(
-          f => unpackOverlayBinary(f)?.kind === overlayUnicastKind
+          f => unpackOverlayFrame(f)?.[0] === overlayUnicastKind
         ),
       1_000
     )
     const aliceUnicastRoomA = capturedFromAlice.find(
-      f => unpackOverlayBinary(f)?.kind === overlayUnicastKind
+      f => unpackOverlayFrame(f)?.[0] === overlayUnicastKind
     )!
     failCount = otherRoomBob.getSnapshot().stats.signatureFailures
     otherRoomBob.handleOverlayFrame(alicePid, aliceUnicastRoomA.slice().buffer)

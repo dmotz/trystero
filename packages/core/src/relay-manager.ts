@@ -1,12 +1,23 @@
 import type {SocketClient} from './internal-types'
-import {mkErr, socketInitialFailureSymbol} from './primitives'
+import {
+  createBoundedCache,
+  mkErr,
+  socketInitialFailureSymbol
+} from './primitives'
 import type {BaseRoomConfig, RelayConfig, RelayConnectivity} from './types'
-import {entries, fromEntries, keys, noOp, shuffle, strToNum} from './utils'
+import {
+  entries,
+  fromEntries,
+  noOp,
+  shuffle,
+  strToNum,
+  unrefTimer
+} from './utils'
 
 const {min} = Math
 const defaultRetryMs = 3333
 const maxRetryMs = 60_000
-const socketRetryPeriods: Record<string, number> = {}
+const socketRetryPeriods = /*@__PURE__*/ createBoundedCache<string, number>(256)
 
 type SocketController = [disconnect: () => void, reconnect: () => void]
 
@@ -37,9 +48,7 @@ const holdRelaySockets = (): void => {
 
 const reconnectRelaySockets = (): void => {
   isRelayOffline = false
-  keys(socketRetryPeriods).forEach(url => {
-    socketRetryPeriods[url] = defaultRetryMs
-  })
+  socketRetryPeriods.clear()
   socketControllers.forEach(c => c[1]())
 }
 
@@ -169,9 +178,11 @@ export const makeSocket = (
         initialFailure = mkErr(`failed to connect to relay ${client.url}`)
         settleInitialAttempt(initialFailure)
       }
-      const period = (socketRetryPeriods[url] ??= defaultRetryMs)
+      const period = socketRetryPeriods.get(url) ?? defaultRetryMs
+      socketRetryPeriods.set(url, period)
       retryTimer = setTimeout(init, Math.random() * period)
-      socketRetryPeriods[url] = min(period * 2, maxRetryMs)
+      unrefTimer(retryTimer)
+      socketRetryPeriods.set(url, min(period * 2, maxRetryMs))
     }
 
     socket.onmessage = e => onMessage(String(e.data))
@@ -185,7 +196,7 @@ export const makeSocket = (
       initialFailure = null
       settleInitialAttempt(null)
       resolveReady(client)
-      socketRetryPeriods[url] = defaultRetryMs
+      socketRetryPeriods.set(url, defaultRetryMs)
       if (isReconnect) {
         onReconnect?.()
       }
@@ -210,7 +221,7 @@ export const makeSocket = (
     },
     () => {
       if (!client.isClosed) {
-        socketRetryPeriods[url] = defaultRetryMs
+        socketRetryPeriods.set(url, defaultRetryMs)
         clearRetryTimer()
         if (isReconnectPending) {
           init()
@@ -243,12 +254,10 @@ export type RelayScopedStore<T, TRelay extends object> = {
   forRelay: (relay: TRelay) => Record<string, T>
 }
 
-const unregisteredRelayErr = /*@__PURE__*/ mkErr('unregistered relay client')
-
 const getRegisteredRelayKey = (relay: object): string => {
   const key = keysByRelay.get(relay)
   if (!key) {
-    throw unregisteredRelayErr
+    throw mkErr('unregistered relay client')
   }
   return key
 }
@@ -268,20 +277,9 @@ export const createRelayManager = <TRelay extends object>(
   getSocket: (relay: TRelay) => WebSocket | undefined
 ): {
   register: (key: string, createRelay: () => TRelay) => TRelay
-  keyOf: (relay: TRelay) => string
-  scoped: <T>() => RelayScopedStore<T, TRelay>
   getSockets: () => Record<string, WebSocket>
 } => {
   const relays: Record<string, TRelay> = {}
-  const localKeys = new WeakMap<TRelay, string>()
-
-  const keyOf = (relay: TRelay): string => {
-    const key = localKeys.get(relay)
-    if (!key) {
-      throw unregisteredRelayErr
-    }
-    return key
-  }
 
   return {
     register: (key, createRelay) => {
@@ -289,13 +287,10 @@ export const createRelayManager = <TRelay extends object>(
       if (!relay) {
         relay = createRelay()
         relays[key] = relay
-        localKeys.set(relay, key)
         keysByRelay.set(relay, key)
       }
       return relay
     },
-    keyOf,
-    scoped: <T>() => createRelayScopedStore<T, TRelay>(keyOf),
     getSockets: () =>
       fromEntries(
         entries(relays).flatMap(([key, relay]) => {

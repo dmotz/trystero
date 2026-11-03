@@ -5,27 +5,28 @@ import {
   signUserEndpointProof,
   verifyWithP256
 } from '../identity'
+import type {PeerHandle, RoleCertificate, UserIdentity} from '../types'
 import {
   decodeBytes,
   encodeBytes,
   fromBase64,
   fromJson,
   isObj,
-  isPosSafeInt,
   libId,
   toBase64,
   toJson
 } from '../utils'
-import type {RoleCertificate, UserIdentity} from '../types'
 
-export const overlayFrameVersion = 3
+export const overlayFrameVersion = 4
 export const overlayControlKind = 1
 export const overlayBroadcastKind = 2
 export const overlayUnicastKind = 3
+export const maxDescriptorNeighbors = 64
 
 export type PeerDescriptor = {
   peerId: string
   seq: number
+  pktSeq?: number
   neighbors: string[]
   signPubKey?: JsonWebKey
   encPubKey?: JsonWebKey
@@ -53,19 +54,8 @@ export type BroadcastEnvelopeHeader = {
   o: string
   q: number
   m: string
+  t: number
   s?: string
-}
-
-export type UnicastLeaseTuple = [lo: number, hi: number, sig: string]
-
-export type UnicastEnvelopeHeader = {
-  o: string
-  d: string
-  q: number
-  m: string
-  iv?: string
-  s?: string
-  l?: UnicastLeaseTuple
 }
 
 export type CryptoIdentity = {
@@ -77,6 +67,16 @@ export type CryptoIdentity = {
   encPublicKey: CryptoKey
   encPubJwk: JsonWebKey
 }
+
+export const isPeerUsable = (
+  peer: PeerHandle | undefined
+): peer is PeerHandle =>
+  Boolean(peer && !peer.isDead && peer.channel?.readyState !== 'closed')
+
+export const getPeerBufferedBytes = (peer: PeerHandle | undefined): number =>
+  typeof peer?.channel?.bufferedAmount === 'number'
+    ? peer.channel.bufferedAmount
+    : 0
 
 export const packOverlayBinary = (
   kind: number,
@@ -127,18 +127,6 @@ export const unpackOverlayFrame = (
   } catch {
     return null
   }
-}
-
-export const unpackOverlayBinary = (
-  bytes: Uint8Array
-): {
-  kind: number
-  ttl: number
-  header: Record<string, unknown>
-  payload: Uint8Array
-} | null => {
-  const f = unpackOverlayFrame(bytes)
-  return f ? {kind: f[0], ttl: f[1], header: f[2], payload: f[3]} : null
 }
 
 export const packOverlayControl = (msg: OverlayControlMessage): Uint8Array => {
@@ -202,24 +190,6 @@ export const isValidOverlayMsgId = (msgId: string): boolean => {
   return true
 }
 
-export const parseUnicastLease = (
-  rawLease: unknown,
-  seq: number,
-  maxWindowPackets: number
-): UnicastLeaseTuple | null =>
-  Array.isArray(rawLease) &&
-  rawLease.length === 3 &&
-  isPosSafeInt(rawLease[0]) &&
-  isPosSafeInt(rawLease[1]) &&
-  typeof rawLease[2] === 'string' &&
-  Boolean(rawLease[2]) &&
-  rawLease[1] >= rawLease[0] &&
-  rawLease[1] - rawLease[0] < maxWindowPackets &&
-  seq >= rawLease[0] &&
-  seq <= rawLease[1]
-    ? [rawLease[0], rawLease[1], rawLease[2]]
-    : null
-
 const ovTag = (
   kind: string,
   appId: string,
@@ -230,36 +200,28 @@ const ovTag = (
 export const canonicalBroadcastHeader = (
   origin: string,
   msgId: string,
-  seq: number = 1,
-  appId: string = '',
-  roomId: string = ''
-): string => ovTag('broadcast-v2', appId, roomId, origin, seq, msgId)
+  seq: number,
+  ts: number,
+  appId: string,
+  roomId: string
+): string => ovTag('broadcast-v3', appId, roomId, origin, seq, ts, msgId)
 
 export const canonicalUnicastHeader = (
   origin: string,
   dest: string,
   msgId: string,
   ivB64: string,
-  seq: number = 1,
-  appId: string = '',
-  roomId: string = ''
-): string => ovTag('unicast-v2', appId, roomId, origin, dest, seq, msgId, ivB64)
+  seq: number,
+  appId: string,
+  roomId: string
+): string => ovTag('unicast-v3', appId, roomId, origin, dest, seq, msgId, ivB64)
 
 export const canonicalLeaveHeader = (
   leavingId: string,
   seq: number,
-  appId: string = '',
-  roomId: string = ''
-): string => ovTag('leave-v2', appId, roomId, leavingId, seq)
-
-export const canonicalUnicastLeaseHeader = (
-  origin: string,
-  dest: string,
-  lo: number,
-  hi: number,
-  appId: string = '',
-  roomId: string = ''
-): string => ovTag('unicast-lease-v1', appId, roomId, origin, dest, lo, hi)
+  appId: string,
+  roomId: string
+): string => ovTag('leave-v3', appId, roomId, leavingId, seq)
 
 export const buildOverlaySignedBytes = (
   canonicalHeader: string,
@@ -277,15 +239,16 @@ export const buildOverlaySignedBytes = (
 
 export const descriptorCanonicalPayload = (
   d: PeerDescriptor,
-  appId: string = '',
-  roomId: string = ''
+  appId: string,
+  roomId: string
 ): string =>
   ovTag(
-    'desc-v2',
+    'desc-v3',
     appId,
     roomId,
     d.peerId,
     d.seq,
+    d.pktSeq ?? 0,
     d.neighbors,
     d.signPubKey ? canonicalizePubJwk(d.signPubKey) : null,
     d.encPubKey ? canonicalizePubJwk(d.encPubKey) : null,

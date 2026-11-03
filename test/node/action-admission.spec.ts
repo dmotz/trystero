@@ -232,8 +232,8 @@ for (const saturation of ['policies', 'transfers'] as const) {
     const pair = linkedActions()
     t.after(pair.close)
     const approvals: ((allow: boolean) => void)[] = []
+    const inbox = pair.left.makeAction('inbox')
     if (saturation === 'policies') {
-      const inbox = pair.left.makeAction('inbox')
       inbox.onMessage(() => {})
       inbox.onReceive(() => new Promise(resolve => approvals.push(resolve)))
     }
@@ -346,8 +346,8 @@ for (const saturation of ['policies', 'transfers']) {
       const pair = linkedActions()
       t.after(pair.close)
       const approvals: ((allow: boolean) => void)[] = []
+      const files = pair.right.makeAction('files')
       if (saturation === 'policies') {
-        const files = pair.right.makeAction('files')
         files.onMessage(() => {})
         files.onReceive(() => new Promise(resolve => approvals.push(resolve)))
       }
@@ -453,10 +453,11 @@ void test('request actions report receive progress for bulk responses', async t 
   assert.ok(contexts.every(context => context.peerId === 'right'))
 })
 
-void test('attaching onReceive before onMessage runs admission for already queued messages and bulk offers', async t => {
+void test('attaching onReceive before onMessage runs admission for already queued messages and bulk offers on registered actions', async t => {
   const pair = linkedActions()
   t.after(pair.close)
 
+  const receiver = pair.right.makeAction('deferred')
   const sender = pair.left.makeAction('deferred')
   await sender.send('blocked-inline')
   await sender.send('allowed-inline-message')
@@ -464,7 +465,6 @@ void test('attaching onReceive before onMessage runs admission for already queue
 
   await turn()
 
-  const receiver = pair.right.makeAction('deferred')
   const seenByteLengths: number[] = []
   const delivered: unknown[] = []
 

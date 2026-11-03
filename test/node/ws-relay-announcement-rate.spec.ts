@@ -38,8 +38,10 @@ const announcementCount = (socket: MockWebSocket) =>
   socket.sent.filter(
     msg =>
       msg.type === 'publish' &&
-      typeof msg.payload === 'string' &&
-      (JSON.parse(msg.payload) as {peerId?: string}).peerId
+      Boolean(msg.payload) &&
+      typeof msg.payload === 'object' &&
+      !Array.isArray(msg.payload) &&
+      typeof (msg.payload as {peerId?: unknown}).peerId === 'string'
   ).length
 
 void test(

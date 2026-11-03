@@ -1,4 +1,43 @@
 import {
+  createActionWireManager,
+  makeActionError,
+  throwIfAborted,
+  type WireAction
+} from './action-wire'
+import type {
+  ActionOptions,
+  InternalAction,
+  InternalMessageContext,
+  InternalReceiveContext,
+  PeerDataTransport,
+  TargetPeers
+} from './internal-types'
+import {createDirectPeerTransport} from './peer-transport'
+import type {
+  ActionError,
+  ActionMessageHandler,
+  ActionProgressContext,
+  ActionProgressHandler,
+  ActionReceiveContext,
+  ActionReceiveHandler,
+  ActionRequestHandler,
+  DataPayload,
+  JsonValue,
+  ListenerOptions,
+  MessageAction,
+  MessageActionConfig,
+  MessageContext,
+  PeerHandle,
+  PeerResult,
+  RequestAction,
+  RequestActionConfig,
+  RequestManyOptions,
+  RequestOptions,
+  RoleCertificate,
+  Room,
+  SendOptions
+} from './types'
+import {
   actionRedefinedErr,
   all,
   authMetaKey,
@@ -9,7 +48,6 @@ import {
   internalActionPrefix,
   isObj,
   lockMethods,
-  logActionHandlerErr,
   logErr,
   mkErr,
   noActivePeerMsg,
@@ -19,73 +57,40 @@ import {
   resetTimer,
   toError,
   toErrorMessage,
+  unrefTimer,
+  validateRoleCertificateShape,
   values
 } from './utils'
-import {
-  initActionWireManager,
-  makeActionError,
-  throwIfAborted,
-  toPeerTransportGetter,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionOptions,
-  type InternalAction,
-  type InternalActionSender
-} from './action-wire'
-import type {PeerDataTransport} from './peer-registry'
-import type {
-  ActionMessageHandler,
-  ActionProgressContext,
-  ActionProgressHandler,
-  ActionReceiveHandler,
-  ActionRequestHandler,
-  DataPayload,
-  JsonValue,
-  MessageAction,
-  MessageActionConfig,
-  MessageContext,
-  PeerHandle,
-  PeerResult,
-  RequestAction,
-  RequestActionConfig,
-  RequestManyOptions,
-  RequestOptions,
-  Room,
-  SendOptions,
-  TargetPeers
-} from './types'
 
-export type {
-  ActionErrorKind,
-  ActionOptions,
-  InternalAction,
-  InternalActionSender
-}
+export type {ActionError, ActionOptions, InternalAction}
+
+const maxConcurrentRequestsPerPeer = 64
+const requestFailedMsg = 'request failed'
 
 type PublicActionKind = 'message' | 'request'
 
-type PublicActionState = [
-  kind: PublicActionKind,
-  requiredRoles: string[],
-  action: unknown,
-  syncReceive: () => void,
+type RegisteredPublicAction = {
+  kind: PublicActionKind
+  requiredRoles: string[]
+  action: unknown
   clear: () => void
-]
+  internal: boolean
+}
 
-type PendingRequestWaiter = [
-  controller: AbortController,
-  getReceive: () => ActionReceiveHandler | null,
+type PendingRequestWaiter = {
+  controller: AbortController
+  getReceive: () => ActionReceiveHandler | null
   emitReceiveProgress: (
     progress: number,
     context: ActionProgressContext
-  ) => void,
-  peerId: string,
-  resolve: (payload: DataPayload) => void,
-  reject: (error: Error) => void,
-  timer: ReturnType<typeof setTimeout> | null,
-  signal: AbortSignal | undefined,
+  ) => void
+  peerId: string
+  resolve: (payload: DataPayload) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout> | null
+  signal: AbortSignal | undefined
   abortHandler: (() => void) | undefined
-]
+}
 
 const getEnvelopeRecord = (
   metadata?: JsonValue
@@ -118,110 +123,287 @@ const withMetadata = <T extends {peerId: string}>(
 ): T & {metadata?: JsonValue} =>
   metadata === undefined ? context : {...context, metadata}
 
-const requestFailedMsg = 'request failed'
-
-const unwrapAuthUserMetadata = (
-  wireMeta: JsonValue | undefined
+const wrapAuthMetadata = (
+  cert: RoleCertificate | null,
+  userMetadata?: JsonValue
 ): JsonValue | undefined =>
-  isObj(wireMeta) && authMetaKey in wireMeta
-    ? Object.hasOwn(wireMeta, 'm')
+  cert
+    ? ({
+        [authMetaKey]: cert as unknown as JsonValue,
+        ...(userMetadata === undefined ? {} : {m: userMetadata})
+      } as JsonValue)
+    : userMetadata
+
+const extractAuthMetadata = (
+  wireMeta: JsonValue | undefined
+): [
+  inlineCert: RoleCertificate | undefined,
+  userMeta: JsonValue | undefined
+] => {
+  if (isObj(wireMeta) && authMetaKey in wireMeta) {
+    const rawCert = wireMeta[authMetaKey]
+    const inlineCert = validateRoleCertificateShape(rawCert)
+      ? rawCert
+      : undefined
+    const userMeta = Object.hasOwn(wireMeta, 'm')
       ? (wireMeta['m'] as JsonValue | undefined)
       : undefined
-    : wireMeta
-
-export type VerifyActionResult = {
-  valid: boolean
-  userMetadata?: JsonValue
-  roles: string[]
+    return [inlineCert, userMeta]
+  }
+  return [undefined, wireMeta]
 }
 
-export const initActionManager = (
-  getPeerIds: (includePending: boolean) => string[],
-  canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean,
-  onPeerError: (peerId: string, error: Error) => void,
-  getTransport: (
+const normalizeRequiredRoles = (
+  roles?: string | readonly string[]
+): string[] => {
+  if (roles === undefined) {
+    return []
+  }
+  const list = [roles].flat().filter(Boolean)
+  if (list.length === 0) {
+    throw mkErr('action roles must contain at least one non-empty role name')
+  }
+  return [...new Set(list)].sort()
+}
+
+const sameSortedRoles = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((role, idx) => role === b[idx])
+
+export type ActionManagerDeps = {
+  onPeerError: (peerId: string, error: Error) => void
+  maxReceiveBytes?: number
+  getTransport?: (
     id: string,
     includePending: boolean
-  ) => PeerDataTransport | undefined,
+  ) => PeerDataTransport | undefined
+  getPeer?: (id: string, includePending: boolean) => PeerHandle | undefined
+  getPeerIds: (includePending: boolean) => string[]
+  canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
   broadcastInline?: (
     frame: Uint8Array,
     onProgress?: (peerId: string) => void,
     signal?: AbortSignal
-  ) => Promise<boolean> | boolean,
-  registerActionAuthority?: (namespace: string, roles: string[]) => void,
-  signActionPayload?: (
-    namespace: string,
+  ) => Promise<boolean> | boolean
+  registerActionAuthority?: (namespace: string, roles: string[]) => void
+  getLocalActionCert?: (
     requiredRoles: readonly string[],
-    data: DataPayload,
-    userMetadata?: JsonValue
-  ) => Promise<JsonValue>,
-  verifyActionOffer?: (
-    namespace: string,
+    namespace: string
+  ) => Promise<RoleCertificate | null>
+  authorizePeerAction?: (
     peerId: string,
     requiredRoles: readonly string[],
-    wireMetadata?: JsonValue
-  ) => Promise<VerifyActionResult>,
-  verifyActionPayload?: (
-    namespace: string,
-    peerId: string,
-    requiredRoles: readonly string[],
-    data: DataPayload,
-    wireMetadata?: JsonValue
-  ) => Promise<VerifyActionResult>,
-  getPeerRoles?: (peerId: string) => string[],
-  getPeerUserId?: (peerId: string) => string,
-  resolveSendTarget?: (target?: TargetPeers) => TargetPeers,
-  resolveRequestTarget?: (target: string) => string | undefined,
-  onUnauthorizedAction?: (namespace: string, peerId: string) => void,
-  maxReceiveBytes?: number
-): readonly [
-  makeAction: Room['makeAction'],
+    inlineCert?: RoleCertificate
+  ) => boolean | Promise<boolean>
+  getPeerRoles?: (peerId: string) => string[]
+  getPeerUserId?: (peerId: string) => string
+  resolveSendTarget?: (
+    target?: TargetPeers,
+    includePending?: boolean
+  ) => TargetPeers
+  resolveRequestTarget?: (
+    target: string,
+    includePending?: boolean
+  ) => string | undefined
+}
+
+export const createActionManager = (
+  deps: ActionManagerDeps
+): {
+  makeAction: Room['makeAction']
   makeInternalAction: <T extends DataPayload = DataPayload>(
     type: string,
     options?: Partial<ActionOptions>
-  ) => InternalAction<T>,
-  handleData: (id: string, data: ArrayBuffer) => void,
-  clearPeer: (id: string, error: Error) => void,
+  ) => InternalAction<T>
+  makeInternalRequestAction: <
+    T extends DataPayload = DataPayload,
+    R extends DataPayload = DataPayload
+  >(
+    type: string
+  ) => RequestAction<T, R>
+  handleData: (id: string, data: ArrayBuffer) => void
+  clearPeer: (id: string, error: Error) => void
   clearListeners: () => void
-] => {
+} => {
+  const peerTransportCache = new WeakMap<PeerHandle, PeerDataTransport>()
+  const resolveTransport = (
+    peerId: string,
+    includePending: boolean
+  ): PeerDataTransport | undefined => {
+    if (deps.getTransport) {
+      return deps.getTransport(peerId, includePending)
+    }
+    const peer = deps.getPeer?.(peerId, includePending)
+    if (!peer) {
+      return undefined
+    }
+    let cached = peerTransportCache.get(peer)
+    if (!cached) {
+      cached = createDirectPeerTransport(peer, () => {
+        const cur =
+          deps.getPeer?.(peerId, true) ?? deps.getPeer?.(peerId, false)
+        return Boolean(cur && !cur.isDead)
+      })
+      peerTransportCache.set(peer, cached)
+    }
+    return cached
+  }
+
   const userIdOf = (peerId: string): string =>
-    getPeerUserId ? getPeerUserId(peerId) : peerId
+    deps.getPeerUserId ? deps.getPeerUserId(peerId) : peerId
+  const rolesOf = (peerId: string): string[] =>
+    deps.getPeerRoles ? [...deps.getPeerRoles(peerId)] : []
   const hasActivePeer = (peerId: string): boolean =>
-    Boolean(getTransport(peerId, false))
-  const publicActions: Record<string, PublicActionState> = Object.create(null)
+    Boolean(resolveTransport(peerId, false)?.isOpen)
+
+  const publicActions: Record<string, RegisteredPublicAction> =
+    Object.create(null)
+  const internalActions = new Map<string, InternalAction<DataPayload>>()
   const pendingRequestWaiters: Record<string, PendingRequestWaiter> = {}
   const activeRequestControllers = new Map<string, Set<AbortController>>()
-  const [makeWireAction, handleData, clearWirePeer] = initActionWireManager(
-    getPeerIds,
-    canReceiveFromPeer,
-    onPeerError,
-    getTransport,
-    broadcastInline,
-    throwIfAborted,
-    maxReceiveBytes
-  )
+
+  const {
+    makeWireAction,
+    handleData,
+    clearPeer: clearWirePeer
+  } = createActionWireManager({
+    resolveTransport,
+    getPeerIds: deps.getPeerIds,
+    canReceiveFromPeer: deps.canReceiveFromPeer,
+    onPeerError: deps.onPeerError,
+    ...(deps.broadcastInline ? {broadcastInline: deps.broadcastInline} : {}),
+    ...(deps.maxReceiveBytes === undefined
+      ? {}
+      : {maxReceiveBytes: deps.maxReceiveBytes})
+  })
+
+  const toProgressBridge = (
+    handler?: ActionProgressHandler,
+    metadata?: JsonValue
+  ): ((progress: number, peerId: string) => void) | undefined =>
+    handler
+      ? (progress: number, peerId: string) => {
+          const res = handler(
+            progress,
+            withMetadata({peerId, userId: userIdOf(peerId)}, metadata)
+          )
+          if (res && typeof (res as PromiseLike<unknown>).then === 'function') {
+            void Promise.resolve(res).catch(err =>
+              logErr('progress handler', err)
+            )
+          }
+        }
+      : undefined
+
   const makeInternalAction = <T extends DataPayload = DataPayload>(
     type: string,
-    options?: Partial<ActionOptions>
-  ): InternalAction<T> =>
-    makeWireAction(
-      type.startsWith(internalActionPrefix)
-        ? type
-        : `${internalActionPrefix}${type}`,
-      options
+    options: Partial<ActionOptions> = {}
+  ): InternalAction<T> => {
+    const wireType = type.startsWith(internalActionPrefix)
+      ? type
+      : `${internalActionPrefix}${type}`
+    const sendToPending = Boolean(options.sendToPending)
+    const wireAction = makeWireAction<T>(wireType, options)
+    const existing = internalActions.get(wireType)
+    if (existing) {
+      return existing as unknown as InternalAction<T>
+    }
+
+    const [subProgress, emitProgress, , hasProgressListeners] =
+      createEventEmitter<[number, ActionProgressContext]>('progress handler')
+
+    const [subMessage, emitMessage] = createEventEmitter<
+      [T, InternalMessageContext]
+    >('internal action handler', active => {
+      wireAction.onMessage(
+        active
+          ? (payload, peerId, metadata) => {
+              emitMessage(
+                payload,
+                withMetadata({peerId, userId: userIdOf(peerId)}, metadata)
+              )
+            }
+          : null
+      )
+    })
+
+    const [setReceiveGate, getReceiveGate] = initSingleHandler<
+      (context: InternalReceiveContext) => boolean | Promise<boolean>
+    >('onReceive', handler => {
+      wireAction.onReceive(
+        handler
+          ? ctx =>
+              handler(
+                withMetadata(
+                  {
+                    peerId: ctx.peerId,
+                    userId: userIdOf(ctx.peerId),
+                    byteLength: ctx.byteLength,
+                    signal: ctx.signal
+                  },
+                  ctx.metadata
+                )
+              )
+          : null
+      )
+    })
+
+    wireAction.onProgress((progress, peerId, metadata) => {
+      if (hasProgressListeners()) {
+        emitProgress(
+          progress,
+          withMetadata({peerId, userId: userIdOf(peerId)}, metadata)
+        )
+      }
+    })
+
+    const action = lockMethods(
+      {
+        send: (data: T, sendOpts: SendOptions = {}) =>
+          wireAction.send(
+            data,
+            deps.resolveSendTarget
+              ? deps.resolveSendTarget(sendOpts.target, sendToPending)
+              : sendOpts.target,
+            sendOpts.metadata,
+            toProgressBridge(sendOpts.onProgress, sendOpts.metadata),
+            sendOpts.signal
+          ),
+        onMessage: (
+          handler: (data: T, context: InternalMessageContext) => unknown,
+          listenerOpts?: ListenerOptions
+        ) => subMessage(handler, listenerOpts),
+        onReceiveProgress: (
+          handler: ActionProgressHandler,
+          listenerOpts?: ListenerOptions
+        ) => subProgress(handler, listenerOpts),
+        onReceive: (
+          handler: (
+            context: InternalReceiveContext
+          ) => boolean | Promise<boolean>,
+          listenerOpts?: ListenerOptions
+        ) => setReceiveGate(handler ?? getReceiveGate()!, listenerOpts)
+      } satisfies InternalAction<T>,
+      ['onMessage', 'onReceive', 'onReceiveProgress']
     )
+
+    internalActions.set(
+      wireType,
+      action as unknown as InternalAction<DataPayload>
+    )
+    return action
+  }
 
   const clearPendingRequestWaiter = (requestId: string): void => {
     const waiter = pendingRequestWaiters[requestId]
     if (!waiter) {
       return
     }
-    resetTimer(waiter[6])
-    if (waiter[7] && waiter[8]) {
-      waiter[7].removeEventListener('abort', waiter[8])
+    resetTimer(waiter.timer)
+    if (waiter.signal && waiter.abortHandler) {
+      waiter.signal.removeEventListener('abort', waiter.abortHandler)
     }
     delete pendingRequestWaiters[requestId]
-    waiter[0].abort()
+    waiter.controller.abort()
   }
 
   const clearPeer = (id: string, error: Error): void => {
@@ -236,9 +418,9 @@ export const initActionManager = (
       toErrorMessage(error, peerDisconnectedMsg)
     )
     entries(pendingRequestWaiters).forEach(([requestId, waiter]) => {
-      if (waiter[3] === id) {
+      if (waiter.peerId === id) {
         clearPendingRequestWaiter(requestId)
-        waiter[5](disconnectedErr)
+        waiter.reject(disconnectedErr)
       }
     })
   }
@@ -254,44 +436,53 @@ export const initActionManager = (
     | null => {
     const parsed = getResponseMetadata(metadata)
     const waiter = parsed && pendingRequestWaiters[parsed[0]]
-    return parsed && waiter && waiter[3] === peerId ? [parsed, waiter] : null
+    return parsed && waiter && waiter.peerId === peerId
+      ? [parsed, waiter]
+      : null
   }
 
-  const responseAction = makeInternalAction<DataPayload>('response', {
-    receiveScope: (peerId, metadata) => {
-      const matched = matchResponseWaiter(peerId, metadata)
-      if (!matched) {
-        return null
-      }
-      const [parsed, waiter] = matched
-      const receive = parsed[1] === undefined ? waiter[1]() : null
-      return [
-        parsed[0],
-        waiter[0].signal,
-        receive
-          ? context =>
-              receive({
-                byteLength: context.byteLength,
-                peerId: context.peerId,
-                userId: userIdOf(context.peerId),
-                kind: 'response',
-                signal: context.signal
-              })
-          : null,
-        reason => {
-          if (pendingRequestWaiters[parsed[0]] === waiter) {
-            clearPendingRequestWaiter(parsed[0])
-            waiter[5](makeActionError('rejected', reason))
-          }
+  const responseAction: WireAction<DataPayload> = makeWireAction<DataPayload>(
+    `${internalActionPrefix}response`,
+    {
+      receiveScope: (peerId, metadata) => {
+        const matched = matchResponseWaiter(peerId, metadata)
+        if (!matched) {
+          return null
         }
-      ]
+        const [parsed, waiter] = matched
+        const receive = parsed[1] === undefined ? waiter.getReceive() : null
+        return [
+          parsed[0],
+          waiter.controller.signal,
+          receive
+            ? context =>
+                receive({
+                  byteLength: context.byteLength,
+                  peerId: context.peerId,
+                  userId: userIdOf(context.peerId),
+                  kind: 'response',
+                  signal: context.signal,
+                  roles: rolesOf(context.peerId)
+                })
+            : null,
+          reason => {
+            if (pendingRequestWaiters[parsed[0]] === waiter) {
+              clearPendingRequestWaiter(parsed[0])
+              waiter.reject(makeActionError('rejected', reason))
+            }
+          }
+        ]
+      }
     }
-  })
+  )
 
   responseAction.onProgress((progress, id, metadata) => {
     const matched = matchResponseWaiter(id, metadata)
     if (matched && matched[0][1] === undefined) {
-      matched[1][2](progress, {peerId: id, userId: userIdOf(id)})
+      matched[1].emitReceiveProgress(progress, {
+        peerId: id,
+        userId: userIdOf(id)
+      })
     }
   })
 
@@ -303,19 +494,25 @@ export const initActionManager = (
     const [parsed, waiter] = matched
     clearPendingRequestWaiter(parsed[0])
     if (parsed[1] !== undefined) {
-      waiter[5](makeActionError('rejected', parsed[1]))
+      waiter.reject(makeActionError('rejected', parsed[1]))
     } else {
-      waiter[4](payload)
+      waiter.resolve(payload)
     }
   })
 
-  const makeActionImpl = <
+  const makeActionCore = <
     T extends DataPayload = DataPayload,
     R extends DataPayload = DataPayload
   >(
     type: string,
-    config?: MessageActionConfig | RequestActionConfig
+    config: MessageActionConfig | RequestActionConfig | undefined,
+    internal: boolean
   ): MessageAction<T> | RequestAction<T, R> => {
+    if (!internal && type.startsWith(internalActionPrefix)) {
+      throw mkErr(
+        `action namespace "${type}" is reserved for internal protocol use`
+      )
+    }
     if (
       config &&
       ('onMessage' in config ||
@@ -328,195 +525,167 @@ export const initActionManager = (
       )
     }
 
-    const kind = config?.kind ?? 'message'
-    const requiredRoles = config?.roles
-      ? [config.roles].flat().filter(Boolean)
-      : []
-    const hasAuthority = requiredRoles.length > 0
-    if (hasAuthority) {
-      registerActionAuthority?.(type, requiredRoles)
+    const kind: PublicActionKind = config?.kind ?? 'message'
+    const requiredRoles = normalizeRequiredRoles(config?.roles)
+    const hasRoleGuard = requiredRoles.length > 0
+    if (hasRoleGuard) {
+      deps.registerActionAuthority?.(type, requiredRoles)
     }
-    const rawAction = makeWireAction<T>(type)
-    const existingState = publicActions[type]
 
-    if (existingState) {
-      if (existingState[0] !== kind) {
+    const existing = publicActions[type]
+    if (existing) {
+      if (
+        existing.kind !== kind ||
+        existing.internal !== internal ||
+        !sameSortedRoles(existing.requiredRoles, requiredRoles)
+      ) {
         throw actionRedefinedErr(type)
       }
-      if (hasAuthority && existingState[1].length === 0) {
-        existingState[1] = requiredRoles
-        registerActionAuthority?.(type, requiredRoles)
-        existingState[3]()
-      }
-      return existingState[2] as MessageAction<T> | RequestAction<T, R>
+      return existing.action as MessageAction<T> | RequestAction<T, R>
     }
 
+    const rawAction = makeWireAction<T>(type)
     const [subProgress, emitProgress, clearProgress, hasProgressListeners] =
       createEventEmitter<[number, ActionProgressContext]>('progress handler')
 
-    const state: PublicActionState = [kind, requiredRoles, null, noOp, noOp]
-
-    const toProgressHandler = (
-      handler?: ActionProgressHandler,
+    const extractWireMeta = (
       metadata?: JsonValue
-    ) =>
-      handler
-        ? (progress: number, peerId: string) => {
-            const res = handler(
-              progress,
-              withMetadata({peerId, userId: userIdOf(peerId)}, metadata)
-            )
-            if (
-              res &&
-              typeof (res as PromiseLike<unknown>).then === 'function'
-            ) {
-              void Promise.resolve(res).catch(err =>
-                logErr('progress handler', err)
-              )
-            }
-          }
-        : undefined
-
-    const extractRawUserMeta = (metadata?: JsonValue): JsonValue | undefined =>
-      state[0] === 'request' ? getRequestMetadata(metadata)?.[1] : metadata
+    ): [
+      inlineCert: RoleCertificate | undefined,
+      userMeta: JsonValue | undefined
+    ] =>
+      extractAuthMetadata(
+        kind === 'request' ? getRequestMetadata(metadata)?.[1] : metadata
+      )
 
     const resolveReqPeer = (target: string): string =>
-      (resolveRequestTarget ? resolveRequestTarget(target) : target) ?? target
+      (deps.resolveRequestTarget
+        ? deps.resolveRequestTarget(target, false)
+        : target) ?? target
 
-    const peerCtx = (
+    const buildPeerContext = (
       peerId: string,
-      roles?: string[],
-      meta?: JsonValue
+      userMeta?: JsonValue
     ): MessageContext =>
       withMetadata(
         {
           peerId,
           userId: userIdOf(peerId),
-          ...(roles && roles.length > 0 ? {roles} : {})
+          roles: rolesOf(peerId)
         },
-        meta
+        userMeta
       )
 
-    const buildGateCtx = (
+    const buildGateContext = (
       context: {byteLength: number; peerId: string; signal: AbortSignal},
-      roles: string[] | undefined,
-      meta: JsonValue | undefined
-    ) => ({
-      ...peerCtx(context.peerId, roles, meta),
+      userMeta: JsonValue | undefined
+    ): ActionReceiveContext => ({
+      ...buildPeerContext(context.peerId, userMeta),
       byteLength: context.byteLength,
       signal: context.signal,
       kind
     })
 
-    const setReceive = (): void => {
-      const hasRoleGuard = state[1].length > 0 && Boolean(verifyActionOffer)
+    const syncReceiveGate = (): void => {
       if (!getReceiveGate() && !hasRoleGuard) {
         rawAction.onReceive(null)
         return
       }
-      rawAction.onReceive(
-        hasRoleGuard
-          ? async context => {
-              const offerRes = await verifyActionOffer!(
-                type,
-                context.peerId,
-                state[1],
-                extractRawUserMeta(context.metadata)
-              )
-              if (!offerRes.valid) {
-                onUnauthorizedAction?.(type, context.peerId)
-                return false
-              }
-              return (
-                getReceiveGate()?.(
-                  buildGateCtx(context, offerRes.roles, offerRes.userMetadata)
-                ) ?? true
-              )
-            }
-          : context =>
-              getReceiveGate()?.(
-                buildGateCtx(
-                  context,
-                  getPeerRoles?.(context.peerId),
-                  unwrapAuthUserMetadata(extractRawUserMeta(context.metadata))
-                )
-              ) ?? true
-      )
+      rawAction.onReceive(context => {
+        const [inlineCert, userMeta] = extractWireMeta(context.metadata)
+        if (!hasRoleGuard) {
+          const gate = getReceiveGate()
+          return gate ? gate(buildGateContext(context, userMeta)) : true
+        }
+        if (!deps.authorizePeerAction) {
+          return false
+        }
+        const authRes = deps.authorizePeerAction(
+          context.peerId,
+          requiredRoles,
+          inlineCert
+        )
+        const afterAuth = (allowed: boolean): boolean | Promise<boolean> => {
+          if (!allowed) {
+            return false
+          }
+          const gate = getReceiveGate()
+          return gate ? gate(buildGateContext(context, userMeta)) : true
+        }
+        return typeof authRes === 'boolean'
+          ? afterAuth(authRes)
+          : authRes.then(afterAuth, () => false)
+      })
     }
 
     const [setReceiveGate, getReceiveGate, clearReceiveGate] =
-      initSingleHandler<ActionReceiveHandler>('onReceive', () => setReceive())
-    state[3] = setReceive
-    setReceive()
+      initSingleHandler<ActionReceiveHandler>('onReceive', () =>
+        syncReceiveGate()
+      )
+    syncReceiveGate()
 
     rawAction.onProgress((progress, peerId, metadata) => {
       if (hasProgressListeners()) {
+        const [, userMeta] = extractWireMeta(metadata)
         emitProgress(
           progress,
-          peerCtx(
-            peerId,
-            undefined,
-            unwrapAuthUserMetadata(extractRawUserMeta(metadata))
-          )
+          withMetadata({peerId, userId: userIdOf(peerId)}, userMeta)
         )
       }
     })
 
-    if (kind === 'message') {
-      const emitMsg = (
-        payload: DataPayload,
-        peerId: string,
-        roles: string[] | undefined,
-        meta?: JsonValue
-      ): void => emitMessage(payload as T, peerCtx(peerId, roles, meta))
+    const prepareSendMeta = async (
+      userMeta?: JsonValue
+    ): Promise<JsonValue | undefined> => {
+      if (!hasRoleGuard) {
+        return userMeta
+      }
+      if (!deps.getLocalActionCert) {
+        throw mkErr(
+          `${insufficientAuthPrefix} for action "${type}": requires [${requiredRoles.join(', ')}]`
+        )
+      }
+      const cert = await deps.getLocalActionCert(requiredRoles, type)
+      return wrapAuthMetadata(cert, userMeta)
+    }
 
+    if (kind === 'message') {
       const receiveMessage = (
         payload: DataPayload,
         peerId: string,
         metadata?: JsonValue
       ): void => {
-        if (state[1].length === 0 || !verifyActionPayload) {
-          emitMsg(payload, peerId, getPeerRoles?.(peerId), metadata)
+        if (
+          hasRoleGuard &&
+          (!deps.authorizePeerAction ||
+            deps.authorizePeerAction(peerId, requiredRoles) !== true)
+        ) {
           return
         }
-
-        void verifyActionPayload(type, peerId, state[1], payload, metadata)
-          .then(verified => {
-            if (!verified.valid) {
-              onUnauthorizedAction?.(type, peerId)
-              return
-            }
-            if (hasMessageListeners()) {
-              emitMsg(payload, peerId, verified.roles, verified.userMetadata)
-            }
-          })
-          .catch(logActionHandlerErr)
+        const [, userMeta] = extractAuthMetadata(metadata)
+        emitMessage(payload as T, buildPeerContext(peerId, userMeta))
       }
 
-      const [subMessage, emitMessage, clearMessage, hasMessageListeners] =
-        createEventEmitter<[T, MessageContext]>('action handler', active =>
-          rawAction.onMessage(active ? receiveMessage : null)
-        )
+      const [subMessage, emitMessage, clearMessage] = createEventEmitter<
+        [T, MessageContext]
+      >('action handler', active =>
+        rawAction.onMessage(active ? receiveMessage : null)
+      )
 
       const action = lockMethods(
         {
           send: async (data: T, options: SendOptions = {}) => {
-            const wireMetadata =
-              state[1].length > 0 && signActionPayload
-                ? await signActionPayload(
-                    type,
-                    state[1],
-                    data,
-                    options.metadata
-                  )
-                : options.metadata
+            throwIfAborted(options.signal)
+            const wireMetadata = hasRoleGuard
+              ? await prepareSendMeta(options.metadata)
+              : options.metadata
             await rawAction.send(
               data,
-              resolveSendTarget
-                ? resolveSendTarget(options.target)
+              deps.resolveSendTarget
+                ? deps.resolveSendTarget(options.target, false)
                 : options.target,
               wireMetadata,
-              toProgressHandler(options.onProgress, options.metadata),
+              toProgressBridge(options.onProgress, options.metadata),
               options.signal
             )
           },
@@ -528,13 +697,17 @@ export const initActionManager = (
         ['onMessage', 'onReceive', 'onReceiveProgress']
       )
 
-      state[2] = action
-      state[4] = () => {
-        clearMessage()
-        clearReceiveGate()
-        clearProgress()
+      publicActions[type] = {
+        kind,
+        requiredRoles,
+        action,
+        internal,
+        clear: () => {
+          clearMessage()
+          clearReceiveGate()
+          clearProgress()
+        }
       }
-      publicActions[type] = state
       return action
     }
 
@@ -556,8 +729,18 @@ export const initActionManager = (
       if (!parsed) {
         return
       }
-      const controller = new AbortController()
       let peerControllers = activeRequestControllers.get(peerId)
+      if ((peerControllers?.size ?? 0) >= maxConcurrentRequestsPerPeer) {
+        void responseAction
+          .send(null, peerId, {
+            r: parsed[0],
+            e: 'too many concurrent requests'
+          })
+          .catch(noOp)
+        return
+      }
+
+      const controller = new AbortController()
       if (!peerControllers) {
         peerControllers = new Set()
         activeRequestControllers.set(peerId, peerControllers)
@@ -565,30 +748,20 @@ export const initActionManager = (
       peerControllers.add(controller)
 
       const runHandler = async (): Promise<R> => {
-        let userMeta = parsed[1]
-        let roles = getPeerRoles?.(peerId)
-        if (state[1].length > 0 && verifyActionPayload) {
-          const verified = await verifyActionPayload(
-            type,
-            peerId,
-            state[1],
-            payload,
-            parsed[1]
-          )
-          if (!verified.valid) {
-            onUnauthorizedAction?.(type, peerId)
-            throw mkErr(`${insufficientAuthPrefix} for request`)
-          }
-          userMeta = verified.userMetadata
-          roles = verified.roles
+        if (
+          hasRoleGuard &&
+          (!deps.authorizePeerAction ||
+            deps.authorizePeerAction(peerId, requiredRoles) !== true)
+        ) {
+          throw mkErr(`${insufficientAuthPrefix} for request`)
         }
-
+        const [, userMeta] = extractAuthMetadata(parsed[1])
         const handler = getRequestGate()
         if (!handler) {
           throw mkErr('no active request handler')
         }
         const response = await handler(payload as T, {
-          ...peerCtx(peerId, roles, userMeta),
+          ...buildPeerContext(peerId, userMeta),
           signal: controller.signal
         })
         if (response === undefined) {
@@ -622,57 +795,67 @@ export const initActionManager = (
         rawAction.onMessage(handler ? receiveRequest : null)
       )
 
-    const requestOne = async (data: T, options: RequestOptions): Promise<R> => {
-      const {target, metadata, onProgress, signal, timeoutMs} = options
-      const resolvedTarget = resolveReqPeer(target)
+    const requestToResolvedPeer = async (
+      data: T,
+      resolvedTarget: string,
+      displayTarget: string,
+      options: Omit<RequestOptions, 'target'>
+    ): Promise<R> => {
+      const {metadata, onProgress, signal, timeoutMs} = options
       const checkReqPeer = (): void => {
         throwIfAborted(signal)
         if (!hasActivePeer(resolvedTarget)) {
-          throw makeActionError('disconnected', noActivePeerMsg(target))
+          throw makeActionError('disconnected', noActivePeerMsg(displayTarget))
         }
       }
       checkReqPeer()
 
-      const innerMeta =
-        state[1].length > 0 && signActionPayload
-          ? await signActionPayload(type, state[1], data, metadata)
-          : metadata
-      if (state[1].length > 0 && signActionPayload) {
+      const innerMeta = hasRoleGuard
+        ? await prepareSendMeta(metadata)
+        : metadata
+      if (hasRoleGuard) {
         checkReqPeer()
       }
 
       const requestId = crypto.randomUUID()
       const controller = new AbortController()
       const responsePromise = new Promise<DataPayload>((resolve, reject) => {
-        const waiter: PendingRequestWaiter = [
+        const waiter: PendingRequestWaiter = {
           controller,
-          getReceiveGate,
-          emitProgress,
-          resolvedTarget,
+          getReceive: getReceiveGate,
+          emitReceiveProgress: emitProgress,
+          peerId: resolvedTarget,
           resolve,
           reject,
-          null,
+          timer: null,
           signal,
-          undefined
-        ]
+          abortHandler: undefined
+        }
 
         if (signal) {
           const rejectAsAborted = (): void => {
             clearPendingRequestWaiter(requestId)
             reject(makeActionError('aborted', operationAbortedMsg))
           }
-          waiter[8] = rejectAsAborted
+          if (signal.aborted) {
+            rejectAsAborted()
+            return
+          }
+          waiter.abortHandler = rejectAsAborted
           signal.addEventListener('abort', rejectAsAborted, {once: true})
         }
 
         pendingRequestWaiters[requestId] = waiter
         if (timeoutMs !== undefined) {
-          waiter[6] = setTimeout(() => {
+          const timer = setTimeout(() => {
             clearPendingRequestWaiter(requestId)
-            waiter[5](makeActionError('timeout', 'request timed out'))
+            waiter.reject(makeActionError('timeout', 'request timed out'))
           }, timeoutMs)
+          unrefTimer(timer)
+          waiter.timer = timer
         }
       })
+
       try {
         const sending = rawAction.send(
           data,
@@ -680,7 +863,7 @@ export const initActionManager = (
           innerMeta === undefined
             ? {r: requestId}
             : {r: requestId, m: innerMeta},
-          toProgressHandler(onProgress, metadata),
+          toProgressBridge(onProgress, metadata),
           controller.signal
         )
         return (await Promise.race([
@@ -690,6 +873,11 @@ export const initActionManager = (
       } finally {
         clearPendingRequestWaiter(requestId)
       }
+    }
+
+    const requestOne = (data: T, options: RequestOptions): Promise<R> => {
+      const {target, ...rest} = options
+      return requestToResolvedPeer(data, resolveReqPeer(target), target, rest)
     }
 
     const lockedAction = lockMethods(
@@ -711,7 +899,12 @@ export const initActionManager = (
                 result = {
                   ...base,
                   status: 'fulfilled',
-                  value: await requestOne(data, {...requestOptions, target})
+                  value: await requestToResolvedPeer(
+                    data,
+                    resolvedTarget,
+                    target,
+                    requestOptions
+                  )
                 }
               } catch (err) {
                 const error = toError(err, requestFailedMsg) as ActionError
@@ -736,90 +929,49 @@ export const initActionManager = (
       ['onRequest', 'onReceive', 'onReceiveProgress']
     )
 
-    state[2] = lockedAction
-    state[4] = () => {
-      clearRequestGate()
-      clearReceiveGate()
-      clearProgress()
+    publicActions[type] = {
+      kind,
+      requiredRoles,
+      action: lockedAction,
+      internal,
+      clear: () => {
+        clearRequestGate()
+        clearReceiveGate()
+        clearProgress()
+      }
     }
-    publicActions[type] = state
     return lockedAction
   }
 
-  return [
-    makeActionImpl as Room['makeAction'],
+  return {
+    makeAction: ((
+      type: string,
+      config?: MessageActionConfig | RequestActionConfig
+    ) => makeActionCore(type, config, false)) as Room['makeAction'],
     makeInternalAction,
+    makeInternalRequestAction: <
+      T extends DataPayload = DataPayload,
+      R extends DataPayload = DataPayload
+    >(
+      type: string
+    ): RequestAction<T, R> => {
+      const wireType = type.startsWith(internalActionPrefix)
+        ? type
+        : `${internalActionPrefix}${type}`
+      return makeActionCore<T, R>(
+        wireType,
+        {kind: 'request'},
+        true
+      ) as RequestAction<T, R>
+    },
     handleData,
     clearPeer,
-    () => {
-      values(publicActions).forEach(s => s[4]())
+    clearListeners: () => {
+      values(publicActions).forEach(entry => {
+        if (!entry.internal) {
+          entry.clear()
+        }
+      })
     }
-  ]
-}
-
-export const createActionManager = (deps: {
-  onPeerError: (peerId: string, error: Error) => void
-  maxReceiveBytes?: number
-  getTransport?: (
-    id: string,
-    includePending: boolean
-  ) => PeerDataTransport | undefined
-  getPeer?: (id: string, includePending: boolean) => PeerHandle | undefined
-  getPeerIds: (includePending: boolean) => string[]
-  canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
-  broadcastInline?: (
-    frame: Uint8Array,
-    onProgress?: (peerId: string) => void,
-    signal?: AbortSignal
-  ) => Promise<boolean> | boolean
-  registerActionAuthority?: (namespace: string, roles: string[]) => void
-  signActionPayload?: (
-    namespace: string,
-    requiredRoles: readonly string[],
-    data: DataPayload,
-    userMetadata?: JsonValue
-  ) => Promise<JsonValue>
-  verifyActionOffer?: (
-    namespace: string,
-    peerId: string,
-    requiredRoles: readonly string[],
-    wireMetadata?: JsonValue
-  ) => Promise<VerifyActionResult>
-  verifyActionPayload?: (
-    namespace: string,
-    peerId: string,
-    requiredRoles: readonly string[],
-    data: DataPayload,
-    wireMetadata?: JsonValue
-  ) => Promise<VerifyActionResult>
-  getPeerRoles?: (peerId: string) => string[]
-  getPeerUserId?: (peerId: string) => string
-  resolveSendTarget?: (target?: TargetPeers) => TargetPeers
-  resolveRequestTarget?: (target: string) => string | undefined
-  onUnauthorizedAction?: (namespace: string, peerId: string) => void
-}) => {
-  const [
-    makeAction,
-    makeInternalAction,
-    handleData,
-    clearPeer,
-    clearListeners
-  ] = initActionManager(
-    deps.getPeerIds,
-    deps.canReceiveFromPeer,
-    deps.onPeerError,
-    toPeerTransportGetter(deps.getTransport, deps.getPeer),
-    deps.broadcastInline,
-    deps.registerActionAuthority,
-    deps.signActionPayload,
-    deps.verifyActionOffer,
-    deps.verifyActionPayload,
-    deps.getPeerRoles,
-    deps.getPeerUserId,
-    deps.resolveSendTarget,
-    deps.resolveRequestTarget,
-    deps.onUnauthorizedAction,
-    deps.maxReceiveBytes
-  )
-  return {makeAction, makeInternalAction, handleData, clearPeer, clearListeners}
+  }
 }

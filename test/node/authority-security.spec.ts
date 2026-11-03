@@ -1,157 +1,236 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {
-  createRoomAuthority,
-  roles,
-  signRoleRevocation,
-  verifyRoleRevocation
-} from '../../packages/core/src/authority.ts'
+import {createRoomAuthority, roles} from '../../packages/core/src/authority.ts'
 import {
   ecdsaKeyAlgo,
   ecdsaSign,
-  ecdsaSignAlgo,
-  isLowSP256Signature,
-  p256N
+  isLowSP256Signature
 } from '../../packages/core/src/crypto.ts'
-import {createIdentityHandshake} from '../../packages/core/src/handshake.ts'
 import {
   createUserIdentity,
-  fromBase64Url,
-  getDefaultEndpointIdentity,
-  toBase64Url,
+  jwkToCompactPub,
   verifyWithP256
 } from '../../packages/core/src/identity.ts'
-import createRoom, {
-  getRoomSignalingBridge
-} from '../../packages/core/src/room.ts'
+import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
+import createRoom from '../../packages/core/src/room.ts'
+import {roleCertPayload} from '../../packages/core/src/signed-record.ts'
 import type {
   JsonValue,
   PeerHandle,
   RoleCertificate,
-  Room
+  RoomError,
+  UserIdentity
 } from '../../packages/core/src/types.ts'
 import {
-  definePlugin,
   encodeBytes,
-  toJson
+  fromBase64Url,
+  toBase64Url
 } from '../../packages/core/src/utils.ts'
-import {linkHandles} from './overlay-harness.ts'
-import {wait, waitFor} from './peer-harness.ts'
+import {
+  createLinkedHandlePair,
+  testEndpoint,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
-void test('S2: delegated or co-admin cannot demote root admin via cert replacement, revocation, or ban', async () => {
-  const rootUser = await createUserIdentity()
-  const modUser = await createUserIdentity()
+const p256N =
+  0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
+
+const ecdsaSignAlgo: EcdsaParams = {
+  name: 'ECDSA',
+  hash: 'SHA-256'
+}
+
+const toHighSSignatureB64 = (sigB64: string): string => {
+  const rawBytes = fromBase64Url(sigB64)
+  let s = 0n
+  for (let i = 32; i < 64; i++) {
+    s = (s << 8n) | BigInt(rawBytes[i]!)
+  }
+  let highS = p256N - s
+  const highBytes = rawBytes.slice()
+  for (let i = 63; i >= 32; i--) {
+    highBytes[i] = Number(highS & 0xffn)
+    highS >>= 8n
+  }
+  return toBase64Url(highBytes)
+}
+
+void test('S2: non-root moderator or co-root admin cannot demote root admin via cert replacement, revocation, or ban', async () => {
+  const [rootUser, coRootUser, modUser, guestUser] = await Promise.all([
+    createUserIdentity(),
+    createUserIdentity(),
+    createUserIdentity(),
+    createUserIdentity()
+  ])
+  const rootPeerId = testPeerId('s2-root-ep')
+  const coRootPeerId = testPeerId('s2-coroot-ep')
+  const modPeerId = testPeerId('s2-mod-ep')
+  const guestPeerId = testPeerId('s2-guest-ep')
   const s2RoomId = `s2-room~${rootUser.userId}`
 
   const rootAuth = createRoomAuthority({
-    selfId: 'root-ep',
+    selfId: rootPeerId,
     appId: 's2-app',
     initialRoomId: s2RoomId,
-    admin: {selfAsAdmin: true},
+    admin: {selfAsAdmin: true, admins: [coRootUser.userId]},
     getLocalUserIdentity: async () => rootUser
   })
-  const modAuth = createRoomAuthority({
-    selfId: 'mod-ep',
+  const coRootAuth = createRoomAuthority({
+    selfId: coRootPeerId,
     appId: 's2-app',
     initialRoomId: s2RoomId,
-    admin: {},
+    admin: {admins: [coRootUser.userId]},
+    getLocalUserIdentity: async () => coRootUser
+  })
+  const modAuth = createRoomAuthority({
+    selfId: modPeerId,
+    appId: 's2-app',
+    initialRoomId: s2RoomId,
+    admin: {admins: [coRootUser.userId]},
     getLocalUserIdentity: async () => modUser
   })
-  const guestUser = await createUserIdentity()
   const guestAuth = createRoomAuthority({
-    selfId: 'guest-ep',
+    selfId: guestPeerId,
     appId: 's2-app',
     initialRoomId: s2RoomId,
-    admin: {},
+    admin: {admins: [coRootUser.userId]},
     getLocalUserIdentity: async () => guestUser
   })
   await Promise.all([
     rootAuth.getAuthorityInfo(),
+    coRootAuth.getAuthorityInfo(),
     modAuth.getAuthorityInfo(),
     guestAuth.getAuthorityInfo()
   ])
 
-  // Root grants moderator + admin roles to modUser
+  // Root grants 'moderator' to modUser ('admin' is reserved exclusively for root admins)
+  await assert.rejects(
+    () => rootAuth.issueRoleCertificate(modUser.userId, ['admin', 'moderator']),
+    /'admin' role is reserved for room root admins/
+  )
   const modCert = await rootAuth.issueRoleCertificate(modUser.userId, [
-    'admin',
     'moderator'
   ])
   assert.equal(await modAuth.verifyAndApplyCert(modCert), true)
   assert.equal(await guestAuth.verifyAndApplyCert(modCert), true)
 
-  // Delegated admin cannot issue certificates at all, nor demote root
+  // Non-root moderator cannot issue certificates, revocations, bans, or unbans
   await assert.rejects(
-    () => modAuth.issueRoleCertificate(rootUser.userId, ['dj']),
+    () => modAuth.issueRoleCertificate(guestUser.userId, ['dj']),
     /insufficient authority/i
   )
   await assert.rejects(
     () => modAuth.issueRoleRevocation(rootUser.userId, 'admin'),
+    /insufficient authority/i
+  )
+  await assert.rejects(
+    () => modAuth.issuePeerModeration('ban', rootUser.userId),
+    /insufficient authority/i
+  )
+  await assert.rejects(
+    () => modAuth.issuePeerModeration('unban', rootUser.userId),
+    /insufficient authority/i
+  )
+
+  // Co-root admin cannot revoke 'admin' / '*' on rootUser or ban/unban rootUser
+  await assert.rejects(
+    () => coRootAuth.issueRoleRevocation(rootUser.userId, 'admin'),
     /cannot revoke a root admin/i
   )
   await assert.rejects(
-    () => modAuth.issuePeerBan(rootUser.userId),
+    () => coRootAuth.issueRoleRevocation(rootUser.userId),
+    /cannot revoke a root admin/i
+  )
+  await assert.rejects(
+    () => coRootAuth.issuePeerModeration('ban', rootUser.userId),
     /cannot ban a root admin/i
   )
+  await assert.rejects(
+    () => coRootAuth.issuePeerModeration('unban', rootUser.userId),
+    /cannot unban a root admin/i
+  )
 
-  // Even a forged RoleCertificate signed by modUser targeting rootUser with newer iat is rejected
-  const forgedPayload = toJson([
-    'trystero:auth:v1',
-    'role-cert',
-    1,
-    'forged-cert-id-123456',
-    's2-app',
-    s2RoomId,
-    rootUser.userId,
-    modUser.userId,
-    ['dj'],
-    Date.now() + 5_000
-  ])
-  const forgedSig = toBase64Url(await modUser.sign(encodeBytes(forgedPayload)))
-  const forgedCert = {
-    v: 1 as const,
-    certId: 'forged-cert-id-123456',
+  // Forged RoleCertificate signed by co-root targeting rootUser WITHOUT 'admin' role (attempting demotion) is rejected
+  const demotionUnsigned: Omit<RoleCertificate, 'sig'> = {
+    v: 1,
+    certId: 'forged-demotion-cert-1234',
+    issuerPubKey: jwkToCompactPub(coRootUser.signPubJwk),
+    subUserId: rootUser.userId,
     appId: 's2-app',
     roomId: s2RoomId,
-    subUserId: rootUser.userId,
-    issUserId: modUser.userId,
-    issPubKey: modUser.signPubJwk,
     roles: ['dj'],
-    iat: Date.now() + 5_000,
-    sig: forgedSig
-  } as unknown as RoleCertificate
-  assert.equal(await guestAuth.verifyAndApplyCert(forgedCert), false)
-  assert.equal(await rootAuth.verifyAndApplyCert(forgedCert), false)
-  assert.equal(rootAuth.getPeerRoles('root-ep').includes('admin'), true)
+    iat: Date.now() + 5_000
+  }
+  const demotionSig = toBase64Url(
+    await coRootUser.sign(encodeBytes(roleCertPayload(demotionUnsigned)))
+  )
+  const demotionCert: RoleCertificate = {...demotionUnsigned, sig: demotionSig}
+  assert.equal(await guestAuth.verifyAndApplyCert(demotionCert), false)
+  assert.equal(await rootAuth.verifyAndApplyCert(demotionCert), false)
+
+  // Forged RoleCertificate signed by non-root modUser is also rejected
+  const modForgedUnsigned: Omit<RoleCertificate, 'sig'> = {
+    v: 1,
+    certId: 'forged-mod-cert-5678',
+    issuerPubKey: jwkToCompactPub(modUser.signPubJwk),
+    subUserId: guestUser.userId,
+    appId: 's2-app',
+    roomId: s2RoomId,
+    roles: ['dj'],
+    iat: Date.now() + 5_000
+  }
+  const modForgedCert: RoleCertificate = {
+    ...modForgedUnsigned,
+    sig: toBase64Url(
+      await modUser.sign(encodeBytes(roleCertPayload(modForgedUnsigned)))
+    )
+  }
+  assert.equal(await guestAuth.verifyAndApplyCert(modForgedCert), false)
+  assert.equal(rootAuth.getPeerRoles(rootPeerId).includes('admin'), true)
 })
 
-void test('S11: multi-tab admin and multi-tab delegated moderator operate across tabs with zero signature failures', async () => {
-  const rootUser = await createUserIdentity()
-  const modUser = await createUserIdentity()
-  const targetUser = await createUserIdentity()
+void test('S11: multi-tab root admin and multi-tab moderator operate across tabs with zero signature failures', async () => {
+  const [rootUser, modUser, targetUser] = await Promise.all([
+    createUserIdentity(),
+    createUserIdentity(),
+    createUserIdentity()
+  ])
+  const rootTab1Peer = testPeerId('s11-root-tab-1')
+  const rootTab2Peer = testPeerId('s11-root-tab-2')
+  const modTab1Peer = testPeerId('s11-mod-tab-1')
+  const modTab2Peer = testPeerId('s11-mod-tab-2')
+  const observerPeer = testPeerId('s11-observer-1')
   const s11RoomId = `s11-room~${rootUser.userId}`
 
+  const peerUsers: Record<string, string> = {
+    [rootTab1Peer]: rootUser.userId,
+    [rootTab2Peer]: rootUser.userId,
+    [modTab1Peer]: modUser.userId,
+    [modTab2Peer]: modUser.userId,
+    [observerPeer]: targetUser.userId
+  }
+
   let sigFailures = 0
-  const mkAuth = (
-    selfId: string,
-    user: Awaited<ReturnType<typeof createUserIdentity>>,
-    selfAsAdmin = false
-  ) =>
+  const mkAuth = (selfId: string, user: UserIdentity, selfAsAdmin = false) =>
     createRoomAuthority({
       selfId,
       appId: 's11-app',
       initialRoomId: s11RoomId,
       admin: selfAsAdmin ? {selfAsAdmin: true} : {},
       getLocalUserIdentity: async () => user,
+      getKnownPeerUserId: pid => peerUsers[pid],
       onSignatureFailure: () => {
         sigFailures++
       }
     })
 
-  const rootTab1 = mkAuth('root-tab-1', rootUser, true)
-  const rootTab2 = mkAuth('root-tab-2', rootUser, true)
-  const modTab1 = mkAuth('mod-tab-1', modUser)
-  const modTab2 = mkAuth('mod-tab-2', modUser)
-  const observer = mkAuth('observer-1', targetUser)
+  const rootTab1 = mkAuth(rootTab1Peer, rootUser, true)
+  const rootTab2 = mkAuth(rootTab2Peer, rootUser, true)
+  const modTab1 = mkAuth(modTab1Peer, modUser)
+  const modTab2 = mkAuth(modTab2Peer, modUser)
+  const observer = mkAuth(observerPeer, targetUser)
   await Promise.all([
     rootTab1.getAuthorityInfo(),
     rootTab2.getAuthorityInfo(),
@@ -160,89 +239,141 @@ void test('S11: multi-tab admin and multi-tab delegated moderator operate across
     observer.getAuthorityInfo()
   ])
 
-  // Root Tab 2 grants 'admin' to modUser; Mod Tab 1 receives cert, Mod Tab 2 receives cert and issues ban
-  const modCert = await rootTab2.issueRoleCertificate(modUser.userId, ['admin'])
+  // Root Tab 2 grants 'moderator' to modUser; both moderator tabs can authorize role-gated actions
+  const modCert = await rootTab2.issueRoleCertificate(modUser.userId, [
+    'moderator'
+  ])
   assert.equal(await modTab1.verifyAndApplyCert(modCert), true)
   assert.equal(await modTab2.verifyAndApplyCert(modCert), true)
   assert.equal(await observer.verifyAndApplyCert(modCert), true)
+  assert.equal(observer.authorizePeerAction(modTab1Peer, ['moderator']), true)
+  assert.equal(observer.authorizePeerAction(modTab2Peer, ['moderator']), true)
 
-  const banRec = await modTab2.issuePeerBan(targetUser.userId, {reason: 'test'})
-  assert.equal(await observer.verifyAndApplyBan(banRec), true)
+  // Root Tab 2 bans targetUser; Root Tab 1 unbans targetUser; observer converges cleanly with 0 sig failures
+  const banRec = await rootTab2.issuePeerModeration('ban', targetUser.userId, {
+    reason: 'test'
+  })
+  assert.equal(await rootTab1.verifyAndApplyModeration(banRec), true)
+  assert.equal(await observer.verifyAndApplyModeration(banRec), true)
   assert.equal(observer.isPeerBanned(targetUser.userId), true)
+
+  const unbanRec = await rootTab1.issuePeerModeration(
+    'unban',
+    targetUser.userId
+  )
+  assert.equal(await observer.verifyAndApplyModeration(unbanRec), true)
+  assert.equal(observer.isPeerBanned(targetUser.userId), false)
   assert.equal(sigFailures, 0)
 })
 
-void test('S12: concurrent mutual bans/revocations between two delegated admins converge regardless of arrival order', async () => {
-  const rootUser = await createUserIdentity()
-  const adminA = await createUserIdentity()
-  const adminB = await createUserIdentity()
-  const observer1User = await createUserIdentity()
-  const observer2User = await createUserIdentity()
-  const s12RoomId = `s12-room~${rootUser.userId}`
+void test('S12: concurrent conflicting moderations and revocations between two root admins converge regardless of arrival order', async () => {
+  const [rootA, rootB, target1, target2, observer1User, observer2User] =
+    await Promise.all([
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity()
+    ])
+  const s12RoomId = `s12-room~${rootA.userId}`
 
-  const mk = (
-    selfId: string,
-    user: Awaited<ReturnType<typeof createUserIdentity>>,
-    selfAsAdmin = false
-  ) =>
+  const mk = (label: string, user: UserIdentity) =>
     createRoomAuthority({
-      selfId,
+      selfId: testPeerId(label),
       appId: 's12-app',
       initialRoomId: s12RoomId,
-      admin: selfAsAdmin ? {selfAsAdmin: true} : {},
+      admin: {admins: [rootA.userId, rootB.userId]},
       getLocalUserIdentity: async () => user
     })
 
-  const root = mk('root-ep', rootUser, true)
-  const authA = mk('admin-a', adminA)
-  const authB = mk('admin-b', adminB)
-  const obs1 = mk('obs-1', observer1User)
-  const obs2 = mk('obs-2', observer2User)
+  const authA = mk('s12-root-a', rootA)
+  const authB = mk('s12-root-b', rootB)
+  const obs1 = mk('s12-obs-1', observer1User)
+  const obs2 = mk('s12-obs-2', observer2User)
   await Promise.all([
-    root.getAuthorityInfo(),
     authA.getAuthorityInfo(),
     authB.getAuthorityInfo(),
     obs1.getAuthorityInfo(),
     obs2.getAuthorityInfo()
   ])
 
-  const certA = await root.issueRoleCertificate(adminA.userId, ['admin'])
-  const certB = await root.issueRoleCertificate(adminB.userId, ['admin'])
+  const certT1 = await authA.issueRoleCertificate(target1.userId, [
+    'dj',
+    'speaker'
+  ])
+  const certT2 = await authB.issueRoleCertificate(target2.userId, [
+    'dj',
+    'speaker'
+  ])
   for (const node of [authA, authB, obs1, obs2]) {
-    await node.verifyAndApplyCert(certA)
-    await node.verifyAndApplyCert(certB)
+    await node.verifyAndApplyCert(certT1)
+    await node.verifyAndApplyCert(certT2)
   }
 
-  // Admin A bans Admin B first (earlier timestamp), Admin B concurrently bans Admin A (later timestamp)
-  const banB = await authA.issuePeerBan(adminB.userId, {reason: 'first'})
+  // Conflicting moderations on target1 (ban first, then unban) and target2 (unban first, then ban), plus revocations
+  const banT1 = await authA.issuePeerModeration('ban', target1.userId, {
+    reason: 'early-ban'
+  })
+  const unbanT2 = await authB.issuePeerModeration('unban', target2.userId)
+  const revDjT1 = await authA.issueRoleRevocation(target1.userId, 'dj')
   await wait(5)
-  const banA = await authB.issuePeerBan(adminA.userId, {reason: 'second'})
+  const unbanT1 = await authB.issuePeerModeration('unban', target1.userId)
+  const banT2 = await authA.issuePeerModeration('ban', target2.userId, {
+    reason: 'late-ban'
+  })
+  const revSpeakerT1 = await authB.issueRoleRevocation(
+    target1.userId,
+    'speaker'
+  )
 
-  // Observer 1 sees (banB, then banA); Observer 2 sees (banA, then banB)!
-  await obs1.verifyAndApplyBan(banB)
-  await obs1.verifyAndApplyBan(banA)
+  // Observer 1 receives in causal order; Observer 2 receives in reverse causal order!
+  await obs1.verifyAndApplyModeration(banT1)
+  await obs1.verifyAndApplyModeration(unbanT1)
+  await obs1.verifyAndApplyModeration(unbanT2)
+  await obs1.verifyAndApplyModeration(banT2)
+  await obs1.verifyAndApplyRevocation(revDjT1)
+  await obs1.verifyAndApplyRevocation(revSpeakerT1)
 
-  await obs2.verifyAndApplyBan(banA)
-  await obs2.verifyAndApplyBan(banB)
+  await obs2.verifyAndApplyModeration(unbanT1)
+  await obs2.verifyAndApplyModeration(banT1)
+  await obs2.verifyAndApplyModeration(banT2)
+  await obs2.verifyAndApplyModeration(unbanT2)
+  await obs2.verifyAndApplyRevocation(revSpeakerT1)
+  await obs2.verifyAndApplyRevocation(revDjT1)
 
   assert.equal(
-    obs1.isPeerBanned(adminA.userId),
-    obs2.isPeerBanned(adminA.userId)
+    obs1.isPeerBanned(target1.userId),
+    obs2.isPeerBanned(target1.userId)
   )
   assert.equal(
-    obs1.isPeerBanned(adminB.userId),
-    obs2.isPeerBanned(adminB.userId)
+    obs1.isPeerBanned(target2.userId),
+    obs2.isPeerBanned(target2.userId)
   )
-  assert.equal(obs1.isPeerBanned(adminB.userId), true)
-  assert.equal(obs1.isPeerBanned(adminA.userId), false)
+  assert.equal(obs1.isPeerBanned(target1.userId), false)
+  assert.equal(obs1.isPeerBanned(target2.userId), true)
+  assert.equal(obs1.getBanReason(target2.userId), 'late-ban')
+  assert.equal(obs2.getBanReason(target2.userId), 'late-ban')
+  assert.deepEqual(
+    obs1.getPeerRoles(target1.userId),
+    obs2.getPeerRoles(target1.userId)
+  )
+  assert.deepEqual(obs1.getPeerRoles(target1.userId), [])
 })
 
-void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and chunked role-gated actions verify signature once', async () => {
-  const adminUser = await createUserIdentity()
-  const attackerUser = await createUserIdentity()
+void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and role-gated actions perform zero per-message signature verifies once cert is synced', async () => {
+  const [adminUser, attackerUser, modUser, receiverUser] = await Promise.all([
+    createUserIdentity(),
+    createUserIdentity(),
+    createUserIdentity(),
+    createUserIdentity()
+  ])
+  const hostEp = testEndpoint('s13-host-ep')
+  const atkEp = testEndpoint('s13-atk-ep')
 
   let hostReg: ((p: PeerHandle, id: string) => void) | null = null
   let atkReg: ((p: PeerHandle, id: string) => void) | null = null
+  const hostErrors: RoomError[] = []
 
   const hostRoom = createRoom(
     f => {
@@ -251,18 +382,18 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
     () => {},
     () => {},
     {
-      selfId: 'host-s13',
+      endpointIdentity: hostEp,
       appId: 's13-app',
       roomId: 's13-fixed-room',
       identity: adminUser,
       use: [roles({admins: [adminUser.userId]})]
     }
   )
-  const rawAuthProbe = definePlugin('rawAuthProbe', {
-    setup: kernel => ({
-      sendAuth: kernel.makeInternalAction<JsonValue>('auth').send
-    })
-  })
+  hostRoom.onError(err => hostErrors.push(err))
+
+  const rawAuthProbe = makeInternalPlugin('roles', kernel => ({
+    sendAuth: kernel.makeInternalAction<JsonValue>('auth').send
+  }))
   const atkRoom = createRoom(
     f => {
       atkReg = f
@@ -270,7 +401,7 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
     () => {},
     () => {},
     {
-      selfId: 'atk-s13',
+      endpointIdentity: atkEp,
       appId: 's13-app',
       roomId: 's13-fixed-room',
       identity: attackerUser,
@@ -279,21 +410,20 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
   )
 
   try {
-    const {peerA, peerB} = linkHandles()
-    hostReg!(peerA, 'atk-s13')
-    atkReg!(peerB, 'host-s13')
-    await waitFor(() => 'atk-s13' in hostRoom.getPeers(), 2_000)
+    const {peerA, peerB} = createLinkedHandlePair()
+    hostReg!(peerA, atkEp.peerId)
+    atkReg!(peerB, hostEp.peerId)
+    await waitFor(() => atkEp.peerId in hostRoom.getPeers(), 2_000)
 
-    // Send a sync message containing 50 garbage certs from atkRoom over internal 'auth' action
+    // Flood 50 garbage certs from atkRoom over internal 'auth' action -> kicked after <= 8 failures
     const garbageCerts = Array.from({length: 50}, (_, i) => ({
       v: 1,
       certId: `bad-${i}`,
+      issuerPubKey: jwkToCompactPub(adminUser.signPubJwk),
+      subUserId: attackerUser.userId,
       appId: 'wrong-app',
       roomId: 's13-fixed-room',
-      subUserId: attackerUser.userId,
-      issUserId: adminUser.userId,
-      issPubKey: adminUser.signPubJwk,
-      roles: ['admin'],
+      roles: ['moderator'],
       iat: Date.now(),
       sig: 'A'.repeat(86)
     }))
@@ -301,93 +431,107 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
       .sendAuth({t: 'sync', certs: garbageCerts} as unknown as JsonValue)
       .catch(() => {})
 
-    await waitFor(() => !('atk-s13' in hostRoom.getPeers()), 2_000)
-    assert.equal('atk-s13' in hostRoom.getPeers(), false)
+    await waitFor(() => !(atkEp.peerId in hostRoom.getPeers()), 2_000)
+    assert.equal(atkEp.peerId in hostRoom.getPeers(), false)
+    assert.equal(
+      hostErrors.some(
+        e =>
+          e.code === 'peer-error' &&
+          /excessive invalid authority records/.test(e.message)
+      ),
+      true
+    )
 
-    // Also verify verifiedActionSigCache deduplicates ECDSA signature verification between offer and payload
-    const receiverUser = await createUserIdentity()
-    const senderEp = await getDefaultEndpointIdentity(undefined, 's13-sender')
-    const recvEp = await getDefaultEndpointIdentity(undefined, 's13-recv')
-    let r1Reg: ((p: PeerHandle, id: string) => void | Promise<void>) | null =
-      null
-    let r2Reg: ((p: PeerHandle, id: string) => void | Promise<void>) | null =
-      null
+    // Verify chunked (40 KiB) + inline role-gated actions do zero per-message ECDSA verifies once RoleCertificate is synced
+    const adminEp = testEndpoint('s13-admin-ep')
+    const senderEp = testEndpoint('s13-sender-ep')
+    const recvEp = testEndpoint('s13-recv-ep')
     const s13RoomId = `s13-room~${adminUser.userId}`
-    let senderRoomRef: Room | null = null
-    let receiverRoomRef: Room | null = null
-    const senderHs = createIdentityHandshake({
-      endpointIdentityP: Promise.resolve(senderEp),
-      appId: 's13-app',
-      roomId: s13RoomId,
-      getUserIdentity: async () => adminUser,
-      getPeerHandle: pid =>
-        getRoomSignalingBridge(senderRoomRef!)?.getPeerHandle(pid),
-      onVerified: (pid, v) =>
-        getRoomSignalingBridge(senderRoomRef!)?.onPeerIdentityVerified(pid, v)
-    })
-    const recvHs = createIdentityHandshake({
-      endpointIdentityP: Promise.resolve(recvEp),
-      appId: 's13-app',
-      roomId: s13RoomId,
-      getUserIdentity: async () => receiverUser,
-      getPeerHandle: pid =>
-        getRoomSignalingBridge(receiverRoomRef!)?.getPeerHandle(pid),
-      onVerified: (pid, v) =>
-        getRoomSignalingBridge(receiverRoomRef!)?.onPeerIdentityVerified(pid, v)
-    })
-    const senderRoom = createRoom(
+
+    let adminReg: ((p: PeerHandle, id: string) => void) | null = null
+    let senderReg: ((p: PeerHandle, id: string) => void) | null = null
+    let recvReg: ((p: PeerHandle, id: string) => void) | null = null
+
+    const adminRoom = createRoom(
       f => {
-        r1Reg = f
+        adminReg = f
       },
       () => {},
       () => {},
       {
-        selfId: senderEp.peerId,
-        endpointIdentityP: Promise.resolve(senderEp),
+        endpointIdentity: adminEp,
         appId: 's13-app',
         roomId: s13RoomId,
-        verifyPeerIdentity: true,
         identity: adminUser,
-        onPeerHandshake: senderHs.compose(),
         use: [roles({selfAsAdmin: true})]
       }
     )
-    senderRoomRef = senderRoom
-    const receiverRoom = createRoom(
+    const senderRoom = createRoom(
       f => {
-        r2Reg = f
+        senderReg = f
       },
       () => {},
       () => {},
       {
-        selfId: recvEp.peerId,
-        endpointIdentityP: Promise.resolve(recvEp),
+        endpointIdentity: senderEp,
         appId: 's13-app',
         roomId: s13RoomId,
-        verifyPeerIdentity: true,
-        identity: receiverUser,
-        onPeerHandshake: recvHs.compose(),
+        identity: modUser,
         use: [roles()]
       }
     )
-    receiverRoomRef = receiverRoom
+    const receiverRoom = createRoom(
+      f => {
+        recvReg = f
+      },
+      () => {},
+      () => {},
+      {
+        endpointIdentity: recvEp,
+        appId: 's13-app',
+        roomId: s13RoomId,
+        identity: receiverUser,
+        use: [roles()]
+      }
+    )
+
     const senderBig = senderRoom.makeAction<Uint8Array>('big-act', {
-      roles: ['admin']
+      roles: ['moderator']
     })
-    let gotBytes = 0
+    const receivedByteLengths: number[] = []
     const recvBig = receiverRoom.makeAction<Uint8Array>('big-act', {
-      roles: ['admin']
+      roles: ['moderator']
     })
     recvBig.onMessage(data => {
-      gotBytes = data.byteLength
+      receivedByteLengths.push(data.byteLength)
     })
 
-    const {peerA: p1, peerB: p2} = linkHandles()
-    void r1Reg!(p1, recvEp.peerId)
-    void r2Reg!(p2, senderEp.peerId)
-    await waitFor(() => recvEp.peerId in senderRoom.getPeers(), 2_000)
+    // Connect admin <-> sender, admin <-> receiver, and sender <-> receiver
+    const linkAdminSender = createLinkedHandlePair()
+    adminReg!(linkAdminSender.peerA, senderEp.peerId)
+    senderReg!(linkAdminSender.peerB, adminEp.peerId)
+
+    const linkAdminRecv = createLinkedHandlePair()
+    adminReg!(linkAdminRecv.peerA, recvEp.peerId)
+    recvReg!(linkAdminRecv.peerB, adminEp.peerId)
+
+    const linkSenderRecv = createLinkedHandlePair()
+    senderReg!(linkSenderRecv.peerA, recvEp.peerId)
+    recvReg!(linkSenderRecv.peerB, senderEp.peerId)
+
     await waitFor(
-      () => receiverRoom.getRoles(senderEp.peerId).includes('admin'),
+      () =>
+        senderEp.peerId in adminRoom.getPeers() &&
+        recvEp.peerId in adminRoom.getPeers() &&
+        recvEp.peerId in senderRoom.getPeers(),
+      2_000
+    )
+
+    await adminRoom.grantRole(modUser.userId, 'moderator')
+    await waitFor(
+      () =>
+        senderRoom.getRoles(modUser.userId).includes('moderator') &&
+        receiverRoom.getRoles(modUser.userId).includes('moderator'),
       2_000
     )
 
@@ -399,24 +543,33 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ch
     }) as typeof crypto.subtle.verify
 
     try {
-      const payload = new Uint8Array(40 * 1024).fill(7) // multi-chunk (> 16 KiB)
-      await senderBig.send(payload)
-      await waitFor(() => gotBytes === payload.byteLength, 2_000)
-      // Cert cached + action sig verified once at offer, cached on final payload => <= 2 verify calls total
-      assert.ok(
-        verifyCount <= 2,
-        `expected <= 2 WebCrypto verify calls for chunked role action, got ${verifyCount}`
+      const payload = new Uint8Array(40 * 1024).fill(7)
+      await senderBig.send(payload, {target: recvEp.peerId})
+      await senderBig.send(new Uint8Array([1, 2, 3]), {target: recvEp.peerId})
+      await senderBig.send(new Uint8Array([4, 5, 6, 7]), {
+        target: recvEp.peerId
+      })
+      await waitFor(() => receivedByteLengths.length === 3, 2_000)
+      assert.deepEqual(receivedByteLengths, [40 * 1024, 3, 4])
+      assert.equal(
+        verifyCount,
+        0,
+        `expected 0 per-message WebCrypto verify calls once RoleCertificate is synced, got ${verifyCount}`
       )
     } finally {
       crypto.subtle.verify = origVerify
-      await Promise.all([senderRoom.leave(), receiverRoom.leave()])
+      await Promise.all([
+        adminRoom.leave(),
+        senderRoom.leave(),
+        receiverRoom.leave()
+      ])
     }
   } finally {
     await Promise.all([hostRoom.leave(), atkRoom.leave()])
   }
 })
 
-void test('S17: high-S P-256 signatures are rejected and revocation dedupe is immune to signature malleability', async () => {
+void test('S17: high-S P-256 signatures are rejected and revocation/moderation dedupe is immune to signature malleability', async () => {
   const kp = await crypto.subtle.generateKey(ecdsaKeyAlgo, true, [
     'sign',
     'verify'
@@ -451,55 +604,45 @@ void test('S17: high-S P-256 signatures are rejected and revocation dedupe is im
   )
   assert.equal(await verifyWithP256(highSig, msg, pubJwk), false)
 
-  // Verify RoleRevocationRecord also rejects high-S and deduplicates by content
-  const rootUser = await createUserIdentity()
-  const targetUser = await createUserIdentity()
+  // Verify RoleRevocationRecord and PeerModerationRecord reject high-S signatures and deduplicate cleanly
+  const [rootUser, targetUser] = await Promise.all([
+    createUserIdentity(),
+    createUserIdentity()
+  ])
   const s17RoomId = `s17-room~${rootUser.userId}`
-  const auth = createRoomAuthority({
-    selfId: 'root-s17',
+  const issuerAuth = createRoomAuthority({
+    selfId: testPeerId('s17-root'),
     appId: 's17-app',
     initialRoomId: s17RoomId,
     admin: {selfAsAdmin: true},
     getLocalUserIdentity: async () => rootUser
   })
-  await auth.getAuthorityInfo()
-  const rootCert = await auth.issueRoleCertificate(rootUser.userId, ['admin'])
-  const rev = await signRoleRevocation(
-    rootUser.sign,
-    rootUser.signPubJwk,
-    rootCert,
-    {
-      appId: 's17-app',
-      roomId: s17RoomId,
-      issuerUserId: rootUser.userId,
-      targetUserId: targetUser.userId,
-      role: 'dj',
-      seq: 1
-    }
-  )
-  const rawRevBytes = fromBase64Url(rev.sig)
-  let revS = 0n
-  for (let i = 32; i < 64; i++) {
-    revS = (revS << 8n) | BigInt(rawRevBytes[i]!)
-  }
-  let revHighS = p256N - revS
-  const highRevBytes = rawRevBytes.slice()
-  for (let i = 63; i >= 32; i--) {
-    highRevBytes[i] = Number(revHighS & 0xffn)
-    revHighS >>= 8n
-  }
-  const malleableRev = {...rev, sig: toBase64Url(highRevBytes)}
+  const observerAuth = createRoomAuthority({
+    selfId: testPeerId('s17-observer'),
+    appId: 's17-app',
+    initialRoomId: s17RoomId,
+    admin: {}
+  })
+  await Promise.all([
+    issuerAuth.getAuthorityInfo(),
+    observerAuth.getAuthorityInfo()
+  ])
 
-  assert.equal(
-    await verifyRoleRevocation(
-      malleableRev,
-      's17-app',
-      s17RoomId,
-      new Set([rootUser.userId])
-    ),
-    false
-  )
-  assert.equal(await auth.verifyAndApplyRevocation(rev), true)
-  assert.equal(await auth.verifyAndApplyRevocation(rev), false)
-  assert.equal(await auth.verifyAndApplyRevocation(malleableRev), false)
+  const rev = await issuerAuth.issueRoleRevocation(targetUser.userId, 'dj')
+  const malleableRev = {...rev, sig: toHighSSignatureB64(rev.sig)}
+
+  assert.equal(await observerAuth.verifyAndApplyRevocation(malleableRev), false)
+  assert.equal(await observerAuth.verifyAndApplyRevocation(rev), true)
+  assert.equal(await observerAuth.verifyAndApplyRevocation(rev), false)
+  assert.equal(await observerAuth.verifyAndApplyRevocation(malleableRev), false)
+
+  const mod = await issuerAuth.issuePeerModeration('ban', targetUser.userId, {
+    reason: 'malleability-test'
+  })
+  const malleableMod = {...mod, sig: toHighSSignatureB64(mod.sig)}
+
+  assert.equal(await observerAuth.verifyAndApplyModeration(malleableMod), false)
+  assert.equal(await observerAuth.verifyAndApplyModeration(mod), true)
+  assert.equal(await observerAuth.verifyAndApplyModeration(mod), false)
+  assert.equal(await observerAuth.verifyAndApplyModeration(malleableMod), false)
 })

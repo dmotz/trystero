@@ -6,15 +6,24 @@ import {
   turn
 } from './peer-harness.ts'
 import {createActionWireManager} from '../../packages/core/src/action-wire.ts'
-import {createActionManager} from '../../packages/core/src/actions.ts'
+import {
+  type ActionError,
+  createActionManager
+} from '../../packages/core/src/actions.ts'
+import {
+  type PeerDataTransport,
+  createDirectPeerTransport
+} from '../../packages/core/src/peer-transport.ts'
+import type {PeerHandle} from '../../packages/core/src/types.ts'
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 
 const encoder = new TextEncoder()
+const decoder = new TextDecoder()
 const chunkSize = 16 * 1024 - 14
 
 const dataFrame = (id: number, offset: number, length: number) => {
   const bytes = new Uint8Array(14 + length)
-  bytes[0] = 2
+  bytes[0] = 3
   bytes[1] = 2
   const view = new DataView(bytes.buffer)
   view.setUint32(2, id)
@@ -22,31 +31,75 @@ const dataFrame = (id: number, offset: number, length: number) => {
   bytes.fill(7, 14)
   return bytes.buffer
 }
+
 const receiver = (maxReceiveBytes = 256 * 1024 ** 2) => {
-  const controls: {peerId: string; kind: number}[] = []
+  const controls: {peerId: string; kind: number; reason?: string}[] = []
   const destroyed: string[] = []
+  const transports = new Map<string, PeerDataTransport>()
   const wire = createActionWireManager({
     onPeerError: id => {
       destroyed.push(id)
+      transports.delete(id)
       wire.clearPeer(id)
     },
-    getPeer: peerId =>
-      ({
-        sendData: (bytes: Uint8Array) =>
-          controls.push({peerId, kind: (bytes[1] ?? 0) & 15}),
-        destroy: () => destroyed.push(peerId)
-      }) as never,
+    resolveTransport: peerId => {
+      let transport = transports.get(peerId)
+      if (!transport) {
+        transport = {
+          isOpen: true,
+          bufferedAmount: 0,
+          sendFrame: (bytes: Uint8Array) => {
+            const kind = (bytes[1] ?? 0) & 15
+            const reason =
+              kind === 4 && bytes.byteLength > 6
+                ? decoder.decode(bytes.subarray(6))
+                : undefined
+            controls.push(
+              reason === undefined ? {peerId, kind} : {peerId, kind, reason}
+            )
+          },
+          waitForDrain: () => true,
+          close: () => destroyed.push(peerId)
+        }
+        transports.set(peerId, transport)
+      }
+      return transport
+    },
     getPeerIds: () => [],
     canReceiveFromPeer: () => true,
-    throwIfAborted: () => {},
+    checkAborted: () => {},
     maxReceiveBytes
   })
   return {wire, controls, destroyed}
 }
 
-void test('late internal action registration enforces its static cap on queued payloads', t => {
+void test('registered wire action enforces maxPayloadBytes on pre-listener and live payloads while unregistered actions never buffer', t => {
   const {wire, controls, destroyed} = receiver()
   t.after(() => wire.clearPeer('peer'))
+
+  // Unregistered actions drop inline frames and immediately reject bulk offers without buffering
+  wire.handleData('peer', start(0, 20_000, {type: 'unregistered-ctrl'}))
+  wire.handleData(
+    'peer',
+    start(1, 512, {
+      type: 'unregistered-ctrl',
+      payload: new Uint8Array(512)
+    })
+  )
+  const lateSizes: number[] = []
+  wire
+    .makeWireAction('unregistered-ctrl', {maxPayloadBytes: 1024})
+    .onMessage(data => {
+      lateSizes.push((data as Uint8Array).length)
+    })
+  assert.deepEqual(lateSizes, [])
+  assert.deepEqual(controls, [
+    {peerId: 'peer', kind: 4, reason: 'unregistered action'}
+  ])
+  controls.length = 0
+
+  // Registered action without listener yet enforces static maxPayloadBytes immediately and buffers valid inline payloads
+  const control = wire.makeWireAction('control', {maxPayloadBytes: 1024})
   wire.handleData('peer', start(0, 20_000, {type: 'control'}))
   wire.handleData(
     'peer',
@@ -55,16 +108,6 @@ void test('late internal action registration enforces its static cap on queued p
       payload: new Uint8Array(1025)
     })
   )
-  const sizes: number[] = []
-  wire
-    .makeInternalAction('control', {maxPayloadBytes: 1024})
-    .onMessage(data => {
-      assert.ok(data instanceof Uint8Array)
-      sizes.push(data.length)
-    })
-  assert.deepEqual(sizes, [])
-  assert.deepEqual(controls, [{peerId: 'peer', kind: 4}])
-  const timer = t.mock.method(globalThis, 'setTimeout')
   wire.handleData(
     'peer',
     start(2, 1024, {
@@ -72,9 +115,272 @@ void test('late internal action registration enforces its static cap on queued p
       payload: new Uint8Array(1024)
     })
   )
+
+  const sizes: number[] = []
+  control.onMessage(data => {
+    assert.ok(data instanceof Uint8Array)
+    sizes.push(data.length)
+  })
   assert.deepEqual(sizes, [1024])
+  assert.equal(controls.length, 1)
+  assert.equal(controls[0]!.kind, 4)
+
+  const timer = t.mock.method(globalThis, 'setTimeout')
+  wire.handleData(
+    'peer',
+    start(3, 1024, {
+      type: 'control',
+      payload: new Uint8Array(1024)
+    })
+  )
+  assert.deepEqual(sizes, [1024, 1024])
   assert.equal(timer.mock.callCount(), 0)
   assert.deepEqual(destroyed, [])
+})
+
+void test('Q9: pre-listener inline ring buffer holds 32 drop-oldest messages with 10s TTL for registered actions only, decoupled from 64 bulk slots', t => {
+  t.mock.timers.enable({apis: ['setTimeout', 'Date']})
+  const {wire, controls, destroyed} = receiver()
+  t.after(() => wire.clearPeer('peer'))
+
+  // 1. Unregistered inline spam (200 frames) and bulk offers (100 frames) allocate zero slots
+  for (let i = 0; i < 200; i++) {
+    wire.handleData(
+      'peer',
+      start(i, 4, {
+        type: 'never-registered',
+        payload: encoder.encode(`u${i}`),
+        format: 0
+      })
+    )
+  }
+  for (let i = 0; i < 100; i++) {
+    wire.handleData('peer', start(i, 20_000, {type: 'never-registered'}))
+  }
+  assert.equal(controls.length, 100)
+  assert.ok(
+    controls.every(c => c.kind === 4 && c.reason === 'unregistered action')
+  )
+  const neverDelivered: unknown[] = []
+  wire.makeWireAction('never-registered').onMessage(d => neverDelivered.push(d))
+  assert.deepEqual(neverDelivered, [])
+  controls.length = 0
+
+  // 2. Saturate all 64 per-peer bulk transfer slots on a registered action ('bulk-hold')
+  const bulkHold = wire.makeWireAction('bulk-hold')
+  for (let id = 0; id < 64; id++) {
+    wire.handleData('peer', start(id, 20_000, {type: 'bulk-hold'}))
+  }
+  assert.equal(controls.length, 0)
+  // 65th bulk offer on the same peer is rejected because per-peer bulk slots (64) are full
+  wire.handleData('peer', start(64, 20_000, {type: 'bulk-hold'}))
+  assert.equal(controls.length, 1)
+  assert.equal(controls[0]!.kind, 4)
+  controls.length = 0
+
+  // 3. Even with all 64 per-peer bulk slots saturated, registered 'ring-chat' buffers 32 drop-oldest inline messages!
+  const ringChat = wire.makeWireAction<number>('ring-chat')
+  for (let i = 0; i < 40; i++) {
+    const body = encoder.encode(JSON.stringify(i))
+    wire.handleData(
+      'peer',
+      start(0, body.byteLength, {
+        type: 'ring-chat',
+        payload: body,
+        format: 1
+      })
+    )
+  }
+  const ringDelivered: number[] = []
+  ringChat.onMessage(val => ringDelivered.push(val))
+  assert.equal(ringDelivered.length, 32)
+  assert.deepEqual(
+    ringDelivered,
+    Array.from({length: 32}, (_, idx) => idx + 8)
+  )
+
+  // Clear 'peer' and verify the reverse direction: filling 32 pre-listener inline slots does NOT consume any of the 64 bulk slots
+  wire.clearPeer('peer')
+  controls.length = 0
+  const preInline = wire.makeWireAction<string>('pre-inline')
+  for (let i = 0; i < 40; i++) {
+    const body = encoder.encode(`msg-${i}`)
+    wire.handleData(
+      'peer',
+      start(0, body.byteLength, {
+        type: 'pre-inline',
+        payload: body,
+        format: 0
+      })
+    )
+  }
+  for (let id = 0; id < 64; id++) {
+    wire.handleData('peer', start(100 + id, 20_000, {type: 'bulk-hold'}))
+  }
+  assert.equal(
+    controls.length,
+    0,
+    '32 buffered pre-listener inline frames must not consume any of the 64 bulk slots'
+  )
+  wire.handleData('peer', start(200, 20_000, {type: 'bulk-hold'}))
+  assert.equal(controls.length, 1)
+  assert.equal(controls[0]!.kind, 4)
+  void bulkHold
+  void preInline
+
+  // 4. 10s TTL expiry on pre-listener inline ring buffer
+  const ttlAction = wire.makeWireAction<string>('ttl-chat')
+  const earlyBody = encoder.encode('expired-msg')
+  wire.handleData(
+    'peer',
+    start(0, earlyBody.byteLength, {
+      type: 'ttl-chat',
+      payload: earlyBody,
+      format: 0
+    })
+  )
+  t.mock.timers.tick(6_000)
+  const freshBody = encoder.encode('fresh-msg')
+  wire.handleData(
+    'peer',
+    start(0, freshBody.byteLength, {
+      type: 'ttl-chat',
+      payload: freshBody,
+      format: 0
+    })
+  )
+  t.mock.timers.tick(5_000) // early-msg is 11s old (> 10s TTL); fresh-msg is 5s old (<= 10s TTL)
+
+  const ttlDelivered: string[] = []
+  ttlAction.onMessage(msg => ttlDelivered.push(msg))
+  assert.deepEqual(ttlDelivered, ['fresh-msg'])
+  assert.deepEqual(destroyed, [])
+})
+
+void test('Q11: concurrent in-flight incoming requests per peer are capped at 64', async () => {
+  const transportsLeft = new Map<string, PeerDataTransport>()
+  const transportsRight = new Map<string, PeerDataTransport>()
+
+  const makeTransport = (
+    cache: Map<string, PeerDataTransport>,
+    fromPeerId: string,
+    deliver: (from: string, buf: ArrayBuffer) => void
+  ): PeerDataTransport => {
+    let t = cache.get(fromPeerId)
+    if (!t) {
+      t = {
+        isOpen: true,
+        bufferedAmount: 0,
+        sendFrame: bytes => deliver(fromPeerId, bytes.slice().buffer),
+        waitForDrain: () => true
+      }
+      cache.set(fromPeerId, t)
+    }
+    return t
+  }
+
+  const attacker = createActionManager({
+    onPeerError: (id, err) => attacker.clearPeer(id, err),
+    getTransport: id =>
+      makeTransport(transportsLeft, id, (_to, buf) =>
+        server.handleData('attacker', buf)
+      ),
+    getPeerIds: () => ['server'],
+    canReceiveFromPeer: () => true
+  })
+
+  const honest = createActionManager({
+    onPeerError: (id, err) => honest.clearPeer(id, err),
+    getTransport: id =>
+      makeTransport(transportsLeft, `honest->${id}`, (_to, buf) =>
+        server.handleData('honest', buf)
+      ),
+    getPeerIds: () => ['server'],
+    canReceiveFromPeer: () => true
+  })
+
+  const server = createActionManager({
+    onPeerError: (id, err) => server.clearPeer(id, err),
+    getTransport: peerId =>
+      makeTransport(transportsRight, peerId, (to, buf) => {
+        if (to === 'attacker') {
+          attacker.handleData('server', buf)
+        } else {
+          honest.handleData('server', buf)
+        }
+      }),
+    getPeerIds: () => ['attacker', 'honest'],
+    canReceiveFromPeer: () => true
+  })
+
+  try {
+    const resolvers: Array<(val: number) => void> = []
+    let handlerCalls = 0
+    const serverRpc = server.makeAction<number, number>('rpc', {
+      kind: 'request'
+    })
+    serverRpc.onRequest((n, ctx) => {
+      handlerCalls++
+      if (ctx.peerId === 'honest') {
+        return n * 10
+      }
+      return new Promise<number>(resolve => {
+        resolvers.push(resolve)
+      })
+    })
+
+    const attackerRpc = attacker.makeAction<number, number>('rpc', {
+      kind: 'request'
+    })
+    const honestRpc = honest.makeAction<number, number>('rpc', {
+      kind: 'request'
+    })
+
+    // 64 concurrent in-flight requests from 'attacker' are admitted
+    const inFlight = Array.from({length: 64}, (_, i) =>
+      attackerRpc.request(i, {target: 'server', timeoutMs: 2_000})
+    )
+    inFlight.forEach(p => void p.catch(() => {}))
+    await turn()
+    assert.equal(resolvers.length, 64)
+    assert.equal(handlerCalls, 64)
+
+    // 65th concurrent request from 'attacker' rejects with kind: 'rejected' ("too many concurrent requests")
+    await assert.rejects(
+      attackerRpc.request(64, {target: 'server', timeoutMs: 2_000}),
+      (err: unknown) =>
+        err instanceof Error &&
+        (err as ActionError).kind === 'rejected' &&
+        /too many concurrent requests/.test(err.message)
+    )
+    assert.equal(handlerCalls, 64)
+
+    // Another peer ('honest') is unaffected by 'attacker' hitting its 64-request cap
+    assert.equal(
+      await honestRpc.request(7, {target: 'server', timeoutMs: 2_000}),
+      70
+    )
+
+    // Completing 1 in-flight request frees a slot for 'attacker'
+    resolvers.shift()!(1000)
+    assert.equal(await inFlight.shift()!, 1000)
+    await turn()
+
+    const nextReq = attackerRpc.request(99, {
+      target: 'server',
+      timeoutMs: 2_000
+    })
+    await turn()
+    assert.equal(resolvers.length, 64)
+    resolvers.forEach((resolve, idx) => resolve(idx + 1))
+    assert.equal(await nextReq, 64)
+    await Promise.all(inFlight)
+  } finally {
+    attacker.clearPeer('server', new Error('closed'))
+    honest.clearPeer('server', new Error('closed'))
+    server.clearPeer('attacker', new Error('closed'))
+    server.clearPeer('honest', new Error('closed'))
+  }
 })
 
 void test('ordinary messages preserve types, metadata, empty values and exact UTF-8 sizes', async t => {
@@ -130,7 +436,7 @@ void test('expired transfer tails cannot be delivered as new messages', t => {
   const {wire, controls} = receiver(32_000)
   t.after(() => wire.clearPeer('peer'))
   let deliveries = 0
-  wire.makeInternalAction('file').onMessage(() => {
+  wire.makeWireAction('file').onMessage(() => {
     deliveries++
   })
   wire.handleData('peer', start(1, 24_000))
@@ -149,7 +455,7 @@ void test('unannounced fragments allocate no transfer state and duplicate offset
   const {wire, controls, destroyed} = receiver(32_000)
   t.after(() => wire.clearPeer('peer'))
   wire
-    .makeInternalAction('file')
+    .makeWireAction('file')
     .onMessage(() => assert.fail('invalid payload delivered'))
   for (let id = 0; id < 5_000; id++) {
     wire.handleData('peer', dataFrame(id, 0, 100))
@@ -178,16 +484,18 @@ void test('oversized proposals are refused and a peer remains usable', async t =
   assert.equal(pair.disconnected(), false)
 })
 
-void test('pending unknown actions are bounded, and disconnect frees their slots', t => {
+void test('pending registered actions are bounded at 64 per peer and disconnect frees their slots', t => {
   const {wire, controls, destroyed} = receiver()
   t.after(() => wire.clearPeer('peer'))
+  wire.makeWireAction('staged')
   for (let id = 0; id < 65; id++) {
-    wire.handleData('peer', start(id, 1, {type: `unknown-${id}`}))
+    wire.handleData('peer', start(id, 1, {type: 'staged'}))
   }
+  assert.equal(controls.length, 1)
   assert.equal(controls.at(-1)!.kind, 4)
   assert.equal(destroyed.length, 0)
   wire.clearPeer('peer')
-  wire.makeInternalAction('file').onMessage(() => {})
+  wire.makeWireAction('file').onMessage(() => {})
   wire.handleData('peer', start(2_000, 1))
   assert.equal(controls.at(-1)!.kind, 3)
 })
@@ -196,14 +504,17 @@ void test('invalid declared sizes are rejected without allocating or delivering'
   for (const size of [NaN, Infinity, -1, 1.5]) {
     const {wire, destroyed} = receiver()
     wire
-      .makeInternalAction('file')
+      .makeWireAction('file')
       .onMessage(() => assert.fail('invalid size delivered'))
     wire.handleData('peer', start(0, size))
     assert.deepEqual(destroyed, ['peer'])
   }
   const {wire, controls, destroyed} = receiver()
+  wire.makeWireAction('file')
   wire.handleData('peer', start(0, Number.MAX_SAFE_INTEGER))
-  assert.deepEqual(controls, [{peerId: 'peer', kind: 4}])
+  assert.equal(controls.length, 1)
+  assert.equal(controls[0]!.peerId, 'peer')
+  assert.equal(controls[0]!.kind, 4)
   assert.deepEqual(destroyed, [])
 })
 
@@ -211,13 +522,13 @@ void test('cancelling pending asynchronous policies cannot create unlimited deci
   const {wire, controls} = receiver()
   t.after(() => wire.clearPeer('peer'))
   const decisions: ((accept: boolean) => void)[] = []
-  const file = wire.makeInternalAction('file')
+  const file = wire.makeWireAction('file')
   file.onReceive(() => new Promise(resolve => decisions.push(resolve)))
   file.onMessage(() => assert.fail('cancelled transfer delivered'))
   for (let id = 0; id < 65; id++) {
     wire.handleData('peer', start(id, 1))
     const cancel = new Uint8Array(6)
-    cancel[0] = 2
+    cancel[0] = 3
     cancel[1] = 5
     new DataView(cancel.buffer).setUint32(2, id)
     wire.handleData('peer', cancel.buffer)
@@ -232,16 +543,20 @@ void test('cancelling pending asynchronous policies cannot create unlimited deci
   )
 })
 
-void test('one peer cannot consume another peer admission slots', async t => {
+void test('one peer cannot consume another peer admission slots', t => {
   const {wire, controls} = receiver()
   t.after(() => {
     wire.clearPeer('attacker')
     wire.clearPeer('honest')
   })
+  wire.makeWireAction('staged')
   for (let id = 0; id < 65; id++) {
-    wire.handleData('attacker', start(id, 1, {type: 'unregistered'}))
+    wire.handleData('attacker', start(id, 1, {type: 'staged'}))
   }
-  wire.makeInternalAction('file').onMessage(() => {})
+  assert.equal(controls.length, 1)
+  assert.equal(controls[0]!.peerId, 'attacker')
+  assert.equal(controls[0]!.kind, 4)
+  wire.makeWireAction('file').onMessage(() => {})
   wire.handleData('honest', start(0, 24_000))
   assert.deepEqual(controls.at(-1), {peerId: 'honest', kind: 3})
 })
@@ -280,11 +595,11 @@ void test('async inline policies preserve per-action order and cannot stall anot
   assert.deepEqual(received, [1, 2])
 })
 
-void test('cancelled and disconnected policies are aborted, bounded, and do not lock out other peers', async t => {
+void test('cancelled and disconnected policies are aborted, bounded, and do not lock out other peers', t => {
   const {wire, controls} = receiver()
   t.after(() => wire.clearPeer('honest'))
   const signals: AbortSignal[] = []
-  const file = wire.makeInternalAction('file')
+  const file = wire.makeWireAction('file')
   file.onReceive(({peerId, signal}) => {
     if (peerId === 'honest') {
       return true
@@ -302,7 +617,7 @@ void test('cancelled and disconnected policies are aborted, bounded, and do not 
   wire.handleData('honest', start(0, 1))
   assert.deepEqual(controls.at(-1), {peerId: 'honest', kind: 3})
   let calls = 0
-  wire.makeInternalAction('cursor').onMessage(() => {
+  wire.makeWireAction('cursor').onMessage(() => {
     calls++
   })
   wire.handleData(
@@ -317,7 +632,7 @@ void test('policy expiry aborts user work and ignores late approval', async t =>
   const {wire, controls} = receiver()
   let approve: (value: boolean) => void
   let signal: AbortSignal
-  const file = wire.makeInternalAction('file')
+  const file = wire.makeWireAction('file')
   file.onReceive(context => {
     signal = context.signal
     return new Promise(resolve => {
@@ -330,16 +645,25 @@ void test('policy expiry aborts user work and ignores late approval', async t =>
   assert.equal(signal!.aborted, true)
   approve!(true)
   await turn()
-  assert.deepEqual(controls, [{peerId: 'peer', kind: 4}])
+  assert.equal(controls.length, 1)
+  assert.equal(controls[0]!.peerId, 'peer')
+  assert.equal(controls[0]!.kind, 4)
 })
 
 void test('incompatible action frames warn and disconnect immediately', t => {
   const {wire, destroyed} = receiver()
   const warning = t.mock.method(console, 'warn', () => {})
-  wire.handleData('peer', new Uint8Array(36).buffer)
-  assert.deepEqual(destroyed, ['peer'])
+  wire.handleData('peer-v0', new Uint8Array(36).buffer)
+  const v2Frame = new Uint8Array(36)
+  v2Frame[0] = 2
+  wire.handleData('peer-v2', v2Frame.buffer)
+  assert.deepEqual(destroyed, ['peer-v0', 'peer-v2'])
   assert.match(
     String(warning.mock.calls[0]?.arguments[0]),
+    /incompatible action protocol/
+  )
+  assert.match(
+    String(warning.mock.calls[1]?.arguments[0]),
     /incompatible action protocol/
   )
 })
@@ -347,7 +671,7 @@ void test('incompatible action frames warn and disconnect immediately', t => {
 void test('global async-policy saturation cannot block the default inline path', async t => {
   const {wire, controls} = receiver()
   const resolvers: Array<(allow: boolean) => void> = []
-  const file = wire.makeInternalAction('file')
+  const file = wire.makeWireAction('file')
   file.onMessage(() => {})
   file.onReceive(() => new Promise(resolve => resolvers.push(resolve)))
   for (let peer = 0; peer < 16; peer++) {
@@ -359,9 +683,10 @@ void test('global async-policy saturation cannot block the default inline path',
   assert.equal(resolvers.length, 128)
   wire.handleData('extra', start(0, 1))
   assert.equal(resolvers.length, 128)
-  assert.deepEqual(controls.at(-1), {peerId: 'extra', kind: 4})
+  assert.equal(controls.at(-1)!.peerId, 'extra')
+  assert.equal(controls.at(-1)!.kind, 4)
   let messages = 0
-  wire.makeInternalAction('cursor').onMessage(() => {
+  wire.makeWireAction('cursor').onMessage(() => {
     messages++
   })
   wire.handleData(
@@ -388,7 +713,7 @@ void test('malformed framing is rejected without parser exceptions', t => {
       bytes[j] = random >>> 24
     }
     if (bytes.length > 1) {
-      bytes[0] = 2
+      bytes[0] = 3
       bytes[1] = i % 6
     }
     assert.doesNotThrow(() => wire.handleData('peer', bytes.buffer))
@@ -399,15 +724,21 @@ for (const saturation of ['policies', 'transfers'] as const) {
   void test(`responses without policies survive global ${saturation} saturation`, async t => {
     const sent: Uint8Array[] = []
     const approvals: ((allow: boolean) => void)[] = []
-    const peer = {sendData: (bytes: Uint8Array) => sent.push(bytes.slice())}
+    const peer = {
+      isDead: false,
+      channel: null,
+      sendData: (bytes: Uint8Array) => sent.push(bytes.slice()),
+      destroy: () => {}
+    }
+    const transport = createDirectPeerTransport(peer as unknown as PeerHandle)
     const manager = createActionManager({
-      getPeer: () => peer as never,
+      getTransport: () => transport,
       getPeerIds: () => [],
       canReceiveFromPeer: () => true,
       onPeerError: (_id, error) => assert.fail(error)
     })
+    const file = manager.makeAction('file')
     if (saturation === 'policies') {
-      const file = manager.makeAction('file')
       file.onMessage(() => {})
       file.onReceive(() => new Promise(resolve => approvals.push(resolve)))
     }
@@ -429,7 +760,7 @@ for (const saturation of ['policies', 'transfers'] as const) {
       const request = sent.at(-1)!
       const length = new DataView(request.buffer).getUint16(34)
       const metadata = JSON.parse(
-        new TextDecoder().decode(request.subarray(36, 36 + length))
+        decoder.decode(request.subarray(36, 36 + length))
       )
       manager.handleData(
         'honest',
@@ -460,7 +791,7 @@ void test('malformed queued inline payload disconnects the peer on delivery', as
   const {wire, destroyed} = receiver()
   t.after(() => wire.clearPeer('peer'))
   let approve: (allow: boolean) => void
-  const action = wire.makeInternalAction('json')
+  const action = wire.makeWireAction('json')
   action.onReceive(
     () =>
       new Promise(resolve => {
@@ -485,21 +816,24 @@ for (const repeated of [false, true]) {
   void test(`${repeated ? 'duplicate' : 'unknown'} acceptance cannot extend another offer deadline`, async t => {
     t.mock.timers.enable({apis: ['setTimeout', 'Date']})
     const peer = {
+      isDead: false,
       sendData: () => {},
+      destroy: () => {},
       channel: {
         readyState: 'open',
         bufferedAmount: 0,
         bufferedAmountLowThreshold: 65535
       }
     }
+    const transport = createDirectPeerTransport(peer as unknown as PeerHandle)
     const wire = createActionWireManager({
-      getPeer: () => peer as never,
+      resolveTransport: () => transport,
       getPeerIds: () => ['peer'],
       canReceiveFromPeer: () => true,
       onPeerError: () => {}
     })
     t.after(() => wire.clearPeer('peer'))
-    const action = wire.makeInternalAction('file')
+    const action = wire.makeWireAction('file')
     const first = action
       .send(new Uint8Array(20000), 'peer')
       .catch(error => error.kind)
@@ -510,7 +844,7 @@ for (const repeated of [false, true]) {
     await Promise.resolve()
     const accept = (id: number) => {
       const bytes = new Uint8Array(6)
-      bytes[0] = 2
+      bytes[0] = 3
       bytes[1] = 3
       new DataView(bytes.buffer).setUint32(2, id)
       wire.handleData('peer', bytes.buffer)

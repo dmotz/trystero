@@ -3,13 +3,13 @@ import test from './test.ts'
 import {
   createTopicStrategy,
   createUserIdentity,
-  definePlugin,
   makeSocket,
   roles,
   type SocketClient
 } from '../../packages/core/src/index.ts'
+import type {EndpointIdentity} from '../../packages/core/src/identity.ts'
 import type {InternalRoomContext} from '../../packages/core/src/internal-types.ts'
-import {internalPluginSymbol} from '../../packages/core/src/primitives.ts'
+import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import type {
@@ -22,11 +22,15 @@ import type {
 } from '../../packages/core/src/types.ts'
 import {
   MockRTCPeerConnection,
+  allocTestPeerIds,
   connectVerifiedPeers,
   createLinkedHandlePair,
+  getTestEndpointByPeerId,
   makeStream,
   makeTrack,
+  testEndpoint,
   turn,
+  wait,
   waitFor
 } from './peer-harness.ts'
 
@@ -36,30 +40,32 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     createUserIdentity(),
     createUserIdentity()
   ])
+  const epAdmin = testEndpoint('lc-replay-admin')
+  const epAlice1 = testEndpoint('lc-replay-alice-1')
+  const epAlice2 = testEndpoint('lc-replay-alice-2')
   const appId = 'replay-semantics-app'
   const roomId = `replay-room~${adminUser.userId}`
 
   const makePeerRoom = (
-    id: string,
+    ep: EndpointIdentity,
     identity: typeof adminUser
   ): Room & RolesPluginApi =>
     createRoom(
-      f => regMap.set(id, f),
+      f => regMap.set(ep.peerId, f),
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: ep,
         appId,
         roomId,
         identity,
-        verifyPeerIdentity: true,
         use: [roles()]
       }
     ) as Room & RolesPluginApi
 
-  const roomAdmin = makePeerRoom('peer-admin', adminUser)
-  const roomAlice1 = makePeerRoom('peer-alice-1', aliceUser)
-  const roomAlice2 = makePeerRoom('peer-alice-2', aliceUser)
+  const roomAdmin = makePeerRoom(epAdmin, adminUser)
+  const roomAlice1 = makePeerRoom(epAlice1, aliceUser)
+  const roomAlice2 = makePeerRoom(epAlice2, aliceUser)
 
   try {
     await Promise.all([
@@ -70,19 +76,19 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     connectVerifiedPeers(
       regMap,
       roomAdmin,
-      'peer-admin',
+      epAdmin.peerId,
       adminUser,
       roomAlice1,
-      'peer-alice-1',
+      epAlice1.peerId,
       aliceUser
     )
     connectVerifiedPeers(
       regMap,
       roomAdmin,
-      'peer-admin',
+      epAdmin.peerId,
       adminUser,
       roomAlice2,
-      'peer-alice-2',
+      epAlice2.peerId,
       aliceUser
     )
 
@@ -100,7 +106,10 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     const replayedUsers: string[] = []
     roomAdmin.onPeerJoin(ctx => replayedPeers.push(ctx.peerId), {replay: true})
     roomAdmin.onUserJoin(ctx => replayedUsers.push(ctx.userId), {replay: true})
-    assert.deepEqual(replayedPeers.sort(), ['peer-alice-1', 'peer-alice-2'])
+    assert.deepEqual(
+      replayedPeers.sort(),
+      [epAlice1.peerId, epAlice2.peerId].sort()
+    )
     assert.deepEqual(replayedUsers, [aliceUser.userId])
 
     // {replay: true, once: true} with 2 active peers replays only 1 item and unsubscribes
@@ -115,13 +124,13 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     const track1 = makeTrack('cam-track-1', 'live')
     const stream1 = makeStream('alice-cam', [track1], true)
     await roomAlice1.addStream(stream1, {
-      target: 'peer-admin',
+      target: epAdmin.peerId,
       metadata: {label: 'initial-cam'}
     })
 
     // Update stream metadata before subscribing with {replay: true}
     await roomAlice1.addStream(stream1, {
-      target: 'peer-admin',
+      target: epAdmin.peerId,
       metadata: {label: 'updated-cam'}
     })
 
@@ -153,7 +162,7 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     })
     assert.equal(replayedStreams.length, 1)
     assert.equal(replayedStreams[0]!.id, 'alice-cam')
-    assert.equal(replayedStreams[0]!.ctx.peerId, 'peer-alice-1')
+    assert.equal(replayedStreams[0]!.ctx.peerId, epAlice1.peerId)
     assert.equal(replayedStreams[0]!.ctx.userId, aliceUser.userId)
     assert.deepEqual(replayedStreams[0]!.ctx.metadata, {label: 'updated-cam'})
 
@@ -195,7 +204,7 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     assert.equal(postUpdateReplays.length, 1)
     assert.equal(postUpdateReplays[0]!.val, 'round-1')
     assert.equal(postUpdateReplays[0]!.ctx.prev, 'lobby')
-    assert.equal(postUpdateReplays[0]!.ctx.peerId, 'peer-admin')
+    assert.equal(postUpdateReplays[0]!.ctx.peerId, epAdmin.peerId)
     assert.equal(postUpdateReplays[0]!.ctx.userId, adminUser.userId)
     assert.deepEqual(postUpdateReplays[0]!.ctx.roles, ['admin'])
     assert.equal(typeof postUpdateReplays[0]!.ctx.timestamp, 'number')
@@ -219,7 +228,7 @@ void test('Live-only default vs {replay: true} on onUserJoin, onPeerJoin, onPeer
     assert.equal(hydratedReplays.length, 1)
     assert.equal(hydratedReplays[0]!.val, 'round-1')
     assert.equal(hydratedReplays[0]!.ctx.prev, 'lobby')
-    assert.equal(hydratedReplays[0]!.ctx.peerId, 'peer-admin')
+    assert.equal(hydratedReplays[0]!.ctx.peerId, epAdmin.peerId)
   } finally {
     await Promise.all([
       roomAdmin.leave(),
@@ -239,78 +248,76 @@ void test('RoomKernel lifecycle hooks return Unsubscribe and support {replay, on
 
   let lateSubscribeReplay: (() => void) | null = null
 
-  const setupLifecycleProbe = (kernel: InternalRoomContext) => {
-    const unsubAct = kernel.onPeerActivated(id => activatedLive.push(id))
-    const unsubDeact = kernel.onPeerDeactivated(id => deactivated.push(id), {
-      once: true
-    })
-    kernel.onRoomIdChanged(rid => roomIds.push(rid), {once: true})
-    const leaveAbort = new AbortController()
-    kernel.onLeave(
-      () => {
-        leaveCount++
-      },
-      {signal: leaveAbort.signal}
-    )
-    const unsubLeave2 = kernel.onLeave(() => {
-      leaveCount += 10
-    })
-
-    lateSubscribeReplay = () => {
-      kernel.onPeerActivated(id => activatedReplayed.push(id), {replay: true})
-      unsubAct()
-      unsubLeave2()
-    }
-
-    return {
-      triggerRoomIdChange: (next: string) => kernel.setEffectiveRoomId(next),
-      abortFirstLeaveHook: () => leaveAbort.abort(),
-      unsubDeact
-    }
-  }
-  const lifecyclePlugin = Object.assign(
-    definePlugin('lifecycle-probe', {
-      setup: () => ({
-        triggerRoomIdChange: (_next: string) => {},
-        abortFirstLeaveHook: () => {},
-        unsubDeact: () => {}
+  const lifecyclePlugin = makeInternalPlugin(
+    'scale',
+    (kernel: InternalRoomContext) => {
+      const unsubAct = kernel.onPeerActivated(id => activatedLive.push(id))
+      const unsubDeact = kernel.onPeerDeactivated(id => deactivated.push(id), {
+        once: true
       })
-    }),
-    {
-      [internalPluginSymbol]: {
-        kind: 'internal' as const,
-        setup: setupLifecycleProbe
+      kernel.onRoomIdChanged(rid => roomIds.push(rid), {once: true})
+      const leaveAbort = new AbortController()
+      kernel.onLeave(
+        () => {
+          leaveCount++
+        },
+        {signal: leaveAbort.signal}
+      )
+      const unsubLeave2 = kernel.onLeave(() => {
+        leaveCount += 10
+      })
+
+      lateSubscribeReplay = () => {
+        kernel.onPeerActivated(id => activatedReplayed.push(id), {replay: true})
+        unsubAct()
+        unsubLeave2()
+      }
+
+      return {
+        triggerRoomIdChange: (next: string) => kernel.setEffectiveRoomId(next),
+        abortFirstLeaveHook: () => leaveAbort.abort(),
+        unsubDeact
       }
     }
   )
+
+  const epA = testEndpoint('lc-kernel-a')
+  const epB = testEndpoint('lc-kernel-b')
+  const epC = testEndpoint('lc-kernel-c')
 
   const roomA = createRoom(
     f => regMap.set('a', f),
     () => {},
     () => {},
     {
-      selfId: 'peer-a',
+      endpointIdentity: epA,
+      clientId: 'lc-kernel-a',
       appId: 'kernel-hooks-app',
       roomId: 'room-v1',
       use: [lifecyclePlugin]
     }
-  ) as Room & {
-    triggerRoomIdChange: (next: string) => void
-    abortFirstLeaveHook: () => void
-    unsubDeact: () => void
-  }
-
+  )
   const roomB = createRoom(
     f => regMap.set('b', f),
     () => {},
     () => {},
-    {selfId: 'peer-b', appId: 'kernel-hooks-app', roomId: 'room-v1'}
+    {
+      endpointIdentity: epB,
+      clientId: 'lc-kernel-b',
+      appId: 'kernel-hooks-app',
+      roomId: 'room-v1'
+    }
   )
   const roomC = createRoom(
     f => regMap.set('c', f),
     () => {},
     () => {},
-    {selfId: 'peer-c', appId: 'kernel-hooks-app', roomId: 'room-v1'}
+    {
+      endpointIdentity: epC,
+      clientId: 'lc-kernel-c',
+      appId: 'kernel-hooks-app',
+      roomId: 'room-v1'
+    }
   )
 
   try {
@@ -321,31 +328,31 @@ void test('RoomKernel lifecycle hooks return Unsubscribe and support {replay, on
     assert.deepEqual(roomIds, ['room-v2'], '{once: true} on onRoomIdChanged')
 
     const ab = createLinkedHandlePair()
-    regMap.get('a')!(ab.peerA, 'peer-b')
-    regMap.get('b')!(ab.peerB, 'peer-a')
-    await waitFor(() => 'peer-b' in roomA.getPeers(), 2_000)
-    assert.deepEqual(activatedLive, ['peer-b'])
+    regMap.get('a')!(ab.peerA, epB.peerId)
+    regMap.get('b')!(ab.peerB, epA.peerId)
+    await waitFor(() => epB.peerId in roomA.getPeers(), 2_000)
+    assert.deepEqual(activatedLive, [epB.peerId])
 
     // Replay active direct peer and unsubscribe first activated hook
     lateSubscribeReplay!()
-    assert.deepEqual(activatedReplayed, ['peer-b'])
+    assert.deepEqual(activatedReplayed, [epB.peerId])
 
     const ac = createLinkedHandlePair()
-    regMap.get('a')!(ac.peerA, 'peer-c')
-    regMap.get('c')!(ac.peerB, 'peer-a')
-    await waitFor(() => 'peer-c' in roomA.getPeers(), 2_000)
+    regMap.get('a')!(ac.peerA, epC.peerId)
+    regMap.get('c')!(ac.peerB, epA.peerId)
+    await waitFor(() => epC.peerId in roomA.getPeers(), 2_000)
     assert.deepEqual(
       activatedLive,
-      ['peer-b'],
+      [epB.peerId],
       'unsubscribed onPeerActivated hook must not fire for peer-c'
     )
 
     // Deactivate both B and C -> {once: true} on onPeerDeactivated captures only the first
     await roomB.leave()
-    await waitFor(() => !('peer-b' in roomA.getPeers()), 2_000)
+    await waitFor(() => !(epB.peerId in roomA.getPeers()), 2_000)
     await roomC.leave()
-    await waitFor(() => !('peer-c' in roomA.getPeers()), 2_000)
-    assert.deepEqual(deactivated, ['peer-b'])
+    await waitFor(() => !(epC.peerId in roomA.getPeers()), 2_000)
+    assert.deepEqual(deactivated, [epB.peerId])
 
     // Abort first leave hook; second was manually unsubscribed -> leaveCount stays 0
     roomA.abortFirstLeaveHook()
@@ -488,16 +495,17 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
   }
 
   // 4. Mid-session peer transport fault & wire protocol fault emit 'peer-error', and kernel.emitError narrows cleanly
-  const customErrPlugin = definePlugin('err-emitter', {
-    setup: kernel => ({
-      triggerCustomHandshakeErr: (peerId: string) =>
-        kernel.emitError({
-          code: 'handshake-failed',
-          peerId,
-          message: 'custom plugin check failed'
-        })
-    })
-  })
+  const customErrPlugin = makeInternalPlugin('scale', kernel => ({
+    triggerCustomHandshakeErr: (peerId: string) =>
+      kernel.emitError({
+        code: 'handshake-failed',
+        peerId,
+        message: 'custom plugin check failed'
+      })
+  }))
+  const epA = testEndpoint('lc-err-a')
+  const epB = testEndpoint('lc-err-b')
+  const epFaulty = testEndpoint('lc-err-faulty')
   const origConsoleError = console.error
   console.error = () => {}
   let regA: ((peer: PeerHandle, id: string) => void) | null = null
@@ -509,7 +517,8 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
     () => {},
     () => {},
     {
-      selfId: 'peer-a',
+      endpointIdentity: epA,
+      clientId: 'lc-err-a',
       appId: 'peer-err-app',
       roomId: 'peer-err-room',
       use: [customErrPlugin]
@@ -521,7 +530,12 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
     },
     () => {},
     () => {},
-    {selfId: 'peer-b', appId: 'peer-err-app', roomId: 'peer-err-room'}
+    {
+      endpointIdentity: epB,
+      clientId: 'lc-err-b',
+      appId: 'peer-err-app',
+      roomId: 'peer-err-room'
+    }
   )
 
   try {
@@ -557,14 +571,14 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
     })
 
     const link = createLinkedHandlePair()
-    regA!(link.peerA, 'peer-b')
-    regB!(link.peerB, 'peer-a')
-    await waitFor(() => 'peer-b' in roomA.getPeers(), 2_000)
+    regA!(link.peerA, epB.peerId)
+    regB!(link.peerB, epA.peerId)
+    await waitFor(() => epB.peerId in roomA.getPeers(), 2_000)
 
     roomA.triggerCustomHandshakeErr('peer-x')
     // Inject malformed wire frame (< 2 bytes) from peer-b -> triggers onPeerError ('peer-error') and kicks peer-b
     link.peerB.sendData(new Uint8Array([99]))
-    await waitFor(() => !('peer-b' in roomA.getPeers()), 2_000)
+    await waitFor(() => !(epB.peerId in roomA.getPeers()), 2_000)
 
     // Reconnect a peer and trigger peer.handlers.error directly
     let capturedHandlers: Parameters<PeerHandle['setHandlers']>[0] = {}
@@ -587,13 +601,13 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
       removeTrack: () => {},
       replaceTrack: () => undefined
     }
-    regA!(faultyPeer, 'peer-faulty')
+    regA!(faultyPeer, epFaulty.peerId)
     capturedHandlers.error?.(new Error('sctp transport aborted'))
 
     assert.deepEqual(observed, [
       'handshake-failed:peer-x:custom plugin check failed',
-      'peer-error:peer-b:Trystero: invalid action frame',
-      'peer-error:peer-faulty:sctp transport aborted'
+      `peer-error:${epB.peerId}:Trystero: invalid action frame`,
+      `peer-error:${epFaulty.peerId}:sctp transport aborted`
     ])
   } finally {
     console.error = origConsoleError
@@ -601,5 +615,392 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
       roomA.leave().catch(() => {}),
       roomB.leave().catch(() => {})
     ])
+  }
+})
+
+void test('Q17: local room.leave() suppresses local onPeerLeave and onUserLeave while notifying remote peers', async () => {
+  const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
+  const [hostUser, bobUser, carolUser] = await Promise.all([
+    createUserIdentity(),
+    createUserIdentity(),
+    createUserIdentity()
+  ])
+  const epHost = testEndpoint('q17-host')
+  const epBob1 = testEndpoint('q17-bob-1')
+  const epBob2 = testEndpoint('q17-bob-2')
+  const epCarol = testEndpoint('q17-carol')
+  const appId = 'q17-leave-semantics-app'
+  const roomId = 'q17-leave-room'
+
+  const makeNode = (ep: EndpointIdentity, identity: typeof hostUser) =>
+    createRoom(
+      f => regMap.set(ep.peerId, f),
+      () => {},
+      () => {},
+      {endpointIdentity: ep, appId, roomId, identity}
+    )
+
+  const roomHost = makeNode(epHost, hostUser)
+  const roomBob1 = makeNode(epBob1, bobUser)
+  const roomBob2 = makeNode(epBob2, bobUser)
+  const roomCarol = makeNode(epCarol, carolUser)
+
+  try {
+    await Promise.all([
+      roomHost.ready,
+      roomBob1.ready,
+      roomBob2.ready,
+      roomCarol.ready
+    ])
+
+    const linkBob1 = createLinkedHandlePair()
+    regMap.get(epHost.peerId)!(linkBob1.peerA, epBob1.peerId)
+    regMap.get(epBob1.peerId)!(linkBob1.peerB, epHost.peerId)
+
+    const linkBob2 = createLinkedHandlePair()
+    regMap.get(epHost.peerId)!(linkBob2.peerA, epBob2.peerId)
+    regMap.get(epBob2.peerId)!(linkBob2.peerB, epHost.peerId)
+
+    const linkCarol = createLinkedHandlePair()
+    regMap.get(epHost.peerId)!(linkCarol.peerA, epCarol.peerId)
+    regMap.get(epCarol.peerId)!(linkCarol.peerB, epHost.peerId)
+
+    await waitFor(
+      () =>
+        Object.keys(roomHost.getPeers()).length === 3 &&
+        epHost.peerId in roomBob1.getPeers() &&
+        epHost.peerId in roomBob2.getPeers() &&
+        epHost.peerId in roomCarol.getPeers(),
+      2_000
+    )
+
+    const hostPeerLeaves: string[] = []
+    const hostUserLeaves: string[] = []
+    const bob1PeerLeaves: string[] = []
+    const bob1UserLeaves: string[] = []
+    const bob2PeerLeaves: string[] = []
+    const bob2UserLeaves: string[] = []
+    const carolPeerLeaves: string[] = []
+    const carolUserLeaves: string[] = []
+
+    roomHost.onPeerLeave(({peerId}) => hostPeerLeaves.push(peerId))
+    roomHost.onUserLeave(({userId}) => hostUserLeaves.push(userId))
+    roomBob1.onPeerLeave(({peerId}) => bob1PeerLeaves.push(peerId))
+    roomBob1.onUserLeave(({userId}) => bob1UserLeaves.push(userId))
+    roomBob2.onPeerLeave(({peerId}) => bob2PeerLeaves.push(peerId))
+    roomBob2.onUserLeave(({userId}) => bob2UserLeaves.push(userId))
+    roomCarol.onPeerLeave(({peerId}) => carolPeerLeaves.push(peerId))
+    roomCarol.onUserLeave(({userId}) => carolUserLeaves.push(userId))
+
+    // 1. Bob's first tab leaves: Bob1 suppresses its own local leave events;
+    //    Host fires onPeerLeave(epBob1) (and not onUserLeave since Bob2 is still active).
+    await roomBob1.leave()
+    await waitFor(() => hostPeerLeaves.includes(epBob1.peerId), 2_000)
+    assert.deepEqual(
+      bob1PeerLeaves,
+      [],
+      'leaving room must suppress local onPeerLeave'
+    )
+    assert.deepEqual(
+      bob1UserLeaves,
+      [],
+      'leaving room must suppress local onUserLeave'
+    )
+    assert.deepEqual(hostPeerLeaves, [epBob1.peerId])
+    assert.deepEqual(hostUserLeaves, [])
+
+    // 2. Host leaves while connected to Bob2 and Carol (and simulate an abrupt mid-leave
+    //    transport close on Carol's handle during the leave flush window).
+    const hostLeaveP = roomHost.leave()
+    linkCarol.peerA.destroy()
+    await hostLeaveP
+
+    await waitFor(
+      () =>
+        bob2PeerLeaves.includes(epHost.peerId) &&
+        bob2UserLeaves.includes(hostUser.userId) &&
+        carolPeerLeaves.includes(epHost.peerId) &&
+        carolUserLeaves.includes(hostUser.userId),
+      2_000
+    )
+
+    assert.deepEqual(
+      hostPeerLeaves,
+      [epBob1.peerId],
+      'local room.leave() must suppress local onPeerLeave for remaining peers even on mid-leave close'
+    )
+    assert.deepEqual(
+      hostUserLeaves,
+      [],
+      'local room.leave() must suppress local onUserLeave for remaining users'
+    )
+    assert.deepEqual(bob2PeerLeaves, [epHost.peerId])
+    assert.deepEqual(bob2UserLeaves, [hostUser.userId])
+    assert.deepEqual(carolPeerLeaves, [epHost.peerId])
+    assert.deepEqual(carolUserLeaves, [hostUser.userId])
+  } finally {
+    await Promise.all([
+      roomHost.leave().catch(() => {}),
+      roomBob1.leave().catch(() => {}),
+      roomBob2.leave().catch(() => {}),
+      roomCarol.leave().catch(() => {})
+    ])
+  }
+})
+
+void test('H13: terminal startup failures (identity-failed and plugin-failed) emit onError, reject room.ready, and auto-clean up relays', async () => {
+  let activeSubscriptions = 0
+  let totalUnsubscribes = 0
+  let postFailureAnnounces = 0
+  let failedPhase = false
+
+  const joinTrackedStrategy = createStrategy({
+    init: () => ({}),
+    subscribe: async () => {
+      activeSubscriptions += 1
+      return () => {
+        activeSubscriptions -= 1
+        totalUnsubscribes += 1
+      }
+    },
+    announce: () => {
+      if (failedPhase) {
+        postFailureAnnounces += 1
+      }
+      return 40
+    }
+  })
+
+  // 1. Delayed identity-failed after relay has already subscribed
+  const identityErrors: RoomError[] = []
+  const identityFailRoom = joinTrackedStrategy(
+    {
+      appId: 'h13-startup-fail-app',
+      identity: async () => {
+        await wait(30)
+        throw new Error('vault identity unavailable')
+      },
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'h13-identity-room'
+  )
+  identityFailRoom.onError(err => identityErrors.push(err))
+
+  await assert.rejects(identityFailRoom.ready, /vault identity unavailable/)
+  await waitFor(
+    () => identityErrors.length === 1 && activeSubscriptions === 0,
+    2_000
+  )
+  failedPhase = true
+  await wait(80)
+  failedPhase = false
+
+  assert.equal(identityErrors[0]!.code, 'identity-failed')
+  assert.match(identityErrors[0]!.message, /vault identity unavailable/)
+  assert.equal(
+    totalUnsubscribes,
+    1,
+    'relay subscription must be cleaned up automatically without calling room.leave()'
+  )
+  assert.equal(
+    postFailureAnnounces,
+    0,
+    'announce timers must not fire after automatic startup failure cleanup'
+  )
+
+  // Verify occupiedRooms slot was released by automatic cleanup
+  const replacementIdentityRoom = joinTrackedStrategy(
+    {
+      appId: 'h13-startup-fail-app',
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'h13-identity-room'
+  )
+  assert.notEqual(
+    replacementIdentityRoom,
+    identityFailRoom,
+    'failed room must release its occupiedRooms slot automatically'
+  )
+  await replacementIdentityRoom.leave()
+
+  // 2. plugin-failed during resolveRoomId
+  const resolveErrors: RoomError[] = []
+  const badResolvePlugin = makeInternalPlugin('scale', () => ({}), {
+    resolveRoomId: async () => {
+      await wait(15)
+      throw new Error('room resolver rejected')
+    }
+  })
+  const pluginResolveFailRoom = joinTrackedStrategy(
+    {
+      appId: 'h13-startup-fail-app',
+      use: [badResolvePlugin],
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'h13-plugin-resolve-room'
+  )
+  pluginResolveFailRoom.onError(err => resolveErrors.push(err))
+
+  await assert.rejects(pluginResolveFailRoom.ready, /room resolver rejected/)
+  await waitFor(() => resolveErrors.length === 1, 2_000)
+  assert.equal(resolveErrors[0]!.code, 'plugin-failed')
+  if (resolveErrors[0]!.code === 'plugin-failed') {
+    assert.equal(resolveErrors[0]!.plugin, 'scale')
+  }
+  assert.equal(activeSubscriptions, 0)
+
+  // 3. plugin-failed when plugin setup() throws after async resolveRoomId
+  const setupErrors: RoomError[] = []
+  const badSetupPlugin = makeInternalPlugin(
+    'scale',
+    () => {
+      throw new Error('plugin setup exploded')
+    },
+    {
+      resolveRoomId: async ({roomId}) => {
+        await wait(20)
+        return {effectiveRoomId: `${roomId}:resolved`}
+      }
+    }
+  )
+  const pluginSetupFailRoom = joinTrackedStrategy(
+    {
+      appId: 'h13-startup-fail-app',
+      use: [badSetupPlugin],
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'h13-plugin-setup-room'
+  )
+  pluginSetupFailRoom.onError(err => setupErrors.push(err))
+
+  await assert.rejects(pluginSetupFailRoom.ready, /plugin setup exploded/)
+  await waitFor(
+    () => setupErrors.length === 1 && activeSubscriptions === 0,
+    2_000
+  )
+  assert.equal(setupErrors[0]!.code, 'plugin-failed')
+  if (setupErrors[0]!.code === 'plugin-failed') {
+    assert.equal(setupErrors[0]!.plugin, 'scale')
+  }
+  assert.equal(
+    activeSubscriptions,
+    0,
+    'setup failure must leave zero active relay subscriptions'
+  )
+
+  const replacementSetupRoom = joinTrackedStrategy(
+    {
+      appId: 'h13-startup-fail-app',
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'h13-plugin-setup-room'
+  )
+  assert.notEqual(
+    replacementSetupRoom,
+    pluginSetupFailRoom,
+    'plugin setup failure must release occupiedRooms slot automatically'
+  )
+  await replacementSetupRoom.leave()
+})
+
+void test('H9: disconnected peers prune their PeerEntry across active and mid-handshake churn', async () => {
+  const [hostId, ...churnIds] = allocTestPeerIds(11) as [string, ...string[]]
+  const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
+
+  const inspectorPlugin = makeInternalPlugin('scale', kernel => ({
+    inspectEntries: (ids: readonly string[]) => ({
+      allPeerIds: kernel.getAllPeerIds(),
+      activePeerIds: kernel.getActivePeerIds(),
+      retainedKnownUsers: ids.filter(
+        id => kernel.getKnownPeerUserId(id) !== undefined
+      ),
+      retainedPubKeys: ids.filter(
+        id => kernel.getPeerPublicKey(id) !== undefined
+      ),
+      retainedHandles: ids.filter(
+        id => kernel.getPeerHandle(id, true) !== undefined
+      )
+    })
+  }))
+
+  const hostRoom = createRoom(
+    f => regMap.set(hostId, f),
+    () => {},
+    () => {},
+    {
+      endpointIdentity: getTestEndpointByPeerId(hostId),
+      clientId: hostId,
+      appId: 'h9-churn-app',
+      roomId: 'h9-churn-room',
+      use: [inspectorPlugin]
+    }
+  )
+
+  try {
+    await hostRoom.ready
+
+    // 1. Full connect + verify + disconnect churn across 6 peers (graceful leave & abrupt close)
+    const activeChurnIds = churnIds.slice(0, 6)
+    for (let i = 0; i < activeChurnIds.length; i++) {
+      const remoteId = activeChurnIds[i]!
+      const remoteRoom = createRoom(
+        f => regMap.set(remoteId, f),
+        () => {},
+        () => {},
+        {
+          endpointIdentity: getTestEndpointByPeerId(remoteId),
+          clientId: remoteId,
+          appId: 'h9-churn-app',
+          roomId: 'h9-churn-room'
+        }
+      )
+      await remoteRoom.ready
+      const link = createLinkedHandlePair()
+      regMap.get(hostId)!(link.peerA, remoteId)
+      regMap.get(remoteId)!(link.peerB, hostId)
+      await waitFor(() => remoteId in hostRoom.getPeers(), 2_000)
+
+      // Confirm PeerEntry holds userId and pubKey while connected, and getUsers() reflects the remote user
+      assert.equal(Object.keys(hostRoom.getUsers()).length, 1)
+      const liveSnap = hostRoom.inspectEntries([remoteId])
+      assert.deepEqual(liveSnap.retainedKnownUsers, [remoteId])
+      assert.deepEqual(liveSnap.retainedPubKeys, [remoteId])
+
+      if (i % 2 === 0) {
+        await remoteRoom.leave()
+      } else {
+        link.peerB.destroy()
+        await remoteRoom.leave()
+      }
+      await waitFor(() => !(remoteId in hostRoom.getPeers()), 2_000)
+    }
+
+    // 2. Mid-handshake abort churn across 4 peers before activation
+    const pendingChurnIds = churnIds.slice(6)
+    for (const pendingId of pendingChurnIds) {
+      const link = createLinkedHandlePair()
+      regMap.get(hostId)!(link.peerA, pendingId)
+      link.peerA.destroy()
+    }
+    await turn()
+
+    assert.deepEqual(hostRoom.getPeers(), {})
+    assert.deepEqual(hostRoom.getUsers(), {})
+    const afterChurn = hostRoom.inspectEntries(churnIds)
+    assert.deepEqual(afterChurn.allPeerIds, [])
+    assert.deepEqual(afterChurn.activePeerIds, [])
+    assert.deepEqual(
+      afterChurn.retainedKnownUsers,
+      [],
+      'disconnected PeerEntry userId records must be pruned'
+    )
+    assert.deepEqual(
+      afterChurn.retainedPubKeys,
+      [],
+      'disconnected PeerEntry pubKey records must be pruned'
+    )
+    assert.deepEqual(afterChurn.retainedHandles, [])
+  } finally {
+    await hostRoom.leave()
   }
 })

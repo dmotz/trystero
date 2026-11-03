@@ -4,7 +4,6 @@ import type {
   Room,
   ScaleConfig,
   ScalePluginApi,
-  TopologyMode,
   UserIdentity
 } from '../../packages/core/src/index.ts'
 import {
@@ -22,6 +21,7 @@ import {
 } from '../../packages/core/src/scale/index.ts'
 import {
   allocTestPeerIds,
+  getTestEndpointByPeerId,
   LinkedMediaPeer,
   LinkedPeer,
   linkPeers,
@@ -37,7 +37,7 @@ export type TestMediaStreamLike = {
 
 export type VirtualNetworkOptions = {
   peerCount: number
-  topology: TopologyMode | ScaleConfig
+  topology?: ScaleConfig
   password?: string
   media?: boolean
   jitterMs?: number
@@ -53,15 +53,14 @@ let nextRegClusterSeq = 0
  */
 export const createOverlayCluster = async ({
   peerCount,
-  topology,
+  topology = {},
   password = '',
   media = false,
   jitterMs = 2
 }: VirtualNetworkOptions) => {
   const peerIds = allocTestPeerIds(peerCount)
   const clusterRoomId = `scale-test-room-${++nextClusterRoomSeq}`
-  const resolvedTopology: ScaleConfig =
-    typeof topology === 'string' ? {mode: topology} : {...topology}
+  const resolvedTopology: ScaleConfig = {...topology}
 
   const registerCallbacks = new Map<
     string,
@@ -238,7 +237,8 @@ export const createOverlayCluster = async ({
       },
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
+        clientId: id,
         appId: 'scale-test-app',
         roomId: clusterRoomId,
         password,
@@ -305,26 +305,11 @@ export const createOverlayCluster = async ({
     for (const id of activeSet) {
       const room = rooms.get(id)!
       const bridge = getRoomSignalingBridge(room)!
-      if (room.getTopology().activeMode === 'mesh') {
-        for (const otherId of activeSet) {
-          if (
-            otherId !== id &&
-            (bridge.canConnectPeer(otherId) ?? true) &&
-            (bridge
-              .getScaleProvider()
-              ?.shouldConnectPeer(otherId, 'outbound') ??
-              true)
-          ) {
-            connectPair(id, otherId)
-          }
-        }
-      } else {
-        const targets = bridge.getScaleProvider()?.getTargetNeighbors()
-        if (targets) {
-          for (const targetId of targets) {
-            if (activeSet.has(targetId)) {
-              connectPair(id, targetId)
-            }
+      const targets = bridge.getScaleProvider()?.getTargetNeighbors()
+      if (targets) {
+        for (const targetId of targets) {
+          if (activeSet.has(targetId)) {
+            connectPair(id, targetId)
           }
         }
       }
@@ -337,8 +322,7 @@ export const createOverlayCluster = async ({
         const snap = rooms.get(id)!.getTopology()
         if (
           snap.roomPeerIds.length !== activeSet.size - 1 ||
-          (snap.activeMode === 'gossip' &&
-            Object.keys(snap.routes).length !== activeSet.size - 1)
+          Object.keys(snap.routes).length !== activeSet.size - 1
         ) {
           return false
         }
@@ -429,7 +413,7 @@ export const createOverlayCluster = async ({
 
 export type ClusterPeerOptions = {
   peerCount: number
-  maxConnections?: number
+  maxDirectPeers?: number
   media?: boolean
   delayMs?: number
   adminId?: string
@@ -439,7 +423,7 @@ export type ClusterPeerOptions = {
 
 export const createTestScaleCluster = async ({
   peerCount,
-  maxConnections = 4,
+  maxDirectPeers = 4,
   media = false,
   delayMs = 1,
   adminId,
@@ -564,8 +548,8 @@ export const createTestScaleCluster = async ({
     const onPeerHandshake = onPeerHandshakeByRoom?.(id)
 
     const plugins = adminIdentity
-      ? [roles(), scale({mode: 'gossip', maxConnections})]
-      : [scale({mode: 'gossip', maxConnections})]
+      ? [roles(), scale({maxDirectPeers})]
+      : [scale({maxDirectPeers})]
 
     const room = createRoom(
       f => registerCallbacks.set(id, f),
@@ -580,10 +564,10 @@ export const createTestScaleCluster = async ({
       },
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId: 'scale-reg-app',
         roomId,
-        ...(userIdentity ? {identity: userIdentity} : {}),
+        ...(userIdentity ? {identity: userIdentity} : {clientId: id}),
         ...(onPeerHandshake ? {onPeerHandshake} : {}),
         use: plugins
       }

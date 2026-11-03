@@ -1,23 +1,76 @@
-import type {ActionOptions, InternalAction} from './action-wire'
-import type {OfferManager} from './offer-manager'
-import type {PeerDataTransport} from './peer-registry'
+import type {EndpointIdentity} from './identity'
+import type {PeerDataTransport} from './peer-transport'
 import type {
+  ActionProgressHandler,
   BaseRoomConfig,
   DataPayload,
   JoinRoomConfig,
   JsonValue,
+  ListenerOptions,
   MaybePromise,
   PeerHandle,
-  PluginContext,
-  PublicRolesProvider,
-  PublicScaleProvider,
+  PeerTarget,
+  ReplayListenerOptions,
   RoleCertificate,
+  Room,
   RoomError,
   SelfInfo,
-  Signal
+  SendOptions,
+  Signal,
+  TopologyRoute,
+  TopologySnapshot,
+  Unsubscribe,
+  UserIdentity
 } from './types'
 
-export type {ActionOptions, InternalAction, PeerDataTransport}
+export type {PeerDataTransport}
+
+export type TargetPeers = PeerTarget | undefined
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+  ? Omit<T, K>
+  : never
+
+export type KernelRoomErrorInput = DistributiveOmit<
+  RoomError,
+  'appId' | 'roomId'
+>
+
+export type ActionOptions = {
+  sendToPending?: boolean
+  receiveWhilePending?: boolean
+  maxPayloadBytes?: number
+}
+
+export type InternalMessageContext = {
+  peerId: string
+  userId: string
+  metadata?: JsonValue
+}
+
+export type InternalReceiveContext = {
+  peerId: string
+  userId: string
+  byteLength: number
+  metadata?: JsonValue
+  signal: AbortSignal
+}
+
+export type InternalAction<T extends DataPayload = DataPayload> = {
+  send: (data: T, options?: SendOptions) => Promise<void>
+  readonly onMessage: (
+    handler: (data: T, context: InternalMessageContext) => unknown,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onReceiveProgress: (
+    handler: ActionProgressHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onReceive: (
+    handler: (context: InternalReceiveContext) => boolean | Promise<boolean>,
+    options?: ListenerOptions
+  ) => Unsubscribe
+}
 
 export type RoleRevocationRecord = {
   v: 1
@@ -25,17 +78,16 @@ export type RoleRevocationRecord = {
   roomId: string
   issuerUserId: string
   targetUserId: string
-  targetCertId?: string
   role?: string
   seq: number
   ts: number
-  issuerCert: RoleCertificate
   signerPubKey: JsonWebKey
   sig: string
 }
 
-export type PeerBanRecord = {
+export type PeerModerationRecord = {
   v: 1
+  op: 'ban' | 'unban'
   appId: string
   roomId: string
   issuerUserId: string
@@ -43,7 +95,6 @@ export type PeerBanRecord = {
   reason?: string
   seq: number
   ts: number
-  issuerCert: RoleCertificate
   signerPubKey: JsonWebKey
   sig: string
 }
@@ -61,14 +112,14 @@ type AuthoritativeStateRecordBase = {
   sig: string
 }
 
-export type AuthoritativeStateValueRecord<T = JsonValue> =
+type AuthoritativeStateValueRecord<T = JsonValue> =
   AuthoritativeStateRecordBase & {
     k: 's' | 'u'
     val: T
     del?: false
   }
 
-export type AuthoritativeStateTombstoneRecord = AuthoritativeStateRecordBase & {
+type AuthoritativeStateTombstoneRecord = AuthoritativeStateRecordBase & {
   k: 'u'
   val?: never
   del: true
@@ -78,61 +129,54 @@ export type AuthoritativeStateRecord<T = JsonValue> =
   | AuthoritativeStateValueRecord<T>
   | AuthoritativeStateTombstoneRecord
 
-export type KernelRolesProvider = PublicRolesProvider & {
-  registerPeerPublicKey: (peerId: string, pubKey: JsonWebKey) => void
-  getStateWriteCert?: (
+export type KernelRolesProvider = {
+  getEffectiveRoomId: () => string
+  getPeerRoles: (peerOrUserId?: string) => string[]
+  isPeerBanned: (peerOrUserId: string) => boolean
+  getBanReason: (peerOrUserId: string) => string | undefined
+  getLocalActionCert: (
+    requiredRoles: readonly string[],
+    namespace?: string
+  ) => Promise<RoleCertificate | null>
+  authorizePeerAction: (
+    peerId: string,
+    requiredRoles: readonly string[],
+    inlineCert?: RoleCertificate
+  ) => boolean | Promise<boolean>
+  getStateWriteCert: (
     requiredRoles: readonly string[] | null,
     namespace: string
   ) => Promise<{cert: RoleCertificate | null; roles: string[]}>
-  verifyStateRecordRoles?: (
+  verifyStateRecordRoles: (
     rec: AuthoritativeStateRecord,
     requiredRoles: readonly string[] | null,
     fromPeerId?: string
   ) => Promise<{valid: boolean; roles: string[]}>
-  canPeerSendAction: (
-    peerId: string,
-    requiredRoles: readonly string[],
-    inlineCert?: RoleCertificate
-  ) => Promise<boolean> | boolean
   onPeerDescriptorCert: (
     peerId: string,
-    signPubKey: JsonWebKey,
-    cert?: RoleCertificate,
-    userId?: string
+    userId: string,
+    cert?: RoleCertificate
   ) => void
-  signActionPayload: (
-    namespace: string,
-    requiredRoles: readonly string[],
-    data: DataPayload,
-    userMetadata?: JsonValue
-  ) => Promise<JsonValue>
-  verifyActionOffer: (
-    namespace: string,
-    peerId: string,
-    requiredRoles: readonly string[],
-    wireMetadata?: JsonValue
-  ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
-  verifyActionPayload: (
-    namespace: string,
-    peerId: string,
-    requiredRoles: readonly string[],
-    data: DataPayload,
-    wireMetadata?: JsonValue
-  ) => Promise<{valid: boolean; userMetadata?: JsonValue; roles: string[]}>
   getAuthorityInfo: () => Promise<
-    Omit<SelfInfo, 'peerId' | 'persisted' | 'identityPersistence'>
+    Omit<SelfInfo, 'peerId' | 'identityPersistence'>
   >
 }
 
-export type KernelScaleProvider = PublicScaleProvider & {
+export type KernelScaleProvider = {
+  isDirectPeer: (peerId: string) => boolean
+  isVirtualPeer: (peerId: string) => boolean
+  getRoute: (peerId: string) => TopologyRoute | undefined
+  getSnapshot: () => TopologySnapshot
   handleFrame: (fromPeerId: string, data: ArrayBuffer) => boolean
   addDirectPeer: (peerId: string, peer: PeerHandle) => void
   removeDirectPeer: (peerId: string, peer?: PeerHandle, reason?: Error) => void
-  prepareMediaPeer?: (peerId: string) => Promise<PeerHandle>
+  prepareMediaPeer: (peerId: string) => Promise<PeerHandle>
+  setPeerMediaPinned: (peerId: string, pinned: boolean) => void
   broadcastInline: (
     frame: Uint8Array,
-    onProgress?: (peerId: string) => void
-  ) => Promise<boolean>
+    onProgress?: (peerId: string) => void,
+    signal?: AbortSignal
+  ) => boolean | Promise<boolean>
   requireDirectPeer: (peerId: string) => void
   notePeerDiscovered: (peerId: string) => boolean
   shouldConnectPeer: (
@@ -146,20 +190,51 @@ export type KernelScaleProvider = PublicScaleProvider & {
   setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
   markPeerBanned: (peerId: string) => void
+  unmarkPeerBanned: (peerId: string) => void
   isPeerBanned: (peerId: string) => boolean
   registerActionAuthority: (actionType: string, roles: string[]) => void
-  recordSignatureFailure: () => void
 }
 
-export type InternalRoomContext = Omit<
-  PluginContext,
-  'getRolesProvider' | 'getScaleProvider'
-> & {
+export type InternalRoomContext = {
+  readonly selfId: string
+  readonly appId: string
+  readonly initialRoomId: string
+  readonly password: string
+  readonly maxUsers?: number | undefined
   readonly effectiveRoomIdP?: Promise<string> | undefined
+  getRoomId: () => string
   setEffectiveRoomId: (roomId: string) => void
+  getLocalEndpointIdentity: () => Promise<EndpointIdentity>
+  getLocalUserIdentity: () => Promise<UserIdentity>
+  getPeerUserId: (peerId: string) => string
+  getKnownPeerUserId: (peerId: string) => string | undefined
+  getUserPeerIds: (userId: string) => string[]
+  getPeerPublicKey: (peerId: string) => JsonWebKey | undefined
   setPeerUserId: (peerId: string, userId: string) => void
   setPeerPublicKey: (peerId: string, pubKey: JsonWebKey) => void
+  getActivePeerIds: () => string[]
   getDirectActivePeerIds: () => string[]
+  getAllPeerIds: () => string[]
+  isPeerActive: (peerId: string) => boolean
+  getPeerHandle: (
+    peerId: string,
+    includePending?: boolean
+  ) => PeerHandle | undefined
+  resolveSendTarget: (
+    targets: TargetPeers,
+    includePending?: boolean
+  ) => TargetPeers
+  resolveRequestTarget: (
+    target: string,
+    includePending?: boolean
+  ) => string | undefined
+  kickPeer: (peerId: string, reason?: Error) => void
+  emitError: (error: KernelRoomErrorInput) => void
+  makeAction: Room['makeAction']
+  makeInternalAction: <T extends DataPayload = DataPayload>(
+    namespace: string,
+    options?: Partial<ActionOptions>
+  ) => InternalAction<T>
   deliverRawData: (originPeerId: string, data: ArrayBuffer) => void
   registerRolesProvider: (provider: KernelRolesProvider) => void
   registerScaleProvider: (provider: KernelScaleProvider) => void
@@ -168,6 +243,22 @@ export type InternalRoomContext = Omit<
   activateVirtualPeer: (peerId: string, transport: PeerDataTransport) => boolean
   deactivateVirtualPeer: (peerId: string, reason?: Error) => void
   purgeBannedUserState: (userId: string) => void
+  readonly onPeerActivated: (
+    listener: (peerId: string, peer: PeerHandle) => unknown,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+  readonly onPeerDeactivated: (
+    listener: (peerId: string) => unknown,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onRoomIdChanged: (
+    listener: (roomId: string) => unknown,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onLeave: (
+    listener: () => unknown,
+    options?: ListenerOptions
+  ) => Unsubscribe
 }
 
 export type SignalPeer = (peerTopic: string, signal: string) => unknown
@@ -184,7 +275,7 @@ export type StrategyContext<TConfig extends BaseRoomConfig = JoinRoomConfig> = {
   config: TConfig
   appId: string
   roomId: string
-  peerId?: string
+  peerId: string
 }
 
 export type TopicSubscriptionContext = {
@@ -230,13 +321,13 @@ export type StrategyAdapter<
     selfTopic: string,
     onMessage: StrategyOnMessage,
     getOffers: (n: number) => Promise<OfferRecord[]>,
-    context?: StrategyContext<TConfig>
+    context: StrategyContext<TConfig>
   ) => MaybePromise<() => void>
   announce: (
     relay: TRelay,
     rootTopic: string,
     selfTopic: string,
-    context?: StrategyContext<TConfig>
+    context: StrategyContext<TConfig>
   ) => MaybePromise<AnnounceResult | void>
 }
 
@@ -283,6 +374,14 @@ export type MediaIdentityCache = {
   clearRemote: () => void
 }
 
+export type AnswerReplayState = {
+  offer: string
+  offerId: string
+  messages: string[]
+  lastSentAt: Array<number | undefined>
+  relays: Array<((message: string) => void) | undefined>
+}
+
 export type PeerState = {
   offerPeer: PeerHandle | null
   offerId: string | null
@@ -292,40 +391,41 @@ export type PeerState = {
   offerRelays: unknown[]
   connectedPeer: PeerHandle | null
   answeringPeer: PeerHandle | null
-  s: string | null
-  o: boolean
-  r: Array<((signal: Signal) => void) | null>
-  b: Signal[]
-  t: Array<ReturnType<typeof setTimeout> | null>
-  e: ReturnType<typeof setTimeout> | null
-  u: number | null
-  x: ReturnType<typeof setTimeout> | null
-  d: boolean
-  a:
-    | [
-        offer: string,
-        offerId: string | undefined,
-        messages: string[],
-        lastSentAt: Array<number | undefined>,
-        relays: Array<((message: string) => void) | undefined>
-      ]
-    | null
-  f: boolean
+  offerSdp: string | null
+  offerAnswered: boolean
+  offerCandidateSenders: Array<((signal: Signal) => void) | null>
+  bufferedOfferCandidates: Signal[]
+  offerRetryTimers: Array<ReturnType<typeof setTimeout> | null>
+  offerExpiryTimer: ReturnType<typeof setTimeout> | null
+  unhealthySince: number | null
+  answeringExpiryTimer: ReturnType<typeof setTimeout> | null
+  didSendAnswer: boolean
+  answerReplay: AnswerReplayState | null
+  didReportConnectFailure: boolean
 }
+
+export type OfferCheckoutFn = (
+  n: number,
+  lease: boolean,
+  encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>,
+  offerIdSize?: number
+) => Promise<OfferRecord[]>
 
 export type SignalContext = {
   appId: string
-  roomId: string
+  getRoomId: () => string
   config: BaseRoomConfig
   peerStates: Record<string, PeerState>
-  rootTopicPlaintext: string
+  getRootTopicPlaintext: () => string
   rootTopicP: Promise<string>
   selfTopicP: Promise<string>
   toPlain: (signal: Signal, peerId: string, offerId: string) => Promise<Signal>
   toCipher: (signal: Signal, peerId: string, offerId: string) => Promise<Signal>
   isLeaving: () => boolean
   onError: ((error: RoomError) => void) | undefined
-  offerManager: OfferManager
+  checkoutOffers: OfferCheckoutFn
+  claimLeasedOffer: (peer: PeerHandle) => void
+  reclaimLeasedOffer: (peer: PeerHandle) => void
   encryptOffer: (
     peer: PeerHandle,
     peerId: string,
@@ -336,8 +436,8 @@ export type SignalContext = {
   disconnectPeer: (peer: PeerHandle, peerId: string) => void
   announceIntervals: number[]
   announceIntervalMs: number
-  selfId?: string
-  selfIdP?: Promise<string>
+  getSelfIdNow: () => string | undefined
+  selfIdP: Promise<string>
   onPeerDiscovered?: (
     peerId: string,
     relayId: number,

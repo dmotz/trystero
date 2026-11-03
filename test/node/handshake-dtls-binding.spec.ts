@@ -406,7 +406,7 @@ void test(
       {
         appId,
         identity: hostUser,
-        limit: 2,
+        maxUsers: 2,
         rtcPolyfill
       },
       roomId
@@ -416,7 +416,7 @@ void test(
       {
         appId,
         identity: aliceUser,
-        limit: 2,
+        maxUsers: 2,
         rtcPolyfill
       },
       roomId
@@ -433,13 +433,13 @@ void test(
       3_000
     )
 
-    // Alice opens a 2nd tab with the same aliceUser in a limit: 2 room -> admitted!
+    // Alice opens a 2nd tab with the same aliceUser in a maxUsers: 2 room -> admitted!
     const aliceTab2Errors: RecordedError[] = []
     const aliceTab2 = makeJoinRoom('peer-alice-2')(
       {
         appId,
         identity: aliceUser,
-        limit: 2,
+        maxUsers: 2,
         rtcPolyfill
       },
       roomId
@@ -463,7 +463,7 @@ void test(
       {
         appId,
         identity: intruderUser,
-        limit: 2,
+        maxUsers: 2,
         rtcPolyfill
       },
       roomId
@@ -654,7 +654,7 @@ void test(
       )
       assert.equal(attacker2PeerId in adminRoom.getPeers(), false)
 
-      // Newcomer advertising limit: 1 refuses other users locally without self-evicting or ejecting established members
+      // Newcomer advertising maxUsers: 1 refuses other users locally without self-evicting or ejecting established members
       const limiterUser = await createUserIdentity()
       const limiterErrors: RecordedError[] = []
       limiterRoom = limiterSlot!.joinRoom(
@@ -662,7 +662,7 @@ void test(
           appId,
           identity: limiterUser,
           use: [roles()],
-          limit: 1,
+          maxUsers: 1,
           rtcPolyfill
         },
         authInfo.roomId

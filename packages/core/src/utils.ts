@@ -1,47 +1,32 @@
-import {
-  createEventEmitter,
-  createSingleHandler,
-  initSingleHandler,
-  lockMethods,
-  type EventEmitter,
-  type SingleHandler,
-  type SingleHandlerTuple
-} from './emitter'
+import {createEventEmitter, initSingleHandler} from './emitter'
+import type {KernelRoomErrorInput} from './internal-types'
 import {
   base62Alphabet,
   createBoundedCache,
   createBoundedSet,
   decodeBytes,
+  domainTag,
   encodeBytes,
   fromBase64,
   fromBase64Url,
   fromJson,
   hash32,
-  internalPluginSymbol,
   libId,
   libName,
   mkErr,
   toBase64,
   toBase64Url,
-  toHex,
   toJson,
   userIdLength
 } from './primitives'
-import type {
-  DataPayload,
-  KernelRoomErrorInput,
-  PluginContext,
-  RoleCertificate,
-  RoomPlugin,
-  UserIdentity
-} from './types'
+import type {DataPayload, RoleCertificate} from './types'
 
 export {
   createBoundedCache,
   createBoundedSet,
   createEventEmitter,
-  createSingleHandler,
   decodeBytes,
+  domainTag,
   encodeBytes,
   fromBase64,
   fromBase64Url,
@@ -49,15 +34,30 @@ export {
   initSingleHandler,
   libId,
   libName,
-  lockMethods,
   mkErr,
   toBase64,
   toBase64Url,
-  toHex,
-  toJson,
-  type EventEmitter,
-  type SingleHandler,
-  type SingleHandlerTuple
+  toJson
+}
+
+export const lockMethods = <T extends object>(
+  target: T,
+  methodNames: readonly (keyof T & string)[]
+): T => {
+  for (const name of methodNames) {
+    const fn = target[name]
+    Object.defineProperty(target, name, {
+      get: () => fn,
+      set: () => {
+        throw new TypeError(
+          `${libName}: ${name} is a method; call ${name}(handler), which returns an unsubscribe function`
+        )
+      },
+      enumerable: true,
+      configurable: true
+    })
+  }
+  return target
 }
 
 export const authMetaKey: string = `__${libId}Auth`
@@ -223,8 +223,6 @@ export const strToNum = (
   limit: number = Number.MAX_SAFE_INTEGER
 ): number => hash32(str) % limit
 
-export const log = (...args: unknown[]): void => console.log(...args)
-
 export const userIdRegex: RegExp = /*@__PURE__*/ new RegExp(
   `^[0-9A-Za-z]{${userIdLength}}$`
 )
@@ -232,146 +230,6 @@ export const userIdRegex: RegExp = /*@__PURE__*/ new RegExp(
 export const selfCertifyingRoomRegex: RegExp = /*@__PURE__*/ new RegExp(
   `^(.+)~([0-9A-Za-z]{${userIdLength}})$`
 )
-
-export const reservedRoomPropertyNames: Set<string> = /*@__PURE__*/ new Set([
-  'ready',
-  'makeAction',
-  'makeState',
-  'makeUserState',
-  'leave',
-  'ping',
-  'getPeers',
-  'getUsers',
-  'getSelf',
-  'addStream',
-  'removeStream',
-  'replaceTrack',
-  'onPeerJoin',
-  'onPeerLeave',
-  'onUserJoin',
-  'onUserLeave',
-  'onPeerStream',
-  'onError'
-])
-
-const reservedPluginNameErr = (name: string): Error =>
-  mkErr(`plugin name "${name}" is a reserved room property`)
-
-export const definePlugin = <
-  TName extends string = string,
-  TApi extends Record<string, unknown> = Record<string, never>
->(
-  name: TName,
-  spec: {
-    resolveRoomId?:
-      | ((context: {
-          appId: string
-          roomId: string
-          userIdentityP: Promise<UserIdentity>
-        }) => Promise<{effectiveRoomId: string; state?: unknown}> | undefined)
-      | undefined
-    setup: (kernel: PluginContext, preResolvedState?: unknown) => TApi | void
-  }
-): RoomPlugin<TName, TApi> => {
-  if (!name || typeof name !== 'string') {
-    throw mkErr('plugin name must be a non-empty string')
-  }
-  if (reservedRoomPropertyNames.has(name)) {
-    throw reservedPluginNameErr(name)
-  }
-  if (!spec || typeof spec.setup !== 'function') {
-    throw mkErr(`plugin "${name}" must provide a setup(kernel) function`)
-  }
-  return {
-    name,
-    ...(spec.resolveRoomId ? {resolveRoomId: spec.resolveRoomId} : {}),
-    setup: spec.setup
-  }
-}
-
-export const getConfiguredPlugins = (
-  use?: readonly RoomPlugin<string, any>[]
-): RoomPlugin<string, any>[] => {
-  if (use === undefined) {
-    return []
-  }
-  if (!Array.isArray(use)) {
-    throw mkErr('use must be an array of room plugins')
-  }
-  const byName = new Map<string, RoomPlugin<string, any>>()
-  for (const item of use) {
-    if (
-      !item ||
-      typeof item !== 'object' ||
-      typeof item.name !== 'string' ||
-      !item.name ||
-      typeof item.setup !== 'function'
-    ) {
-      throw mkErr('invalid plugin in use[]; use definePlugin()')
-    }
-    if (reservedRoomPropertyNames.has(item.name)) {
-      throw reservedPluginNameErr(item.name)
-    }
-    if (byName.has(item.name)) {
-      throw mkErr(`duplicate plugin "${item.name}" in use[]`)
-    }
-    byName.set(item.name, item)
-  }
-  const ordered: RoomPlugin<string, any>[] = []
-  const rolesPlugin = byName.get('roles')
-  if (rolesPlugin) {
-    ordered.push(rolesPlugin)
-    byName.delete('roles')
-  }
-  const scalePlugin = byName.get('scale')
-  if (scalePlugin) {
-    ordered.push(scalePlugin)
-    byName.delete('scale')
-  }
-  for (const p of byName.values()) {
-    ordered.push(p)
-  }
-  return ordered
-}
-
-export const isSelfAsAdminPlugin = (use?: RoomPlugin | RoomPlugin[]): boolean =>
-  Boolean(
-    use &&
-    [use]
-      .flat()
-      .some(
-        p =>
-          isObj(p) &&
-          p.name === 'roles' &&
-          (p as Record<string, unknown>)['selfAsAdmin'] === true
-      )
-  )
-
-export const makeInternalPlugin = <
-  TKind extends 'roles' | 'scale',
-  TApi extends Record<string, unknown>,
-  TExtra extends object = Record<never, never>
->(
-  name: TKind,
-  setup: (kernel: any, getPre?: () => any) => TApi,
-  extra?: Partial<RoomPlugin<TKind, TApi>> & TExtra,
-  selfAsAdmin = false
-): RoomPlugin<TKind, TApi> & TExtra => {
-  const plugin = {
-    name,
-    ...extra,
-    setup: (): never => {
-      throw mkErr(
-        `${name}() must be registered via joinRoom({use: [${name}()]})`
-      )
-    }
-  } as RoomPlugin<TKind, TApi> & TExtra
-  Object.defineProperty(plugin, internalPluginSymbol, {
-    value: {kind: name, selfAsAdmin, setup},
-    enumerable: false
-  })
-  return plugin
-}
 
 export const toPayloadSource = (
   data: DataPayload

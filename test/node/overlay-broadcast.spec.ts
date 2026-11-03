@@ -12,13 +12,14 @@ import {
   overlayUnicastKind,
   packOverlayBinary,
   scale,
-  unpackOverlayBinary
+  unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
 import {createOverlayCluster} from './overlay-harness.ts'
 import {
   allocTestPeerIds,
+  getTestEndpointByPeerId,
   LinkedPeer,
   linkPeers,
   testPeerId,
@@ -28,20 +29,20 @@ import {
 
 void test('Data-only scale: 150-peer text chat broadcast & high-frequency cursor updates over gossip overlay', async () => {
   const peerCount = 150
-  const maxConnections = 8
+  const maxDirectPeers = 8
   const cluster = await createOverlayCluster({
     peerCount,
-    topology: {mode: 'gossip', maxConnections}
+    topology: {maxDirectPeers}
   })
 
   try {
     // 1. Verify bounded direct connections and full room discovery
     for (const id of cluster.peerIds) {
       const snap = cluster.rooms.get(id)!.getTopology()
-      assert.equal(snap.activeMode, 'gossip')
+      assert.equal(snap.peerId, id)
       assert.ok(
-        snap.directPeerIds.length <= maxConnections,
-        `peer ${id} has ${snap.directPeerIds.length} direct peers, expected <= ${maxConnections}`
+        snap.directPeerIds.length <= maxDirectPeers,
+        `peer ${id} has ${snap.directPeerIds.length} direct peers, expected <= ${maxDirectPeers}`
       )
       assert.equal(
         snap.roomPeerIds.length,
@@ -158,10 +159,10 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     selfId: aliceId!,
     appId: 'byz-app',
     roomId: 'byz-room',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -171,10 +172,10 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     selfId: honestId!,
     appId: 'byz-app',
     roomId: 'byz-room',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(honestId!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -184,10 +185,10 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     selfId: blackholeId!,
     appId: 'byz-app',
     roomId: 'byz-room',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(blackholeId!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -197,10 +198,10 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     selfId: bobId!,
     appId: 'byz-app',
     roomId: 'byz-room',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobId!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (origin, data) => {
@@ -222,12 +223,11 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     getOffer: async () => undefined,
     signal: async () => undefined,
     sendData: (data: Uint8Array) => {
-      const parsed = unpackOverlayBinary(data)
+      const parsed = unpackOverlayFrame(data)
       if (
         dropDataFrames &&
         parsed &&
-        (parsed.kind === overlayBroadcastKind ||
-          parsed.kind === overlayUnicastKind)
+        (parsed[0] === overlayBroadcastKind || parsed[0] === overlayUnicastKind)
       ) {
         blackholeDroppedCount++
         return
@@ -246,9 +246,9 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
   })
 
   // Diamond topology:
-  // Alice <-> blackholeRelay <-> Bob (blackholeRelay has lexicographically smaller ID or primary path,
+  // Alice <-> blackholeRelay <-> Bob (blackholeRelay has lexicographically smaller ID / primary path,
   // and silently drops 100% of outbound broadcast/unicast frames to Bob!)
-  // Alice <-> honestRelay <-> Bob (backup disjoint path)
+  // Alice <-> honestRelay <-> Bob (alternate disjoint path)
   alice.addDirectPeer(blackholeId!, makePipe(aliceId!, blackholeRelay))
   blackholeRelay.addDirectPeer(aliceId!, makePipe(blackholeId!, alice))
   blackholeRelay.addDirectPeer(
@@ -266,20 +266,21 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     () =>
       alice.getSnapshot().roomPeerIds.includes(bobId!) &&
       bob.getSnapshot().roomPeerIds.includes(aliceId!) &&
-      Boolean(alice.getSnapshot().routes[bobId!]?.backupNextHop),
+      Boolean(alice.getSnapshot().routes[bobId!]?.nextHop),
     2_000
   )
   await wait(60)
 
-  // Verify Alice's route to Bob has both primary nextHop and a disjoint backupNextHop
   const bobRoute = alice.getSnapshot().routes[bobId!]!
-  assert.ok(bobRoute.nextHop, 'expected primary nextHop to Bob')
-  assert.ok(bobRoute.backupNextHop, 'expected disjoint backupNextHop to Bob')
-  assert.notEqual(bobRoute.nextHop, bobRoute.backupNextHop)
+  assert.equal(
+    bobRoute.nextHop,
+    blackholeId!,
+    'expected primary nextHop to Bob to start on blackholeRelay'
+  )
 
   // Send 5 broadcasts from Alice -> Bob while blackholeRelay drops 100% of data packets
-  // (flood + dedupe delivers via honestRelay), then mark blackholeRelay link dead
-  // on Alice so unicast automatically fails over to backupNextHop (honestRelay)
+  // (flood + dedupe delivers via honestRelay), then disconnect blackholeRelay
+  // on Alice so unicast recomputes route to honestRelay
   for (let i = 0; i < 5; i++) {
     await alice.broadcastInline(encodeBytes(`byz-broadcast-${i}`))
   }
@@ -290,8 +291,9 @@ void test('Byzantine fault tolerance: Blackhole relay dropping 100% of data pack
     `expected blackholeRelay to drop data packets (dropped ${blackholeDroppedCount})`
   )
 
-  // Now simulate primary nextHop (relay-blackhole) link failure so unicast uses disjoint backupNextHop
+  // Now simulate primary nextHop (blackholeRelay) link failure so unicast routes via honestRelay
   alice.removeDirectPeer(blackholeId!)
+  assert.equal(alice.getSnapshot().routes[bobId!]?.nextHop, honestId!)
   for (let i = 0; i < 5; i++) {
     alice.sendUnicast(bobId!, encodeBytes(`byz-unicast-${i}`))
   }
@@ -341,13 +343,12 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId: 'c2-boundary-app',
         roomId: 'c2-boundary-room',
         use: [
           scale({
-            mode: 'gossip',
-            maxConnections: 4
+            maxDirectPeers: 4
           })
         ]
       }
@@ -375,11 +376,8 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
     const linkRB = linkPeers(new LinkedPeer(), new LinkedPeer())
     const origRelayToBobSend = linkRB.peerA.sendData.bind(linkRB.peerA)
     linkRB.peerA.sendData = (data: Uint8Array) => {
-      const parsed = unpackOverlayBinary(data)
-      if (
-        parsed?.kind === overlayBroadcastKind &&
-        parsed.header['o'] === aliceId
-      ) {
+      const parsed = unpackOverlayFrame(data)
+      if (parsed?.[0] === overlayBroadcastKind && parsed[2]['o'] === aliceId) {
         capturedBroadcastsAtRelay.push(data.slice())
       }
       origRelayToBobSend(data)
@@ -409,27 +407,29 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
       2_000
     )
 
-    const captured = unpackOverlayBinary(
+    const captured = unpackOverlayFrame(
       capturedBroadcastsAtRelay[capturedBroadcastsAtRelay.length - 1]!
     )!
     assert.ok(captured, 'expected captured broadcast packet from alice')
+    const [, capturedTtl, capturedHeader, capturedPayload] = captured
     assert.equal(
-      captured.payload[0],
-      2,
-      'expected action-wire v2 version byte (0x02) at start of payload'
+      capturedPayload[0],
+      3,
+      'expected action-wire v3 version byte (0x03) at start of payload'
     )
 
-    const origMsgId = captured.header['m'] as string
-    const origSig = captured.header['s'] as string
+    const origMsgId = capturedHeader['m'] as string
+    const origSig = capturedHeader['s'] as string
+    const origTs = capturedHeader['t'] as number
 
-    // Attack 1 (exact C2 exploit): move the first byte of payload ("\u0002") into header.m
+    // Attack 1 (exact C2 exploit): move the first byte of payload ("\u0003") into header.m
     const shiftedMsgId1 =
-      origMsgId + decodeBytes(captured.payload.subarray(0, 1))
-    const shiftedPayload1 = captured.payload.subarray(1)
+      origMsgId + decodeBytes(capturedPayload.subarray(0, 1))
+    const shiftedPayload1 = capturedPayload.subarray(1)
     const exploitPacket1 = packOverlayBinary(
       overlayBroadcastKind,
-      captured.ttl,
-      {o: aliceId, q: 50, m: shiftedMsgId1, s: origSig},
+      capturedTtl,
+      {o: aliceId, q: 50, t: origTs, m: shiftedMsgId1, s: origSig},
       shiftedPayload1
     )
 
@@ -437,14 +437,14 @@ void test('C2 regression: relay boundary-shifting bytes between msgId and payloa
     const shiftedMsgId2 = origMsgId.slice(0, -1)
     const movedCharBytes = encodeBytes(origMsgId.slice(-1))
     const shiftedPayload2 = new Uint8Array(
-      movedCharBytes.byteLength + captured.payload.byteLength
+      movedCharBytes.byteLength + capturedPayload.byteLength
     )
     shiftedPayload2.set(movedCharBytes, 0)
-    shiftedPayload2.set(captured.payload, movedCharBytes.byteLength)
+    shiftedPayload2.set(capturedPayload, movedCharBytes.byteLength)
     const exploitPacket2 = packOverlayBinary(
       overlayBroadcastKind,
-      captured.ttl,
-      {o: aliceId, q: 51, m: shiftedMsgId2, s: origSig},
+      capturedTtl,
+      {o: aliceId, q: 51, t: origTs, m: shiftedMsgId2, s: origSig},
       shiftedPayload2
     )
 
@@ -515,7 +515,8 @@ void test('Bug B regression: leave() + rejoin with same peerId delivers broadcas
       selfId,
       appId,
       roomId,
-      topology: {mode: 'gossip', maxConnections: 4},
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(selfId),
       onVirtualPeerJoin: id => onJoin(id),
       onVirtualPeerLeave: id => onLeave(id),
       onDeliverData: (from, data) =>

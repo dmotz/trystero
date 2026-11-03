@@ -1,38 +1,40 @@
 import {hashTopic} from './crypto'
-import {resolveSelfId} from './identity'
 import type {
+  AnswerReplayState,
   OfferRecord,
   PeerState,
   SignalContext,
   SignalPeer
 } from './internal-types'
-import type {OfferCheckoutFn} from './offer-manager'
-import type {BaseRoomConfig, PeerHandle, RoomError, Signal} from './types'
+import type {BaseRoomConfig, PeerHandle, Signal} from './types'
 import {
   all,
   candidateType,
+  createBoundedCache,
   entries,
   fromJson,
   genId,
   hasIceUrl,
   isObj,
   keys,
-  log,
+  logErr,
   mkErr,
   noOp,
   resetTimer,
   toJson,
-  topicPath
+  topicPath,
+  unrefTimer
 } from './utils'
 
 const signalKeys = ['offer', 'answer', 'candidate'] as const
-export const maxSignalMessageChars: number = 128 * 1024
-export const maxSignalPeerIdChars = 64
-export const maxSignalOfferIdChars = 64
-export const maxSignalSdpChars: number = 64 * 1024
-export const maxSignalCandidateChars = 4_096
-export const maxTrackedSignalPeers = 256
+const maxSignalMessageChars: number = 128 * 1024
+const maxSignalPeerIdChars = 64
+const maxSignalOfferIdChars = 64
+const maxSignalSdpChars: number = 64 * 1024
+const maxSignalCandidateChars = 4_096
+const maxTrackedSignalPeers = 256
 export const maxPendingPeerConnections = 64
+const decryptErrDedupeTtlMs = 60_000
 const signalIdPattern = /^[\w.~:!-]{1,64}$/
 
 export const buildSignalAad = (
@@ -50,7 +52,7 @@ const isValidSignalId = (value: unknown, maxLen: number): value is string =>
 export const isValidSignalPeerId = (value: unknown): value is string =>
   isValidSignalId(value, maxSignalPeerIdChars)
 
-export const isValidSignalOfferId = (value: unknown): value is string =>
+const isValidSignalOfferId = (value: unknown): value is string =>
   isValidSignalId(value, maxSignalOfferIdChars)
 
 const toPayload = (msg: unknown): Record<string, unknown> | null => {
@@ -99,15 +101,12 @@ const parseSignalEnvelope = (
   if (!payload) {
     return null
   }
-  const isStr = typeof msg === 'string'
+  const isRawString = typeof msg === 'string'
   const hasSignalContent = signalKeys.some(k => k in payload)
   if (
     ('peerId' in payload && !isValidSignalPeerId(payload['peerId'])) ||
     ((hasSignalContent || payload['offerId'] !== undefined) &&
       !isValidSignalOfferId(payload['offerId'])) ||
-    ('passive' in payload &&
-      payload['passive'] !== undefined &&
-      typeof payload['passive'] !== 'boolean') ||
     signalKeys.some(k => {
       if (!(k in payload)) {
         return false
@@ -121,7 +120,7 @@ const parseSignalEnvelope = (
       )
     }) ||
     ('peer' in payload &&
-      (isStr ||
+      (isRawString ||
         (payload['peer'] !== undefined && !isPeerHandle(payload['peer']))))
   ) {
     return null
@@ -167,7 +166,7 @@ const disconnectedPeerGraceMs = 7_533
 const answeringTtlMs = 23_333
 const offerRelayPlaceholder = 'offer-placeholder'
 
-export const countPendingPeerConnections = (
+const countPendingPeerConnections = (
   peerStates: Record<string, PeerState>,
   excludePeerId?: string
 ): number => {
@@ -216,10 +215,10 @@ const destroyAlive = (peer: PeerHandle | null | undefined): void => {
 
 export const resetAnsweringState = (state: PeerState): void => {
   counterAnnounceTimestamps.delete(state)
-  state.x = resetTimer(state.x)
+  state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
   state.answeringPeer = null
-  state.d = false
-  state.a = null
+  state.didSendAnswer = false
+  state.answerReplay = null
 }
 
 const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
@@ -241,7 +240,7 @@ export const markPeerConnected = (
   dialBackoffByState.delete(state)
   resetAnsweringState(state)
   state.connectedPeer = physical
-  state.u = null
+  state.unhealthySince = null
 }
 
 export const detachConnectedPeer = (
@@ -250,26 +249,25 @@ export const detachConnectedPeer = (
 ): void => {
   if (state?.connectedPeer === physical) {
     state.connectedPeer = null
-    state.u = null
+    state.unhealthySince = null
   }
 }
 
 export const clearConnectedPeer = (
   state: PeerState,
-  peerId: string,
+  _peerId: string,
   _reason: string
 ): void => {
   if (!state.connectedPeer) {
     return
   }
-  DEV: log('clearing stale connected peer:', peerId, _reason)
   destroyAlive(state.connectedPeer)
   state.connectedPeer = null
-  state.u = null
+  state.unhealthySince = null
 }
 
 const clearOfferRelay = (state: PeerState, relayId: number): void => {
-  state.t[relayId] = resetTimer(state.t[relayId])
+  state.offerRetryTimers[relayId] = resetTimer(state.offerRetryTimers[relayId])
   if (state.offerRelays[relayId]) {
     state.offerRelays[relayId] = undefined
   }
@@ -286,21 +284,21 @@ const clearOfferRelayIfPlaceholder = (
 
 export const resetOfferState = (state: PeerState): void => {
   counterAnnounceTimestamps.delete(state)
-  state.e = resetTimer(state.e)
+  state.offerExpiryTimer = resetTimer(state.offerExpiryTimer)
   state.offerInitPromise = null
   state.offerRelays.forEach((_, relayId) => clearOfferRelay(state, relayId))
   state.offerRelays = []
-  state.r = []
-  state.t = []
-  state.b = []
+  state.offerCandidateSenders = []
+  state.offerRetryTimers = []
+  state.bufferedOfferCandidates = []
   if (state.offerPeer !== state.connectedPeer) {
     destroyAlive(state.offerPeer)
   }
   state.offerPeer = null
   state.offerId = null
-  state.s = null
-  state.o = false
-  state.f = false
+  state.offerSdp = null
+  state.offerAnswered = false
+  state.didReportConnectFailure = false
 }
 
 export const getState = (
@@ -339,74 +337,59 @@ export const getState = (
     offerRelays: [],
     connectedPeer: null,
     answeringPeer: null,
-    s: null,
-    o: false,
-    r: [],
-    b: [],
-    t: [],
-    e: null,
-    u: null,
-    x: null,
-    d: false,
-    a: null,
-    f: false
+    offerSdp: null,
+    offerAnswered: false,
+    offerCandidateSenders: [],
+    bufferedOfferCandidates: [],
+    offerRetryTimers: [],
+    offerExpiryTimer: null,
+    unhealthySince: null,
+    answeringExpiryTimer: null,
+    didSendAnswer: false,
+    answerReplay: null,
+    didReportConnectFailure: false
   })
 }
 
-export const initSignalHandler = (
-  appId: string,
-  getRoomId: () => string,
-  config: BaseRoomConfig,
-  peerStates: Record<string, PeerState>,
-  getRootTopicPlaintext: () => string,
-  rootTopicP: Promise<string>,
-  selfTopicP: Promise<string>,
-  toPlain: (signal: Signal, peerId: string, offerId: string) => Promise<Signal>,
-  toCipher: (
-    signal: Signal,
-    peerId: string,
-    offerId: string
-  ) => Promise<Signal>,
-  isLeaving: () => boolean,
-  onError: ((error: RoomError) => void) | undefined,
-  checkoutOffers: OfferCheckoutFn,
-  claimLeasedOffer: (peer: PeerHandle) => void,
-  reclaimLeasedOffer: (peer: PeerHandle) => void,
-  encryptOffer: (
-    peer: PeerHandle,
-    peerId: string,
-    offerId: string
-  ) => Promise<string>,
-  initPeerFn: (initiator: boolean, config: BaseRoomConfig) => PeerHandle,
-  connectPeer: (peer: PeerHandle, peerId: string) => void,
-  disconnectPeer: (peer: PeerHandle, peerId: string) => void,
-  announceIntervals: number[],
-  announceIntervalMs: number,
-  getSelfIdNow: () => string | undefined,
-  selfIdP: Promise<string> | undefined,
-  onPeerDiscovered?: (
-    peerId: string,
-    relayId: number,
-    signalPeer: SignalPeer
-  ) => void,
-  shouldConnectPeer?: (
-    peerId: string,
-    direction: 'outbound' | 'inbound'
-  ) => boolean
-): readonly [
+export const createSignalHandler = (
+  ctx: SignalContext
+): {
   handleMessage: (
     relayId: number
-  ) => (topic: string, msg: unknown, signalPeer: SignalPeer) => Promise<void>,
+  ) => (topic: string, msg: unknown, signalPeer: SignalPeer) => Promise<void>
   dialPeer: (peerId: string) => void
-] => {
-  const relaySignalPeers: Array<SignalPeer | undefined> = []
+} => {
+  const {
+    appId,
+    getRoomId,
+    config,
+    peerStates,
+    getRootTopicPlaintext,
+    rootTopicP,
+    selfTopicP,
+    toPlain,
+    toCipher,
+    isLeaving,
+    onError,
+    checkoutOffers,
+    claimLeasedOffer,
+    reclaimLeasedOffer,
+    encryptOffer,
+    initPeer: initPeerFn,
+    connectPeer,
+    disconnectPeer,
+    announceIntervals,
+    announceIntervalMs,
+    getSelfIdNow,
+    selfIdP,
+    onPeerDiscovered,
+    shouldConnectPeer
+  } = ctx
 
-  const getSelfId = (): Promise<string> => {
-    const cur = getSelfIdNow()
-    return (
-      selfIdP ?? (cur ? Promise.resolve(cur) : resolveSelfId(undefined, appId))
-    )
-  }
+  const relaySignalPeers: Array<SignalPeer | undefined> = []
+  const recentDecryptErrors = createBoundedCache<string, number>(512)
+
+  const getSelfId = (): Promise<string> => selfIdP
 
   const peerTopicOf = (peerId: string): Promise<string> =>
     hashTopic(topicPath(getRootTopicPlaintext(), peerId))
@@ -415,10 +398,10 @@ export const initSignalHandler = (
     countPendingPeerConnections(peerStates, peerId) >= maxPendingPeerConnections
 
   const reportSdpFailure = (state: PeerState, peerId: string): void => {
-    if (isLeaving() || state.connectedPeer || state.f) {
+    if (isLeaving() || state.connectedPeer || state.didReportConnectFailure) {
       return
     }
-    state.f = true
+    state.didReportConnectFailure = true
     const turnConfigured = hasTurnServer(config)
     onError?.({
       code: 'peer-connect-failed',
@@ -438,35 +421,43 @@ export const initSignalHandler = (
     peerId: string,
     stage: 'offer' | 'answer',
     cause: unknown
-  ): void =>
+  ): void => {
+    const key = `${peerId}:${stage}`
+    const now = Date.now()
+    const prev = recentDecryptErrors.get(key)
+    if (prev !== undefined && now - prev < decryptErrDedupeTtlMs) {
+      return
+    }
+    recentDecryptErrors.set(key, now)
     onError?.({
       code: 'decrypt-failed',
       peerId,
       stage,
-      message: `incorrect password decrypting ${stage}`,
+      message: `failed to decrypt ${stage} (incorrect password or corrupted signal)`,
       appId,
       roomId: getRoomId(),
       cause
     })
+  }
 
   const scheduleAnsweringExpiry = (
     state: PeerState,
     peerId: string,
     peer: PeerHandle
   ): void => {
-    resetTimer(state.x)
-    state.x = setTimeout(() => {
+    resetTimer(state.answeringExpiryTimer)
+    state.answeringExpiryTimer = setTimeout(() => {
       const current = peerStates[peerId]
       if (!current || current.connectedPeer || current.answeringPeer !== peer) {
         return
       }
-      DEV: log('answering timed out for', peerId, '- retrying on next offer')
-      if (current.d) {
+      if (current.didSendAnswer) {
         reportSdpFailure(current, peerId)
       }
       clearAnswering(current, peer)
       prunePeerStates(peerStates)
     }, answeringTtlMs)
+    unrefTimer(state.answeringExpiryTimer)
   }
 
   const scheduleOfferExpiry = (
@@ -474,20 +465,20 @@ export const initSignalHandler = (
     peerId: string,
     ttlMs = offerTtl
   ): void => {
-    resetTimer(state.e)
+    resetTimer(state.offerExpiryTimer)
     const offerId = state.offerId
-    state.e = setTimeout(() => {
+    state.offerExpiryTimer = setTimeout(() => {
       const current = peerStates[peerId]
       if (!current || current.connectedPeer || current.offerId !== offerId) {
         return
       }
-      DEV: log('offer expired for', peerId, '- resetting')
-      if (current.o) {
+      if (current.offerAnswered) {
         reportSdpFailure(current, peerId)
       }
       resetOfferState(current)
       prunePeerStates(peerStates)
     }, ttlMs)
+    unrefTimer(state.offerExpiryTimer)
   }
 
   const bindOfferPeerHandlers = (
@@ -498,7 +489,7 @@ export const initSignalHandler = (
   ): void => {
     const onClosedOrError = (): void => {
       if (state.offerPeer === peer && !state.connectedPeer) {
-        if (state.o) {
+        if (state.offerAnswered) {
           reportSdpFailure(state, peerId)
         }
         resetOfferState(state)
@@ -519,8 +510,8 @@ export const initSignalHandler = (
     state: PeerState,
     peerId: string
   ): NonNullable<PeerState['offerInitPromise']> => {
-    if (state.offerPeer && state.offerId && state.s) {
-      return Promise.resolve([state.offerPeer, state.s, state.offerId])
+    if (state.offerPeer && state.offerId && state.offerSdp) {
+      return Promise.resolve([state.offerPeer, state.offerSdp, state.offerId])
     }
     if (state.offerInitPromise) {
       return state.offerInitPromise
@@ -563,15 +554,17 @@ export const initSignalHandler = (
 
       state.offerPeer = peer
       state.offerId = offerId
-      state.s = offer
-      state.o = false
-      state.f = false
-      state.b = []
+      state.offerSdp = offer
+      state.offerAnswered = false
+      state.didReportConnectFailure = false
+      state.bufferedOfferCandidates = []
 
       bindOfferPeerHandlers(state, peerId, peer, signal => {
         if (state.offerPeer === peer) {
-          state.b.push(signal)
-          state.r.forEach(sendSignal => sendSignal?.(signal))
+          state.bufferedOfferCandidates.push(signal)
+          state.offerCandidateSenders.forEach(sendSignal =>
+            sendSignal?.(signal)
+          )
         }
       })
       scheduleOfferExpiry(state, peerId)
@@ -593,7 +586,12 @@ export const initSignalHandler = (
     retryAttempt = 0
   ): Promise<void> => {
     const state = peerStates[peerId]
-    if (!state || state.connectedPeer || state.answeringPeer || state.o) {
+    if (
+      !state ||
+      state.connectedPeer ||
+      state.answeringPeer ||
+      state.offerAnswered
+    ) {
       clearOfferRelayIfPlaceholder(state, relayId)
       return
     }
@@ -618,7 +616,7 @@ export const initSignalHandler = (
     if (
       state.connectedPeer ||
       state.answeringPeer ||
-      state.o ||
+      state.offerAnswered ||
       state.offerRelays[relayId] !== offerRelayPlaceholder
     ) {
       clearOfferRelayIfPlaceholder(state, relayId)
@@ -626,17 +624,19 @@ export const initSignalHandler = (
     }
 
     const [offerPeer, offerSdp, offerId] = offerInfo
-    state.t[relayId] = resetTimer(state.t[relayId])
+    state.offerRetryTimers[relayId] = resetTimer(
+      state.offerRetryTimers[relayId]
+    )
     state.offerRelays[relayId] = true
 
-    state.t[relayId] = setTimeout(
+    const retryTimer = setTimeout(
       () => {
         if (
           retryAttempt >= 2 ||
           isLeaving() ||
           state.connectedPeer ||
           state.answeringPeer ||
-          state.o ||
+          state.offerAnswered ||
           state.offerPeer !== offerPeer ||
           state.offerId !== offerId
         ) {
@@ -648,15 +648,26 @@ export const initSignalHandler = (
           return
         }
         state.offerRelays[relayId] = offerRelayPlaceholder
-        void handleAnnouncement(relayId, peerId, signalPeer, retryAttempt + 1)
+        void handleAnnouncement(
+          relayId,
+          peerId,
+          signalPeer,
+          retryAttempt + 1
+        ).catch(err => {
+          if (!isLeaving()) {
+            logErr('signal', err)
+          }
+        })
       },
       retryAttempt === 0 && announceIntervals[relayId] === undefined
         ? 2_000
         : (announceIntervals[relayId] ?? announceIntervalMs) * 0.9
     )
+    unrefTimer(retryTimer)
+    state.offerRetryTimers[relayId] = retryTimer
 
     let didSendOffer = false
-    state.r[relayId] = signal => {
+    state.offerCandidateSenders[relayId] = signal => {
       if (
         !didSendOffer ||
         isLeaving() ||
@@ -684,13 +695,14 @@ export const initSignalHandler = (
         .catch(noOp)
     }
 
-    DEV: log('sending offer to', peerId)
     void signalPeer(
       peerTopic,
       toJson({peerId: localSelfId, offerId, offer: offerSdp})
     )
     didSendOffer = true
-    state.b.forEach(signal => state.r[relayId]?.(signal))
+    state.bufferedOfferCandidates.forEach(signal =>
+      state.offerCandidateSenders[relayId]?.(signal)
+    )
   }
 
   const replayExistingAnswerIfMatch = async (
@@ -701,24 +713,28 @@ export const initSignalHandler = (
     offerId: string,
     signalPeer: SignalPeer
   ): Promise<void> => {
-    const replay = state.a
-    const lastSentAt = replay?.[3][relayId]
+    const replay = state.answerReplay
+    const lastSentAt = replay?.lastSentAt[relayId]
     if (
       state.answeringPeer &&
       !state.answeringPeer.isDead &&
       replay &&
-      replay[0] === offer &&
-      replay[1] === offerId &&
+      replay.offer === offer &&
+      replay.offerId === offerId &&
       (lastSentAt === undefined || Date.now() - lastSentAt >= 1_000)
     ) {
-      replay[3][relayId] = Date.now()
+      replay.lastSentAt[relayId] = Date.now()
       const peerTopic = await peerTopicOf(peerId)
-      if (!isLeaving() && state.a === replay && !state.connectedPeer) {
+      if (
+        !isLeaving() &&
+        state.answerReplay === replay &&
+        !state.connectedPeer
+      ) {
         const send = (message: string): void => {
           void signalPeer(peerTopic, message)
         }
-        replay[4][relayId] = send
-        replay[2].forEach(send)
+        replay.relays[relayId] = send
+        replay.messages.forEach(send)
       }
     }
   }
@@ -739,7 +755,10 @@ export const initSignalHandler = (
     }
 
     const existingState = peerStates[peerId]
-    if (existingState && (existingState.answeringPeer || existingState.o)) {
+    if (
+      existingState &&
+      (existingState.answeringPeer || existingState.offerAnswered)
+    ) {
       return replayExistingAnswerIfMatch(
         existingState,
         relayId,
@@ -778,7 +797,7 @@ export const initSignalHandler = (
     if (state.connectedPeer) {
       return
     }
-    if (state.answeringPeer || state.o) {
+    if (state.answeringPeer || state.offerAnswered) {
       return replayExistingAnswerIfMatch(
         state,
         relayId,
@@ -802,19 +821,25 @@ export const initSignalHandler = (
     }
 
     const answerPeer = initPeerFn(false, config)
-    const replay: NonNullable<PeerState['a']> = [offer, offerId, [], [], []]
-    replay[3][relayId] = Date.now()
+    const replay: AnswerReplayState = {
+      offer,
+      offerId,
+      messages: [],
+      lastSentAt: [],
+      relays: []
+    }
+    replay.lastSentAt[relayId] = Date.now()
     state.answeringPeer = answerPeer
-    state.d = false
-    state.a = replay
-    state.f = false
+    state.didSendAnswer = false
+    state.answerReplay = replay
+    state.didReportConnectFailure = false
     scheduleAnsweringExpiry(state, peerId, answerPeer)
 
     const onClosedOrError = (): void => {
       if (
         state.answeringPeer === answerPeer &&
         !state.connectedPeer &&
-        state.d
+        state.didSendAnswer
       ) {
         reportSdpFailure(state, peerId)
       }
@@ -835,13 +860,12 @@ export const initSignalHandler = (
       return
     }
 
-    DEV: log('got offer from', peerId)
     const peerTopic = await peerTopicOf(peerId)
-    if (isLeaving() || state.a !== replay) {
+    if (isLeaving() || state.answerReplay !== replay) {
       return
     }
 
-    replay[4][relayId] = message => {
+    replay.relays[relayId] = message => {
       void signalPeer(peerTopic, message)
     }
 
@@ -860,7 +884,7 @@ export const initSignalHandler = (
           }
           const isAnswer = signal.type === 'answer'
           if (isAnswer) {
-            state.d = true
+            state.didSendAnswer = true
           }
           const message = toJson({
             peerId: localSelfId,
@@ -868,10 +892,10 @@ export const initSignalHandler = (
             ...(isAnswer ? {answer: enc.sdp} : {candidate: enc.sdp})
           })
           const now = Date.now()
-          replay[2].push(message)
-          replay[4].forEach((send, id) => {
+          replay.messages.push(message)
+          replay.relays.forEach((send, id) => {
             if (send) {
-              replay[3][id] = now
+              replay.lastSentAt[id] = now
               send(message)
             }
           })
@@ -901,7 +925,6 @@ export const initSignalHandler = (
       }
     })
 
-    DEV: log('sending answer to', peerId)
     await answerPeer.signal(plainOffer)
   }
 
@@ -936,7 +959,7 @@ export const initSignalHandler = (
         ? peer
         : currentState?.offerPeer && currentState.offerId === offerId
           ? currentState.offerPeer
-          : currentState?.a?.[1] === offerId
+          : currentState?.answerReplay?.offerId === offerId
             ? currentState.answeringPeer
             : null
 
@@ -952,6 +975,13 @@ export const initSignalHandler = (
     peer: PeerHandle | undefined
   ): Promise<void> => {
     if (!offerId) {
+      return
+    }
+    if (shouldConnectPeer && !shouldConnectPeer(peerId, 'outbound')) {
+      if (peer) {
+        reclaimLeasedOffer(peer)
+        destroyAlive(peer)
+      }
       return
     }
     const localSelfId = getSelfIdNow() ?? (await getSelfId())
@@ -971,15 +1001,13 @@ export const initSignalHandler = (
       return
     }
 
-    DEV: log('got answer from', peerId)
-
     if (peer) {
       const state = getState(peerStates, peerId)
       claimLeasedOffer(peer)
 
       if (
         state.connectedPeer ||
-        state.o ||
+        state.offerAnswered ||
         (state.answeringPeer &&
           !state.answeringPeer.isDead &&
           localSelfId > peerId)
@@ -994,7 +1022,7 @@ export const initSignalHandler = (
       resetOfferState(state)
       state.offerPeer = peer
       state.offerId = offerId
-      state.o = true
+      state.offerAnswered = true
       scheduleOfferExpiry(state, peerId, offerPostAnswerTtlMs)
       bindOfferPeerHandlers(state, peerId, peer)
       void peer.signal(plainAnswer)
@@ -1005,7 +1033,7 @@ export const initSignalHandler = (
     if (
       !state ||
       !state.offerPeer ||
-      state.o ||
+      state.offerAnswered ||
       !state.offerId ||
       offerId !== state.offerId ||
       state.offerPeer.isDead
@@ -1013,8 +1041,7 @@ export const initSignalHandler = (
       return
     }
 
-    DEV: log('signaling offer-peer with answer for', peerId)
-    state.o = true
+    state.offerAnswered = true
     scheduleOfferExpiry(state, peerId, offerPostAnswerTtlMs)
     void state.offerPeer.signal(plainAnswer)
   }
@@ -1030,207 +1057,200 @@ export const initSignalHandler = (
         !isLeaving() &&
         !state.connectedPeer &&
         !state.answeringPeer &&
-        !state.o
+        !state.offerAnswered
       ) {
         void signalPeer(peerSelfTopic, toJson({peerId: localSelfId}))
       }
     })
 
-  return [
-    (relayId: number) =>
+  return {
+    handleMessage:
+      (relayId: number) =>
       async (
         topic: string,
         msg: unknown,
         signalPeer: SignalPeer
       ): Promise<void> => {
-        if (isLeaving()) {
-          return
-        }
-        relaySignalPeers[relayId] = signalPeer
-        const parsed = parseSignalEnvelope(msg)
-        if (!parsed) {
-          return
-        }
-        const [peerId, offer, answer, candidate, offerId, peer] = parsed
-        const knownSelfId = getSelfIdNow()
-        if (!peerId || (knownSelfId && peerId === knownSelfId)) {
-          return
-        }
-
-        const [rootTopic, selfTopic, localSelfId] = await all([
-          rootTopicP,
-          selfTopicP,
-          getSelfId()
-        ])
-        if (
-          peerId === localSelfId ||
-          isLeaving() ||
-          (topic !== rootTopic && topic !== selfTopic)
-        ) {
-          return
-        }
-
-        onPeerDiscovered?.(peerId, relayId, signalPeer)
-
-        const state = peerStates[peerId]
-        const connectedPeer = state?.connectedPeer
-        if (connectedPeer && state) {
-          const health = getConnectedPeerHealth(connectedPeer)
-          if (health === 'live') {
-            state.u = null
+        try {
+          if (isLeaving()) {
             return
           }
-          if (health === 'stale') {
-            clearConnectedPeer(state, peerId, 'message-from-stale-peer')
-          } else {
-            const nowMs = Date.now()
-            if (nowMs - (state.u ??= nowMs) < disconnectedPeerGraceMs) {
-              DEV: log(
-                'connected peer transiently unhealthy, suppressing signal:',
-                peerId
+          relaySignalPeers[relayId] = signalPeer
+          const parsed = parseSignalEnvelope(msg)
+          if (!parsed) {
+            return
+          }
+          const [peerId, offer, answer, candidate, offerId, peer] = parsed
+          const knownSelfId = getSelfIdNow()
+          if (!peerId || (knownSelfId && peerId === knownSelfId)) {
+            return
+          }
+
+          const [rootTopic, selfTopic, localSelfId] = await all([
+            rootTopicP,
+            selfTopicP,
+            getSelfId()
+          ])
+          if (
+            peerId === localSelfId ||
+            isLeaving() ||
+            (topic !== rootTopic && topic !== selfTopic)
+          ) {
+            return
+          }
+
+          onPeerDiscovered?.(peerId, relayId, signalPeer)
+
+          const state = peerStates[peerId]
+          const connectedPeer = state?.connectedPeer
+          if (connectedPeer && state) {
+            const health = getConnectedPeerHealth(connectedPeer)
+            if (health === 'live') {
+              state.unhealthySince = null
+              return
+            }
+            if (health === 'stale') {
+              clearConnectedPeer(state, peerId, 'message-from-stale-peer')
+            } else {
+              const nowMs = Date.now()
+              if (
+                nowMs - (state.unhealthySince ??= nowMs) <
+                disconnectedPeerGraceMs
+              ) {
+                return
+              }
+              clearConnectedPeer(
+                state,
+                peerId,
+                'message-from-prolonged-disconnect'
+              )
+            }
+          }
+
+          if (!offer && !answer && !candidate) {
+            if (
+              (shouldConnectPeer && !shouldConnectPeer(peerId, 'outbound')) ||
+              (!peerStates[peerId] && atPendingCap(peerId))
+            ) {
+              return
+            }
+
+            const announceState = getState(peerStates, peerId)
+            if (
+              announceState.answeringPeer ||
+              announceState.connectedPeer ||
+              announceState.offerAnswered
+            ) {
+              return
+            }
+
+            if (localSelfId >= peerId && !announceState.offerPeer) {
+              let lastSentByRelay = counterAnnounceTimestamps.get(announceState)
+              if (!lastSentByRelay) {
+                lastSentByRelay = []
+                counterAnnounceTimestamps.set(announceState, lastSentByRelay)
+              }
+              const lastSentAt = lastSentByRelay[relayId]
+              if (lastSentAt !== undefined && Date.now() - lastSentAt < 1_000) {
+                return
+              }
+              lastSentByRelay[relayId] = Date.now()
+              await sendDirectPing(
+                peerId,
+                localSelfId,
+                announceState,
+                signalPeer
               )
               return
             }
-            clearConnectedPeer(
-              state,
-              peerId,
-              'message-from-prolonged-disconnect'
-            )
+
+            if (!announceState.offerRelays[relayId]) {
+              announceState.offerRelays[relayId] = offerRelayPlaceholder
+              await handleAnnouncement(relayId, peerId, signalPeer)
+            }
+            return
+          }
+
+          if (offer) {
+            await handleOffer(relayId, peerId, offer, offerId, signalPeer)
+            return
+          }
+          if (candidate) {
+            await handleCandidate(peerId, candidate, offerId, peer)
+            return
+          }
+          if (answer) {
+            await handleAnswer(peerId, answer, offerId, peer)
+          }
+        } catch (err) {
+          if (!isLeaving()) {
+            logErr('signal', err)
           }
         }
+      },
 
-        if (!offer && !answer && !candidate) {
+    dialPeer: (peerId: string): void => {
+      if (!isValidSignalPeerId(peerId)) {
+        return
+      }
+      void getSelfId()
+        .then(localSelfId => {
           if (
+            isLeaving() ||
+            !peerId ||
+            peerId === localSelfId ||
             (shouldConnectPeer && !shouldConnectPeer(peerId, 'outbound')) ||
             (!peerStates[peerId] && atPendingCap(peerId))
           ) {
             return
           }
-
-          const announceState = getState(peerStates, peerId)
+          const state = getState(peerStates, peerId)
           if (
-            announceState.answeringPeer ||
-            announceState.connectedPeer ||
-            announceState.o
+            state.connectedPeer ||
+            state.answeringPeer ||
+            state.offerAnswered ||
+            state.offerPeer ||
+            !relaySignalPeers.some(Boolean)
           ) {
             return
           }
-
-          if (localSelfId >= peerId && !announceState.offerPeer) {
-            let lastSentByRelay = counterAnnounceTimestamps.get(announceState)
-            if (!lastSentByRelay) {
-              lastSentByRelay = []
-              counterAnnounceTimestamps.set(announceState, lastSentByRelay)
-            }
-            const lastSentAt = lastSentByRelay[relayId]
-            if (lastSentAt !== undefined && Date.now() - lastSentAt < 1_000) {
+          const now = Date.now()
+          const backoff = dialBackoffByState.get(state)
+          if (backoff && now < backoff[1]) {
+            return
+          }
+          const attempts = (backoff?.[0] ?? 0) + 1
+          dialBackoffByState.set(state, [
+            attempts,
+            now + Math.min(60_000, 2_000 * 2 ** (attempts - 1))
+          ])
+          relaySignalPeers.forEach((signalPeer, relayId) => {
+            if (!signalPeer) {
               return
             }
-            lastSentByRelay[relayId] = Date.now()
-            await sendDirectPing(peerId, localSelfId, announceState, signalPeer)
-            return
-          }
-
-          if (!announceState.offerRelays[relayId]) {
-            announceState.offerRelays[relayId] = offerRelayPlaceholder
-            return handleAnnouncement(relayId, peerId, signalPeer)
-          }
-          return
-        }
-
-        if (offer) {
-          return handleOffer(relayId, peerId, offer, offerId, signalPeer)
-        }
-        if (candidate) {
-          return handleCandidate(peerId, candidate, offerId, peer)
-        }
-        if (answer) {
-          return handleAnswer(peerId, answer, offerId, peer)
-        }
-      },
-
-    (peerId: string): void => {
-      if (!isValidSignalPeerId(peerId)) {
-        return
-      }
-      void getSelfId().then(localSelfId => {
-        if (
-          isLeaving() ||
-          !peerId ||
-          peerId === localSelfId ||
-          (!peerStates[peerId] && atPendingCap(peerId))
-        ) {
-          return
-        }
-        const state = getState(peerStates, peerId)
-        if (
-          state.connectedPeer ||
-          state.answeringPeer ||
-          state.o ||
-          state.offerPeer ||
-          !relaySignalPeers.some(Boolean)
-        ) {
-          return
-        }
-        const now = Date.now()
-        const backoff = dialBackoffByState.get(state)
-        if (backoff && now < backoff[1]) {
-          return
-        }
-        const attempts = (backoff?.[0] ?? 0) + 1
-        dialBackoffByState.set(state, [
-          attempts,
-          now + Math.min(60_000, 2_000 * 2 ** (attempts - 1))
-        ])
-        relaySignalPeers.forEach((signalPeer, relayId) => {
-          if (!signalPeer) {
-            return
-          }
-          if (localSelfId < peerId) {
-            if (!state.offerRelays[relayId]) {
-              state.offerRelays[relayId] = offerRelayPlaceholder
-              void handleAnnouncement(relayId, peerId, signalPeer)
+            if (localSelfId < peerId) {
+              if (!state.offerRelays[relayId]) {
+                state.offerRelays[relayId] = offerRelayPlaceholder
+                void handleAnnouncement(relayId, peerId, signalPeer).catch(
+                  err => {
+                    if (!isLeaving()) {
+                      logErr('signal', err)
+                    }
+                  }
+                )
+              }
+            } else {
+              void sendDirectPing(peerId, localSelfId, state, signalPeer).catch(
+                noOp
+              )
             }
-          } else {
-            void sendDirectPing(peerId, localSelfId, state, signalPeer)
+          })
+        })
+        .catch(err => {
+          if (!isLeaving()) {
+            logErr('signal', err)
           }
         })
-      })
     }
-  ]
-}
-
-export const createSignalHandler = (
-  ctx: SignalContext
-): {
-  handleMessage: ReturnType<typeof initSignalHandler>[0]
-  dialPeer: ReturnType<typeof initSignalHandler>[1]
-} => {
-  const [handleMessage, dialPeer] = initSignalHandler(
-    ctx.appId,
-    () => ctx.roomId,
-    ctx.config,
-    ctx.peerStates,
-    () => ctx.rootTopicPlaintext,
-    ctx.rootTopicP,
-    ctx.selfTopicP,
-    (s, p, o) => ctx.toPlain(s, p, o),
-    (s, p, o) => ctx.toCipher(s, p, o),
-    () => ctx.isLeaving(),
-    err => ctx.onError?.(err),
-    (n, lease, enc, size) => ctx.offerManager.checkout(n, lease, enc, size),
-    p => ctx.offerManager.claimLeased(p),
-    p => ctx.offerManager.reclaimLeased(p),
-    (p, id, oid) => ctx.encryptOffer(p, id, oid),
-    (init, cfg) => ctx.initPeer(init, cfg),
-    (p, id) => ctx.connectPeer(p, id),
-    (p, id) => ctx.disconnectPeer(p, id),
-    ctx.announceIntervals,
-    ctx.announceIntervalMs,
-    () => ctx.selfId,
-    ctx.selfIdP,
-    (id, r, sp) => ctx.onPeerDiscovered?.(id, r, sp),
-    (id, dir) => ctx.shouldConnectPeer?.(id, dir) ?? true
-  )
-  return {handleMessage, dialPeer}
+  }
 }

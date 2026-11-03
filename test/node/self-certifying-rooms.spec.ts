@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import {execFileSync} from 'node:child_process'
-import {readFileSync} from 'node:fs'
+import {existsSync, readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import test from './test.ts'
 import * as corePublicExports from '../../packages/core/src/index.ts'
-import {definePlugin, roles} from '../../packages/core/src/index.ts'
+import {roles, scale} from '../../packages/core/src/index.ts'
 import {createMemorySignalBus} from './memory-rtc.ts'
 
-void test('Production build (no DEV labels): custom plugin setup(kernel) sees resolved 20-char kernel.selfId on the first room, and built .d.mts omits _test_only_* and __config', () => {
+void test('Production build: built-in plugins work on the first room, definePlugin and public.mjs are un-exported, and built .d.mts omits test-only symbols and __config', () => {
   const distIndexMjs = resolve(
     import.meta.dirname,
     '../../packages/core/dist/index.mjs'
@@ -17,21 +17,28 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
     '../../packages/core/dist/index.d.mts'
   )
 
+  assert.equal(
+    existsSync(
+      resolve(import.meta.dirname, '../../packages/core/dist/public.mjs')
+    ),
+    false,
+    '@trystero-p2p/core/public runtime bundle must not exist'
+  )
+  assert.equal(
+    existsSync(
+      resolve(import.meta.dirname, '../../packages/core/dist/public.d.mts')
+    ),
+    false,
+    '@trystero-p2p/core/public dts bundle must not exist'
+  )
+
   const script = `
     import assert from 'node:assert/strict'
-    import {createTopicStrategy, definePlugin} from ${JSON.stringify(distIndexMjs)}
+    import * as core from ${JSON.stringify(distIndexMjs)}
 
-    let setupSelfId = null
-    const customPlugin = definePlugin('custom-selfid-check', {
-      setup(kernel) {
-        setupSelfId = kernel.selfId
-        return {
-          getCapturedSelfId: () => setupSelfId
-        }
-      }
-    })
+    assert.equal('definePlugin' in core, false, 'definePlugin must not be publicly exported')
 
-    const joinRoom = createTopicStrategy({
+    const joinRoom = core.createTopicStrategy({
       init: () => ({}),
       subscribeTopic: () => () => {},
       publishTopic: () => {}
@@ -40,20 +47,19 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
     const room = joinRoom(
       {
         appId: 'prod-first-room-app',
-        use: [customPlugin]
+        use: [core.roles({selfAsAdmin: true}), core.scale()]
       },
       'room-1'
     )
 
-    assert.equal(room.getCapturedSelfId, undefined)
+    assert.equal(typeof room.grantRole, 'function')
+    assert.equal(typeof room.unban, 'function')
+    assert.equal(typeof room.getTopology, 'function')
     await room.ready
-    assert.equal(typeof room.getCapturedSelfId, 'function')
 
     const self = await room.getSelf()
-    assert.equal(typeof setupSelfId, 'string')
-    assert.match(setupSelfId, /^[0-9A-Za-z]{20}$/, 'kernel.selfId in setup() must be a resolved 20-char peerId in production build')
-    assert.equal(setupSelfId, self.peerId)
-    assert.equal(room.getCapturedSelfId(), self.peerId)
+    assert.match(self.peerId, /^[0-9A-Za-z]{20}$/, 'self.peerId must be a resolved 20-char peerId in production build')
+    assert.equal(room.getTopology().peerId, self.peerId)
     await room.leave()
   `
 
@@ -116,90 +122,47 @@ void test('Production build (no DEV labels): custom plugin setup(kernel) sees re
   )
 })
 
-void test('Plugin API safety: rejects reserved room property names, duplicate plugin names, and duplicate plugin API property names', async () => {
+void test('Plugin API safety: rejects non-built-in plugin objects and duplicate built-in plugins synchronously', () => {
   const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus()
   const joinRoom = makeJoinRoom()
 
   assert.throws(
-    () => definePlugin('ready', {setup: () => ({})}),
-    /plugin name "ready" is a reserved room property/
-  )
-  assert.throws(
-    () => definePlugin('leave', {setup: () => ({})}),
-    /plugin name "leave" is a reserved room property/
-  )
-  assert.throws(
-    () => definePlugin('onPeerJoin', {setup: () => ({})}),
-    /plugin name "onPeerJoin" is a reserved room property/
-  )
-
-  const shadowLeavePlugin = definePlugin('shadow-leave', {
-    setup: () => ({
-      leave: () => Promise.resolve()
-    })
-  })
-  await assert.rejects(
     () =>
       joinRoom(
         {
-          appId: 'shadow-test',
-          use: [shadowLeavePlugin],
+          appId: 'invalid-plugin-test',
+          use: [{name: 'custom', setup: () => ({})} as never],
           rtcPolyfill
         },
-        'room-shadow-1'
-      ).ready,
-    /cannot override reserved room property "leave"/
+        'room-invalid-1'
+      ),
+    /invalid plugin in use\[\]; expected roles\(\) or scale\(\)/
   )
-
-  const shadowGetPeersPlugin = definePlugin('shadow-peers', {
-    setup: () => ({
-      getPeers: () => ({})
-    })
-  })
-  await assert.rejects(
-    () =>
-      joinRoom(
-        {
-          appId: 'shadow-test',
-          use: [shadowGetPeersPlugin],
-          rtcPolyfill
-        },
-        'room-shadow-2'
-      ).ready,
-    /cannot override reserved room property "getPeers"/
-  )
-
-  const pluginA = definePlugin('plugin-a', {
-    setup: () => ({sharedFn: () => 1})
-  })
-  const pluginB = definePlugin('plugin-b', {
-    setup: () => ({sharedFn: () => 2})
-  })
 
   assert.throws(
     () =>
       joinRoom(
         {
           appId: 'dup-plugin-test',
-          use: [pluginA, pluginA],
+          use: [roles(), roles()],
           rtcPolyfill
         },
         'room-dup-1'
       ),
-    /duplicate plugin "plugin-a"/
+    /duplicate plugin "roles"/
   )
 
-  await assert.rejects(
+  assert.throws(
     () =>
       joinRoom(
         {
-          appId: 'dup-api-test',
-          use: [pluginA, pluginB],
+          appId: 'dup-scale-test',
+          use: [scale(), scale()],
           rtcPolyfill
         },
         'room-dup-2'
-      ).ready,
-    /defines duplicate room property "sharedFn"/
+      ),
+    /duplicate plugin "scale"/
   )
 })
 
@@ -233,9 +196,14 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'makeUserState is synchronously available on Room before room.ready'
   )
   assert.equal(
-    'grantRole' in room,
-    false,
-    'plugin methods attach when room.ready resolves'
+    typeof room.grantRole,
+    'function',
+    'built-in roles plugin stubs attach synchronously before room.ready'
+  )
+  assert.equal(
+    typeof room.unban,
+    'function',
+    'built-in roles unban stub attaches synchronously before room.ready'
   )
 
   await room.ready
@@ -279,7 +247,9 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'socketGetter',
     'strToNum',
     'toHex',
-    'values'
+    'values',
+    'definePlugin',
+    'decodeBytes'
   ]) {
     assert.equal(
       pruned in coreExports,
@@ -299,11 +269,9 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'toJson',
     'fromJson',
     'encodeBytes',
-    'decodeBytes',
     'genId',
     'roles',
     'scale',
-    'definePlugin',
     'clearUserIdentity',
     'createUserIdentity',
     'exportUserIdentity',
@@ -377,10 +345,6 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     {stdio: 'pipe'}
   )
 
-  const publicDts = readFileSync(
-    resolve(process.cwd(), 'packages/core/dist/public.d.mts'),
-    'utf8'
-  )
   const collectDtsExportedNames = (dts: string, out = new Set<string>()) => {
     for (const m of dts.matchAll(
       /^export (?:type|interface|declare const) (\w+)\b/gm
@@ -389,7 +353,7 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
         out.add(m[1])
       }
     }
-    for (const m of dts.matchAll(/^export \{([^}]+)\}/gm)) {
+    for (const m of dts.matchAll(/^export (?:type )?\{([^}]+)\}/gm)) {
       for (const part of (m[1] ?? '').split(',')) {
         const cleaned = part
           .trim()
@@ -425,16 +389,10 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       `packages/${strategyPkg}/dist/index.d.mts must not wildcard re-export @trystero-p2p/core root`
     )
     const exportedNames = collectDtsExportedNames(strategyDts)
-    if (
-      /^export\s+\*\s+from\s+['"]@trystero-p2p\/core\/public['"]/m.test(
-        strategyDts
-      )
-    ) {
-      collectDtsExportedNames(publicDts, exportedNames)
-    }
 
     for (const leaked of [
       'ActionOptions',
+      'AuthoritativeState',
       'AuthoritativeStateRecord',
       'BaseRelayConfig',
       'BaseRoomConfig',
@@ -453,6 +411,9 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       'PeerBanRecord',
       'PeerHandle',
       'PeerHandlers',
+      'PluginContext',
+      'PublicRolesProvider',
+      'PublicScaleProvider',
       'ResolvedIdentityPersistence',
       'RoleRevocationRecord',
       'RoomKernel',
@@ -467,10 +428,12 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       'TopicPublishContext',
       'TopicStrategyAdapter',
       'TopicSubscriptionContext',
+      'TopologyMode',
       'UserIdentityPersistence',
       'WsRelayClientMessage',
       'WsRelayServerMessage',
       'createEvent',
+      'definePlugin',
       'subscribe'
     ]) {
       assert.equal(
@@ -480,6 +443,8 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       )
     }
     for (const kept of [
+      'ActionError',
+      'BanOptions',
       'Room',
       'RoomError',
       'RoomErrorCode',
@@ -493,7 +458,6 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
       'RequestAction',
       'SendOptions',
       'SharedState',
-      'AuthoritativeState',
       'UserState',
       'UserStateConfig',
       'UserStateChangeContext',

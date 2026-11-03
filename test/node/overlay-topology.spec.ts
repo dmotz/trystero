@@ -16,7 +16,12 @@ import {
 } from '../../packages/core/src/scale/index.ts'
 import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
 import {createOverlayCluster} from './overlay-harness.ts'
-import {testPeerId, wait, waitFor} from './peer-harness.ts'
+import {
+  getTestEndpointByPeerId,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 void test('Topology algorithms: symmetric gossip neighbor selection & shortest-path routing', () => {
   const peerCount = 200
@@ -25,73 +30,57 @@ void test('Topology algorithms: symmetric gossip neighbor selection & shortest-p
     (_, i) => `peer-${String(i).padStart(4, '0')}`
   )
 
-  for (const mode of ['gossip'] as const) {
-    const maxConnections = 8
-    const adjacency = new Map<string, Set<string>>()
+  const maxDirectPeers = 8
+  const adjacency = new Map<string, Set<string>>()
 
-    for (const id of peerIds) {
-      adjacency.set(
-        id,
-        computeTargetNeighbors(id, peerIds, mode, maxConnections)
-      )
-    }
+  for (const id of peerIds) {
+    adjacency.set(id, computeTargetNeighbors(id, peerIds, maxDirectPeers))
+  }
 
-    let totalDirectedEdges = 0
-    for (const [u, neighbors] of adjacency.entries()) {
-      assert.ok(
-        neighbors.size <= maxConnections,
-        `${mode}: peer ${u} degree ${neighbors.size} exceeds maxConnections ${maxConnections}`
-      )
-      assert.ok(
-        neighbors.size >= 2,
-        `${mode}: peer ${u} degree ${neighbors.size} should be at least 2`
-      )
-      totalDirectedEdges += neighbors.size
-
-      for (const v of neighbors) {
-        assert.ok(
-          adjacency.get(v)?.has(u),
-          `${mode}: neighbor selection must be symmetric between ${u} and ${v}`
-        )
-      }
-    }
-
-    const fullMeshDirectedEdges = peerCount * (peerCount - 1)
-    const reductionRatio = 1 - totalDirectedEdges / fullMeshDirectedEdges
+  let totalDirectedEdges = 0
+  for (const [u, neighbors] of adjacency.entries()) {
     assert.ok(
-      reductionRatio >= 0.95,
-      `${mode}: expected >=95% edge reduction for N=200, got ${(reductionRatio * 100).toFixed(1)}%`
+      neighbors.size <= maxDirectPeers,
+      `peer ${u} degree ${neighbors.size} exceeds maxDirectPeers ${maxDirectPeers}`
     )
-
-    // Verify full connectivity and logarithmic diameter from peer-0000
-    const routes: Record<string, TopologyRoute> = computeShortestPathRoutes(
-      peerIds[0]!,
-      adjacency,
-      adjacency.get(peerIds[0]!)!
-    )
-    assert.equal(
-      Object.keys(routes).length,
-      peerCount - 1,
-      `${mode}: all ${peerCount - 1} peers must be reachable`
-    )
-
-    const maxHops = Math.max(...Object.values(routes).map(r => r.hops))
     assert.ok(
-      maxHops <= 7,
-      `${mode}: expected logarithmic diameter <= 7 hops for N=200, got ${maxHops}`
+      neighbors.size >= 2,
+      `peer ${u} degree ${neighbors.size} should be at least 2`
     )
+    totalDirectedEdges += neighbors.size
 
-    // Verify backupNextHop is disjoint from primary nextHop
-    for (const [dest, route] of Object.entries(routes)) {
-      if (route.backupNextHop) {
-        assert.notEqual(
-          route.backupNextHop,
-          route.nextHop,
-          `${mode}: backupNextHop for ${dest} must differ from primary nextHop`
-        )
-      }
+    for (const v of neighbors) {
+      assert.ok(
+        adjacency.get(v)?.has(u),
+        `neighbor selection must be symmetric between ${u} and ${v}`
+      )
     }
   }
+
+  const fullMeshDirectedEdges = peerCount * (peerCount - 1)
+  const reductionRatio = 1 - totalDirectedEdges / fullMeshDirectedEdges
+  assert.ok(
+    reductionRatio >= 0.95,
+    `expected >=95% edge reduction for N=200, got ${(reductionRatio * 100).toFixed(1)}%`
+  )
+
+  // Verify full connectivity and logarithmic diameter from peer-0000
+  const routes: Record<string, TopologyRoute> = computeShortestPathRoutes(
+    peerIds[0]!,
+    adjacency,
+    adjacency.get(peerIds[0]!)!
+  )
+  assert.equal(
+    Object.keys(routes).length,
+    peerCount - 1,
+    `all ${peerCount - 1} peers must be reachable`
+  )
+
+  const maxHops = Math.max(...Object.values(routes).map(r => r.hops))
+  assert.ok(
+    maxHops <= 7,
+    `expected logarithmic diameter <= 7 hops for N=200, got ${maxHops}`
+  )
 })
 
 void test('Peer dropping & mesh-breaking scenarios: 25% mass churn and autonomous overlay self-healing', async () => {
@@ -99,8 +88,7 @@ void test('Peer dropping & mesh-breaking scenarios: 25% mass churn and autonomou
   const cluster = await createOverlayCluster({
     peerCount,
     topology: {
-      mode: 'gossip',
-      maxConnections: 8
+      maxDirectPeers: 8
     }
   })
 
@@ -164,20 +152,22 @@ void test('Peer dropping & mesh-breaking scenarios: 25% mass churn and autonomou
   }
 })
 
-void test('Solution (a): reject maxConnections < 4, derive dynamic TTL from roster size, and verify 100% reachability & delivery at N=250 and N=500 with defaults', async () => {
-  // 1. Reject maxConnections < 4 in both normalizeTopologyConfig and scale()
-  for (const invalid of [0, 1, 2, 3, -4, 3.5, Number.NaN]) {
+void test('Solution (a): validate maxDirectPeers bounds (4..32), derive dynamic TTL from roster size, and verify 100% reachability & delivery at N=250 and N=500 with defaults', async () => {
+  // 1. Reject invalid maxDirectPeers (< 4 or > 32 or non-integer) in both normalizeTopologyConfig and scale()
+  for (const invalid of [0, 1, 2, 3, 33, -4, 3.5, Number.NaN]) {
     assert.throws(
-      () => normalizeTopologyConfig({mode: 'gossip', maxConnections: invalid}),
-      /scale\.maxConnections must be an integer >= 4/
+      () => normalizeTopologyConfig({maxDirectPeers: invalid}),
+      /scale\.maxDirectPeers must be an integer between 4 and 32/
     )
     assert.throws(
-      () => scale({mode: 'gossip', maxConnections: invalid}),
-      /scale\.maxConnections must be an integer >= 4/
+      () => scale({maxDirectPeers: invalid}),
+      /scale\.maxDirectPeers must be an integer between 4 and 32/
     )
   }
-  assert.equal(normalizeTopologyConfig({maxConnections: 4}).maxConnections, 4)
-  assert.equal(normalizeTopologyConfig().maxConnections, 6)
+  assert.throws(() => scale('gossip' as any), /scale config must be an object/)
+  assert.equal(normalizeTopologyConfig({maxDirectPeers: 4}).maxDirectPeers, 4)
+  assert.equal(normalizeTopologyConfig({maxDirectPeers: 32}).maxDirectPeers, 32)
+  assert.equal(normalizeTopologyConfig().maxDirectPeers, 6)
 
   // 2. Verify deriveMaxHops scales with roster size and degree
   const ttlSmall = deriveMaxHops(16, 6)
@@ -187,7 +177,7 @@ void test('Solution (a): reject maxConnections < 4, derive dynamic TTL from rost
   assert.ok(ttl250 >= 25, `expected ttl250 >= 25, got ${ttl250}`)
   assert.ok(ttl500 >= 30 && ttl500 <= maxAllowedHops)
 
-  // 3. Verify 0% unreachable pairs across all N*(N-1) pairs at N=250 and N=500 with default maxConnections=6
+  // 3. Verify 0% unreachable pairs across all N*(N-1) pairs at N=250 and N=500 with default maxDirectPeers=6
   for (const n of [250, 500]) {
     const ids = Array.from(
       {length: n},
@@ -197,13 +187,7 @@ void test('Solution (a): reject maxConnections < 4, derive dynamic TTL from rost
     for (const id of ids) {
       adj.set(
         id,
-        computeTargetNeighbors(
-          id,
-          ids,
-          'gossip',
-          6,
-          'default-app\0default-room'
-        )
+        computeTargetNeighbors(id, ids, 6, 'default-app\0default-room')
       )
     }
     const maxHopsLimit = deriveMaxHops(n, 6)
@@ -229,7 +213,7 @@ void test('Solution (a): reject maxConnections < 4, derive dynamic TTL from rost
     assert.equal(
       unreachablePairs,
       0,
-      `N=${n} with default maxConnections=6 must have 0 unreachable pairs within TTL=${maxHopsLimit} (observed diameter=${observedDiameter})`
+      `N=${n} with default maxDirectPeers=6 must have 0 unreachable pairs within TTL=${maxHopsLimit} (observed diameter=${observedDiameter})`
     )
     assert.ok(
       observedDiameter <= maxHopsLimit,
@@ -237,10 +221,9 @@ void test('Solution (a): reject maxConnections < 4, derive dynamic TTL from rost
     )
   }
 
-  // 4. Live N=250 cluster at default scale('gossip') config over async jittered harness
+  // 4. Live N=250 cluster at default scale() config over async jittered harness
   const cluster250 = await createOverlayCluster({
     peerCount: 250,
-    topology: 'gossip',
     jitterMs: 1
   })
   try {
@@ -312,12 +295,14 @@ void test('Liveness refresh on verified packets and descriptor seq-bump flood th
   const alicePid = testPeerId('live-alice')
   const relayPid = testPeerId('live-relay')
   const bobPid = testPeerId('live-bob')
+  const altNeighborPid = testPeerId('live-alt')
 
   const alice = createOverlayManager({
     selfId: alicePid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(alicePid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -326,7 +311,8 @@ void test('Liveness refresh on verified packets and descriptor seq-bump flood th
     selfId: relayPid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayPid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -339,7 +325,8 @@ void test('Liveness refresh on verified packets and descriptor seq-bump flood th
     appId,
     roomId,
     descriptorTtlMs: 350,
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobPid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: id => bobLeaves.push(id),
     onDeliverData: (_from, data) =>
@@ -416,15 +403,16 @@ void test('Liveness refresh on verified packets and descriptor seq-bump flood th
 
     // Now test content-agnostic descriptor flood throttling:
     // Flood 40 validly-signed descriptor updates for Alice alternating neighbor lists at >100/s;
-    // at most the burst cap (8) are verified and accepted, while excess updates (>= 30) are throttled before verification and counted in signatureFailures.
+    // at most the token-bucket burst cap (16) are verified and accepted, while excess updates (>= 23) are throttled before WebCrypto verification!
     blockAliceDescriptorsToBob = false
     bobAcceptedAliceDescriptors = 0
     const aliceId = await alice.getLocalCryptoIdentity()
+    const floodFrames: Uint8Array[] = []
     for (let s = 500; s < 540; s++) {
       const d: any = {
         peerId: alicePid,
         seq: s,
-        neighbors: s % 2 === 0 ? [relayPid] : [relayPid, 'alt-neighbor'].sort(),
+        neighbors: s % 2 === 0 ? [relayPid] : [relayPid, altNeighborPid].sort(),
         signPubKey: aliceId.signPubJwk,
         encPubKey: aliceId.encPubJwk
       }
@@ -434,19 +422,32 @@ void test('Liveness refresh on verified packets and descriptor seq-bump flood th
       d.sig = Buffer.from(
         await ecdsaSign(aliceId.signPrivateKey, canonical as BufferSource)
       ).toString('base64')
-      bob.handleOverlayFrame(
-        relayPid,
-        packOverlayControl({t: 'gossip', descriptors: [d]}).slice().buffer
-      )
+      floodFrames.push(packOverlayControl({t: 'gossip', descriptors: [d]}))
     }
-    await wait(80)
+
+    const origVerify = crypto.subtle.verify.bind(crypto.subtle)
+    let floodVerifyCalls = 0
+    crypto.subtle.verify = (async (...args: Parameters<typeof origVerify>) => {
+      floodVerifyCalls++
+      return origVerify(...args)
+    }) as typeof crypto.subtle.verify
+
+    try {
+      for (const frame of floodFrames) {
+        bob.handleOverlayFrame(relayPid, frame.slice().buffer)
+      }
+      await wait(80)
+    } finally {
+      crypto.subtle.verify = origVerify
+    }
+
     assert.ok(
-      bobAcceptedAliceDescriptors <= 17,
+      bobAcceptedAliceDescriptors >= 1 && bobAcceptedAliceDescriptors <= 17,
       `expected content-agnostic descriptor flood to verify and accept at most the burst cap, got ${bobAcceptedAliceDescriptors}`
     )
     assert.ok(
-      bob.getSnapshot().stats.signatureFailures >= 23,
-      `expected excess descriptor updates to be throttled before verification and counted as signatureFailures, got ${bob.getSnapshot().stats.signatureFailures}`
+      floodVerifyCalls <= 17,
+      `expected excess descriptor updates to be throttled before WebCrypto verification (<= 17 verifies for 40 frames), got ${floodVerifyCalls}`
     )
   } finally {
     alice.destroy()

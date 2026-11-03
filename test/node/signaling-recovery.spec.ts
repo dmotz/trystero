@@ -7,17 +7,20 @@ import {
   resetOfferState
 } from '../../packages/core/src/signal-handler.ts'
 import type {
+  OfferCheckoutFn,
+  OfferRecord,
   PeerState,
   SignalContext,
   StrategyOnMessage
 } from '../../packages/core/src/internal-types.ts'
 import type {
+  BaseRoomConfig,
   PeerHandle,
   PeerHandlers,
   Signal
 } from '../../packages/core/src/types.ts'
 import initPeer from '../../packages/core/src/peer.ts'
-import {OfferManager} from '../../packages/core/src/offer-manager.ts'
+import {createOfferManager} from '../../packages/core/src/offer-manager.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {MockRTCPeerConnection, wait, waitFor} from './peer-harness.ts'
 
@@ -31,26 +34,9 @@ type SentSignalMessage = {
   candidate?: string
 }
 
-type MockOfferManager = {
-  checkout: (
-    ...args: Parameters<OfferManager['checkout']>
-  ) => Promise<Array<{peer: PeerHandle; offer: string; offerId?: string}>>
-  claimLeased: (peer: PeerHandle) => void
-  reclaimLeased: (peer: PeerHandle) => void
-}
-
-type FixtureContext = Omit<
-  SignalContext,
-  'config' | 'offerManager' | 'initPeer' | 'onError' | 'encryptOffer'
-> & {
-  config: Partial<SignalContext['config']>
-  offerManager: MockOfferManager
-  initPeer: (
-    initiator?: boolean,
-    config?: SignalContext['config']
-  ) => PeerHandle
-  onError?: SignalContext['onError']
-  encryptOffer?: SignalContext['encryptOffer']
+type FixtureContext = Omit<SignalContext, 'config' | 'initPeer'> & {
+  config: BaseRoomConfig
+  initPeer: (initiator?: boolean, config?: BaseRoomConfig) => PeerHandle
 }
 
 type MockFixturePeer = {
@@ -92,34 +78,45 @@ const fixture = (t: TestContext) => {
     }) satisfies MockFixturePeer as unknown as PeerHandle
   const ctx: FixtureContext = {
     appId: 'recovery-test',
-    roomId: 'room',
-    config: {},
+    getRoomId: () => 'room',
+    config: {appId: 'recovery-test'},
     peerStates: {},
-    rootTopicPlaintext: 'root',
+    getRootTopicPlaintext: () => 'root',
     rootTopicP: Promise.resolve('root'),
     selfTopicP: Promise.resolve('self'),
     toPlain: async signal => signal,
     toCipher: async signal => signal,
     isLeaving: () => leaving,
-    offerManager: {
-      checkout: async () => [{peer: peer(), offer: 'offer'}],
-      claimLeased() {},
-      reclaimLeased() {}
-    },
+    onError: undefined,
+    checkoutOffers: (async () => [
+      {peer: peer(), offer: 'offer', offerId: 'fixture-offer'}
+    ]) as OfferCheckoutFn,
+    claimLeasedOffer() {},
+    reclaimLeasedOffer() {},
+    encryptOffer: async () => 'offer',
     initPeer: peer,
     connectPeer() {},
     disconnectPeer() {},
     announceIntervals: [],
     announceIntervalMs: 5333,
-    selfId
+    getSelfIdNow: () => selfId,
+    selfIdP: Promise.resolve(selfId)
   }
-  const receive = createSignalHandler(
-    ctx as unknown as SignalContext
-  ).handleMessage(0)
+  const signalContext: SignalContext = {
+    ...ctx,
+    checkoutOffers: (...args) => ctx.checkoutOffers(...args),
+    claimLeasedOffer: p => ctx.claimLeasedOffer(p),
+    reclaimLeasedOffer: p => ctx.reclaimLeasedOffer(p),
+    encryptOffer: (...args) => ctx.encryptOffer(...args),
+    initPeer: (initiator, cfg) => ctx.initPeer(initiator, cfg)
+  }
+  const handler = createSignalHandler(signalContext)
+  const receive = handler.handleMessage(0)
   const send = (_: string, message: string) =>
     messages.push(JSON.parse(message) as SentSignalMessage)
   return {
     ctx,
+    signalContext,
     messages,
     leave: () => {
       leaving = true
@@ -163,16 +160,15 @@ void test('a pending outgoing offer is discarded after its state resets', async 
   const f = fixture(t)
   const peerId = selfId + 'z'
   const outgoingPeer = f.ctx.initPeer()
-  let resolveOffer:
-    | ((records: Array<{peer: PeerHandle; offer: string}>) => void)
-    | undefined
-  f.ctx.offerManager.checkout = () =>
-    new Promise(resolve => (resolveOffer = resolve))
+  let resolveOffer: ((records: OfferRecord[]) => void) | undefined
+  f.ctx.checkoutOffers = () => new Promise(resolve => (resolveOffer = resolve))
 
   const pendingAnnouncement = f.receive({peerId})
   await settle()
   resetOfferState(f.ctx.peerStates[peerId]!)
-  resolveOffer!([{peer: outgoingPeer, offer: 'outgoing-offer'}])
+  resolveOffer!([
+    {peer: outgoingPeer, offer: 'outgoing-offer', offerId: 'out-1'}
+  ])
   await pendingAnnouncement
 
   assert.equal(outgoingPeer.isDead, true)
@@ -199,7 +195,7 @@ void test('offer candidates gathered before signaling handlers attach are publis
       }
     } as unknown as RTCPeerConnectionIceEvent)
 
-  const manager = new OfferManager(() => {
+  const manager = createOfferManager(() => {
     offerPeer = initPeer(true, {
       appId: 'recovery-test',
       rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
@@ -207,7 +203,9 @@ void test('offer candidates gathered before signaling handlers attach are publis
     emitCandidate(10001)
     return offerPeer
   })
-  f.ctx.offerManager = manager
+  f.ctx.checkoutOffers = manager.checkout
+  f.ctx.claimLeasedOffer = manager.claimLeased
+  f.ctx.reclaimLeasedOffer = manager.reclaimLeased
   f.ctx.encryptOffer = async (peer: PeerHandle) => {
     const offer = await peer.getOffer()
     assert.equal(offer!.type, 'offer')
@@ -304,7 +302,7 @@ void test('a matching repeated offer replays its answer and candidates, not a ne
     'rapid duplicates must not amplify traffic'
   )
   const relay1Messages: SentSignalMessage[] = []
-  await createSignalHandler(f.ctx as unknown as SignalContext).handleMessage(1)(
+  await createSignalHandler(f.signalContext).handleMessage(1)(
     'root',
     offer,
     (_, message) =>
@@ -444,7 +442,7 @@ void test('untrusted serialized or non-handle peer fields and array payloads are
   const f = fixture(t)
   const peerId = `${selfId}z`
   let claimed = 0
-  f.ctx.offerManager.claimLeased = () => {
+  f.ctx.claimLeasedOffer = () => {
     claimed++
   }
 
@@ -466,6 +464,77 @@ void test('untrusted serialized or non-handle peer fields and array payloads are
 
   assert.equal(claimed, 0)
   assert.equal(Object.keys(f.ctx.peerStates).length, 0)
+})
+
+void test('H4: malformed, non-object, primitive, array, and corrupt relay packets are safely ignored without breaking subsequent signaling', async t => {
+  const f = fixture(t)
+  const validOutPeerId = `${selfId}z`
+  const validInPeerId = `${selfId}y`
+
+  const malformedPayloads: unknown[] = [
+    null,
+    undefined,
+    0,
+    42,
+    NaN,
+    true,
+    false,
+    '',
+    'not-json-{{{',
+    'null',
+    '42',
+    'true',
+    '"just-a-string"',
+    '[]',
+    '[{"peerId":"abc"}]',
+    [],
+    [{peerId: validOutPeerId}],
+    'x'.repeat(130 * 1024),
+    {peerId: null},
+    {peerId: 12345},
+    {peerId: ''},
+    {peerId: 'invalid whitespace id'},
+    {peerId: validOutPeerId, offer: 'missing-offer-id'},
+    {peerId: validOutPeerId, offerId: '', offer: 'empty-offer-id'},
+    {peerId: validOutPeerId, offerId: 'bad id!', offer: 'bad-offer-id'},
+    {peerId: validOutPeerId, offerId: 'oid-1', offer: ''},
+    {peerId: validOutPeerId, offerId: 'oid-2', offer: 123},
+    {peerId: validOutPeerId, offerId: 'oid-3', answer: {nested: true}},
+    {
+      peerId: validOutPeerId,
+      offerId: 'oid-4',
+      candidate: 'c'.repeat(5_000)
+    }
+  ]
+
+  for (const packet of malformedPayloads) {
+    await assert.doesNotReject(async () => {
+      await f.receive(packet)
+    })
+  }
+
+  assert.equal(
+    Object.keys(f.ctx.peerStates).length,
+    0,
+    'malformed relay packets must not allocate peerStates'
+  )
+  assert.equal(
+    f.messages.length,
+    0,
+    'malformed relay packets must not emit outbound signals'
+  )
+
+  // Verify subsequent outbound offer and inbound answer signaling still work normally
+  await f.receive({peerId: validOutPeerId})
+  assert.equal(f.messages.filter(m => m.offer).length, 1)
+
+  await f.receive({
+    peerId: validInPeerId,
+    offerId: 'valid-in-1',
+    offer: 'offer'
+  })
+  await settle()
+  assert.equal(f.messages.filter(m => m.answer).length, 1)
 })
 
 type Subscriber = {

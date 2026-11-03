@@ -3,16 +3,26 @@ import test from './test.ts'
 import {
   actionStartFrame as start,
   linkedActions as linked,
+  testEndpoint,
   turn
 } from './peer-harness.ts'
 import {createActionWireManager} from '../../packages/core/src/action-wire.ts'
-import {createActionManager} from '../../packages/core/src/actions.ts'
+import {
+  type ActionError,
+  createActionManager
+} from '../../packages/core/src/actions.ts'
+import {
+  type PeerDataTransport,
+  createDirectPeerTransport
+} from '../../packages/core/src/peer-transport.ts'
+import createRoom from '../../packages/core/src/room.ts'
+import type {PeerHandle} from '../../packages/core/src/types.ts'
 
 const chunkSize = 16 * 1024 - 14
 
 const dataFrame = (id: number, offset: number, length: number) => {
   const bytes = new Uint8Array(14 + length)
-  bytes[0] = 2
+  bytes[0] = 3
   bytes[1] = 2
   const view = new DataView(bytes.buffer)
   view.setUint32(2, id)
@@ -20,23 +30,35 @@ const dataFrame = (id: number, offset: number, length: number) => {
   bytes.fill(7, 14)
   return bytes.buffer
 }
+
 const receiver = (maxReceiveBytes = 256 * 1024 ** 2) => {
   const controls: {peerId: string; kind: number}[] = []
   const destroyed: string[] = []
+  const transports = new Map<string, PeerDataTransport>()
   const wire = createActionWireManager({
     onPeerError: id => {
       destroyed.push(id)
+      transports.delete(id)
       wire.clearPeer(id)
     },
-    getPeer: peerId =>
-      ({
-        sendData: (bytes: Uint8Array) =>
-          controls.push({peerId, kind: (bytes[1] ?? 0) & 15}),
-        destroy: () => destroyed.push(peerId)
-      }) as never,
+    resolveTransport: peerId => {
+      let transport = transports.get(peerId)
+      if (!transport) {
+        transport = {
+          isOpen: true,
+          bufferedAmount: 0,
+          sendFrame: (bytes: Uint8Array) =>
+            controls.push({peerId, kind: (bytes[1] ?? 0) & 15}),
+          waitForDrain: () => true,
+          close: () => destroyed.push(peerId)
+        }
+        transports.set(peerId, transport)
+      }
+      return transport
+    },
     getPeerIds: () => [],
     canReceiveFromPeer: () => true,
-    throwIfAborted: () => {},
+    checkAborted: () => {},
     maxReceiveBytes
   })
   return {wire, controls, destroyed}
@@ -119,16 +141,29 @@ void test('bulk offers queue automatically while small messages still pass', asy
   assert.equal(pair.disconnected(), false)
 })
 
-void test('missing handlers retain only offers and registration applies the receive policy', async t => {
+void test('unregistered bulk offers reject immediately while registered listener-less actions retain offers and apply receive policy', async t => {
   const pair = linked()
   t.after(pair.close)
+
+  // Unregistered action on receiver rejects bulk offer immediately without allocating a slot
+  await assert.rejects(
+    pair.left.makeAction('unregistered-file').send(new Uint8Array(100_000)),
+    (err: ActionError) =>
+      err.kind === 'rejected' && /unregistered action/.test(err.message)
+  )
+  assert.equal(
+    pair.frames.some(frame => frame.kind === 2),
+    false
+  )
+
+  pair.frames.length = 0
+  const file = pair.right.makeAction('file')
   const sending = pair.left.makeAction('file').send(new Uint8Array(100_000))
   await turn()
   assert.deepEqual(
     pair.frames.map(frame => frame.kind),
     [1]
   )
-  const file = pair.right.makeAction('file')
   file.onReceive(() => false)
   await assert.rejects(sending, {kind: 'rejected'})
   assert.equal(typeof file.onMessage, 'function')
@@ -195,8 +230,9 @@ void test('freeing capacity schedules offers from peers visited earlier in the q
     wire.clearPeer('a')
     wire.clearPeer('b')
   })
-  wire.makeInternalAction('file').onMessage(() => {})
-  wire.handleData('a', start(0, 1, {type: 'unregistered'}))
+  wire.makeWireAction('staged')
+  wire.makeWireAction('file').onMessage(() => {})
+  wire.handleData('a', start(0, 1, {type: 'staged'}))
   wire.handleData('b', start(1, 24_000))
   wire.handleData('a', start(2, 24_000))
   assert.equal(controls.filter(x => x.peerId === 'a').length, 0)
@@ -279,12 +315,13 @@ void test('cursor sends need no receipt and ready inline receives allocate no ti
       wire.clearPeer(`attacker-${i}`)
     }
   })
+  wire.makeWireAction('staged')
   for (let peer = 0; peer < 16; peer++) {
     for (let id = 0; id < 64; id++) {
-      wire.handleData(`attacker-${peer}`, start(id, 1, {type: 'unregistered'}))
+      wire.handleData(`attacker-${peer}`, start(id, 1, {type: 'staged'}))
     }
   }
-  wire.makeInternalAction('cursor').onMessage(() => {
+  wire.makeWireAction('cursor').onMessage(() => {
     calls++
   })
   const readyTimer = t.mock.method(globalThis, 'setTimeout')
@@ -297,19 +334,85 @@ void test('cursor sends need no receipt and ready inline receives allocate no ti
   assert.equal(readyTimer.mock.callCount(), 0)
 })
 
-void test('large typed arrays are snapshotted once before admission', async t => {
+void test('large typed arrays stream zero-copy without full-buffer .slice() when unmutated until send settles', async t => {
   const pair = linked()
   t.after(pair.close)
   let received: Uint8Array
   pair.right.makeAction('file').onMessage(data => {
     received = data as Uint8Array
   })
-  const bytes = new Uint8Array(24_000).fill(42)
-  const sending = pair.left.makeAction('file').send(bytes)
+  const backing = new ArrayBuffer(24_004)
+  const bytes = new Uint8Array(backing, 4, 24_000).fill(42)
+  let inputSliceCalls = 0
+  Object.defineProperty(bytes, 'slice', {
+    value: (...args: Parameters<Uint8Array['slice']>) => {
+      inputSliceCalls++
+      return Uint8Array.prototype.slice.apply(bytes, args)
+    }
+  })
+  await pair.left.makeAction('file').send(bytes)
+  assert.equal(inputSliceCalls, 0)
   bytes.fill(0)
-  await sending
+  assert.equal(received!.byteLength, 24_000)
   assert.equal(received![0], 42)
   assert.equal(received!.at(-1), 42)
+})
+
+void test('broadcast send resolves cleanly in an empty room while explicit-target send rejects with disconnected ActionError', async () => {
+  const emptyActions = createActionManager({
+    onPeerError: () => {},
+    getTransport: () => undefined,
+    getPeerIds: () => [],
+    canReceiveFromPeer: () => false
+  })
+  const chat = emptyActions.makeAction<string | Uint8Array>('chat')
+
+  // Broadcast (omitted target) resolves cleanly in an empty room for both inline and bulk payloads
+  await chat.send('broadcast-inline')
+  await chat.send(new Uint8Array(24_000).fill(5))
+
+  // Explicit target resolving to missing peer or empty target list rejects with ActionError (kind: 'disconnected')
+  for (const explicitTarget of ['missing-peer', [] as string[]]) {
+    await assert.rejects(
+      chat.send('targeted-inline', {target: explicitTarget}),
+      (err: unknown) =>
+        err instanceof Error && (err as ActionError).kind === 'disconnected'
+    )
+    await assert.rejects(
+      chat.send(new Uint8Array(24_000), {target: explicitTarget}),
+      (err: unknown) =>
+        err instanceof Error && (err as ActionError).kind === 'disconnected'
+    )
+  }
+
+  // Room-level verification: broadcast resolves cleanly in an empty room, while targeting an absent peer/userId rejects with kind: 'disconnected'
+  const room = createRoom(
+    () => {},
+    () => {},
+    () => {},
+    {
+      endpointIdentity: testEndpoint('q10-empty-room-peer'),
+      appId: 'q10-app',
+      roomId: 'q10-room'
+    }
+  )
+  try {
+    await room.getSelf()
+    const roomChat = room.makeAction<string>('room-chat')
+    await roomChat.send('hello-empty-room')
+    await assert.rejects(
+      roomChat.send('hello-nobody', {target: 'nonexistent-peer-id'}),
+      (err: unknown) =>
+        err instanceof Error && (err as ActionError).kind === 'disconnected'
+    )
+    await assert.rejects(
+      roomChat.send('hello-empty-array', {target: []}),
+      (err: unknown) =>
+        err instanceof Error && (err as ActionError).kind === 'disconnected'
+    )
+  } finally {
+    await room.leave()
+  }
 })
 
 void test('inline request refusal rejects without requiring a delivery receipt', async t => {
@@ -352,23 +455,25 @@ void test('control responses have a bounded send buffer', t => {
   const warning = t.mock.method(console, 'warn', () => {})
   let closed = false
   const peer = {
-    channel: {bufferedAmount: 2 * 1024 ** 2},
+    isDead: false,
+    channel: {readyState: 'open', bufferedAmount: 2 * 1024 ** 2},
     sendData: () => assert.fail('overfull control buffer'),
     destroy: () => {
       closed = true
     }
   }
+  const transport = createDirectPeerTransport(peer as unknown as PeerHandle)
   const wire = createActionWireManager({
     onPeerError: id => {
       peer.destroy()
       wire.clearPeer(id)
     },
-    getPeer: () => peer as never,
+    resolveTransport: () => transport,
     getPeerIds: () => [],
     canReceiveFromPeer: () => true,
-    throwIfAborted: () => {}
+    checkAborted: () => {}
   })
-  wire.makeInternalAction('file').onMessage(() => {})
+  wire.makeWireAction('file').onMessage(() => {})
   wire.handleData('peer', start(0, 24_000))
   assert.equal(closed, true)
   assert.equal(warning.mock.callCount(), 1)
@@ -380,7 +485,7 @@ void test('bulk capacity rotates between peers instead of draining one peer back
     wire.clearPeer('attacker')
     wire.clearPeer('honest')
   })
-  wire.makeInternalAction('file').onMessage(() => {})
+  wire.makeWireAction('file').onMessage(() => {})
   wire.handleData('attacker', start(0, 24_000))
   wire.handleData('attacker', start(1, 24_000))
   wire.handleData('honest', start(0, 24_000))
@@ -404,16 +509,18 @@ void test('abort interrupts a backpressure wait and removes its listeners', asyn
       events.get(event)?.delete(fn)
   }
   const peer = {
+    isDead: false,
     channel,
     sendData: () => assert.fail('aborted send reached the channel'),
     destroy: () => {}
   }
+  const transport = createDirectPeerTransport(peer as unknown as PeerHandle)
   const actions = createActionManager({
     onPeerError: (id, error) => {
       peer.destroy()
       actions.clearPeer(id, error)
     },
-    getPeer: () => peer as never,
+    getTransport: () => transport,
     getPeerIds: () => ['peer'],
     canReceiveFromPeer: () => true
   })
@@ -429,7 +536,7 @@ void test('abort interrupts a backpressure wait and removes its listeners', asyn
 void test('completed bulk data can wait for a temporarily removed handler', t => {
   const {wire} = receiver()
   t.after(() => wire.clearPeer('peer'))
-  const file = wire.makeInternalAction('file')
+  const file = wire.makeWireAction('file')
   let received = 0
   file.onMessage(() => {
     received++
@@ -507,8 +614,8 @@ void test('queued bulk transfers do not expire while an active transfer makes pr
 void test('completed bulk transfer waiting for a removed handler does not block other bulk actions on the same peer', t => {
   const {wire, controls} = receiver(64_000)
   t.after(() => wire.clearPeer('peer'))
-  const first = wire.makeInternalAction('first')
-  const second = wire.makeInternalAction('second')
+  const first = wire.makeWireAction('first')
+  const second = wire.makeWireAction('second')
   let firstCount = 0
   let secondCount = 0
   first.onMessage(() => {

@@ -22,6 +22,9 @@ const sortedClusterPool = allEndpoints
   .sort((a, b) => (a.peerId < b.peerId ? -1 : a.peerId > b.peerId ? 1 : 0))
 
 const namedPool = allEndpoints.slice(clusterPoolSize)
+const endpointByPeerId = new Map<string, EndpointIdentity>(
+  allEndpoints.map(ep => [ep.peerId, ep])
+)
 const endpointByLabel = new Map<string, EndpointIdentity>()
 let nextNamedIndex = 0
 
@@ -35,6 +38,10 @@ export const allocTestPeerIds = (count: number): string[] => {
 }
 
 export const testEndpoint = (label: string): EndpointIdentity => {
+  const byId = endpointByPeerId.get(label)
+  if (byId) {
+    return byId
+  }
   const existing = endpointByLabel.get(label)
   if (existing) {
     return existing
@@ -44,6 +51,9 @@ export const testEndpoint = (label: string): EndpointIdentity => {
   endpointByLabel.set(label, ep)
   return ep
 }
+
+export const getTestEndpointByPeerId = (peerId: string): EndpointIdentity =>
+  endpointByPeerId.get(peerId) ?? testEndpoint(peerId)
 
 export const testPeerId = (label: string): string => testEndpoint(label).peerId
 

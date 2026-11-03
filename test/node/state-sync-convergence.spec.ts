@@ -1,20 +1,23 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
+import {jwkToCompactPub} from '../../packages/core/src/identity.ts'
 import {
+  type DataPayload,
   type JsonValue,
   type Room,
   type RoomError,
   type SharedState,
+  type TopologySnapshot,
   type UserIdentity,
   type UserState,
   createUserIdentity,
+  encodeBytes,
   roles,
   scale
 } from '../../packages/core/src/index.ts'
 import {
   compareStateRecords,
   createStateManager,
-  jwkToCompactPub,
   maxUserStateNamespacesPerUser,
   signStateRecord
 } from '../../packages/core/src/state.ts'
@@ -23,7 +26,13 @@ import {
   createMemorySignalBus,
   type MemoryRtcConnectionInstance
 } from './memory-rtc.ts'
-import {createSortedJoinRooms, wait, waitFor} from './peer-harness.ts'
+import {
+  actionStartFrame,
+  createSortedJoinRooms,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 void test('State engine hardening: same-ms tie-break pull sync, unregistered poisoning defense, LRU bounds, per-user quotas, rate limits, and invalid-record peer kick', async () => {
   const [alice, bob, mallory, rootAdmin] = await Promise.all([
@@ -34,9 +43,9 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   ])
   const appId = 'hardening-app'
   const roomId = 'hardening-room'
-  const peerA = '11111111111111111111'
-  const peerB = '22222222222222222222'
-  const peerM = '33333333333333333333'
+  const peerA = testPeerId('hardening-peer-a')
+  const peerB = testPeerId('hardening-peer-b')
+  const peerM = testPeerId('hardening-peer-m')
 
   // 1. Same-millisecond HLC tie-break convergence when userId order disagrees with sig prefix
   const fixedHlc = Date.now()
@@ -62,7 +71,49 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   })
   const expectedWinner = compareStateRecords(recA, recB) > 0 ? 'alice' : 'bob'
 
-  const handlers = new Map<string, (raw: JsonValue, from: string) => void>()
+  type MockInternalCtx = {peerId: string; userId: string}
+  const handlers = new Map<
+    string,
+    (raw: JsonValue, ctx: MockInternalCtx) => void
+  >()
+  const makeMockInternalAction =
+    (selfId: string, user: UserIdentity, peerPool: string[]) =>
+    <T extends DataPayload>(ns: string) => {
+      const key = `${selfId}:${ns}`
+      return {
+        send: async (
+          data: T,
+          options?: {target?: string | string[] | null}
+        ) => {
+          const targets = options?.target
+          const list = targets
+            ? Array.isArray(targets)
+              ? targets
+              : [targets]
+            : peerPool.filter(p => p !== selfId)
+          for (const t of list) {
+            queueMicrotask(() => {
+              handlers.get(`${t}:${ns}`)?.(data as JsonValue, {
+                peerId: selfId,
+                userId: user.userId
+              })
+            })
+          }
+        },
+        onMessage: (fn: (data: T, ctx: MockInternalCtx) => unknown) => {
+          handlers.set(
+            key,
+            fn as (raw: JsonValue, ctx: MockInternalCtx) => void
+          )
+          return () => {
+            handlers.delete(key)
+          }
+        },
+        onReceive: () => () => {},
+        onReceiveProgress: () => () => {}
+      } as never
+    }
+
   const makeHarnessMgr = (
     selfId: string,
     user: UserIdentity,
@@ -88,29 +139,7 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
             : mallory.userId,
       isPeerBanned: () => false,
       getPeerRoles: () => [],
-      makeInternalAction: <T extends JsonValue>(ns: string) => {
-        const key = `${selfId}:${ns}`
-        return {
-          send: async (data: T, targets?: string | string[] | null) => {
-            const list = targets
-              ? Array.isArray(targets)
-                ? targets
-                : [targets]
-              : [peerA, peerB].filter(p => p !== selfId)
-            for (const t of list) {
-              queueMicrotask(() => {
-                handlers.get(`${t}:${ns}`)?.(data, selfId)
-              })
-            }
-          },
-          onMessage: (fn: (data: T, peerId: string) => void) => {
-            handlers.set(key, fn as (raw: JsonValue, from: string) => void)
-            return () => handlers.delete(key)
-          },
-          onReceive: () => () => {},
-          onReceiveProgress: () => () => {}
-        } as never
-      },
+      makeInternalAction: makeMockInternalAction(selfId, user, [peerA, peerB]),
       ...(onInvalid ? {onInvalidRecord: onInvalid} : {})
     })
 
@@ -127,7 +156,7 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   mgrA.destroy()
   mgrB.destroy()
 
-  // 2. Unregistered namespaces drop silently without penalty, and lazy verify-before-relay catches forged direct signatures before relaying
+  // 2. Unregistered namespaces drop silently without penalty, and eager signature verification catches forged direct signatures
   const invalidFrom: Array<string | undefined> = []
   const peerPubs: Record<string, string> = {
     [peerA]: jwkToCompactPub(alice.signPubJwk),
@@ -157,32 +186,13 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
           : pid === peerB
             ? bob.userId
             : mallory.userId,
-      getPeerUserPub: pid => peerPubs[pid],
       isPeerBanned: () => false,
       getPeerRoles: () => [],
-      makeInternalAction: <T extends JsonValue>(ns: string) => {
-        const key = `${selfId}:${ns}`
-        return {
-          send: async (data: T, targets?: string | string[] | null) => {
-            const list = targets
-              ? Array.isArray(targets)
-                ? targets
-                : [targets]
-              : [peerA, peerB, peerM].filter(p => p !== selfId)
-            for (const t of list) {
-              queueMicrotask(() => {
-                handlers.get(`${t}:${ns}`)?.(data, selfId)
-              })
-            }
-          },
-          onMessage: (fn: (data: T, peerId: string) => void) => {
-            handlers.set(key, fn as (raw: JsonValue, from: string) => void)
-            return () => handlers.delete(key)
-          },
-          onReceive: () => () => {},
-          onReceiveProgress: () => () => {}
-        } as never
-      },
+      makeInternalAction: makeMockInternalAction(selfId, user, [
+        peerA,
+        peerB,
+        peerM
+      ]),
       ...(onInvalid ? {onInvalidRecord: onInvalid} : {})
     })
 
@@ -230,7 +240,7 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
         sig: 'A'.repeat(86)
       }
     },
-    peerM
+    {peerId: peerM, userId: mallory.userId}
   )
   await waitFor(() => invalidFrom.length === 1)
   await wait(30)
@@ -251,7 +261,7 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   )
   mgrQuota.destroy()
 
-  // 4. Forged signatures trigger peer-error and kick after 8 invalid state records, while >25 valid burst only drops excess
+  // 4. Forged signatures trigger peer-error and kick after 8 invalid state records, while >120 valid burst only drops excess
   const {makeJoinRoom, rtcPolyfill} = createMemorySignalBus()
   const joinVictim = makeJoinRoom('sec-victim')
   const joinAttacker = makeJoinRoom('sec-attacker')
@@ -269,48 +279,69 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   )
   try {
     const victimLive = victimRoom.makeState('burst', 0)
-    const attackerLive = attackerRoom.makeState('burst', 0)
+    attackerRoom.makeState('burst', 0)
 
     await waitFor(() => Object.keys(victimRoom.getUsers()).length === 1)
 
-    // Burst 35 valid records back-to-back via distinct awaits — token bucket drops excess without kicking!
-    for (let i = 1; i <= 35; i++) {
-      await attackerLive.set(i)
-    }
-    await wait(50)
-    assert.equal(victimErrors.length, 0)
-    assert.equal(Object.keys(victimRoom.getUsers()).length, 1)
-    assert.ok(victimLive.get() >= 1)
-
-    // Refill live rate-limit tokens (~9 tokens at 20/s), then inject 8 forged @_state records -> peer-error & kick!
-    await wait(450)
     const attackerSelf = await attackerRoom.getSelf()
-    const forgedMsg = JSON.stringify({
-      t: 'rec',
-      r: {
-        v: 1,
-        k: 's',
-        ns: 'burst',
-        hlc: Date.now(),
-        peerId: attackerSelf.peerId,
-        userId: mallory.userId,
-        pub: 'bad',
-        val: 999,
-        sig: 'bad-sig'
-      }
-    })
-    const typeBytes = new TextEncoder().encode('@_state')
-    const bodyBytes = new TextEncoder().encode(forgedMsg)
-    const rawFrame = new Uint8Array(36 + bodyBytes.byteLength)
-    rawFrame[0] = 2
-    rawFrame[1] = 1 << 4 // jsonFormat inline frame
-    rawFrame.set(typeBytes, 2)
-    rawFrame.set(bodyBytes, 36)
-
     const victimPc = victimRoom.getPeers()[attackerSelf.peerId]
       ?.connection as unknown as MemoryRtcConnectionInstance | undefined
     const attackerChannel = victimPc?.partnerPc?.dataChannel
     assert.ok(attackerChannel && attackerChannel.readyState === 'open')
+
+    // Burst 140 valid signed wire records back-to-back (> maxLiveRecordBurst = 120) — token bucket drops excess without kicking!
+    const baseBurstHlc = Date.now()
+    const validFrames = await Promise.all(
+      Array.from({length: 140}, async (_, idx) => {
+        const rec = await signStateRecord(mallory.sign, mallory.signPubJwk, {
+          kind: 's',
+          appId: 'sec-kick-app',
+          roomId: 'sec-room',
+          ns: 'burst',
+          hlc: baseBurstHlc + idx + 1,
+          peerId: attackerSelf.peerId,
+          userId: mallory.userId,
+          val: idx + 1
+        })
+        const {appId: _a, roomId: _r, ...wireRec} = rec
+        return actionStartFrame(0, 0, {
+          type: '@_state',
+          payload: encodeBytes(JSON.stringify({t: 'rec', r: wireRec})),
+          format: 1
+        })
+      })
+    )
+    for (const frame of validFrames) {
+      attackerChannel.send(frame)
+    }
+    await waitFor(() => victimLive.get() >= 1)
+    await wait(50)
+    assert.equal(victimErrors.length, 0)
+    assert.equal(Object.keys(victimRoom.getUsers()).length, 1)
+    assert.ok(victimLive.get() >= 1 && victimLive.get() < 140)
+
+    // Refill live rate-limit tokens (~18 tokens at 60/s), then inject 8 forged @_state v3 records -> peer-error & kick!
+    await wait(300)
+    const forgedRawFrame = actionStartFrame(0, 0, {
+      type: '@_state',
+      payload: encodeBytes(
+        JSON.stringify({
+          t: 'rec',
+          r: {
+            v: 1,
+            k: 's',
+            ns: 'burst',
+            hlc: Date.now() + 500,
+            peerId: attackerSelf.peerId,
+            userId: mallory.userId,
+            pub: 'bad',
+            val: 999,
+            sig: 'bad-sig'
+          }
+        })
+      ),
+      format: 1
+    })
 
     let kickedPeers = 0
     let kickedUsers = 0
@@ -326,7 +357,7 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
     })
 
     for (let k = 0; k < 8; k++) {
-      attackerChannel.send(rawFrame)
+      attackerChannel.send(forgedRawFrame)
     }
 
     await waitFor(
@@ -345,7 +376,7 @@ void test('State engine hardening: same-ms tie-break pull sync, unregistered poi
   }
 })
 
-void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mesh peer join and convergence across scale({mode: "gossip"})', async () => {
+void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mesh peer join and convergence across scale({maxDirectPeers: 4})', async () => {
   // Part A: 9-peer mesh -> 10th peer joins with O(1) pull fanout rather than 9 full pushes
   const {makeJoinRoom, rtcPolyfill, setSendObserver} = createMemorySignalBus()
   const meshPeers = await createSortedJoinRooms(
@@ -428,20 +459,17 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
     await Promise.all(rooms.map(r => r.leave()))
   }
 
-  // Part B: Multi-hop gossip mode (`scale({mode: 'gossip', maxConnections: 4})`) converges shared & user state across non-adjacent peers
-  const {makeJoinRoom: makeGossipJoin} = createMemorySignalBus()
+  // Part B: Multi-hop scale overlay (`scale({maxDirectPeers: 4})`) converges shared & user state across non-adjacent peers
+  const {makeJoinRoom: makeGossipJoin, rtcPolyfill: gossipRtcPolyfill} =
+    createMemorySignalBus()
   const gossipPeers = await createSortedJoinRooms(
     12,
     () => makeGossipJoin(),
     'gossip-state-app'
   )
   const gossipRooms: Array<
-    ReturnType<ReturnType<typeof makeGossipJoin>> & {
-      getTopology: () => {
-        activeMode: string
-        directPeerIds: string[]
-        roomPeerIds: string[]
-      }
+    Room & {
+      getTopology: () => TopologySnapshot
     }
   > = []
   const gossipStates: Array<SharedState<string>> = []
@@ -452,8 +480,8 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
       const gr = gossipPeers[i]!.joinRoom(
         {
           appId: 'gossip-state-app',
-          rtcPolyfill,
-          use: [scale({mode: 'gossip', maxConnections: 4})]
+          rtcPolyfill: gossipRtcPolyfill,
+          use: [scale({maxDirectPeers: 4})]
         },
         'gossip-room'
       )
@@ -461,7 +489,7 @@ void test('Sync scalability & multi-hop overlay: bounded pull fanout on 10th mes
       const prof = gr.makeUserState('handle', '')
       void prof.set(`gossip-user-${i}`)
       gossipProfiles.push(prof)
-      gossipRooms.push(gr as never)
+      gossipRooms.push(gr)
       await gr.ready
       await wait(15)
     }

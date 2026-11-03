@@ -1,13 +1,83 @@
 import mqtt from 'mqtt'
 import {
+  clearUserIdentity,
   createRelayManager,
   createRelayScopedStore,
   createTopicStrategy,
+  createUserIdentity,
+  exportUserIdentity,
   getRelays,
+  importUserIdentity,
+  mkErr,
+  roles,
+  scale,
+  socketInitialFailureSymbol,
   toJson,
+  type ActionError,
+  type ActionErrorKind,
+  type ActionMessageHandler,
+  type ActionProgressContext,
+  type ActionProgressHandler,
+  type ActionReceiveContext,
+  type ActionReceiveHandler,
+  type ActionRequestHandler,
+  type AddMediaOptions,
+  type BanOptions,
+  type DataPayload,
   type JoinRoom,
   type JoinRoomConfig,
-  type RelayConfig
+  type JsonValue,
+  type ListenerOptions,
+  type MessageAction,
+  type MessageActionConfig,
+  type MessageContext,
+  type PeerInfo,
+  type PeerJoinContext,
+  type PeerLeaveContext,
+  type PeerMediaContext,
+  type PeerResult,
+  type PeerTarget,
+  type RelayConfig,
+  type RemoveMediaOptions,
+  type ReplaceTrackOptions,
+  type ReplayListenerOptions,
+  type RequestAction,
+  type RequestActionConfig,
+  type RequestContext,
+  type RequestManyOptions,
+  type RequestOptions,
+  type RoleCertificate,
+  type RolesConfig,
+  type RolesPluginApi,
+  type Room,
+  type RoomError,
+  type RoomErrorBase,
+  type RoomErrorCode,
+  type RoomErrorHandler,
+  type RoomPlugin,
+  type RoomWithPlugins,
+  type ScaleConfig,
+  type ScalePluginApi,
+  type SelfInfo,
+  type SendOptions,
+  type SharedState,
+  type StateChangeContext,
+  type StateConfig,
+  type TopologyRoute,
+  type TopologySnapshot,
+  type TopologyStats,
+  type TurnServerConfig,
+  type Unsubscribe,
+  type UserIdentity,
+  type UserIdentityConfig,
+  type UserIdentityLoader,
+  type UserIdentityLoaderContext,
+  type UserInfo,
+  type UserJoinContext,
+  type UserLeaveContext,
+  type UserState,
+  type UserStateChangeContext,
+  type UserStateConfig
 } from '@trystero-p2p/core'
 
 const defaultRedundancy = 4
@@ -18,8 +88,7 @@ const relayManager = /*@__PURE__*/ createRelayManager<mqtt.MqttClient>(
       | undefined
 )
 type TopicState = {
-  handler?: (topic: string, data: string) => void
-  token?: symbol
+  handler?: (topic: string, data: string) => void | Promise<void>
   refs: number
   announcement?: string
   ready?: Promise<unknown>
@@ -29,10 +98,17 @@ const topicStates = /*@__PURE__*/ createRelayScopedStore<
   TopicState,
   mqtt.MqttClient
 >()
+const warnFlags = /*@__PURE__*/ new WeakMap<mqtt.MqttClient, boolean>()
 const pendingBatches = /*@__PURE__*/ new WeakMap<
   mqtt.MqttClient,
   {topics: Set<string>; promise: Promise<unknown>}
 >()
+
+const logClientError = (client: mqtt.MqttClient, err: unknown): void => {
+  if (warnFlags.get(client) !== false) {
+    console.error(err)
+  }
+}
 
 const ensureSubscribed = (
   client: mqtt.MqttClient,
@@ -62,7 +138,7 @@ const ensureSubscribed = (
           activeTopics.length > 0
             ? client.subscribeAsync(activeTopics).then(
                 () => {},
-                err => console.error(err)
+                err => logClientError(client, err)
               )
             : undefined
         )
@@ -85,13 +161,14 @@ export const joinRoom: JoinRoom<MqttRoomConfig> =
         const client = relayManager.register(url, () =>
           mqtt.connect(url, {queueQoSZero: false, resubscribe: false})
         )
+        warnFlags.set(client, config.relayConfig?.warnOnRelayFailure !== false)
         const states = topicStates.forRelay(client)
 
         if (client.listenerCount('message') === 0) {
           client
-            .on('message', (topic, buffer) =>
-              states[topic]?.handler?.(topic, buffer.toString())
-            )
+            .on('message', (topic, buffer) => {
+              void states[topic]?.handler?.(topic, buffer.toString())
+            })
             .on('connect', () => {
               const topics = Object.keys(states).filter(
                 topic => (states[topic]?.refs ?? 0) > 0
@@ -110,27 +187,51 @@ export const joinRoom: JoinRoom<MqttRoomConfig> =
                     }
                   })
                 })
-                .catch(console.error)
+                .catch(err => logClientError(client, err))
             })
-            .on('error', console.error)
+            .on('error', err => logClientError(client, err))
         }
 
-        return client.connected
-          ? Promise.resolve(client)
-          : new Promise<mqtt.MqttClient>(res =>
-              client.once('connect', () => res(client))
-            )
+        if (client.connected) {
+          return Promise.resolve(client)
+        }
+
+        let settleInitialFailure = (_err: Error | null): void => {}
+        const initialFailureP = new Promise<Error | null>(resolve => {
+          settleInitialFailure = err => {
+            client.off('error', onInitialError)
+            client.off('close', onInitialClose)
+            resolve(err)
+          }
+        })
+        const onInitialError = (err: Error): void => {
+          settleInitialFailure(err)
+        }
+        const onInitialClose = (): void => {
+          settleInitialFailure(mkErr(`MQTT connection failed: ${url}`))
+        }
+        client.once('error', onInitialError)
+        client.once('close', onInitialClose)
+
+        const readyP = new Promise<mqtt.MqttClient>(res =>
+          client.once('connect', () => {
+            settleInitialFailure(null)
+            res(client)
+          })
+        ) as Promise<mqtt.MqttClient> & {
+          [socketInitialFailureSymbol]?: () => Promise<Error | null>
+        }
+        readyP[socketInitialFailureSymbol] = () => initialFailureP
+        return readyP
       }),
 
     subscribeTopic: (client, topic, onMessage, context) => {
       const states = topicStates.forRelay(client)
       const state = (states[topic] ??= {refs: 0})
-      const token = Symbol(topic)
       const topicHandler = (topic: string, data: string) =>
         onMessage(topic, data)
 
       state.handler = topicHandler
-      state.token = token
       state.refs += 1
 
       const cleanup = () => {
@@ -138,10 +239,6 @@ export const joinRoom: JoinRoom<MqttRoomConfig> =
 
         if (state.handler === topicHandler) {
           delete state.handler
-        }
-
-        if (state.token === token) {
-          delete state.token
         }
 
         if (state.refs === 0) {
@@ -179,8 +276,78 @@ export const joinRoom: JoinRoom<MqttRoomConfig> =
 export const getRelaySockets = (): Record<string, WebSocket> =>
   relayManager.getSockets()
 
-export type {JoinRoomConfig, RelayConfig}
-export * from '@trystero-p2p/core/public'
+export {
+  clearUserIdentity,
+  createUserIdentity,
+  exportUserIdentity,
+  importUserIdentity,
+  roles,
+  scale,
+  type ActionError,
+  type ActionErrorKind,
+  type ActionMessageHandler,
+  type ActionProgressContext,
+  type ActionProgressHandler,
+  type ActionReceiveContext,
+  type ActionReceiveHandler,
+  type ActionRequestHandler,
+  type AddMediaOptions,
+  type BanOptions,
+  type DataPayload,
+  type JoinRoomConfig,
+  type JsonValue,
+  type ListenerOptions,
+  type MessageAction,
+  type MessageActionConfig,
+  type MessageContext,
+  type PeerInfo,
+  type PeerJoinContext,
+  type PeerLeaveContext,
+  type PeerMediaContext,
+  type PeerResult,
+  type PeerTarget,
+  type RelayConfig,
+  type RemoveMediaOptions,
+  type ReplaceTrackOptions,
+  type ReplayListenerOptions,
+  type RequestAction,
+  type RequestActionConfig,
+  type RequestContext,
+  type RequestManyOptions,
+  type RequestOptions,
+  type RoleCertificate,
+  type RolesConfig,
+  type RolesPluginApi,
+  type Room,
+  type RoomError,
+  type RoomErrorBase,
+  type RoomErrorCode,
+  type RoomErrorHandler,
+  type RoomPlugin,
+  type RoomWithPlugins,
+  type ScaleConfig,
+  type ScalePluginApi,
+  type SelfInfo,
+  type SendOptions,
+  type SharedState,
+  type StateChangeContext,
+  type StateConfig,
+  type TopologyRoute,
+  type TopologySnapshot,
+  type TopologyStats,
+  type TurnServerConfig,
+  type Unsubscribe,
+  type UserIdentity,
+  type UserIdentityConfig,
+  type UserIdentityLoader,
+  type UserIdentityLoaderContext,
+  type UserInfo,
+  type UserJoinContext,
+  type UserLeaveContext,
+  type UserState,
+  type UserStateChangeContext,
+  type UserStateConfig
+}
 
 export const defaultRelayUrls: string[] = [
   'wss://broker.emqx.io:8084/mqtt',

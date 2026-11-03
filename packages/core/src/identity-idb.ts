@@ -1,26 +1,23 @@
 import {ecdsaSign} from './crypto'
-import {encodeBytes, libId, mkErr} from './primitives'
+import {domainTag, encodeBytes, libId, mkErr} from './primitives'
 import type {UserIdentity} from './types'
 
 export type StoredIdbIdentityRecord = {
   userId: string
-  publicKey: string
   signPubJwk: JsonWebKey
   privateKey: CryptoKey
 }
 
-const storagePrefix = `${libId}:user_identity:v1:`
+const lockPrefix = `${libId}:user_identity:v1:`
 const idbDbName = `${libId}_identity_v1`
 const idbStoreName = 'identities'
 const idbErr = (op: string): Error => mkErr(`IndexedDB ${op} failed`)
-const idbGetErr = /*@__PURE__*/ idbErr('get')
-const idbProbeBytes = /*@__PURE__*/ encodeBytes(`${libId}:idb-key-probe:v1`)
+const idbProbeBytes = /*@__PURE__*/ encodeBytes(domainTag('idb-key-probe', 1))
 
 export const buildUserIdentityFromIdbRecord = (
   rec: StoredIdbIdentityRecord
 ): UserIdentity => ({
   userId: rec.userId,
-  publicKey: rec.publicKey,
   signPubJwk: rec.signPubJwk,
   sign: (payload: Uint8Array) =>
     ecdsaSign(rec.privateKey, payload as BufferSource)
@@ -39,33 +36,58 @@ const openIdentityDb = (): Promise<IDBDatabase> =>
     req.onerror = () => reject(req.error ?? idbErr('open'))
   })
 
-const idbTxReq = <T>(
-  db: IDBDatabase,
-  mode: IDBTransactionMode,
-  run: (store: IDBObjectStore) => IDBRequest,
-  op: string
-): Promise<T> =>
-  new Promise((resolve, reject) => {
-    const req = run(
-      db.transaction(idbStoreName, mode).objectStore(idbStoreName)
-    )
-    req.onsuccess = () => resolve(req.result as T)
-    req.onerror = () => reject(req.error ?? idbErr(op))
-  })
-
 const idbGetRecord = (
   db: IDBDatabase,
   appId: string
 ): Promise<StoredIdbIdentityRecord | undefined> =>
-  idbTxReq(db, 'readonly', s => s.get(appId), 'get')
+  new Promise((resolve, reject) => {
+    const tx = db.transaction(idbStoreName, 'readonly')
+    const req = tx.objectStore(idbStoreName).get(appId)
+    req.onsuccess = () =>
+      resolve(req.result as StoredIdbIdentityRecord | undefined)
+    req.onerror = () => reject(req.error ?? idbErr('get'))
+  })
+
+const idbWriteTx = <T>(
+  db: IDBDatabase,
+  run: (store: IDBObjectStore, setResult: (val: T) => void) => void,
+  op: string
+): Promise<T> =>
+  new Promise((resolve, reject) => {
+    const tx = db.transaction(idbStoreName, 'readwrite')
+    let result!: T
+    let settled = false
+    const fail = (err: unknown): void => {
+      if (!settled) {
+        settled = true
+        reject(err instanceof Error ? err : (tx.error ?? idbErr(op)))
+      }
+    }
+    tx.oncomplete = () => {
+      if (!settled) {
+        settled = true
+        resolve(result)
+      }
+    }
+    tx.onerror = () => fail(tx.error)
+    tx.onabort = () => fail(tx.error)
+    run(tx.objectStore(idbStoreName), val => {
+      result = val
+    })
+  })
 
 const idbPutRecord = (
   db: IDBDatabase,
   appId: string,
   candidate: StoredIdbIdentityRecord
 ): Promise<StoredIdbIdentityRecord> =>
-  idbTxReq(db, 'readwrite', s => s.put(candidate, appId), 'put').then(
-    () => candidate
+  idbWriteTx(
+    db,
+    (store, setResult) => {
+      setResult(candidate)
+      store.put(candidate, appId)
+    },
+    'put'
   )
 
 const isValidStoredIdbRecord = async (
@@ -102,7 +124,7 @@ const withNavigatorLock = async <T>(
   appId: string,
   fn: (db: IDBDatabase) => Promise<T>
 ): Promise<T> => {
-  const lockName = `${storagePrefix}${appId}`
+  const lockName = `${lockPrefix}${appId}`
   const run = async (): Promise<T> => {
     const db = await openIdentityDb()
     try {
@@ -141,53 +163,51 @@ export const loadOrCreateIdbIdentity = (
 ): Promise<UserIdentity> =>
   withNavigatorLock(idbKey, async db => {
     const ensureValid = async (
-      rec: StoredIdbIdentityRecord,
-      fallback?: StoredIdbIdentityRecord
+      rec: StoredIdbIdentityRecord
     ): Promise<StoredIdbIdentityRecord> =>
       (await isValidStoredIdbRecord(rec, verifyUserIdKey, verifyWithP256))
         ? rec
-        : idbPutRecord(db, idbKey, fallback ?? (await generateRecord()))
+        : idbPutRecord(db, idbKey, await generateRecord())
 
     const existing = await idbGetRecord(db, idbKey)
     if (existing !== undefined) {
       return buildUserIdentityFromIdbRecord(await ensureValid(existing))
     }
+
     const candidate = await generateRecord()
-    const resolved = await new Promise<StoredIdbIdentityRecord>(
-      (resolve, reject) => {
-        const store = db
-          .transaction(idbStoreName, 'readwrite')
-          .objectStore(idbStoreName)
-        const settleExisting = (rec: StoredIdbIdentityRecord): void => {
-          ensureValid(rec, candidate).then(resolve, reject)
-        }
+    const outcome = await idbWriteTx<
+      | {added: true; rec: StoredIdbIdentityRecord}
+      | {added: false; rec: StoredIdbIdentityRecord}
+    >(
+      db,
+      (store, setResult) => {
         const getReq = store.get(idbKey)
         getReq.onsuccess = () => {
           const found = getReq.result as StoredIdbIdentityRecord | undefined
           if (found !== undefined) {
-            settleExisting(found)
+            setResult({added: false, rec: found})
             return
           }
-          const addReq = store.add(candidate, idbKey)
-          addReq.onsuccess = () => resolve(candidate)
-          addReq.onerror = event => {
-            event?.preventDefault?.()
-            idbGetRecord(db, idbKey).then(
-              winner =>
-                winner
-                  ? settleExisting(winner)
-                  : reject(addReq.error ?? idbErr('add')),
-              reject
-            )
-          }
+          setResult({added: true, rec: candidate})
+          store.add(candidate, idbKey)
         }
-        getReq.onerror = () => reject(getReq.error ?? idbGetErr)
-      }
+      },
+      'add'
     )
+    const resolved = outcome.added
+      ? outcome.rec
+      : await ensureValid(outcome.rec)
     return buildUserIdentityFromIdbRecord(resolved)
   })
 
 export const deleteIdbIdentity = (appId: string): Promise<void> =>
   withNavigatorLock(appId, db =>
-    idbTxReq<void>(db, 'readwrite', s => s.delete(appId), 'delete')
+    idbWriteTx<void>(
+      db,
+      (store, setResult) => {
+        setResult(undefined)
+        store.delete(appId)
+      },
+      'delete'
+    )
   )

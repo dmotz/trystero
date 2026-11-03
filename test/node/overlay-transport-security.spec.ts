@@ -12,7 +12,13 @@ import {
   fromJson
 } from '../../packages/core/src/utils.ts'
 import {makeOverlayPipe} from './overlay-harness.ts'
-import {allocTestPeerIds, testPeerId, wait, waitFor} from './peer-harness.ts'
+import {
+  allocTestPeerIds,
+  getTestEndpointByPeerId,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds eviction and across direct reconnects, and isolates ECDH keys', async () => {
   const deliveredBroadcasts: string[] = []
@@ -28,7 +34,8 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     selfId: aliceId,
     appId: 's5-app',
     roomId: 's5-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -37,7 +44,8 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     selfId: relayId,
     appId: 's5-app',
     roomId: 's5-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (_from, data) => {
@@ -48,7 +56,8 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     selfId: carolId,
     appId: 's5-app',
     roomId: 's5-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(carolId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (_from, data) => {
@@ -66,7 +75,8 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
       selfId: aliceId,
       appId: 's5-app',
       roomId: 's5-room-2',
-      topology: {mode: 'gossip', maxConnections: 4},
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId),
       onVirtualPeerJoin: () => {},
       onVirtualPeerLeave: () => {},
       onDeliverData: () => {}
@@ -161,7 +171,8 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     selfId: aliceId,
     appId: 's7-app',
     roomId: 'room-X',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -170,7 +181,8 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     selfId: relayId,
     appId: 's7-app',
     roomId: 'room-X',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -179,7 +191,8 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     selfId: aliceId,
     appId: 's7-app',
     roomId: 'room-Y',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -188,7 +201,8 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     selfId: relayId,
     appId: 's7-app',
     roomId: 'room-Y',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -197,7 +211,8 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     selfId: victimId,
     appId: 's7-app',
     roomId: 'room-Y',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(victimId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: id => roomYLeaves.push(id),
     onDeliverData: (_from, d) =>
@@ -269,7 +284,8 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
     selfId: aliceId,
     appId: 'd8-app',
     roomId: 'd8-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId),
     onVirtualPeerJoin: id => virtualJoins.push(id),
     onVirtualPeerLeave: id => virtualLeaves.push(id),
     onDeliverData: () => {}
@@ -278,7 +294,8 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
     selfId: relay1Id,
     appId: 'd8-app',
     roomId: 'd8-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relay1Id),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -287,7 +304,8 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
     selfId: relay2Id,
     appId: 'd8-app',
     roomId: 'd8-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relay2Id),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -296,7 +314,8 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
     selfId: bobId,
     appId: 'd8-app',
     roomId: 'd8-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -338,7 +357,7 @@ void test('D8: transient 250ms route churn does not flap virtual peer membership
   }
 })
 
-void test('D9: virtual PeerDataTransport exposes backpressure, fails over to backupNextHop, and amortizes unicast stream signatures via lease', async () => {
+void test('D9: virtual PeerDataTransport exposes next-hop backpressure, fails over across relays on disconnect, and rejects sends when unreachable', async () => {
   let virtualDestTransport: PeerDataTransport | null = null
   const received: string[] = []
   let viaRelay1 = 0
@@ -349,7 +368,8 @@ void test('D9: virtual PeerDataTransport exposes backpressure, fails over to bac
     selfId: srcId!,
     appId: 'd9-app',
     roomId: 'd9-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(srcId!),
     onVirtualPeerJoin: (id, vp) => {
       if (id === dstId) {
         virtualDestTransport = vp
@@ -362,7 +382,8 @@ void test('D9: virtual PeerDataTransport exposes backpressure, fails over to bac
     selfId: relay1Id!,
     appId: 'd9-app',
     roomId: 'd9-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relay1Id!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -371,7 +392,8 @@ void test('D9: virtual PeerDataTransport exposes backpressure, fails over to bac
     selfId: relay2Id!,
     appId: 'd9-app',
     roomId: 'd9-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relay2Id!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -380,7 +402,8 @@ void test('D9: virtual PeerDataTransport exposes backpressure, fails over to bac
     selfId: dstId!,
     appId: 'd9-app',
     roomId: 'd9-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(dstId!),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (_from, d) => received.push(decodeBytes(new Uint8Array(d)))
@@ -390,13 +413,24 @@ void test('D9: virtual PeerDataTransport exposes backpressure, fails over to bac
     const r1State = {alive: true, bufferedAmount: 0}
     const r2State = {alive: true, bufferedAmount: 1_024}
 
+    const withChannelEvents = (pipe: ReturnType<typeof makeOverlayPipe>) => {
+      Object.assign(pipe.channel!, {
+        bufferedAmountLowThreshold: 65_536,
+        addEventListener: () => {},
+        removeEventListener: () => {}
+      })
+      return pipe
+    }
+
     src.addDirectPeer(
       relay1Id!,
-      makeOverlayPipe(srcId!, relay1, r1State, d => {
-        if (d[0] === overlayFrameVersion && d[1] === 3) {
-          viaRelay1++
-        }
-      })
+      withChannelEvents(
+        makeOverlayPipe(srcId!, relay1, r1State, d => {
+          if (d[0] === overlayFrameVersion && d[1] === 3) {
+            viaRelay1++
+          }
+        })
+      )
     )
     relay1.addDirectPeer(srcId!, makeOverlayPipe(relay1Id!, src))
     relay1.addDirectPeer(dstId!, makeOverlayPipe(relay1Id!, dst))
@@ -404,11 +438,13 @@ void test('D9: virtual PeerDataTransport exposes backpressure, fails over to bac
 
     src.addDirectPeer(
       relay2Id!,
-      makeOverlayPipe(srcId!, relay2, r2State, d => {
-        if (d[0] === overlayFrameVersion && d[1] === 3) {
-          viaRelay2++
-        }
-      })
+      withChannelEvents(
+        makeOverlayPipe(srcId!, relay2, r2State, d => {
+          if (d[0] === overlayFrameVersion && d[1] === 3) {
+            viaRelay2++
+          }
+        })
+      )
     )
     relay2.addDirectPeer(srcId!, makeOverlayPipe(relay2Id!, src))
     relay2.addDirectPeer(dstId!, makeOverlayPipe(relay2Id!, dst))
@@ -418,51 +454,44 @@ void test('D9: virtual PeerDataTransport exposes backpressure, fails over to bac
       () =>
         Boolean(
           virtualDestTransport &&
-          src.getSnapshot().routes[dstId!]?.backupNextHop
+          src.getSnapshot().routes[dstId!]?.nextHop === relay1Id!
         ),
       2_000
     )
 
-    // 1. Congest primary relay1 (> 256 KiB): virtual peer reports healthy backup's bufferedAmount and routes via relay2!
+    // 1. Virtual transport reflects active primary nextHop's bufferedAmount and supports waitForDrain
     r1State.bufferedAmount = 512 * 1024
+    assert.equal(virtualDestTransport!.bufferedAmount, 512 * 1024)
+    r1State.bufferedAmount = 0
+    assert.equal(virtualDestTransport!.bufferedAmount, 0)
+    assert.equal(virtualDestTransport!.waitForDrain(), true)
+
+    // 2. Deliver 50 individually signed E2EE unicast packets over primary relay1 and verify queue backpressure drain
+    for (let i = 0; i < 50; i++) {
+      virtualDestTransport!.sendFrame(encodeBytes(`pkt-${i}`))
+    }
+    const drainResult = virtualDestTransport!.waitForDrain()
+    assert.equal(await drainResult, true)
+    await waitFor(() => received.length === 50, 3_000)
+    assert.equal(viaRelay1, 50)
+    assert.equal(viaRelay2, 0)
+
+    // 3. Disconnect primary relay1: route recomputes to relay2, bufferedAmount reflects relay2, and unicasts fail over cleanly
+    r1State.alive = false
+    src.removeDirectPeer(relay1Id!)
+    assert.equal(src.getSnapshot().routes[dstId!]?.nextHop, relay2Id!)
     assert.equal(virtualDestTransport!.bufferedAmount, 1_024)
 
-    // 2. Measure ECDSA sign count across a 100-packet unicast burst (must amortize via signed UnicastLeaseTuple!)
-    const origSign = crypto.subtle.sign.bind(crypto.subtle)
-    let ecdsaSigns = 0
-    crypto.subtle.sign = (async (...args: Parameters<typeof origSign>) => {
-      const alg = args[0]
-      if (
-        typeof alg === 'object' &&
-        alg &&
-        'name' in alg &&
-        alg.name === 'ECDSA'
-      ) {
-        ecdsaSigns++
-      }
-      return origSign(...args)
-    }) as typeof crypto.subtle.sign
-
-    try {
-      for (let i = 0; i < 100; i++) {
-        virtualDestTransport!.sendFrame(encodeBytes(`pkt-${i}`))
-      }
-      await waitFor(() => received.length === 100, 3_000)
-    } finally {
-      crypto.subtle.sign = origSign
+    for (let i = 50; i < 100; i++) {
+      virtualDestTransport!.sendFrame(encodeBytes(`pkt-${i}`))
     }
+    await waitFor(() => received.length === 100, 3_000)
+    assert.equal(viaRelay2, 50)
 
-    assert.equal(viaRelay1, 0)
-    assert.equal(viaRelay2, 100)
-    assert.ok(
-      ecdsaSigns <= 3,
-      `expected <= 3 ECDSA signs for 100-packet leased unicast stream, got ${ecdsaSigns}`
-    )
-
-    // 3. When both direct relays die, virtualDestTransport.sendFrame fails synchronously instead of blackholing
-    r1State.alive = false
+    // 4. When all direct relays die, virtualDestTransport.sendFrame fails synchronously instead of blackholing
     r2State.alive = false
     assert.equal(virtualDestTransport!.isOpen, false)
+    assert.equal(virtualDestTransport!.waitForDrain(), false)
     assert.throws(() => virtualDestTransport!.sendFrame(encodeBytes('dead')))
   } finally {
     src.destroy()

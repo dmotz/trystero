@@ -4,9 +4,17 @@ const decoder = /*@__PURE__*/ new TextDecoder()
 export const libName = 'Trystero'
 export const libId = 'trystero'
 
-export const socketInitialFailureSymbol: unique symbol = /*@__PURE__*/ Symbol()
-export const internalPluginSymbol: unique symbol = /*@__PURE__*/ Symbol()
-export const signalingBridgeSymbol: unique symbol = /*@__PURE__*/ Symbol()
+export const domainTag = (name: string, version: number): string =>
+  `${libId}:${name}:v${version}`
+
+export const socketInitialFailureSymbol: unique symbol =
+  /*@__PURE__*/ Symbol.for(`${libId}.socketInitialFailure`) as never
+export const internalPluginSymbol: unique symbol = /*@__PURE__*/ Symbol.for(
+  `${libId}.internalPlugin`
+) as never
+export const signalingBridgeSymbol: unique symbol = /*@__PURE__*/ Symbol.for(
+  `${libId}.signalingBridge`
+) as never
 
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
@@ -16,7 +24,7 @@ export const fromJson = <T>(s: string): T => {
   try {
     return JSON.parse(s) as T
   } catch {
-    throw mkErr(`failed to parse JSON: ${s}`)
+    throw mkErr(`failed to parse JSON (${s.length} bytes)`)
   }
 }
 
@@ -24,9 +32,6 @@ export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
 
 export const decodeBytes = (buf: ArrayBufferLike | ArrayBufferView): string =>
   decoder.decode(buf)
-
-export const toHex = (bytes: Uint8Array): string =>
-  Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
 
 export const toBase64 = (bytes: Uint8Array): string => {
   let bin = ''
@@ -99,41 +104,50 @@ export type BoundedCache<K, V> = {
   set: (key: K, value: V) => void
   delete: (key: K) => boolean
   clear: () => void
-  keys: () => IterableIterator<K>
-  entries: () => IterableIterator<[K, V]>
+  keys: () => K[]
+  entries: () => [K, V][]
 }
 
 export const createBoundedCache = <K, V>(
   maxSize = 4_096
 ): BoundedCache<K, V> => {
   const map = new Map<K, V>()
-  const rawGet = map.get.bind(map)
-  const rawSet = map.set.bind(map)
-  map.get = key => {
-    const value = rawGet(key)
-    if (value !== undefined || map.has(key)) {
-      map.delete(key)
-      rawSet(key, value as V)
-    }
-    return value
-  }
-  map.set = (key, value) => {
-    if (map.has(key)) {
-      map.delete(key)
-    } else if (map.size >= maxSize) {
-      const oldest = map.keys().next().value
-      if (oldest !== undefined) {
-        map.delete(oldest)
+  return {
+    get size() {
+      return map.size
+    },
+    get: key => {
+      if (!map.has(key)) {
+        return undefined
       }
-    }
-    return rawSet(key, value)
+      const value = map.get(key) as V
+      map.delete(key)
+      map.set(key, value)
+      return value
+    },
+    has: key => map.has(key),
+    set: (key, value) => {
+      if (map.has(key)) {
+        map.delete(key)
+      } else if (map.size >= maxSize) {
+        const oldest = map.keys().next().value
+        if (oldest !== undefined) {
+          map.delete(oldest)
+        }
+      }
+      map.set(key, value)
+    },
+    delete: key => map.delete(key),
+    clear: () => map.clear(),
+    keys: () => [...map.keys()],
+    entries: () => [...map.entries()]
   }
-  return map
 }
 
 export type BoundedSet<T> = {
   has: (value: T) => boolean
   add: (value: T) => boolean
+  clear: () => void
 }
 
 export const createBoundedSet = <T>(maxSize = 4_096): BoundedSet<T> => {
@@ -152,6 +166,7 @@ export const createBoundedSet = <T>(maxSize = 4_096): BoundedSet<T> => {
       }
       set.add(value)
       return true
-    }
+    },
+    clear: () => set.clear()
   }
 }

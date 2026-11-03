@@ -6,7 +6,7 @@ import type {
 } from './internal-types'
 import createStrategy from './strategy'
 import type {BaseRoomConfig, JoinRoom, JoinRoomConfig} from './types'
-import {mkErr, toJson} from './utils'
+import {mkErr, noOp} from './utils'
 
 const defaultSteadyAnnounceIntervalMs = 60_000
 const topicMissingErr = (what: string): Error =>
@@ -77,13 +77,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       rawContext
     ) => {
       const context = requireContext(rawContext)
-      const signalPeer = (peerTopic: string, signal: string) =>
-        void publishTopic(
-          relay,
-          peerTopic,
-          signal,
-          makeTopicContext(context, 'signal', rootTopic, selfTopic)
-        )
+      const signalPeer = (peerTopic: string, signal: string): void => {
+        try {
+          void Promise.resolve(
+            publishTopic(
+              relay,
+              peerTopic,
+              signal,
+              makeTopicContext(context, 'signal', rootTopic, selfTopic)
+            )
+          ).catch(noOp)
+        } catch {
+          // Ignore synchronous publish failures during fire-and-forget signaling
+        }
+      }
 
       let didCleanup = false
       const forwardMessage = (
@@ -121,9 +128,9 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       const result = await publishTopic(
         relay,
         rootTopic,
-        toJson({
+        {
           peerId: requirePeerId(context)
-        }),
+        },
         makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )
 

@@ -3,17 +3,24 @@ import vm from 'node:vm'
 import test from './test.ts'
 import {
   createTopicStrategy,
-  definePlugin,
-  roles
+  roles,
+  scale
 } from '../../packages/core/src/index.ts'
 import {createActionManager} from '../../packages/core/src/actions.ts'
+import {initSingleHandler} from '../../packages/core/src/emitter.ts'
+import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
+import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
-import {createSingleHandler} from '../../packages/core/src/utils.ts'
 import {joinRoom as joinSupabaseRoom} from '../../packages/supabase/src/index.ts'
 import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
-import type {RoomError} from '../../packages/core/src/types.ts'
-import {MockRTCPeerConnection, linkedActions, waitFor} from './peer-harness.ts'
+import type {PeerHandle, RoomError} from '../../packages/core/src/types.ts'
+import {
+  MockRTCPeerConnection,
+  linkedActions,
+  testEndpoint,
+  waitFor
+} from './peer-harness.ts'
 
 void test('Single-handler enforcement on action.onRequest and action.onReceive', async () => {
   const pair = linkedActions()
@@ -73,7 +80,11 @@ void test('Single-handler enforcement on action.onRequest and action.onReceive',
     () => {},
     () => {},
     () => {},
-    {selfId: 'leave-slot-peer', appId: 'slot-app', roomId: 'slot-room'}
+    {
+      endpointIdentity: testEndpoint('leave-slot-peer'),
+      appId: 'slot-app',
+      roomId: 'slot-room'
+    }
   )
   const rpc = room.makeAction('rpc', {kind: 'request'})
   rpc.onRequest(() => 'v1')
@@ -83,7 +94,7 @@ void test('Single-handler enforcement on action.onRequest and action.onReceive',
   unsubAfterLeave()
 })
 
-void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, non-function handlers, non-writable .on* methods, cached room.onError, and reserved onError plugin name', async () => {
+void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, non-function handlers, non-writable .on* methods, cached room.onError, and internal-only use[] validation', async () => {
   let storedRootTopic = ''
   let storedSubscriber = null as
     | Parameters<Parameters<typeof createStrategy>[0]['subscribe']>[3]
@@ -257,55 +268,80 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     await room1.leave()
   }
 
-  // 6. Plugin safety: 'onError' is reserved, while custom plugins and makeState.onChange lock properly
+  // 6. Plugin validation: use[] rejects non-arrays, non-internal plugins, and duplicates; setup errors emit plugin-failed
   assert.throws(
-    () => definePlugin('onError', {setup: () => ({})}),
-    /plugin name "onError" is a reserved room property/
+    () =>
+      joinTopic(
+        {
+          appId: 'plugin-guard-app',
+          use: 'not-an-array' as never,
+          rtcPolyfill:
+            MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+        },
+        'plugin-guard-room'
+      ),
+    /use must be an array of room plugins/
   )
 
-  const shadowErrPlugin = definePlugin('shadow-on-err', {
-    setup: () => ({
-      onError: () => () => {}
-    })
+  assert.throws(
+    () =>
+      joinTopic(
+        {
+          appId: 'plugin-guard-app',
+          use: [{name: 'custom', setup: () => ({})}] as never,
+          rtcPolyfill:
+            MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+        },
+        'plugin-guard-room'
+      ),
+    /invalid plugin in use\[\]; expected roles\(\) or scale\(\)/
+  )
+
+  assert.throws(
+    () =>
+      joinTopic(
+        {
+          appId: 'plugin-guard-app',
+          use: [roles(), roles()],
+          rtcPolyfill:
+            MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+        },
+        'plugin-guard-room'
+      ),
+    /duplicate plugin "roles" in use\[\]/
+  )
+
+  const throwingInternalPlugin = makeInternalPlugin('scale', () => {
+    throw new Error('plugin-setup-boom')
   })
   const badPluginErrors: RoomError[] = []
   const badPluginRoom = joinTopic(
     {
       appId: 'plugin-guard-app',
-      use: [shadowErrPlugin],
+      use: [throwingInternalPlugin],
       rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'plugin-guard-room'
   )
   badPluginRoom.onError(err => badPluginErrors.push(err))
-  await assert.rejects(
-    () => badPluginRoom.ready,
-    /cannot override reserved room property "onError"/
-  )
-  assert.equal(badPluginErrors.length, 1)
+  await waitFor(() => badPluginErrors.length === 1)
   assert.equal(badPluginErrors[0]!.code, 'plugin-failed')
   if (badPluginErrors[0]!.code === 'plugin-failed') {
-    assert.equal(badPluginErrors[0]!.plugin, 'shadow-on-err')
+    assert.equal(badPluginErrors[0]!.plugin, 'scale')
   }
   await badPluginRoom.leave().catch(() => {})
 
-  // Custom plugin + roles() work alongside locked .on* methods, and state.onChange is also locked
-  const customPlugin = definePlugin('hello-ext', {
-    setup: () => ({
-      greet: () => 'hi'
-    })
-  })
+  // Built-in roles() + scale() work alongside locked .on* methods, and state.onChange is also locked
   const extRoom = joinTopic(
     {
       appId: 'ext-room-app',
-      use: [roles({selfAsAdmin: true}), customPlugin],
+      use: [roles({selfAsAdmin: true}), scale()],
       rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'ext-room'
   )
   try {
-    await extRoom.ready
-    assert.equal(extRoom.greet(), 'hi')
+    await extRoom.getSelf()
     const st = extRoom.makeState('s', 1)
     assert.throws(() => {
       ;(st as unknown as Record<string, unknown>)['onChange'] = () => {}
@@ -316,71 +352,67 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
 })
 
 void test('Unsubscribing or aborting onReceive during pending role offer verification admits transfer instead of rejecting', async () => {
-  // 1. Stale createSingleHandler wrapper call after unsubscribe returns undefined rather than throwing
-  const slot = createSingleHandler<() => boolean>('onReceive')
-  const unsubSlot = slot.set(() => false)
-  const capturedWrapper = slot.get()!
+  // 1. Stale initSingleHandler wrapper call after unsubscribe returns undefined rather than throwing
+  const [setSlot, getSlot] = initSingleHandler<() => boolean>('onReceive')
+  const unsubSlot = setSlot(() => false)
+  const capturedWrapper = getSlot()!
   unsubSlot()
-  assert.equal(slot.get(), null)
+  assert.equal(getSlot(), null)
   assert.equal(capturedWrapper(), undefined)
 
   // 2. Role-guarded bulk offer in flight while onReceive is unsubscribed / aborted
   let offerEnteredResolve: (() => void) | null = null
-  let resolveOfferCheck:
-    | ((res: {
-        valid: boolean
-        roles: string[]
-        userMetadata?: {tag: string}
-      }) => void)
-    | null = null
+  let resolveOfferCheck: ((allowed: boolean) => void) | null = null
+  let peerAuthorized = false
 
   const waitOfferEntered = () =>
     new Promise<void>(resolve => {
       offerEnteredResolve = resolve
     })
 
-  const toRight = {
+  const toRightTransport = createDirectPeerTransport({
+    isDead: false,
+    channel: null,
     sendData: (bytes: Uint8Array) =>
       right.handleData('left', bytes.slice().buffer),
     destroy: () => {}
-  }
-  const toLeft = {
+  } as unknown as PeerHandle)
+
+  const toLeftTransport = createDirectPeerTransport({
+    isDead: false,
+    channel: null,
     sendData: (bytes: Uint8Array) =>
       left.handleData('right', bytes.slice().buffer),
     destroy: () => {}
-  }
+  } as unknown as PeerHandle)
 
   const left = createActionManager({
     onPeerError: (id, err) => left.clearPeer(id, err),
-    getPeer: () => toRight as never,
+    getTransport: () => toRightTransport,
     getPeerIds: () => ['right'],
     canReceiveFromPeer: () => true,
-    signActionPayload: async (_ns, _roles, _data, userMeta) => ({
-      m: userMeta ?? null
-    })
+    registerActionAuthority: () => {},
+    getLocalActionCert: async () => null
   })
 
   const right = createActionManager({
     onPeerError: (id, err) => right.clearPeer(id, err),
-    getPeer: () => toLeft as never,
+    getTransport: () => toLeftTransport,
     getPeerIds: () => ['left'],
     canReceiveFromPeer: () => true,
-    verifyActionOffer: async () => {
-      offerEnteredResolve?.()
-      return new Promise(resolve => {
-        resolveOfferCheck = resolve
-      })
-    },
-    verifyActionPayload: async (_ns, _peerId, _roles, _data, wireMeta) => {
-      const m =
-        wireMeta && typeof wireMeta === 'object' && 'm' in wireMeta
-          ? (wireMeta as {m?: {tag: string}}).m
-          : undefined
-      return {
-        valid: true,
-        roles: ['admin'],
-        ...(m === undefined ? {} : {userMetadata: m})
+    registerActionAuthority: () => {},
+    getPeerRoles: () => ['admin'],
+    authorizePeerAction: () => {
+      if (peerAuthorized) {
+        return true
       }
+      offerEnteredResolve?.()
+      return new Promise<boolean>(resolve => {
+        resolveOfferCheck = allowed => {
+          peerAuthorized = allowed
+          resolve(allowed)
+        }
+      })
     }
   })
 
@@ -392,13 +424,13 @@ void test('Unsubscribing or aborting onReceive during pending role offer verific
       roles: 'admin'
     })
 
-    const receivedSizes: number[] = []
-    receiver.onMessage(async data => {
+    const receivedItems: Array<{size: number; metadata: unknown}> = []
+    receiver.onMessage(async (data, ctx) => {
       await Promise.resolve()
-      receivedSizes.push(data.byteLength)
+      receivedItems.push({size: data.byteLength, metadata: ctx.metadata})
     })
 
-    // Gate initially rejects everything, but we unsubscribe it while verifyActionOffer is pending
+    // Gate initially rejects everything, but we abort it while authorizePeerAction is pending
     const abortCtrl = new AbortController()
     let gateInvocations = 0
     receiver.onReceive(
@@ -414,18 +446,16 @@ void test('Unsubscribing or aborting onReceive during pending role offer verific
     const sendPromise = sender.send(payload, {metadata: {tag: 'ok'}})
 
     await entered
-    // Abort the onReceive gate while verifyActionOffer is mid-flight -> restores automatic acceptance
+    // Abort the onReceive gate while authorizePeerAction is mid-flight -> restores automatic acceptance
     abortCtrl.abort()
-    resolveOfferCheck!({
-      valid: true,
-      roles: ['admin'],
-      userMetadata: {tag: 'ok'}
-    })
+    resolveOfferCheck!(true)
 
     await sendPromise
-    await waitFor(() => receivedSizes.length === 1, 1_000)
+    await waitFor(() => receivedItems.length === 1, 1_000)
     assert.equal(gateInvocations, 0)
-    assert.deepEqual(receivedSizes, [payload.byteLength])
+    assert.deepEqual(receivedItems, [
+      {size: payload.byteLength, metadata: {tag: 'ok'}}
+    ])
   } finally {
     left.clearPeer('right', new Error('closed'))
     right.clearPeer('left', new Error('closed'))

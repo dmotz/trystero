@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import {readdirSync, readFileSync} from 'node:fs'
+import {existsSync, readdirSync, readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 import test from './test.ts'
 import {createMemoryRtcRealm} from './memory-rtc.ts'
@@ -8,20 +8,52 @@ import {waitFor} from './peer-harness.ts'
 const importDist = <T>(relPath: string): Promise<T> =>
   import(new URL(relPath, import.meta.url).href) as Promise<T>
 
-const expectedCorePublicExports = [
+const expectedStrategyReExports = [
   'clearUserIdentity',
   'createUserIdentity',
-  'definePlugin',
   'exportUserIdentity',
   'importUserIdentity',
   'roles',
   'scale'
 ]
 
+const expectedCoreExports: Record<string, 'function' | 'string' | 'symbol'> = {
+  clearUserIdentity: 'function',
+  createRelayManager: 'function',
+  createRelayScopedStore: 'function',
+  createStrategy: 'function',
+  createTopicStrategy: 'function',
+  createUserIdentity: 'function',
+  encodeBytes: 'function',
+  exportUserIdentity: 'function',
+  fromJson: 'function',
+  genId: 'function',
+  getRelays: 'function',
+  hashTopic: 'function',
+  importUserIdentity: 'function',
+  libName: 'string',
+  makeSocket: 'function',
+  mkErr: 'function',
+  roles: 'function',
+  scale: 'function',
+  setRelayConnectivity: 'function',
+  socketInitialFailureSymbol: 'symbol',
+  toJson: 'function',
+  unrefTimer: 'function'
+}
+
+const removedCoreExports = ['decodeBytes', 'definePlugin', 'hash32']
+
 void test('Built dist/*.mjs entrypoints expose exact public contracts and strip DEV-only hooks', async () => {
+  const coreDistDir = resolve(import.meta.dirname, '../../packages/core/dist')
+  assert.equal(
+    existsSync(resolve(coreDistDir, 'public.mjs')),
+    false,
+    '@trystero-p2p/core/public (dist/public.mjs) must not exist'
+  )
+
   const [
     coreDist,
-    corePublicDist,
     firebaseDist,
     mqttDist,
     nostrDist,
@@ -33,9 +65,6 @@ void test('Built dist/*.mjs entrypoints expose exact public contracts and strip 
   ] = await Promise.all([
     importDist<typeof import('@trystero-p2p/core')>(
       '../../packages/core/dist/index.mjs'
-    ),
-    importDist<typeof import('@trystero-p2p/core/public')>(
-      '../../packages/core/dist/public.mjs'
     ),
     importDist<typeof import('@trystero-p2p/firebase')>(
       '../../packages/firebase/dist/index.mjs'
@@ -63,29 +92,27 @@ void test('Built dist/*.mjs entrypoints expose exact public contracts and strip 
     )
   ])
 
+  const coreRecord = coreDist as Record<string, unknown>
   assert.deepEqual(
-    Object.keys(corePublicDist).sort((a, b) => a.localeCompare(b)),
-    expectedCorePublicExports
+    Object.keys(coreRecord).sort((a, b) => a.localeCompare(b)),
+    Object.keys(expectedCoreExports).sort((a, b) => a.localeCompare(b))
   )
 
-  for (const fnName of [
-    ...expectedCorePublicExports,
-    'createRelayManager',
-    'createStrategy',
-    'createTopicStrategy',
-    'decodeBytes',
-    'encodeBytes',
-    'fromJson',
-    'genId',
-    'hash32',
-    'hashTopic',
-    'libName',
-    'toJson'
-  ]) {
+  for (const [exportName, expectedType] of Object.entries(
+    expectedCoreExports
+  )) {
     assert.equal(
-      typeof (coreDist as Record<string, unknown>)[fnName],
-      fnName === 'libName' ? 'string' : 'function',
-      `expected @trystero-p2p/core dist to export ${fnName}`
+      typeof coreRecord[exportName],
+      expectedType,
+      `expected @trystero-p2p/core dist to export ${exportName} (${expectedType})`
+    )
+  }
+
+  for (const removed of removedCoreExports) {
+    assert.equal(
+      removed in coreRecord,
+      false,
+      `@trystero-p2p/core must not export removed symbol ${removed}`
     )
   }
 
@@ -100,11 +127,18 @@ void test('Built dist/*.mjs entrypoints expose exact public contracts and strip 
   ] as const) {
     const record = mod as Record<string, unknown>
     assert.equal(typeof record['joinRoom'], 'function', `${pkgName}.joinRoom`)
-    for (const sym of expectedCorePublicExports) {
+    for (const sym of expectedStrategyReExports) {
       assert.equal(
         typeof record[sym],
         'function',
-        `${pkgName} must re-export ${sym} from @trystero-p2p/core/public`
+        `${pkgName} must re-export ${sym} from @trystero-p2p/core`
+      )
+    }
+    for (const removed of removedCoreExports) {
+      assert.equal(
+        removed in record,
+        false,
+        `${pkgName} must not expose removed symbol ${removed}`
       )
     }
     assert.equal(
@@ -124,7 +158,6 @@ void test('Built dist/*.mjs entrypoints expose exact public contracts and strip 
   assert.equal(typeof wsRelayServerDist.createWsRelayServer, 'function')
 
   // Verify production core dist files contain zero DEV labels or test backdoors
-  const coreDistDir = resolve(import.meta.dirname, '../../packages/core/dist')
   const mjsFiles = readdirSync(coreDistDir).filter(name =>
     name.endsWith('.mjs')
   )
@@ -209,7 +242,7 @@ void test('Built dist/*.mjs executes end-to-end room join, actions, shared/user 
         appId: 'dist-smoke-app',
         identity: hostUser,
         rtcPolyfill: realm.rtcPolyfill,
-        use: [coreDist.roles({selfAsAdmin: true}), coreDist.scale('auto')]
+        use: [coreDist.roles({selfAsAdmin: true}), coreDist.scale()]
       },
       'smoke-room'
     )
@@ -224,11 +257,12 @@ void test('Built dist/*.mjs executes end-to-end room join, actions, shared/user 
         appId: 'dist-smoke-app',
         identity: guestUser,
         rtcPolyfill: realm.rtcPolyfill,
-        use: [coreDist.roles(), coreDist.scale('auto')]
+        use: [coreDist.roles(), coreDist.scale()]
       },
       selfA.roomId
     )
     guestRoom = roomB
+    const selfB = await roomB.getSelf()
 
     const hostChat = roomA.makeAction<string>('chat')
     const guestChat = roomB.makeAction<string>('chat')
@@ -275,7 +309,11 @@ void test('Built dist/*.mjs executes end-to-end room join, actions, shared/user 
         roomB.getRoles(guestUser.userId).includes('moderator')
     )
 
-    assert.equal(roomA.getTopology().activeMode, 'mesh')
+    const topoA = roomA.getTopology()
+    assert.equal(topoA.peerId, selfA.peerId)
+    assert.deepEqual(topoA.roomPeerIds, [selfB.peerId])
+    assert.equal('selfId' in topoA, false)
+    assert.equal('activeMode' in topoA, false)
   } finally {
     await Promise.all([hostRoom?.leave(), guestRoom?.leave()])
     realm.clear()

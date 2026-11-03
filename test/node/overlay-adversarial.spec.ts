@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {signRoomAuth} from '../../packages/core/src/crypto.ts'
+import type {Room, ScalePluginApi} from '../../packages/core/src/index.ts'
+import {ecdsaSign, signRoomAuth} from '../../packages/core/src/crypto.ts'
+import {
+  createUserIdentity,
+  signUserEndpointProof
+} from '../../packages/core/src/identity.ts'
 import {
   computeTargetNeighbors,
   createOverlayManager,
@@ -12,13 +17,27 @@ import {
   overlayUnicastKind,
   packOverlayBinary,
   packOverlayControl,
-  unpackOverlayBinary
+  scale,
+  unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
-import {getRoomSignalingBridge} from '../../packages/core/src/room.ts'
+import createRoom, {
+  getRoomSignalingBridge
+} from '../../packages/core/src/room.ts'
 import {createSignalHandler} from '../../packages/core/src/signal-handler.ts'
-import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  decodeBytes,
+  encodeBytes,
+  toBase64
+} from '../../packages/core/src/utils.ts'
 import {createOverlayCluster} from './overlay-harness.ts'
-import {testPeerId, wait, waitFor} from './peer-harness.ts'
+import {
+  getTestEndpointByPeerId,
+  LinkedPeer,
+  linkPeers,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down eviction DoS, replay floods, TTL amplification, and deduplication cache-poisoning resistance', async () => {
   const relayedToBobFrames: Uint8Array[] = []
@@ -37,10 +56,10 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     appId: 'adv-app',
     roomId: 'adv-room',
     password: 'shared-room-secret',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(aliceId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -51,10 +70,10 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     appId: 'adv-app',
     roomId: 'adv-room',
     password: 'shared-room-secret',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -65,10 +84,10 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     appId: 'adv-app',
     roomId: 'adv-room',
     password: 'shared-room-secret',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (origin, data) => {
@@ -159,13 +178,11 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     'adv-app',
     'adv-room'
   )
-  const hijackSigBuf = await crypto.subtle.sign(
-    {name: 'ECDSA', hash: 'SHA-256'},
-    mallorySignPair.privateKey,
-    encodeBytes(hijackCanonical) as BufferSource
-  )
-  const hijackSigB64 = btoa(
-    String.fromCharCode(...new Uint8Array(hijackSigBuf))
+  const hijackSigB64 = toBase64(
+    await ecdsaSign(
+      mallorySignPair.privateKey,
+      encodeBytes(hijackCanonical) as BufferSource
+    )
   )
 
   const sigFailuresBeforeHijack = bob.getSnapshot().stats.signatureFailures
@@ -242,7 +259,7 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
 
   // Attack D: Pre-Verification Deduplication Cache-Poisoning Attack
   // Capture a real signed broadcast packet from Alice, then inject a forged packet with the
-  // EXACT same msgId into Bob first, followed by Alice's genuine packet.
+  // EXACT same msgId into Carol first, followed by Alice's genuine packet.
   aliceToRelayFrames.length = 0
   await alice.broadcastInline(
     encodeBytes('GENUINE-BROADCAST-AFTER-POISON-ATTEMPT')
@@ -250,27 +267,27 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   await waitFor(() => bobDelivered.length === 1, 2_000)
 
   const genuineAliceBroadcast = aliceToRelayFrames.find(frame => {
-    const parsed = unpackOverlayBinary(frame)
-    return parsed?.kind === overlayBroadcastKind
+    const parsed = unpackOverlayFrame(frame)
+    return parsed?.[0] === overlayBroadcastKind
   })
   assert.ok(
     genuineAliceBroadcast,
     'expected captured broadcast frame from Alice'
   )
-  const parsedGenuine = unpackOverlayBinary(genuineAliceBroadcast!)!
+  const [, , genuineHeader] = unpackOverlayFrame(genuineAliceBroadcast!)!
 
   // Now test cache-poisoning resistance on a fresh peer (Carol) that pins Alice's key
-  // and receives a forged frame with msgId = parsedGenuine.header.m BEFORE the genuine frame!
+  // and receives a forged frame with msgId = genuineHeader.m BEFORE the genuine frame!
   const carolDelivered: string[] = []
   const carol = createOverlayManager({
     selfId: carolId,
     appId: 'adv-app',
     roomId: 'adv-room',
     password: 'shared-room-secret',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(carolId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: (_origin, data) => {
@@ -286,8 +303,9 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     4,
     {
       o: aliceId,
-      q: parsedGenuine.header['q'],
-      m: parsedGenuine.header['m'],
+      q: genuineHeader['q'],
+      t: genuineHeader['t'],
+      m: genuineHeader['m'],
       s: hijackSigB64
     },
     encodeBytes('CORRUPTED-FAST-PATH-PACKET')
@@ -329,11 +347,11 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   await alice.broadcastInline(encodeBytes('TTL-CLAMP-TEST'))
   await waitFor(() => relayedToBobFrames.length > 0, 1_000)
   const anotherAliceBroadcast = aliceToRelayFrames
-    .map(f => unpackOverlayBinary(f))
+    .map(f => unpackOverlayFrame(f))
     .find(
       p =>
-        p?.kind === overlayBroadcastKind &&
-        decodeBytes(p.payload) === 'TTL-CLAMP-TEST'
+        p?.[0] === overlayBroadcastKind &&
+        decodeBytes(p[3]) === 'TTL-CLAMP-TEST'
     )!
 
   // Craft a packet with Alice's valid header+signature+payload, but malicious ttl = 255,
@@ -344,10 +362,10 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     appId: 'adv-app',
     roomId: 'adv-room',
     password: 'shared-room-secret',
-    topology: {
-      mode: 'gossip',
-      maxConnections: 4
+    config: {
+      maxDirectPeers: 4
     },
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayClampId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -366,8 +384,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     getOffer: async () => undefined,
     signal: async () => undefined,
     sendData: (data: Uint8Array) => {
-      const p = unpackOverlayBinary(data)
-      if (p?.kind === overlayBroadcastKind) {
+      const p = unpackOverlayFrame(data)
+      if (p?.[0] === overlayBroadcastKind) {
         clampedForwardedFrames.push(data.slice())
       }
     },
@@ -383,14 +401,14 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
   const amplifiedTtlPacket = packOverlayBinary(
     overlayBroadcastKind,
     255,
-    anotherAliceBroadcast.header,
-    anotherAliceBroadcast.payload
+    anotherAliceBroadcast[2],
+    anotherAliceBroadcast[3]
   )
   relayClamp.handleOverlayFrame(upstreamId, amplifiedTtlPacket.slice().buffer)
   await waitFor(() => clampedForwardedFrames.length === 1, 1_000)
-  const forwardedParsed = unpackOverlayBinary(clampedForwardedFrames[0]!)!
+  const [, forwardedTtl] = unpackOverlayFrame(clampedForwardedFrames[0]!)!
   assert.equal(
-    forwardedParsed.ttl,
+    forwardedTtl,
     maxAllowedHops - 1,
     `incoming TTL=255 must be clamped to maxAllowedHops(${maxAllowedHops}) - 1 = ${maxAllowedHops - 1} on forwarding`
   )
@@ -403,17 +421,17 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     2_000
   )
   const capturedUnicast = relayedToBobFrames
-    .map(f => unpackOverlayBinary(f))
-    .find(p => p?.kind === overlayUnicastKind)!
+    .map(f => unpackOverlayFrame(f))
+    .find(p => p?.[0] === overlayUnicastKind)!
   assert.ok(capturedUnicast, 'expected captured E2EE unicast packet')
 
-  const flippedCiphertext = capturedUnicast.payload.slice()
+  const flippedCiphertext = capturedUnicast[3].slice()
   flippedCiphertext[0] = (flippedCiphertext[0] ?? 0) ^ 0xff
   const tamperedUnicastPacket = packOverlayBinary(
     overlayUnicastKind,
     4,
     {
-      ...capturedUnicast.header,
+      ...capturedUnicast[2],
       q: 99,
       m: `${aliceId}:bitflipped-unicast-99`
     },
@@ -441,17 +459,18 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
   // 1. Signaling door validation & bounds in createSignalHandler
   let toPlainCalls = 0
   let discoveredCount = 0
+  const honestSelfId = testPeerId('honest-self')
 
   const relayHandler = createSignalHandler({
     appId: 'sig-app',
-    roomId: 'sig-room',
+    getRoomId: () => 'sig-room',
     config: {appId: 'sig-app'},
     peerStates: {},
-    rootTopicPlaintext: 'root-topic',
+    getRootTopicPlaintext: () => 'root-topic',
     rootTopicP: Promise.resolve('root-topic'),
     selfTopicP: Promise.resolve('self-topic'),
-    selfId: 'honest-self',
-    selfIdP: Promise.resolve('honest-self'),
+    getSelfIdNow: () => honestSelfId,
+    selfIdP: Promise.resolve(honestSelfId),
     isLeaving: () => false,
     announceIntervals: [],
     announceIntervalMs: 1_000,
@@ -460,7 +479,9 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
       return s
     },
     toCipher: async s => s,
-    offerManager: {take: () => ({}) as any} as any,
+    checkoutOffers: async () => [],
+    claimLeasedOffer: () => {},
+    reclaimLeasedOffer: () => {},
     encryptOffer: async () => 'v=0',
     initPeer: () => ({
       isDead: false,
@@ -498,7 +519,7 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     JSON.stringify({
       peerId: 'valid-peer-1',
       offerId: 'o'.repeat(80),
-      offer: {type: 'offer', sdp: 'v=0'}
+      offer: 'v=0'
     })
   )
   // 1d. Oversized SDP (> 64 KiB) or oversized candidate (> 4 KiB) is dropped at ingress
@@ -506,13 +527,14 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     JSON.stringify({
       peerId: 'valid-peer-2',
       offerId: 'offer-1',
-      offer: {type: 'offer', sdp: 'v='.repeat(40_000)}
+      offer: 'v='.repeat(40_000)
     })
   )
   await handleSignal(
     JSON.stringify({
       peerId: 'valid-peer-3',
-      candidate: {candidate: 'c'.repeat(5_000)}
+      offerId: 'offer-2',
+      candidate: 'c'.repeat(5_000)
     })
   )
   assert.equal(
@@ -530,9 +552,8 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
   await handleSignal(
     JSON.stringify({
       peerId: 'unsolicited-cand-peer',
-      candidate: {
-        candidate: 'candidate:1 1 UDP 2122252543 192.0.2.1 5000 typ host'
-      }
+      offerId: 'offer-unsolicited',
+      candidate: 'candidate:1 1 UDP 2122252543 192.0.2.1 5000 typ host'
     }),
     'self-topic'
   )
@@ -543,35 +564,35 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
   )
 
   // 2. Public-topic roster poisoning resistance:
-  // An active 4-peer room in 'auto' mode (below autoThreshold=12, so activeMode === 'mesh')
-  // receives 200 fake peer announcements via notePeerDiscovered on the public signaling topic.
+  // An active 4-peer room receives 200 fake peer announcements via notePeerDiscovered on the public signaling topic.
   const cluster = await createOverlayCluster({
     peerCount: 4,
-    topology: {mode: 'auto', autoThreshold: 12, maxConnections: 6}
+    topology: {maxDirectPeers: 6}
   })
   try {
-    const victimRoom = cluster.rooms.get(cluster.peerIds[0]!)!
+    const victimId = cluster.peerIds[0]!
+    const victimRoom = cluster.rooms.get(victimId)!
     const victimBridge = getRoomSignalingBridge(victimRoom)!
-    assert.equal(victimRoom.getTopology().activeMode, 'mesh')
+    assert.equal(victimRoom.getTopology().peerId, victimId)
     assert.equal(victimRoom.getTopology().roomPeerIds.length, 3)
 
     for (let i = 0; i < 200; i++) {
       victimBridge
         .getScaleProvider()
-        ?.notePeerDiscovered(`fake-topic-sybil-${i}`)
+        ?.notePeerDiscovered(testPeerId(`fake-topic-sybil-${i}`))
     }
     await wait(30)
 
     const snapAfterSpam = victimRoom.getTopology()
-    assert.equal(
-      snapAfterSpam.activeMode,
-      'mesh',
-      'public-topic notePeerDiscovered spam must NOT flip an established mesh room into gossip mode'
-    )
     assert.deepEqual(
       snapAfterSpam.roomPeerIds,
       cluster.peerIds.slice(1),
       'unverified public-topic announcements must never enter roomPeerIds'
+    )
+    assert.deepEqual(
+      [...(victimBridge.getScaleProvider()?.getTargetNeighbors() ?? [])].sort(),
+      cluster.peerIds.slice(1).sort(),
+      'unverified public-topic announcements must not displace converged target neighbors'
     )
   } finally {
     await cluster.cleanup()
@@ -583,26 +604,184 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     (_, i) => `peer-${String(i).padStart(2, '0')}`
   )
   const targetsRoom1 = [
-    ...computeTargetNeighbors(
-      'peer-00',
-      samplePeers,
-      'gossip',
-      4,
-      'app-1\0room-alpha'
-    )
+    ...computeTargetNeighbors('peer-00', samplePeers, 4, 'app-1\0room-alpha')
   ]
   const targetsRoom2 = [
-    ...computeTargetNeighbors(
-      'peer-00',
-      samplePeers,
-      'gossip',
-      4,
-      'app-1\0room-beta'
-    )
+    ...computeTargetNeighbors('peer-00', samplePeers, 4, 'app-1\0room-beta')
   ]
   assert.notDeepEqual(
     targetsRoom1,
     targetsRoom2,
     'room-salted ring placement must produce different neighbor sets across different rooms'
   )
+})
+
+void test("C1 regression: gossip descriptors cannot overwrite or spoof a direct peer's handshake-verified userId", async () => {
+  const appId = 'c1-spoof-app'
+  const roomId = 'c1-spoof-room'
+  const aliceId = testPeerId('c1-adv-alice')
+  const malloryId = testPeerId('c1-adv-mallory')
+  const relayId = testPeerId('c1-adv-relay')
+
+  const [aliceUser, malloryUser, impersonatedUser, relayUser] =
+    await Promise.all([
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity(),
+      createUserIdentity()
+    ])
+  const aliceEp = getTestEndpointByPeerId(aliceId)
+  const malloryEp = getTestEndpointByPeerId(malloryId)
+  const relayEp = getTestEndpointByPeerId(relayId)
+
+  const registerCallbacks = new Map<string, (peer: any, id: string) => void>()
+  const rooms = new Map<string, Room & ScalePluginApi>()
+
+  const entries = [
+    [aliceId, aliceEp, aliceUser],
+    [malloryId, malloryEp, malloryUser],
+    [relayId, relayEp, relayUser]
+  ] as const
+
+  for (const [id, ep, usr] of entries) {
+    const room = createRoom(
+      peerRegister => {
+        registerCallbacks.set(id, peerRegister)
+      },
+      () => {},
+      () => {},
+      {
+        endpointIdentity: ep,
+        identity: usr,
+        appId,
+        roomId,
+        use: [scale({maxDirectPeers: 4})]
+      }
+    )
+    rooms.set(id, room as Room & ScalePluginApi)
+  }
+
+  try {
+    // Connect Alice <-> Mallory directly, and Alice <-> Relay <-> Mallory
+    const linkAM = linkPeers(new LinkedPeer(), new LinkedPeer())
+    registerCallbacks.get(aliceId)!(linkAM.peerA, malloryId)
+    registerCallbacks.get(malloryId)!(linkAM.peerB, aliceId)
+
+    const linkAR = linkPeers(new LinkedPeer(), new LinkedPeer())
+    registerCallbacks.get(aliceId)!(linkAR.peerA, relayId)
+    registerCallbacks.get(relayId)!(linkAR.peerB, aliceId)
+
+    const linkRM = linkPeers(new LinkedPeer(), new LinkedPeer())
+    registerCallbacks.get(relayId)!(linkRM.peerA, malloryId)
+    registerCallbacks.get(malloryId)!(linkRM.peerB, relayId)
+
+    const aliceRoom = rooms.get(aliceId)!
+
+    await waitFor(
+      () =>
+        aliceRoom.getPeers()[malloryId]?.direct === true &&
+        aliceRoom.getPeers()[malloryId]?.userId === malloryUser.userId &&
+        aliceRoom.getPeers()[relayId]?.direct === true,
+      3_000
+    )
+
+    assert.equal(aliceRoom.getPeers()[malloryId]?.userId, malloryUser.userId)
+    assert.deepEqual(aliceRoom.getUsers()[malloryUser.userId]?.peerIds, [
+      malloryId
+    ])
+
+    const aliceScale = getRoomSignalingBridge(aliceRoom)!.getScaleProvider()!
+
+    // Attack 1: Mallory's endpoint signs a high-seq gossip descriptor claiming a DIFFERENT userId
+    // (even with a valid userProof from impersonatedUser!).
+    const spoofedWithProof: Record<string, unknown> = {
+      peerId: malloryId,
+      seq: 500,
+      neighbors: [aliceId, relayId].sort(),
+      signPubKey: malloryEp.signPubJwk,
+      userId: impersonatedUser.userId,
+      userPubKey: impersonatedUser.signPubJwk,
+      userProof: await signUserEndpointProof(impersonatedUser, {
+        appId,
+        roomId,
+        peerId: malloryId,
+        peerPubJwk: malloryEp.signPubJwk,
+        seq: 500
+      })
+    }
+    spoofedWithProof['sig'] = toBase64(
+      await malloryEp.sign(
+        encodeBytes(
+          descriptorCanonicalPayload(spoofedWithProof as any, appId, roomId)
+        )
+      )
+    )
+
+    // Attack 2: Mallory's endpoint signs a higher-seq gossip descriptor claiming Alice's userId without userProof,
+    // and another omitting userId/userProof completely.
+    const spoofedNoProof: Record<string, unknown> = {
+      peerId: malloryId,
+      seq: 501,
+      neighbors: [aliceId, relayId].sort(),
+      signPubKey: malloryEp.signPubJwk,
+      userId: aliceUser.userId
+    }
+    spoofedNoProof['sig'] = toBase64(
+      await malloryEp.sign(
+        encodeBytes(
+          descriptorCanonicalPayload(spoofedNoProof as any, appId, roomId)
+        )
+      )
+    )
+
+    const omittedIdentityDesc: Record<string, unknown> = {
+      peerId: malloryId,
+      seq: 502,
+      neighbors: [aliceId, relayId].sort(),
+      signPubKey: malloryEp.signPubJwk
+    }
+    omittedIdentityDesc['sig'] = toBase64(
+      await malloryEp.sign(
+        encodeBytes(
+          descriptorCanonicalPayload(omittedIdentityDesc as any, appId, roomId)
+        )
+      )
+    )
+
+    for (const desc of [
+      spoofedWithProof,
+      spoofedNoProof,
+      omittedIdentityDesc
+    ]) {
+      const frame = packOverlayControl({
+        t: 'gossip',
+        descriptors: [desc as any]
+      })
+      aliceScale.handleFrame(relayId, frame.slice().buffer)
+      aliceScale.handleFrame(malloryId, frame.slice().buffer)
+    }
+    await wait(80)
+
+    // Direct WebRTC handshake-verified userId MUST remain pinned to malloryUser.userId!
+    assert.equal(
+      aliceRoom.getPeers()[malloryId]?.userId,
+      malloryUser.userId,
+      'gossip descriptor must never overwrite handshake-verified direct peer userId'
+    )
+    assert.equal(
+      aliceRoom.getUsers()[impersonatedUser.userId],
+      undefined,
+      'spoofed userId from gossip descriptor must not appear in getUsers()'
+    )
+    assert.equal(
+      aliceRoom.getUsers()[aliceUser.userId],
+      undefined,
+      'omitted-proof descriptor claiming local userId must not spoof getUsers()'
+    )
+    assert.deepEqual(aliceRoom.getUsers()[malloryUser.userId]?.peerIds, [
+      malloryId
+    ])
+  } finally {
+    await Promise.all([...rooms.values()].map(r => r.leave()))
+  }
 })

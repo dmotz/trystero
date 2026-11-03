@@ -1,78 +1,353 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {
-  normalizeTopologyConfig,
-  scale
-} from '../../packages/core/src/scale/index.ts'
+import {actionWireVersion} from '../../packages/core/src/action-wire.ts'
+import {roles} from '../../packages/core/src/authority.ts'
+import {createUserIdentity} from '../../packages/core/src/identity.ts'
 import createRoom from '../../packages/core/src/room.ts'
+import {
+  createOverlayManager,
+  normalizeTopologyConfig,
+  scale,
+  unpackOverlayFrame
+} from '../../packages/core/src/scale/index.ts'
+import {defaultRequiredPeerIdleTtlMs} from '../../packages/core/src/scale/routing.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
-import {definePlugin} from '../../packages/core/src/utils.ts'
-import {createOverlayCluster} from './overlay-harness.ts'
-import {joinAsTestPeer, MockRTCPeerConnection} from './peer-harness.ts'
+import type {PeerHandle, UserIdentity} from '../../packages/core/src/types.ts'
+import {
+  createOverlayCluster,
+  createTestScaleCluster
+} from './overlay-harness.ts'
+import {
+  allocTestPeerIds,
+  getTestEndpointByPeerId,
+  joinAsTestPeer,
+  LinkedPeer,
+  MockRTCPeerConnection,
+  testPeerId,
+  waitFor
+} from './peer-harness.ts'
 
-void test('Elegant API & automatic configuration: joinRoom with scale "auto" transitions from mesh to gossip at threshold', async () => {
-  const peerCount = 24
-  const autoThreshold = 8
-  const maxConnections = 6
+void test('Unified scale() config validation: accepts maxDirectPeers 4..32 (default 6) and rejects invalid or legacy configs', () => {
+  assert.deepEqual(normalizeTopologyConfig(), {maxDirectPeers: 6})
+  assert.deepEqual(normalizeTopologyConfig({}), {maxDirectPeers: 6})
+  assert.deepEqual(normalizeTopologyConfig({maxDirectPeers: 4}), {
+    maxDirectPeers: 4
+  })
+  assert.deepEqual(normalizeTopologyConfig({maxDirectPeers: 32}), {
+    maxDirectPeers: 32
+  })
 
-  // Verify normalizeTopologyConfig supports both string shorthand and full config object
-  assert.equal(normalizeTopologyConfig().mode, 'auto')
-  assert.equal(normalizeTopologyConfig('gossip').mode, 'gossip')
-  assert.equal(normalizeTopologyConfig('auto').mode, 'auto')
-  assert.throws(
-    () => normalizeTopologyConfig('mesh' as any),
-    /invalid topology mode/
-  )
-  assert.throws(
-    () => normalizeTopologyConfig('broadcast' as any),
-    /invalid topology mode/
-  )
+  assert.equal(scale().name, 'scale')
+  assert.equal(scale({maxDirectPeers: 8}).name, 'scale')
 
-  // Start with 6 peers (<= autoThreshold of 8): should remain in 'mesh' mode
+  for (const invalidShape of [
+    'auto',
+    'gossip',
+    'mesh',
+    'broadcast',
+    null,
+    [],
+    42
+  ]) {
+    assert.throws(
+      () => normalizeTopologyConfig(invalidShape as never),
+      /scale config must be an object/
+    )
+    assert.throws(
+      () => scale(invalidShape as never),
+      /scale config must be an object/
+    )
+  }
+
+  for (const invalidDegree of [
+    3,
+    33,
+    0,
+    -1,
+    4.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY
+  ]) {
+    assert.throws(
+      () => normalizeTopologyConfig({maxDirectPeers: invalidDegree}),
+      /scale\.maxDirectPeers must be an integer between 4 and 32/
+    )
+    assert.throws(
+      () => scale({maxDirectPeers: invalidDegree}),
+      /scale\.maxDirectPeers must be an integer between 4 and 32/
+    )
+  }
+})
+
+void test('Unified scale(): full-mesh fast path below maxDirectPeers bypasses overlay ECDSA broadcast signing, multi-hop above maxDirectPeers, and TopologySnapshot immutability', async () => {
+  const maxDirectPeers = 6
+
+  // 1. Room size <= maxDirectPeers + 1 (6 peers, 5 remotes <= maxDirectPeers 6):
+  //    Gossip forms a full direct mesh (0 virtual peers) and broadcasts bypass overlay ECDSA signing.
   const smallCluster = await createOverlayCluster({
     peerCount: 6,
-    topology: {mode: 'auto', autoThreshold, maxConnections}
+    topology: {maxDirectPeers}
   })
 
   try {
     for (const id of smallCluster.peerIds) {
-      const snap = smallCluster.rooms.get(id)!.getTopology()
-      assert.equal(snap.mode, 'auto')
-      assert.equal(
-        snap.activeMode,
-        'mesh',
-        'room below autoThreshold should stay in full mesh mode'
-      )
+      const room = smallCluster.rooms.get(id)!
+      const snap = room.getTopology()
+      assert.equal(snap.peerId, id)
+      assert.equal('selfId' in snap, false)
+      assert.equal('mode' in snap, false)
+      assert.equal('activeMode' in snap, false)
       assert.equal(snap.directPeerIds.length, 5)
+      assert.equal(snap.roomPeerIds.length, 5)
+
+      const peers = room.getPeers()
+      assert.equal(Object.keys(peers).length, 5)
+      for (const info of Object.values(peers)) {
+        assert.equal(info.direct, true)
+        assert.equal(info.hops, 1)
+      }
+    }
+
+    const originId = smallCluster.peerIds[0]!
+    const originRoom = smallCluster.rooms.get(originId)!
+    const receivedOnSmall = new Map<string, string[]>()
+    const chatSenders = new Map<string, (msg: string) => Promise<void>>()
+
+    for (const id of smallCluster.peerIds) {
+      receivedOnSmall.set(id, [])
+      const action = smallCluster.rooms.get(id)!.makeAction<string>('mesh-fast')
+      action.onMessage(msg => {
+        receivedOnSmall.get(id)!.push(msg)
+      })
+      chatSenders.set(id, msg => action.send(msg))
+    }
+
+    const outboundFramesFromOrigin: Uint8Array[] = []
+    for (const [key, pair] of smallCluster.directLinks.entries()) {
+      const endpoint =
+        pair.peerA.ownerId === originId
+          ? pair.peerA
+          : pair.peerB.ownerId === originId
+            ? pair.peerB
+            : null
+      if (endpoint && key.includes(originId)) {
+        const origSend = endpoint.sendData.bind(endpoint)
+        endpoint.sendData = (data: Uint8Array) => {
+          outboundFramesFromOrigin.push(data.slice())
+          origSend(data)
+        }
+      }
+    }
+
+    const overlaySentBefore = originRoom.getTopology().stats.messagesSent
+    await chatSenders.get(originId)!('direct-fast-path')
+
+    await waitFor(
+      () =>
+        smallCluster.peerIds
+          .slice(1)
+          .every(id => receivedOnSmall.get(id)!.includes('direct-fast-path')),
+      2_000
+    )
+
+    assert.equal(
+      originRoom.getTopology().stats.messagesSent,
+      overlaySentBefore,
+      'full-mesh broadcast must bypass overlay broadcastInline signing path'
+    )
+    assert.equal(outboundFramesFromOrigin.length, 5)
+    for (const frame of outboundFramesFromOrigin) {
+      assert.equal(
+        frame[0],
+        actionWireVersion,
+        'full-mesh fast path sends raw action-wire frames directly without overlay wrapping'
+      )
+      assert.equal(unpackOverlayFrame(frame), null)
     }
   } finally {
     await smallCluster.cleanup()
   }
 
-  // Now scale to 24 peers (> autoThreshold of 8): should automatically switch to 'gossip'
-  const largeCluster = await createOverlayCluster({
+  // 2. Room size > maxDirectPeers + 1 (20 distinct-user peers with maxDirectPeers: 6):
+  //    Bounded-degree multi-hop gossip overlay with seamless broadcast & unicast routing + snapshot immutability.
+  const peerCount = 20
+  const expectedLargeIds = allocTestPeerIds(peerCount)
+  const createdUsers = await Promise.all(
+    Array.from({length: peerCount}, () => createUserIdentity())
+  )
+  const largeIdentities = new Map<string, UserIdentity>()
+  for (let i = 0; i < peerCount; i++) {
+    largeIdentities.set(expectedLargeIds[i]!, createdUsers[i]!)
+  }
+  const largeCluster = await createTestScaleCluster({
     peerCount,
-    topology: {mode: 'auto', autoThreshold, maxConnections}
+    maxDirectPeers,
+    identities: largeIdentities
   })
 
   try {
+    let sawMultiHop = false
     for (const id of largeCluster.peerIds) {
       const snap = largeCluster.rooms.get(id)!.getTopology()
-      assert.equal(snap.mode, 'auto')
-      assert.equal(
-        snap.activeMode,
-        'gossip',
-        'room above autoThreshold should automatically switch to gossip'
-      )
-      assert.ok(snap.directPeerIds.length <= maxConnections)
+      assert.equal(snap.peerId, id)
+      assert.equal('selfId' in snap, false)
+      assert.equal('activeMode' in snap, false)
       assert.equal(snap.roomPeerIds.length, peerCount - 1)
+      assert.equal(Object.keys(snap.routes).length, peerCount - 1)
+      assert.ok(
+        snap.directPeerIds.length <= maxDirectPeers * 2 &&
+          snap.directPeerIds.length < peerCount - 1,
+        `expected bounded direct degree, got ${snap.directPeerIds.length}`
+      )
+      if (Object.values(snap.routes).some(r => r.hops > 1)) {
+        sawMultiHop = true
+      }
     }
+    assert.equal(sawMultiHop, true, '20-peer room forms multi-hop routes')
+
+    // Verify TopologySnapshot deep-copy immutability
+    const probeId = largeCluster.peerIds[0]!
+    const probeRoom = largeCluster.rooms.get(probeId)!
+    const snap1 = probeRoom.getTopology()
+    const samplePeer = Object.keys(snap1.routes)[0]!
+    const originalRoute = {...snap1.routes[samplePeer]!}
+    const originalDirectLen = snap1.directPeerIds.length
+    const originalRoomLen = snap1.roomPeerIds.length
+    const originalSent = snap1.stats.messagesSent
+
+    snap1.directPeerIds.push('corrupted-direct')
+    snap1.roomPeerIds.length = 0
+    snap1.stats.messagesSent = 999_999
+    snap1.routes[samplePeer]!.hops = 999
+    snap1.routes[samplePeer]!.nextHop = 'corrupted-hop'
+    snap1.routes['injected-peer'] = {nextHop: 'corrupted-hop', hops: 77}
+
+    const snap2 = probeRoom.getTopology()
+    assert.equal(snap2.directPeerIds.length, originalDirectLen)
+    assert.equal(snap2.directPeerIds.includes('corrupted-direct'), false)
+    assert.equal(snap2.roomPeerIds.length, originalRoomLen)
+    assert.equal(snap2.stats.messagesSent, originalSent)
+    assert.deepEqual(snap2.routes[samplePeer], originalRoute)
+    assert.equal(snap2.routes['injected-peer'], undefined)
+
+    // Verify seamless multi-hop broadcast & unicast delivery
+    const multiHopTargetId = largeCluster.peerIds.find(
+      id =>
+        id !== probeId &&
+        (probeRoom.getTopology().routes[id]?.hops ?? 0) >= 2 &&
+        !probeRoom.getTopology().directPeerIds.includes(id)
+    )!
+    assert.ok(multiHopTargetId, 'expected multi-hop virtual peer')
+
+    const receivedBroadcast = new Set<string>()
+    const receivedUnicast: string[] = []
+    for (const id of largeCluster.peerIds) {
+      const bcast = largeCluster.rooms.get(id)!.makeAction<string>('gossip-msg')
+      bcast.onMessage(msg => {
+        if (msg === 'hello-20') {
+          receivedBroadcast.add(id)
+        }
+      })
+      const ucast = largeCluster.rooms.get(id)!.makeAction<string>('direct-dm')
+      ucast.onMessage(msg => {
+        if (id === multiHopTargetId) {
+          receivedUnicast.push(msg)
+        }
+      })
+    }
+
+    await probeRoom.makeAction<string>('gossip-msg').send('hello-20')
+    await waitFor(() => receivedBroadcast.size === peerCount - 1, 5_000)
+    assert.ok(probeRoom.getTopology().stats.messagesSent >= 1)
+
+    await probeRoom
+      .makeAction<string>('direct-dm')
+      .send('secret-hop', {target: multiHopTargetId})
+    await waitFor(() => receivedUnicast.includes('secret-hop'), 5_000)
   } finally {
     await largeCluster.cleanup()
   }
 })
 
-void test('End-to-end createTopicStrategy integration with scale()', async () => {
+void test('localRequiredPeers expires after 60s idle TTL unless pinned by active media (setPeerMediaPinned)', () => {
+  assert.equal(defaultRequiredPeerIdleTtlMs, 60_000)
+
+  const [selfId, n1, n2, n3, n4, ...candidates] = allocTestPeerIds(16)
+  const realDateNow = Date.now
+  let fakeNow = 1_700_000_000_000
+  Date.now = () => fakeNow
+
+  const mgr = createOverlayManager({
+    selfId: selfId!,
+    appId: 'ttl-test-app',
+    roomId: 'ttl-test-room',
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(selfId!),
+    onVirtualPeerJoin: () => true,
+    onVirtualPeerLeave: () => {},
+    onDeliverData: () => {}
+  })
+
+  try {
+    for (const neighborId of [n1!, n2!, n3!, n4!]) {
+      mgr.addDirectPeer(neighborId, new LinkedPeer() as unknown as PeerHandle)
+    }
+    for (const cid of candidates) {
+      mgr.notePeerDiscovered(cid)
+    }
+
+    // Pick two candidates that are NOT algorithmic small-world target neighbors
+    const baseTargets = mgr.getTargetNeighbors()
+    const nonTargetCandidates = candidates.filter(cid => !baseTargets.has(cid))
+    assert.ok(nonTargetCandidates.length >= 2)
+    const idlePeerId = nonTargetCandidates[0]!
+    const pinnedPeerId = nonTargetCandidates[1]!
+
+    // At capacity (4 direct peers == maxDirectPeers): non-target candidates are not dialed outbound unless required
+    assert.equal(mgr.getSnapshot().directPeerIds.length, 4)
+    assert.equal(mgr.getTargetNeighbors().has(idlePeerId), false)
+    assert.equal(mgr.shouldConnectPeer(idlePeerId, 'outbound'), false)
+    assert.equal(mgr.getTargetNeighbors().has(pinnedPeerId), false)
+    assert.equal(mgr.shouldConnectPeer(pinnedPeerId, 'outbound'), false)
+
+    // Promote idlePeerId via requireDirectPeer and pin pinnedPeerId via setPeerMediaPinned
+    mgr.requireDirectPeer(idlePeerId, {dial: false})
+    mgr.setPeerMediaPinned(pinnedPeerId, true)
+
+    assert.equal(mgr.getTargetNeighbors().has(idlePeerId), true)
+    assert.equal(mgr.shouldConnectPeer(idlePeerId, 'outbound'), true)
+    assert.equal(mgr.getTargetNeighbors().has(pinnedPeerId), true)
+    assert.equal(mgr.shouldConnectPeer(pinnedPeerId, 'outbound'), true)
+
+    // Just before 60s TTL (59,999 ms): idlePeerId is still required
+    fakeNow += 59_999
+    assert.equal(mgr.getTargetNeighbors().has(idlePeerId), true)
+    assert.equal(mgr.shouldConnectPeer(idlePeerId, 'outbound'), true)
+
+    // Past 60s idle TTL (60,001 ms): idlePeerId expires, preventing permanent degree bloat!
+    fakeNow += 2
+    assert.equal(mgr.getTargetNeighbors().has(idlePeerId), false)
+    assert.equal(mgr.shouldConnectPeer(idlePeerId, 'outbound'), false)
+
+    // Media-pinned peer stays required indefinitely while stream/track is active (e.g. 3 minutes later)
+    fakeNow += 120_000
+    assert.equal(mgr.getTargetNeighbors().has(pinnedPeerId), true)
+    assert.equal(mgr.shouldConnectPeer(pinnedPeerId, 'outbound'), true)
+
+    // Unpinning media grants a fresh 60s idle TTL window, then expires
+    mgr.setPeerMediaPinned(pinnedPeerId, false)
+    fakeNow += 59_999
+    assert.equal(mgr.getTargetNeighbors().has(pinnedPeerId), true)
+    fakeNow += 2
+    assert.equal(mgr.getTargetNeighbors().has(pinnedPeerId), false)
+    assert.equal(mgr.shouldConnectPeer(pinnedPeerId, 'outbound'), false)
+  } finally {
+    Date.now = realDateNow
+    mgr.destroy()
+  }
+})
+
+void test('End-to-end createTopicStrategy integration with unified scale() and use[] plugin validation', async () => {
   const topicSubs = new Map<string, Set<(topic: string, msg: string) => void>>()
 
   const makeJoinRoom = (peerId: string) =>
@@ -109,84 +384,73 @@ void test('End-to-end createTopicStrategy integration with scale()', async () =>
   const roomA = makeJoinRoom('peer-alpha')(
     {
       appId: 'topic-e2e-overlay',
-      use: [scale('gossip')],
-      rtcPolyfill: MockRTCPeerConnection as any
+      use: [scale()],
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'lobby'
   )
   const roomB = makeJoinRoom('peer-beta')(
     {
       appId: 'topic-e2e-overlay',
-      use: [scale({mode: 'gossip', maxConnections: 6})],
-      rtcPolyfill: MockRTCPeerConnection as any
+      use: [scale({maxDirectPeers: 6})],
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'lobby'
   )
 
   try {
     await Promise.all([roomA.ready, roomB.ready])
-    assert.equal(roomA.getTopology().selfId, (await roomA.getSelf()).peerId)
-    assert.equal(roomA.getTopology().mode, 'gossip')
-    assert.equal(roomB.getTopology().selfId, (await roomB.getSelf()).peerId)
-    assert.equal(roomB.getTopology().activeMode, 'gossip')
+    assert.equal(roomA.getTopology().peerId, (await roomA.getSelf()).peerId)
+    assert.equal(roomB.getTopology().peerId, (await roomB.getSelf()).peerId)
   } finally {
     await Promise.all([roomA.leave(), roomB.leave()])
   }
-})
 
-void test('Third-party plugin injection via definePlugin (spread and plugins array)', async () => {
-  const events: string[] = []
-  const telemetryPlugin = (prefix: string) =>
-    definePlugin('telemetry', {
-      setup: kernel => {
-        const internal = kernel.makeInternalAction<string>('telem')
-        internal.onMessage(() => {})
-        events.push(`${prefix}:setup:${kernel.selfId}:${kernel.getRoomId()}`)
-        kernel.onLeave(() => {
-          events.push(`${prefix}:destroy:${kernel.selfId}`)
-        })
-        return {
-          getEvents: () => [...events]
+  // Verify built-in use[] plugin validation rejects unknown or duplicate plugins
+  const ep = getTestEndpointByPeerId(testPeerId('plugin-check'))
+  assert.throws(
+    () =>
+      createRoom(
+        () => {},
+        () => {},
+        () => {},
+        {
+          endpointIdentity: ep,
+          appId: 'plugin-app',
+          roomId: 'plugin-room',
+          use: [{name: 'custom'} as never]
         }
-      }
-    })
-
-  const room = createRoom(
-    () => {},
-    () => {},
-    () => {},
-    {
-      selfId: 'custom-peer',
-      appId: 'plugin-app',
-      roomId: 'plugin-room',
-      use: [telemetryPlugin('mod1')]
-    }
+      ),
+    /invalid plugin in use\[\]; expected roles\(\) or scale\(\)/
   )
-
-  assert.deepEqual((room as any).getEvents(), [
-    'mod1:setup:custom-peer:plugin-room'
-  ])
-  await room.leave()
-  assert.deepEqual(events, [
-    'mod1:setup:custom-peer:plugin-room',
-    'mod1:destroy:custom-peer'
-  ])
-
-  const room2 = createRoom(
-    () => {},
-    () => {},
-    () => {},
-    {
-      selfId: 'custom-peer-2',
-      appId: 'plugin-app',
-      roomId: 'plugin-room-2',
-      use: [telemetryPlugin('mod2')]
-    }
+  assert.throws(
+    () =>
+      createRoom(
+        () => {},
+        () => {},
+        () => {},
+        {
+          endpointIdentity: ep,
+          appId: 'plugin-app',
+          roomId: 'plugin-room',
+          use: [scale(), scale()]
+        }
+      ),
+    /duplicate plugin "scale" in use\[\]/
   )
-  assert.deepEqual((room2 as any).getEvents(), [
-    'mod1:setup:custom-peer:plugin-room',
-    'mod1:destroy:custom-peer',
-    'mod2:setup:custom-peer-2:plugin-room-2'
-  ])
-  await room2.leave()
+  assert.throws(
+    () =>
+      createRoom(
+        () => {},
+        () => {},
+        () => {},
+        {
+          endpointIdentity: ep,
+          appId: 'plugin-app',
+          roomId: 'plugin-room',
+          use: [roles(), roles()]
+        }
+      ),
+    /duplicate plugin "roles" in use\[\]/
+  )
 })

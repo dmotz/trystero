@@ -1,26 +1,41 @@
 import assert from 'node:assert/strict'
+import {once} from 'node:events'
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises'
+import {createRequire} from 'node:module'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {build} from 'tsdown'
+import {WebSocketServer, type WebSocket as WsSocket} from 'ws'
 import {
   createTopicStrategy,
   createUserIdentity,
-  definePlugin,
   roles,
   scale,
   type JoinRoomConfig,
   type PeerHandle,
-  type PluginContext,
   type RoomError
 } from '../../packages/core/src/index.ts'
+import type {InternalRoomContext} from '../../packages/core/src/internal-types.ts'
+import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {
+  joinRoom as joinFirebaseRoom,
+  type FirebaseRelayConfig
+} from '../../packages/firebase/src/index.ts'
+import {
+  getRelaySockets as getMqttRelaySockets,
+  joinRoom as joinMqttRoom
+} from '../../packages/mqtt/src/index.ts'
+import {joinRoom as joinSupabaseRoom} from '../../packages/supabase/src/index.ts'
+import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
+import {
   allocTestPeerIds,
   BufferedPeer,
+  getTestEndpointByPeerId,
   linkPeers,
   MockRTCPeerConnection,
+  testEndpoint,
   wait,
   waitFor
 } from './peer-harness.ts'
@@ -125,11 +140,12 @@ void test('Bug 1.10: concurrent joinRoom calls run init(effectiveConfig) per roo
   }
 })
 
-void test('Bug 1.11: concurrent limit: 2 admission across all 3 peerId orderings emits zero phantom joins/leaves', async () => {
+void test('Bug 1.11: concurrent maxUsers: 2 admission across all 3 peerId orderings emits zero phantom joins/leaves', async () => {
+  const [idLow, idMid, idHigh] = allocTestPeerIds(3) as [string, string, string]
   const orderings: Array<[string, string, string]> = [
-    ['peer-a', 'peer-b', 'peer-c'],
-    ['peer-m', 'peer-b', 'peer-z'],
-    ['peer-z', 'peer-b', 'peer-c']
+    [idLow, idMid, idHigh],
+    [idMid, idLow, idHigh],
+    [idHigh, idLow, idMid]
   ]
 
   for (const [hostId, p1Id, p2Id] of orderings) {
@@ -138,24 +154,25 @@ void test('Bug 1.11: concurrent limit: 2 admission across all 3 peerId orderings
     const leaves = new Map<string, string[]>()
     const errors = new Map<string, RoomError[]>()
 
-    const makeNode = (selfId: string) => {
-      joins.set(selfId, [])
-      leaves.set(selfId, [])
-      errors.set(selfId, [])
+    const makeNode = (id: string) => {
+      joins.set(id, [])
+      leaves.set(id, [])
+      errors.set(id, [])
       const r = createRoom(
-        f => callbacks.set(selfId, f),
+        f => callbacks.set(id, f),
         () => {},
         () => {},
         {
-          selfId,
+          endpointIdentity: getTestEndpointByPeerId(id),
+          clientId: id,
           appId: 'bug-1-11-app',
           roomId: `room-${hostId}-${p1Id}-${p2Id}`,
-          limit: 2
+          maxUsers: 2
         }
       )
-      r.onPeerJoin(({peerId}) => joins.get(selfId)!.push(peerId))
-      r.onPeerLeave(({peerId}) => leaves.get(selfId)!.push(peerId))
-      r.onError(err => errors.get(selfId)!.push(err))
+      r.onPeerJoin(({peerId}) => joins.get(id)!.push(peerId))
+      r.onPeerLeave(({peerId}) => leaves.get(id)!.push(peerId))
+      r.onError(err => errors.get(id)!.push(err))
       return r
     }
 
@@ -224,39 +241,41 @@ void test('Bug 1.11: concurrent limit: 2 admission across all 3 peerId orderings
     }
   }
 
-  // Full 3-way simultaneous triangle (A <-> B, A <-> C, B <-> C) with limit: 2
+  // Full 3-way simultaneous triangle (A <-> B, A <-> C, B <-> C) with maxUsers: 2
   {
-    const ids = ['tri-a', 'tri-b', 'tri-c'] as const
+    const ids = allocTestPeerIds(6).slice(3, 6) as [string, string, string]
+    const [triA, triB, triC] = ids
     const callbacks = new Map<string, (peer: PeerHandle, id: string) => void>()
     const joins = new Map<string, string[]>()
     const leaves = new Map<string, string[]>()
     const errors = new Map<string, RoomError[]>()
-    const rooms = ids.map(selfId => {
-      joins.set(selfId, [])
-      leaves.set(selfId, [])
-      errors.set(selfId, [])
+    const rooms = ids.map(id => {
+      joins.set(id, [])
+      leaves.set(id, [])
+      errors.set(id, [])
       const r = createRoom(
-        f => callbacks.set(selfId, f),
+        f => callbacks.set(id, f),
         () => {},
         () => {},
         {
-          selfId,
+          endpointIdentity: getTestEndpointByPeerId(id),
+          clientId: id,
           appId: 'bug-1-11-triangle',
           roomId: 'tri-room',
-          limit: 2
+          maxUsers: 2
         }
       )
-      r.onPeerJoin(({peerId}) => joins.get(selfId)!.push(peerId))
-      r.onPeerLeave(({peerId}) => leaves.get(selfId)!.push(peerId))
-      r.onError(err => errors.get(selfId)!.push(err))
+      r.onPeerJoin(({peerId}) => joins.get(id)!.push(peerId))
+      r.onPeerLeave(({peerId}) => leaves.get(id)!.push(peerId))
+      r.onError(err => errors.get(id)!.push(err))
       return r
     })
 
     try {
       const pairs: Array<[string, string]> = [
-        ['tri-a', 'tri-b'],
-        ['tri-a', 'tri-c'],
-        ['tri-b', 'tri-c']
+        [triA, triB],
+        [triA, triC],
+        [triB, triC]
       ]
       for (const [leftId, rightId] of pairs) {
         const {peerA, peerB} = linkPeers(new BufferedPeer(), new BufferedPeer())
@@ -264,41 +283,56 @@ void test('Bug 1.11: concurrent limit: 2 admission across all 3 peerId orderings
         callbacks.get(rightId)!(peerB as unknown as PeerHandle, leftId)
       }
 
-      await waitFor(() => {
-        const counts = rooms
-          .map(r => Object.keys(r.getPeers()).length)
-          .sort((a, b) => a - b)
-        const totalRoomFull = ids.reduce(
-          (n, id) =>
-            n +
-            (errors.get(id)?.filter(e => e.code === 'room-full').length ?? 0),
-          0
-        )
-        return (
-          counts[0] === 0 &&
-          counts[1] === 1 &&
-          counts[2] === 1 &&
-          totalRoomFull === 1
-        )
-      })
+      const roomById = new Map(ids.map((id, idx) => [id, rooms[idx]!]))
+      const isLinkSettled = (u: string, v: string): boolean => {
+        const uHasV = v in roomById.get(u)!.getPeers()
+        const vHasU = u in roomById.get(v)!.getPeers()
+        if (uHasV && vHasU) {
+          return true
+        }
+        const rejected =
+          (errors.get(u)?.some(e => e.code === 'room-full' && e.peerId === v) ??
+            false) ||
+          (errors.get(v)?.some(e => e.code === 'room-full' && e.peerId === u) ??
+            false)
+        return rejected && !uHasV && !vHasU
+      }
+
+      await waitFor(() => pairs.every(([u, v]) => isLinkSettled(u, v)), 3_000)
       await wait(40)
 
+      let totalRoomFull = 0
       for (const id of ids) {
+        const activePeers = Object.keys(roomById.get(id)!.getPeers())
+        assert.ok(
+          activePeers.length <= 1,
+          `triangle node ${id} must never exceed maxUsers: 2`
+        )
+        assert.deepEqual(
+          joins.get(id),
+          activePeers,
+          `triangle node ${id} must emit zero phantom onPeerJoin`
+        )
         assert.deepEqual(
           leaves.get(id),
           [],
           `triangle node ${id} must emit zero phantom onPeerLeave`
         )
+        for (const err of errors.get(id) ?? []) {
+          assert.equal(err.code, 'room-full')
+          if (err.code === 'room-full') {
+            totalRoomFull += 1
+            assert.equal(
+              activePeers.includes(err.peerId),
+              false,
+              `admitted peer must not also reject ${id} with room-full`
+            )
+          }
+        }
       }
-      const loserIdx = rooms.findIndex(
-        r => Object.keys(r.getPeers()).length === 0
-      )
-      assert.notEqual(loserIdx, -1)
-      const loserId = ids[loserIdx]!
-      assert.deepEqual(joins.get(loserId), [])
-      assert.equal(
-        errors.get(loserId)?.some(e => e.code === 'room-full'),
-        true
+      assert.ok(
+        totalRoomFull >= 2,
+        `at least 2 triangle links must be rejected with room-full, got ${totalRoomFull}`
       )
     } finally {
       await Promise.all(rooms.map(r => r.leave()))
@@ -306,137 +340,81 @@ void test('Bug 1.11: concurrent limit: 2 admission across all 3 peerId orderings
   }
 })
 
-void test('Bug 1.12: sequential resolveRoomId chaining, PublicScaleProvider, virtual peers in getActivePeerIds, and narrowed PluginContext', async () => {
+void test('Bug 1.12: sequential resolveRoomId chaining, KernelScaleProvider, and virtual peers in getActivePeerIds', async () => {
   const adminIdentity = await createUserIdentity()
-  let capturedKernel = null as PluginContext | null
+  const epAdmin = testEndpoint('bug-1-12-admin')
   const seenRoomIdsInResolvers: string[] = []
 
-  const suffixPlugin = definePlugin('env-suffix', {
-    resolveRoomId: async ({roomId}) => {
-      seenRoomIdsInResolvers.push(roomId)
-      return {effectiveRoomId: `${roomId}:staging`}
-    },
-    setup(kernel) {
-      capturedKernel = kernel
-      return {
-        inspectKernel: () => ({
-          activePeers: kernel.getActivePeerIds(),
-          scaleSnapshot: kernel.getScaleProvider()?.getSnapshot(),
-          hasInternalMutator:
-            'setEffectiveRoomId' in (kernel as Record<string, unknown>) ||
-            'registerRolesProvider' in (kernel as Record<string, unknown>) ||
-            'registerScaleProvider' in (kernel as Record<string, unknown>) ||
-            'activateVirtualPeer' in (kernel as Record<string, unknown>)
-        })
-      }
-    }
-  })
-
-  const prefixSeenRoomIds: string[] = []
-  const prefixPlugin = definePlugin('env-prefix', {
-    resolveRoomId: async ({roomId}) => {
-      prefixSeenRoomIds.push(roomId)
-      return {effectiveRoomId: `staging:${roomId}`}
-    },
-    setup: () => ({})
-  })
-
-  const roomPrefixed = createRoom(
-    () => {},
-    () => {},
-    () => {},
+  const suffixScalePlugin = makeInternalPlugin(
+    'scale',
+    kernel => ({
+      inspectKernel: () => ({
+        activePeers: kernel.getActivePeerIds(),
+        effectiveRoomId: kernel.getRoomId()
+      })
+    }),
     {
-      selfId: 'node-prefixed1234567',
-      appId: 'bug-1-12-app',
-      roomId: 'base-room',
-      identity: adminIdentity,
-      verifyPeerIdentity: true,
-      runIdentityHandshake: true,
-      use: [prefixPlugin, roles({selfAsAdmin: true})]
+      resolveRoomId: async ({roomId}) => {
+        seenRoomIdsInResolvers.push(roomId)
+        return {effectiveRoomId: `${roomId}:staging`}
+      }
     }
   )
 
-  try {
-    const prefixedSelf = await roomPrefixed.getSelf()
-    assert.deepEqual(prefixSeenRoomIds, ['base-room'])
-    assert.equal(
-      prefixedSelf.roomId,
-      `staging:base-room~${adminIdentity.userId}`
-    )
-    assert.equal(prefixedSelf.baseRoomId, 'staging:base-room')
-    assert.equal(prefixedSelf.isAdmin, true)
-  } finally {
-    await roomPrefixed.leave()
-  }
-
-  const callbacks = new Map<string, (peer: PeerHandle, id: string) => void>()
   const roomAdmin = createRoom(
-    f => callbacks.set('node-admin1234567890', f),
+    () => {},
     () => {},
     () => {},
     {
-      selfId: 'node-admin1234567890',
+      endpointIdentity: epAdmin,
       appId: 'bug-1-12-app',
       roomId: 'base-room',
       identity: adminIdentity,
-      verifyPeerIdentity: true,
-      runIdentityHandshake: true,
-      use: [
-        roles({selfAsAdmin: true}),
-        suffixPlugin,
-        scale({mode: 'gossip', maxConnections: 4})
-      ]
+      // Even when passed with scale first, getConfiguredPlugins runs roles before scale
+      use: [suffixScalePlugin, roles({selfAsAdmin: true})]
     }
   )
 
   try {
     const selfInfo = await roomAdmin.getSelf()
     assert.equal(seenRoomIdsInResolvers.length, 1)
-    assert.match(seenRoomIdsInResolvers[0]!, /^base-room~[A-Za-z0-9_-]{20,}$/)
+    assert.equal(
+      seenRoomIdsInResolvers[0],
+      `base-room~${adminIdentity.userId}`,
+      'roles resolveRoomId must run before scale resolveRoomId'
+    )
     assert.equal(selfInfo.roomId, `${seenRoomIdsInResolvers[0]}:staging`)
     assert.equal(selfInfo.isAdmin, true)
-    assert.ok(capturedKernel)
-
-    const inspection = roomAdmin.inspectKernel()
     assert.equal(
-      inspection.hasInternalMutator,
-      false,
-      '3rd-party PluginContext must not expose internal kernel mutators'
-    )
-    assert.equal(inspection.scaleSnapshot?.mode, 'gossip')
-    assert.equal(
-      typeof capturedKernel.getScaleProvider()?.isVirtualPeer,
-      'function'
-    )
-    assert.equal(
-      typeof capturedKernel.getScaleProvider()?.isDirectPeer,
-      'function'
+      roomAdmin.inspectKernel().effectiveRoomId,
+      `${seenRoomIdsInResolvers[0]}:staging`
     )
   } finally {
     await roomAdmin.leave()
   }
 
-  // Verify 2-hop virtual peer appears in kernel.getActivePeerIds()
-  let observerKernel = null as PluginContext | null
-  const observerPlugin = definePlugin('observer', {
-    setup(kernel) {
-      observerKernel = kernel
-    }
+  // Verify 2-hop virtual peer appears in kernel.getActivePeerIds() and getTopology()
+  let observerKernel = null as InternalRoomContext | null
+  const observerRolesPlugin = makeInternalPlugin('roles', kernel => {
+    observerKernel = kernel
+    return {}
   })
 
+  const callbacks = new Map<string, (peer: PeerHandle, id: string) => void>()
   const [idA, idB, idC] = allocTestPeerIds(3) as [string, string, string]
-  const makeLineNode = (selfId: string, useObserver = false) =>
+  const makeLineNode = (id: string, useObserver = false) =>
     createRoom(
-      f => callbacks.set(selfId, f),
+      f => callbacks.set(id, f),
       () => {},
       () => {},
       {
-        selfId,
+        endpointIdentity: getTestEndpointByPeerId(id),
+        clientId: id,
         appId: 'bug-1-12-line',
         roomId: 'line-room',
         use: useObserver
-          ? [scale({mode: 'gossip', maxConnections: 4}), observerPlugin]
-          : [scale({mode: 'gossip', maxConnections: 4})]
+          ? [scale({maxDirectPeers: 4}), observerRolesPlugin]
+          : [scale({maxDirectPeers: 4})]
       }
     )
 
@@ -465,8 +443,470 @@ void test('Bug 1.12: sequential resolveRoomId chaining, PublicScaleProvider, vir
     )
     assert.equal(observerKernel.getScaleProvider()?.isVirtualPeer(idC), true)
     assert.equal(observerKernel.getScaleProvider()?.isDirectPeer(idB), true)
+
+    const topo = nodeA.getTopology()
+    assert.equal(topo.peerId, idA)
+    assert.deepEqual(topo.directPeerIds, [idB])
+    assert.equal(topo.routes[idC]?.hops, 2)
   } finally {
     await Promise.all([nodeA.leave(), nodeB.leave(), nodeC.leave()])
+  }
+})
+
+void test('H5: Firebase permission_denied listener error rejects root subscription and emits relay-failed', async () => {
+  const firebaseRequire = createRequire(
+    resolve('packages/firebase/package.json')
+  )
+  const {initializeApp, deleteApp} = firebaseRequire('firebase/app') as {
+    initializeApp: (
+      opts: {databaseURL: string},
+      name: string
+    ) => FirebaseRelayConfig['firebaseApp']
+    deleteApp: (
+      app: NonNullable<FirebaseRelayConfig['firebaseApp']>
+    ) => Promise<void>
+  }
+  const {getDatabase, goOffline} = firebaseRequire('firebase/database') as {
+    getDatabase: (
+      app: NonNullable<FirebaseRelayConfig['firebaseApp']>
+    ) => unknown
+    goOffline: (db: unknown) => void
+  }
+
+  const wss = new WebSocketServer({host: '127.0.0.1', port: 0})
+  await once(wss, 'listening')
+  const addr = wss.address()
+  assert.ok(addr && typeof addr !== 'string')
+
+  wss.on('connection', ws => {
+    ws.send(
+      JSON.stringify({
+        t: 'c',
+        d: {
+          t: 'h',
+          d: {
+            ts: Date.now(),
+            v: '5',
+            h: `127.0.0.1:${addr.port}`,
+            s: 'sess-h5'
+          }
+        }
+      })
+    )
+    ws.on('message', (raw, isBinary) => {
+      const text = isBinary ? '' : Buffer.from(raw as Buffer).toString('utf8')
+      const msg = JSON.parse(text) as {
+        t?: string
+        d?: {r?: number; a?: string}
+      }
+      if (
+        msg.t === 'd' &&
+        typeof msg.d?.r === 'number' &&
+        (msg.d.a === 'q' || msg.d.a === 'n')
+      ) {
+        ws.send(
+          JSON.stringify({
+            t: 'd',
+            d: {
+              r: msg.d.r,
+              b: {s: 'permission_denied', d: 'Permission denied'}
+            }
+          })
+        )
+      }
+    })
+  })
+
+  const fbApp = initializeApp(
+    {databaseURL: `http://127.0.0.1:${addr.port}?ns=trystero-h5`},
+    `h5-app-${Date.now()}`
+  )!
+  const errors: RoomError[] = []
+  const room = joinFirebaseRoom(
+    {
+      appId: 'firebase-h5-app',
+      relayConfig: {firebaseApp: fbApp, warnOnRelayFailure: false},
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'restricted-room'
+  )
+  room.onError(err => errors.push(err))
+
+  try {
+    await waitFor(() => errors.length === 1, 3_000)
+    assert.equal(errors[0]!.code, 'relay-failed')
+    assert.match(errors[0]!.message, /permission_denied/i)
+    assert.equal(errors[0]!.appId, 'firebase-h5-app')
+    assert.equal(errors[0]!.roomId, 'restricted-room')
+  } finally {
+    await room.leave().catch(() => {})
+    goOffline(getDatabase(fbApp))
+    await deleteApp(fbApp).catch(() => {})
+    wss.clients.forEach(c => c.terminate())
+    await new Promise<void>(r => wss.close(() => r()))
+  }
+})
+
+void test('H6: MQTT initial connection failure across configured brokers emits relay-failed via socketInitialFailureSymbol', async () => {
+  const wss = new WebSocketServer({host: '127.0.0.1', port: 0})
+  await once(wss, 'listening')
+  const addr = wss.address()
+  assert.ok(addr && typeof addr !== 'string')
+  wss.on('connection', ws => {
+    ws.close()
+  })
+
+  const realSetTimeout = globalThis.setTimeout
+  const realSetInterval = globalThis.setInterval
+  const capturedTimers: Array<ReturnType<typeof setTimeout>> = []
+  const capturedIntervals: Array<ReturnType<typeof setInterval>> = []
+  globalThis.setTimeout = ((
+    fn: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    const t = realSetTimeout(fn, ms, ...args)
+    capturedTimers.push(t)
+    return t
+  }) as typeof setTimeout
+  globalThis.setInterval = ((
+    fn: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    const i = realSetInterval(fn, ms, ...args)
+    capturedIntervals.push(i)
+    return i
+  }) as typeof setInterval
+
+  const errors: RoomError[] = []
+  const room = joinMqttRoom(
+    {
+      appId: `mqtt-h6-app-${Date.now()}`,
+      relayConfig: {
+        urls: [
+          `ws://127.0.0.1:${addr.port}/mqtt-dead-1`,
+          `ws://127.0.0.1:${addr.port}/mqtt-dead-2`
+        ],
+        warnOnRelayFailure: false
+      },
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'mqtt-h6-room'
+  )
+  room.onError(err => errors.push(err))
+
+  try {
+    await waitFor(() => errors.length === 1, 3_000)
+    assert.equal(errors[0]!.code, 'relay-failed')
+    assert.match(errors[0]!.message, /MQTT connection failed/)
+    assert.equal(errors[0]!.roomId, 'mqtt-h6-room')
+  } finally {
+    await room.leave().catch(() => {})
+    Object.values(getMqttRelaySockets()).forEach(sock => sock?.close?.())
+    wss.clients.forEach(c => c.terminate())
+    await new Promise<void>(r => wss.close(() => r()))
+    await new Promise<void>(r => realSetTimeout(r, 20))
+    capturedTimers.forEach(t => clearTimeout(t))
+    capturedIntervals.forEach(i => clearInterval(i))
+    globalThis.setTimeout = realSetTimeout
+    globalThis.setInterval = realSetInterval
+  }
+})
+
+void test('H7: Supabase sweeps unsubscribed idle peer signal channels after 30s while keeping room channels open', async t => {
+  const realSetTimeout = globalThis.setTimeout
+  const sweepCallbacks: Array<() => void> = []
+
+  t.mock.method(globalThis, 'setTimeout', ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    if (delay === 30_000) {
+      sweepCallbacks.push(() => callback(...args))
+      return realSetTimeout(() => {}, 0)
+    }
+    return realSetTimeout(callback, delay === 50_000 ? 0 : delay, ...args)
+  }) as typeof setTimeout)
+
+  const wss = new WebSocketServer({host: '127.0.0.1', port: 0})
+  await once(wss, 'listening')
+  const addr = wss.address()
+  assert.ok(addr && typeof addr !== 'string')
+
+  const joinedTopics: string[] = []
+  const leftTopics: string[] = []
+  let activeSocket: WsSocket | null = null
+  let rootChannelTopic: string | null = null
+  let signalBroadcastCount = 0
+
+  wss.on('connection', socket => {
+    activeSocket = socket
+    socket.on('message', (bytes, isBinary) => {
+      const dec = new TextDecoder()
+      if (isBinary) {
+        const u8 = ArrayBuffer.isView(bytes)
+          ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+          : new Uint8Array(
+              bytes instanceof ArrayBuffer ? bytes : Buffer.concat(bytes)
+            )
+        // Supabase Realtime v2 binary userBroadcastPush (kind = 3)
+        if (u8[0] === 3 && u8.byteLength >= 7) {
+          const joinRefLen = u8[1]!
+          const refLen = u8[2]!
+          const topicLen = u8[3]!
+          const eventLen = u8[4]!
+          const topicOffset = 7 + joinRefLen + refLen
+          const topic = dec.decode(
+            u8.subarray(topicOffset, topicOffset + topicLen)
+          )
+          const userEvent = dec.decode(
+            u8.subarray(
+              topicOffset + topicLen,
+              topicOffset + topicLen + eventLen
+            )
+          )
+          if (userEvent === 'join') {
+            rootChannelTopic = topic
+          } else if (userEvent === 'sdp') {
+            signalBroadcastCount += 1
+          }
+        }
+        return
+      }
+      const [joinRef, ref, topic, event, payload] = JSON.parse(
+        dec.decode(bytes as Uint8Array)
+      ) as [
+        string | null,
+        string | null,
+        string,
+        string,
+        {event?: string} | undefined
+      ]
+      if (event === 'phx_join') {
+        joinedTopics.push(topic)
+      } else if (event === 'phx_leave') {
+        leftTopics.push(topic)
+      } else if (event === 'broadcast') {
+        if (payload?.event === 'join') {
+          rootChannelTopic = topic
+        } else if (payload?.event === 'sdp') {
+          signalBroadcastCount += 1
+        }
+      }
+      if (
+        event === 'phx_join' ||
+        event === 'phx_leave' ||
+        event === 'heartbeat'
+      ) {
+        socket.send(
+          JSON.stringify([
+            joinRef,
+            ref,
+            topic,
+            'phx_reply',
+            {status: 'ok', response: {}}
+          ])
+        )
+      }
+    })
+  })
+
+  const room = joinSupabaseRoom(
+    {
+      appId: `http://127.0.0.1:${addr.port}`,
+      relayConfig: {supabaseKey: 'supabase-h7-key'},
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    },
+    'supabase-h7-room'
+  )
+
+  try {
+    const {peerId: selfPeerId} = await room.getSelf()
+    await waitFor(
+      () => joinedTopics.length === 2 && rootChannelTopic !== null,
+      3_000
+    )
+    const initialRoomTopics = new Set(joinedTopics)
+
+    // Deliver a remote peer join announcement (valid base58 peerId so local room dials and publishes a signal)
+    const remotePeerId =
+      selfPeerId === 'z'.repeat(20) ? 'y'.repeat(20) : 'z'.repeat(20)
+    activeSocket!.send(
+      JSON.stringify([
+        null,
+        null,
+        rootChannelTopic,
+        'broadcast',
+        {
+          type: 'broadcast',
+          event: 'join',
+          payload: {peerId: remotePeerId}
+        }
+      ])
+    )
+
+    await waitFor(
+      () =>
+        joinedTopics.length === 3 &&
+        signalBroadcastCount >= 1 &&
+        sweepCallbacks.length >= 1,
+      3_000
+    )
+    const peerSignalTopic = joinedTopics.find(tp => !initialRoomTopics.has(tp))!
+    assert.ok(peerSignalTopic, 'expected a 3rd signal channel to be joined')
+    assert.equal(
+      leftTopics.length,
+      0,
+      'signal channel stays open during active signaling before sweep'
+    )
+
+    // Fire the 30s idle signal channel sweep while room stays open
+    sweepCallbacks.splice(0).forEach(cb => cb())
+    await waitFor(() => leftTopics.includes(peerSignalTopic), 2_000)
+
+    assert.deepEqual(
+      leftTopics,
+      [peerSignalTopic],
+      'idle sweep must remove only the unsubscribed peer signal channel while keeping root/self subscribed'
+    )
+  } finally {
+    await room.leave().catch(() => {})
+    await waitFor(() => wss.clients.size === 0, 2_000).catch(() => {})
+    wss.clients.forEach(c => c.terminate())
+    await new Promise<void>(r => wss.close(() => r()))
+  }
+})
+
+void test('H10: Torrent cleans up infoHash maps and reclaims pre-allocated offers when last room subscriber leaves', async () => {
+  const origWebSocket = globalThis.WebSocket
+  const sockets: TorrentMockWs[] = []
+
+  class TorrentMockWs {
+    readyState = 0
+    sent: Array<{action: string; info_hash: string}> = []
+    onopen: (() => void) | null = null
+    onclose: (() => void) | null = null
+    onmessage: ((ev: {data: string}) => void) | null = null
+    url: string
+
+    constructor(url: string) {
+      this.url = url
+      sockets.push(this)
+      queueMicrotask(() => {
+        this.readyState = 1
+        this.onopen?.()
+      })
+    }
+
+    send(data: string) {
+      this.sent.push(JSON.parse(data) as {action: string; info_hash: string})
+    }
+
+    close() {
+      this.readyState = 3
+      this.onclose?.()
+    }
+  }
+
+  let createdPcs = 0
+  let closedPcs = 0
+  class TrackingPc extends MockRTCPeerConnection {
+    constructor() {
+      super()
+      createdPcs += 1
+    }
+    override close() {
+      if (this.connectionState !== 'closed') {
+        closedPcs += 1
+      }
+      super.close()
+    }
+  }
+
+  globalThis.WebSocket = TorrentMockWs as unknown as typeof WebSocket
+  const trackerUrl = `wss://torrent-h10-${Date.now()}.test`
+  const appId = `torrent-h10-app-${Date.now()}`
+  const roomId = 'torrent-h10-room'
+
+  let room1: ReturnType<typeof joinTorrentRoom> | undefined
+  let room2: ReturnType<typeof joinTorrentRoom> | undefined
+  try {
+    room1 = joinTorrentRoom(
+      {
+        appId,
+        password: 'h10-password',
+        relayConfig: {urls: [trackerUrl]},
+        rtcPolyfill: TrackingPc as unknown as typeof RTCPeerConnection
+      },
+      roomId
+    )
+
+    await waitFor(
+      () => (sockets[0]?.sent.length ?? 0) >= 1 && createdPcs >= 1,
+      2_000
+    )
+    const sock = sockets[0]!
+    const infoHash = sock.sent[0]!.info_hash
+    assert.equal(typeof infoHash, 'string')
+    assert.equal(infoHash.length, 20)
+
+    // Leaving the last subscriber must reclaim outstanding offers AND delete infoHashToTopic[infoHash]
+    await room1.leave()
+    room1 = undefined
+    assert.equal(
+      closedPcs,
+      createdPcs,
+      'all pre-allocated torrent offer peers must be closed on leave'
+    )
+
+    // Inject a tracker offer for that info_hash while no room is subscribed.
+    // Because infoHashToTopic[infoHash] was deleted on leave, this message must be ignored
+    // without recording offer_id 'probe-h10' in Torrent's 4-second handledSignals dedupe cache.
+    sock.onmessage?.({
+      data: JSON.stringify({
+        info_hash: infoHash,
+        peer_id: 'remote-peer-h10',
+        offer_id: 'probe-h10',
+        offer: {type: 'offer', sdp: 'corrupt-ciphertext'}
+      })
+    })
+
+    // Re-join the same room immediately (within the 4s dedupe window) and deliver the exact same
+    // offer_id: it must NOT be suppressed by stale handledSignals from after room1 left.
+    const room2Errors: RoomError[] = []
+    room2 = joinTorrentRoom(
+      {
+        appId,
+        password: 'h10-password',
+        relayConfig: {urls: [trackerUrl]},
+        rtcPolyfill: TrackingPc as unknown as typeof RTCPeerConnection
+      },
+      roomId
+    )
+    room2.onError(err => room2Errors.push(err))
+
+    await waitFor(() => sock.sent.length >= 2, 2_000)
+    sock.onmessage?.({
+      data: JSON.stringify({
+        info_hash: infoHash,
+        peer_id: 'remote-peer-h10',
+        offer_id: 'probe-h10',
+        offer: {type: 'offer', sdp: 'corrupt-ciphertext'}
+      })
+    })
+
+    await waitFor(() => room2Errors.length === 1, 2_000)
+    assert.equal(room2Errors[0]!.code, 'decrypt-failed')
+    if (room2Errors[0]!.code === 'decrypt-failed') {
+      assert.equal(room2Errors[0]!.peerId, 'remote-peer-h10')
+    }
+  } finally {
+    await room1?.leave().catch(() => {})
+    await room2?.leave().catch(() => {})
+    sockets.forEach(s => s.close())
+    globalThis.WebSocket = origWebSocket
   }
 })
 
@@ -496,8 +936,8 @@ void test('Tree-shaking: bundling defaultRelayUrls from trystero stays under 1.5
         onlyBundle: false
       },
       alias: {
-        '@trystero-p2p/core/public': resolve('packages/core/src/public.ts'),
         '@trystero-p2p/core': resolve('packages/core/src/index.ts'),
+        '@trystero-p2p/nostr': resolve('packages/nostr/src/index.ts'),
         '@trystero-p2p/torrent': resolve('packages/torrent/src/index.ts'),
         crypto: resolve('scripts/empty.ts'),
         'node:crypto': resolve('scripts/empty.ts')

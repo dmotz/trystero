@@ -1,5 +1,5 @@
 import type {PeerHandle} from './types'
-import {resetTimer, unrefTimer} from './utils'
+import {noOp, resetTimer, unrefTimer} from './utils'
 
 export type PeerDataTransport = {
   readonly isOpen: boolean
@@ -21,7 +21,7 @@ export const waitForBufferedAmountLow = (
   }
   if (
     channel.readyState !== 'open' ||
-    channel.bufferedAmount <= channel.bufferedAmountLowThreshold
+    channel.bufferedAmount <= (channel.bufferedAmountLowThreshold ?? 0)
   ) {
     return channel.readyState === 'open'
   }
@@ -62,10 +62,87 @@ export const waitForBufferedAmountLow = (
       return
     }
 
-    if (channel.bufferedAmount <= channel.bufferedAmountLowThreshold) {
+    if (channel.bufferedAmount <= (channel.bufferedAmountLowThreshold ?? 0)) {
       finish(true)
     }
   })
+}
+
+export const destroyAfterFlush = (
+  peer: PeerHandle,
+  graceMs = 40,
+  capMs = 150
+): (() => void) => {
+  if (peer.isDead) {
+    return noOp
+  }
+  peer.setHandlers({
+    data: noOp,
+    stream: noOp,
+    close: noOp,
+    error: noOp
+  })
+  const channel = peer.channel
+  if (!channel || channel.readyState !== 'open') {
+    peer.destroy()
+    return noOp
+  }
+
+  let done = false
+  let graceDone = graceMs <= 0
+  let graceTimer: ReturnType<typeof setTimeout> | null = null
+  let capTimer: ReturnType<typeof setTimeout> | null = null
+  const hasEventTarget = typeof channel.addEventListener === 'function'
+
+  const finish = (): void => {
+    if (done) {
+      return
+    }
+    done = true
+    if (hasEventTarget) {
+      channel.removeEventListener('bufferedamountlow', maybeFinish)
+      channel.removeEventListener('close', finish)
+      channel.removeEventListener('error', finish)
+    }
+    resetTimer(graceTimer)
+    resetTimer(capTimer)
+    peer.destroy()
+  }
+
+  const maybeFinish = (): void => {
+    if (
+      graceDone &&
+      (channel.readyState !== 'open' ||
+        typeof channel.bufferedAmount !== 'number' ||
+        channel.bufferedAmount <= 0)
+    ) {
+      finish()
+    }
+  }
+
+  if (hasEventTarget) {
+    try {
+      channel.bufferedAmountLowThreshold = 0
+    } catch {
+      // Ignore read-only polyfill implementations
+    }
+    channel.addEventListener('bufferedamountlow', maybeFinish)
+    channel.addEventListener('close', finish)
+    channel.addEventListener('error', finish)
+  }
+
+  if (!graceDone) {
+    graceTimer = setTimeout(() => {
+      graceDone = true
+      maybeFinish()
+    }, graceMs)
+    unrefTimer(graceTimer)
+  }
+  capTimer = setTimeout(finish, Math.max(graceMs, capMs))
+  unrefTimer(capTimer)
+  maybeFinish()
+
+  return finish
 }
 
 export const createDirectPeerTransport = (

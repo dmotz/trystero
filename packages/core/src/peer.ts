@@ -12,6 +12,7 @@ import {
   peerDisconnectedMsg,
   resetTimer,
   toError,
+  unrefTimer,
   warn
 } from './utils'
 import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
@@ -243,6 +244,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
         }
         if (!pendingDataTimer) {
           pendingDataTimer = setTimeout(failData, pendingDataTimeoutMs)
+          unrefTimer(pendingDataTimer)
         }
         pendingData.push(data)
       }
@@ -291,6 +293,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
         if (targetCandidatePattern.test(sdp)) {
           resetTimer(settleTimeout)
           settleTimeout = setTimeout(finish, iceCandidateSettleMs)
+          unrefTimer(settleTimeout)
         }
       }
       const checkState = (): void => {
@@ -310,6 +313,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
       pendingIceGathering.add(finish)
       timeout = setTimeout(finish, iceTimeout)
+      unrefTimer(timeout)
       peerConnection.addEventListener(iceStateEvent, checkState)
       peerConnection.addEventListener(iceCandidateEvent, onCandidate)
       checkState()
@@ -338,10 +342,11 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     }
   }
 
-  const createOffer = async (restartIce = false): Promise<Signal | void> => {
+  const createOffer = async (): Promise<Signal | void> => {
     if (
       pc.connectionState === 'closed' ||
-      (!restartIce && (makingOffer || pc.signalingState !== 'stable'))
+      makingOffer ||
+      pc.signalingState !== 'stable'
     ) {
       if (pc.connectionState === 'closed') {
         settleInitialOffer()
@@ -351,39 +356,20 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
     try {
       makingOffer = true
-
-      if (restartIce) {
-        // Rolling back the first unanswered offer can discard its data m-line.
-        if (
-          pc.remoteDescription &&
-          pc.signalingState !== 'stable' &&
-          pc.signalingState !== 'closed' &&
-          pc.localDescription?.type === offerType
-        ) {
-          await pc.setLocalDescription({type: 'rollback'})
-        }
-
-        if (typeof pc.restartIce === 'function') {
-          pc.restartIce()
-        }
-      }
-
-      await pc.setLocalDescription(
-        restartIce ? await pc.createOffer({iceRestart: true}) : undefined
-      )
+      await pc.setLocalDescription()
       const offer = await emitLocalDescriptionSignal()
       return offer
     } catch (err) {
-      if (!restartIce) {
-        settleInitialOffer()
-      }
+      settleInitialOffer()
       handlers.error?.(toError(err, 'failed to create local offer'))
     } finally {
       makingOffer = false
     }
   }
 
-  pc.onnegotiationneeded = async () => createOffer(false)
+  pc.onnegotiationneeded = () => {
+    void createOffer()
+  }
 
   pc.onicecandidate = ({candidate}) => {
     if (!shouldTrickleIce || !candidate) {
@@ -440,6 +426,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
           emitClose()
         }
       }, disconnectedCloseDelayMs)
+      unrefTimer(disconnectedCloseTimer)
     }
   }
 
@@ -488,13 +475,9 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       return pc.connectionState === 'closed'
     },
 
-    getOffer: async (restartIce = false): Promise<Signal | void> => {
+    getOffer: async (): Promise<Signal | void> => {
       if (!initiator) {
         return
-      }
-
-      if (restartIce) {
-        return createOffer(true)
       }
 
       if (resolveInitialOffer) {

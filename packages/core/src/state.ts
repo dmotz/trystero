@@ -1,4 +1,3 @@
-import {hash32} from './crypto'
 import {
   compactPubToJwk,
   getVerifiedPubKeyRecord,
@@ -8,11 +7,10 @@ import {
 import type {
   ActionOptions,
   AuthoritativeStateRecord,
-  AuthoritativeStateTombstoneRecord,
-  AuthoritativeStateValueRecord,
   InternalAction,
   KernelRolesProvider,
-  KernelScaleProvider
+  KernelScaleProvider,
+  TargetPeers
 } from './internal-types'
 import {isValidSignalPeerId} from './signal-handler'
 import {
@@ -22,7 +20,7 @@ import {
   createMonotonicClock,
   createTokenBucketLimiter,
   defaultMaxClockSkewMs,
-  hasFiniteNums,
+  selectPullFanoutPeers,
   signWith,
   type StateSigner,
   verifySig
@@ -35,7 +33,6 @@ import type {
   SharedState,
   StateChangeContext,
   StateConfig,
-  TargetPeers,
   UserIdentity,
   UserState,
   UserStateChangeContext,
@@ -67,25 +64,16 @@ import {
   validateRoleCertificateShape
 } from './utils'
 
-export {
-  canonicalizeJson,
-  compactPubToJwk,
-  defaultMaxClockSkewMs,
-  hasFiniteNums,
-  jwkToCompactPub,
-  signWith,
-  type StateSigner,
-  verifySig
-}
-
-export const defaultMaxStateBytes: number = 16 * 1024
-export const maxAllowedStateBytes: number = 64 * 1024
+const defaultMaxStateBytes: number = 16 * 1024
+const maxAllowedStateBytes: number = 64 * 1024
 export const maxUserStateNamespacesPerUser = 32
-export const maxUserStateBytesPerUser: number = 64 * 1024
+const maxUserStateBytesPerUser: number = 64 * 1024
 
-const maxLiveRecordsPerSec = 20
-const maxLiveRecordBurst = 25
+const minSlotBroadcastIntervalMs = 40
+const maxLiveRecordsPerSec = 60
+const maxLiveRecordBurst = 120
 const maxSyncRecordsPerBatch = 1_024
+const maxPullPages = 16
 const maxSyncChunkBytes: number = 180 * 1024
 const maxHandshakeStateBytes: number = 60 * 1024
 const handshakeStateDeadlineMs = 400
@@ -118,72 +106,76 @@ type UnsignedStateRecord<T = JsonValue> =
       : never
     : never
 
-export const stateRecordPayload = (
-  r: UnsignedStateRecord,
+const stateRecordPayload = (
+  record: UnsignedStateRecord,
   canonVal?: string
 ): string =>
   canonTag('state', [
-    r.v,
-    r.k,
-    r.appId,
-    r.roomId,
-    r.ns,
-    r.hlc,
-    r.peerId,
-    r.userId,
-    r.pub,
-    r.del === true ? null : (canonVal ?? canonicalizeJson(r.val)),
-    r.del === true ? 1 : 0,
-    r.cert?.sig ?? ''
+    record.v,
+    record.k,
+    record.appId,
+    record.roomId,
+    record.ns,
+    record.hlc,
+    record.peerId,
+    record.userId,
+    record.pub,
+    record.del === true ? null : (canonVal ?? canonicalizeJson(record.val)),
+    record.del === true ? 1 : 0,
+    record.cert?.sig ?? ''
   ])
 
-type ParsedRecord = [
-  rec: AuthoritativeStateRecord,
-  bytes: number,
+type ParsedRecord = {
+  rec: AuthoritativeStateRecord
+  bytes: number
   canonVal: string | undefined
-]
+}
 
 const validateAndMeasureRecord = (
-  r: unknown,
+  raw: unknown,
   maxBytes = Number.POSITIVE_INFINITY
 ): ParsedRecord | null => {
-  if (!isObj(r) || keys(r).some(k => !allowedRecordKeys.has(k))) {
+  if (!isObj(raw) || keys(raw).some(k => !allowedRecordKeys.has(k))) {
     return null
   }
   if (
-    r['v'] !== 1 ||
-    (r['k'] !== 's' && r['k'] !== 'u') ||
-    !isStr(r['appId']) ||
-    !isStr(r['roomId']) ||
-    !isStr(r['ns']) ||
-    (r['ns'] as string).length > 256 ||
-    !isPosSafeInt(r['hlc']) ||
-    !isValidSignalPeerId(r['peerId']) ||
-    !isValidUserId(r['userId'] as string) ||
-    typeof r['pub'] !== 'string' ||
-    !compactPubToJwk(r['pub']) ||
-    !isValidSig(r['sig']) ||
-    (r['cert'] !== undefined && !validateRoleCertificateShape(r['cert']))
+    raw['v'] !== 1 ||
+    (raw['k'] !== 's' && raw['k'] !== 'u') ||
+    !isStr(raw['appId']) ||
+    !isStr(raw['roomId']) ||
+    !isStr(raw['ns']) ||
+    (raw['ns'] as string).length > 256 ||
+    !isPosSafeInt(raw['hlc']) ||
+    !isValidSignalPeerId(raw['peerId']) ||
+    !isValidUserId(raw['userId'] as string) ||
+    typeof raw['pub'] !== 'string' ||
+    !compactPubToJwk(raw['pub']) ||
+    !isValidSig(raw['sig']) ||
+    (raw['cert'] !== undefined && !validateRoleCertificateShape(raw['cert']))
   ) {
     return null
   }
-  if (r['del'] !== undefined) {
-    return r['del'] === true && r['k'] === 'u' && r['val'] === undefined
-      ? [r as AuthoritativeStateRecord, tombstoneBytes, undefined]
+  if (raw['del'] !== undefined) {
+    return raw['del'] === true && raw['k'] === 'u' && raw['val'] === undefined
+      ? {
+          rec: raw as AuthoritativeStateRecord,
+          bytes: tombstoneBytes,
+          canonVal: undefined
+        }
       : null
   }
-  if (!('val' in r) || r['val'] === undefined) {
+  if (!('val' in raw) || raw['val'] === undefined) {
     return null
   }
-  const measured = canonicalizeAndMeasureJson(r['val'], maxBytes)
+  const measured = canonicalizeAndMeasureJson(raw['val'], maxBytes)
   return Array.isArray(measured)
-    ? [r as AuthoritativeStateRecord, measured[1], measured[0]]
+    ? {
+        rec: raw as AuthoritativeStateRecord,
+        bytes: measured[1],
+        canonVal: measured[0]
+      }
     : null
 }
-
-export const validateStateRecordShape = (
-  r: unknown
-): r is AuthoritativeStateRecord => validateAndMeasureRecord(r) !== null
 
 export type StateSignParams<T = JsonValue> = {
   kind?: 's' | 'u'
@@ -198,89 +190,32 @@ export type StateSignParams<T = JsonValue> = {
   cert?: RoleCertificate | null
 }
 
-const signStateRecordInternal = async <T = JsonValue>(
+export const signStateRecord = async <T = JsonValue>(
   signer: StateSigner,
   pubJwk: JsonWebKey,
-  p: StateSignParams<T>,
+  params: StateSignParams<T>,
   canonVal?: string
 ): Promise<AuthoritativeStateRecord<T>> => {
   const base = {
     v: 1 as const,
-    appId: p.appId,
-    roomId: p.roomId,
-    ns: p.ns,
-    hlc: p.hlc ?? Date.now(),
-    peerId: p.peerId,
-    userId: p.userId,
+    appId: params.appId,
+    roomId: params.roomId,
+    ns: params.ns,
+    hlc: params.hlc ?? Date.now(),
+    peerId: params.peerId,
+    userId: params.userId,
     pub: jwkToCompactPub(pubJwk),
-    ...(p.cert ? {cert: p.cert} : {})
+    ...(params.cert ? {cert: params.cert} : {})
   }
-  const u: UnsignedStateRecord<T> =
-    p.del === true
+  const unsigned: UnsignedStateRecord<T> =
+    params.del === true
       ? {...base, k: 'u', del: true}
-      : {...base, k: p.kind ?? 's', val: p.val as T}
+      : {...base, k: params.kind ?? 's', val: params.val as T}
   const sig = await signWith(
     signer,
-    stateRecordPayload(u as UnsignedStateRecord, canonVal)
+    stateRecordPayload(unsigned as UnsignedStateRecord, canonVal)
   )
-  return {...u, sig} as AuthoritativeStateRecord<T>
-}
-
-export function signStateRecord(
-  signer: StateSigner,
-  pubJwk: JsonWebKey,
-  p: StateSignParams<never> & {del: true}
-): Promise<AuthoritativeStateTombstoneRecord>
-export function signStateRecord<T = JsonValue>(
-  signer: StateSigner,
-  pubJwk: JsonWebKey,
-  p: StateSignParams<T> & {del?: false}
-): Promise<AuthoritativeStateValueRecord<T>>
-export function signStateRecord<T = JsonValue>(
-  signer: StateSigner,
-  pubJwk: JsonWebKey,
-  p: StateSignParams<T>
-): Promise<AuthoritativeStateRecord<T>>
-export function signStateRecord<T = JsonValue>(
-  signer: StateSigner,
-  pubJwk: JsonWebKey,
-  p: StateSignParams<T>
-): Promise<AuthoritativeStateRecord<T>> {
-  return signStateRecordInternal(signer, pubJwk, p)
-}
-
-const verifyRecordSigWithCanon = async (
-  rec: AuthoritativeStateRecord,
-  appId: string,
-  roomId: string,
-  clockSkewMs: number,
-  canonVal?: string
-): Promise<boolean> => {
-  if (
-    rec.appId !== appId ||
-    rec.roomId !== roomId ||
-    rec.hlc > Date.now() + clockSkewMs ||
-    (rec.cert && (rec.cert.subUserId !== rec.userId || rec.hlc < rec.cert.iat))
-  ) {
-    return false
-  }
-  const signer = await getVerifiedPubKeyRecord(rec.pub)
-  if (!signer || signer[6] !== rec.userId) {
-    return false
-  }
-  return verifySig(rec.pub, stateRecordPayload(rec, canonVal), rec.sig)
-}
-
-export const verifyStateRecordSignature = async (
-  rec: AuthoritativeStateRecord,
-  appId: string,
-  roomId: string,
-  clockSkewMs: number = defaultMaxClockSkewMs
-): Promise<boolean> => {
-  const parsed = validateAndMeasureRecord(rec)
-  return parsed
-    ? verifyRecordSigWithCanon(parsed[0], appId, roomId, clockSkewMs, parsed[2])
-    : false
+  return {...unsigned, sig} as AuthoritativeStateRecord<T>
 }
 
 export const compareStateRecords = (
@@ -288,7 +223,7 @@ export const compareStateRecords = (
   b: AuthoritativeStateRecord
 ): number =>
   a.hlc - b.hlc ||
-  cmpStr(a.userId || a.peerId, b.userId || b.peerId) ||
+  cmpStr(a.userId, b.userId) ||
   cmpStr(a.peerId, b.peerId) ||
   cmpStr(a.sig, b.sig)
 
@@ -310,54 +245,59 @@ type DigestEntry = [hlc: number, sig8: string]
 
 type StateControlMessage =
   | {t: 'rec'; r: WireStateRecord}
-  | {t: 'pull'; d: Record<string, DigestEntry>}
+  | {t: 'pull'; d: Record<string, DigestEntry>; c?: string}
   | {
       t: 'sync'
       p: Record<string, string>
       r: WireStateRecord[]
-      w?: string[]
-      u?: 1
+      n?: string
     }
 
-type PendingOp = [
-  del: boolean,
-  next: JsonValue | ((prev: JsonValue) => JsonValue) | undefined,
-  res: () => void,
-  rej: (err: unknown) => void
-]
+type PendingOp = {
+  del: boolean
+  next: JsonValue | ((prev: JsonValue) => JsonValue) | undefined
+  resolve: () => void
+  reject: (err: unknown) => void
+}
 
-type SlotEntry = [
-  rec: AuthoritativeStateRecord,
-  val: JsonValue,
-  prev: JsonValue,
-  roles: string[],
+type SlotEntry = {
+  rec: AuthoritativeStateRecord
+  value: JsonValue
+  prev: JsonValue
+  roles: string[]
   bytes: number
-]
+}
 
 type SlotBase = {
-  n: string // ns
-  i: JsonValue // init
-  r: string[] | null // reqRoles
-  b: number // maxBytes
-  m: Map<string, SlotEntry> // entries
-  s: Readonly<Record<string, JsonValue>> | null // snap
-  c: () => void // clear
-  a: unknown // api
-  o: PendingOp[] // ops
-  f: Promise<void> | null // flushP
-  p: Promise<void> | null // stepP
+  namespace: string
+  initialValue: JsonValue
+  requiredRoles: string[] | null
+  maxBytes: number
+  entries: Map<string, SlotEntry>
+  snapshot: Readonly<Record<string, JsonValue>> | null
+  clearListeners: () => void
+  api: unknown
+  ops: PendingOp[]
+  flushPromise: Promise<void> | null
+  stepPromise: Promise<void> | null
+  lastBroadcastAt: number
+  skipNextPace: boolean
+  wakePace: (() => void) | null
 }
 
 type SharedSlot = SlotBase & {
-  k: 's'
-  v?: (next: JsonValue, ctx: StateChangeContext<JsonValue>) => boolean
-  e: (val: JsonValue, ctx: StateChangeContext<JsonValue>) => void
+  kind: 's'
+  validate?: (next: JsonValue, ctx: StateChangeContext<JsonValue>) => boolean
+  emit: (val: JsonValue, ctx: StateChangeContext<JsonValue>) => void
 }
 
 type UserSlot = SlotBase & {
-  k: 'u'
-  v?: (next: JsonValue, ctx: UserStateChangeContext<JsonValue>) => boolean
-  e: (
+  kind: 'u'
+  validate?: (
+    next: JsonValue,
+    ctx: UserStateChangeContext<JsonValue>
+  ) => boolean
+  emit: (
     val: JsonValue | undefined,
     ctx: UserStateChangeContext<JsonValue>
   ) => void
@@ -365,15 +305,15 @@ type UserSlot = SlotBase & {
 
 type Slot = SharedSlot | UserSlot
 
-type StagedUserItem = [
-  slot: UserSlot,
-  rec: AuthoritativeStateRecord,
-  roles: string[],
-  bytes: number,
+type StagedUserItem = {
+  slot: UserSlot
+  rec: AuthoritativeStateRecord
+  roles: string[]
+  bytes: number
   seenAt: number
-]
+}
 
-export type HandshakeStatePayload = {
+type HandshakeStatePayload = {
   ok: true
   p: Record<string, string>
   r: JsonValue[]
@@ -398,14 +338,12 @@ export type StateManagerDeps = {
   getDirectPeerIds: () => string[]
   isUserOnline: (userId: string) => boolean
   getKnownPeerUserId: (peerId: string) => string | undefined
-  getPeerUserPub?: (peerId: string) => string | undefined
   isPeerBanned: (peerOrUserId: string) => boolean
   getPeerRoles: (peerOrUserId?: string) => string[]
   makeInternalAction?: <T extends DataPayload = DataPayload>(
     namespace: string,
     options?: Partial<ActionOptions>
   ) => InternalAction<T>
-  onBroadcastRecord?: (rec: AuthoritativeStateRecord) => void
   onInvalidRecord?: (fromPeerId?: string) => void
 }
 
@@ -524,8 +462,8 @@ const validateSlotArgs = (
 }
 
 const getLiveEntry = (slot: Slot, key: string): SlotEntry | undefined => {
-  const e = slot.m.get(key)
-  return e && !e[0].del ? e : undefined
+  const entry = slot.entries.get(key)
+  return entry && !entry.rec.del ? entry : undefined
 }
 
 const estimateWireRecordBytes = (wire: WireStateRecord): number =>
@@ -535,81 +473,61 @@ const sig8 = (rec: AuthoritativeStateRecord): string => rec.sig.slice(0, 8)
 const quotaErr = (ns: string): Error =>
   mkErr(`state "${ns}" exceeds user quota`)
 
-export const initStateManager = (
-  appId: string,
-  getRoomId: () => string,
-  getSelfId: () => string,
-  getLocalUserId: () => string,
-  ensureReady: () => Promise<
-    readonly [selfId: string, user: UserIdentity, roomId: string]
-  >,
-  hasRolesPlugin: () => boolean,
-  getRolesProvider: () => KernelRolesProvider | null,
-  getScaleProvider: (() => KernelScaleProvider | null) | undefined,
-  isPeerActive: (peerId: string) => boolean,
-  isPeerPendingHandshake: ((peerId: string) => boolean) | undefined,
-  isDirectPeer: (peerId: string) => boolean,
-  getDirectPeerIds: () => string[],
-  isUserOnline: (userId: string) => boolean,
-  getKnownPeerUserId: (peerId: string) => string | undefined,
-  isPeerBanned: (peerOrUserId: string) => boolean,
-  getPeerRoles: (peerOrUserId?: string) => string[],
-  makeInternalAction:
-    | (<T extends DataPayload = DataPayload>(
-        namespace: string,
-        options?: Partial<ActionOptions>
-      ) => InternalAction<T>)
-    | undefined,
-  onInvalidRecord: ((fromPeerId?: string) => void) | undefined,
-  onBroadcastRecord?: (rec: AuthoritativeStateRecord) => void
-): readonly [
-  makeState: RoomMakeState,
-  makeUserState: RoomMakeUserState,
-  prepareHandshakeReady: (
-    peerId: string
-  ) => Promise<HandshakeStatePayload | undefined> | undefined,
-  stageHandshakeUserState: (
-    peerId: string,
-    payload: {p: Record<string, string>; r: unknown[]},
-    onReady?: () => void
-  ) => Promise<void>,
-  onPeerJoined: (peerId: string, userId: string, isDirect: boolean) => void,
-  onPeerDisconnected: (peerId: string) => void,
-  onUserLeft: (userId: string) => void,
-  purgeBannedUser: (userId: string) => void,
-  clearPeer: (peerId: string) => void,
-  destroy: () => void,
-  verifyAndApplyStateRecord: (
-    rec: AuthoritativeStateRecord,
-    fromPeerId?: string
-  ) => Promise<boolean>
-] => {
+export const createStateManager = ({
+  appId,
+  getRoomId,
+  getSelfId,
+  getLocalUserId,
+  ensureReady,
+  hasRolesPlugin,
+  getRolesProvider,
+  getScaleProvider,
+  isPeerActive,
+  isPeerPendingHandshake,
+  isDirectPeer,
+  getDirectPeerIds,
+  isUserOnline,
+  getKnownPeerUserId,
+  isPeerBanned,
+  getPeerRoles,
+  makeInternalAction,
+  onInvalidRecord
+}: StateManagerDeps): StateManager => {
   const slots = new Map<string, Slot>()
   const forwardedRecSigs = createBoundedSet(1_024)
-  const [consumeLiveRate, deleteLiveRate, clearLiveRate] =
-    createTokenBucketLimiter(maxLiveRecordsPerSec, maxLiveRecordBurst, 512)
+  const liveRateLimiter = createTokenBucketLimiter(
+    maxLiveRecordsPerSec,
+    maxLiveRecordBurst,
+    512
+  )
   const [hitSyncQuota] = createWindowCounter(512, 49)
-  const stagedHs = new Map<string, StagedUserItem[]>()
+  const stagedHandshake = new Map<string, StagedUserItem[]>()
+  const sentHandshakeSigs = new Map<string, Set<string>>()
   const pendingOfflineUserRecs = createBoundedCache<
     string,
     Map<string, StagedUserItem>
   >(128)
   const pendingJoinWaiters = new Map<
     string,
-    [p: Promise<boolean>, res: (ok: boolean) => void, n: number]
+    {promise: Promise<boolean>; resolve: (ok: boolean) => void; count: number}
   >()
   const completedSyncPeers = new Set<string>()
-  const inFlightPullTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  const [peekClock, observeClock, , nextBoundedClock] = createMonotonicClock()
+  const inFlightPulls = new Map<
+    string,
+    {timer: ReturnType<typeof setTimeout>; pages: number}
+  >()
+  const clock = createMonotonicClock()
 
   let repullQueued = false
   let destroyed = false
 
+  const isScaleActive = (): boolean => Boolean(getScaleProvider?.())
+
   const resolvePendingJoin = (peerId: string, ok: boolean): void => {
-    const w = pendingJoinWaiters.get(peerId)
-    if (w) {
+    const waiter = pendingJoinWaiters.get(peerId)
+    if (waiter) {
       pendingJoinWaiters.delete(peerId)
-      w[1](ok)
+      waiter.resolve(ok)
     }
   }
 
@@ -617,20 +535,20 @@ export const initStateManager = (
     if (!isPeerPendingHandshake?.(peerId)) {
       return isPeerActive(peerId) ? null : false
     }
-    let w = pendingJoinWaiters.get(peerId)
-    if (!w) {
-      let res!: (ok: boolean) => void
-      const p = new Promise<boolean>(r => {
-        res = r
+    let waiter = pendingJoinWaiters.get(peerId)
+    if (!waiter) {
+      let resolve!: (ok: boolean) => void
+      const promise = new Promise<boolean>(r => {
+        resolve = r
       })
-      w = [p, res, 0]
-      pendingJoinWaiters.set(peerId, w)
+      waiter = {promise, resolve, count: 0}
+      pendingJoinWaiters.set(peerId, waiter)
     }
-    if (w[2] >= 8) {
+    if (waiter.count >= 8) {
       return false
     }
-    w[2]++
-    return w[0]
+    waiter.count++
+    return waiter.promise
   }
 
   const readyRoomForPeer = async (
@@ -642,7 +560,7 @@ export const initStateManager = (
     }
     let roomId: string
     try {
-      ;[, , roomId] = await ensureReady()
+      ;({roomId} = await ensureReady())
     } catch {
       return null
     }
@@ -658,14 +576,14 @@ export const initStateManager = (
   ): boolean => {
     let count = 0
     let bytes = nextBytes
-    for (const s of slots.values()) {
-      if (s.k !== 'u' || s === target) {
+    for (const slot of slots.values()) {
+      if (slot.kind !== 'u' || slot === target) {
         continue
       }
-      const e = s.m.get(uid)
-      if (e) {
+      const entry = slot.entries.get(uid)
+      if (entry) {
         count++
-        bytes += e[4]
+        bytes += entry.bytes
       }
     }
     return (
@@ -722,11 +640,16 @@ export const initStateManager = (
       return true
     }
     const rp = getRolesProvider()
-    if (!rec.cert || !rp) {
+    if (!rp) {
       return false
     }
     const active = rp.getPeerRoles(rec.userId)
-    return reqRoles.some(r => rec.cert!.roles.includes(r) && active.includes(r))
+    if (rec.cert) {
+      return reqRoles.some(
+        r => rec.cert!.roles.includes(r) && active.includes(r)
+      )
+    }
+    return reqRoles.some(r => active.includes(r))
   }
 
   const evictEntry = (
@@ -736,15 +659,18 @@ export const initStateManager = (
     now: number,
     roles: string[]
   ): void => {
-    slot.m.delete(key)
-    slot.s = null
-    if (slot.k === 's') {
-      slot.e(
-        slot.i,
-        mkCtxBase(entry[1], getSelfId(), entry[0].userId, roles, now)
+    slot.entries.delete(key)
+    slot.snapshot = null
+    if (slot.kind === 's') {
+      slot.emit(
+        slot.initialValue,
+        mkCtxBase(entry.value, getSelfId(), entry.rec.userId, roles, now)
       )
-    } else if (!entry[0].del) {
-      slot.e(undefined, toUserCtx(entry[0], entry[1], roles, true, now, false))
+    } else if (!entry.rec.del) {
+      slot.emit(
+        undefined,
+        toUserCtx(entry.rec, entry.value, roles, true, now, false)
+      )
     }
   }
 
@@ -757,16 +683,17 @@ export const initStateManager = (
 
   const sendState = (msg: StateControlMessage, targets?: TargetPeers): void => {
     if (stateAction) {
-      void stateAction.send(msg as unknown as JsonValue, targets).catch(noOp)
+      void stateAction
+        .send(
+          msg as unknown as JsonValue,
+          targets === undefined ? undefined : {target: targets}
+        )
+        .catch(noOp)
     }
   }
 
-  const isGossipActive = (): boolean =>
-    getScaleProvider?.()?.getActiveMode() === 'gossip'
-
   const broadcastLiveRecord = (rec: AuthoritativeStateRecord): void => {
     forwardedRecSigs.add(rec.sig)
-    onBroadcastRecord?.(rec)
     sendState({t: 'rec', r: toWireRecord(rec, true)})
   }
 
@@ -779,7 +706,7 @@ export const initStateManager = (
     }
     forwardedRecSigs.add(rec.sig)
     const msg: StateControlMessage = {t: 'rec', r: toWireRecord(rec, true)}
-    if (isGossipActive()) {
+    if (isScaleActive()) {
       sendState(msg)
       return
     }
@@ -792,40 +719,54 @@ export const initStateManager = (
   }
 
   const verifyParsedRecord = async (
-    [rec, bytes, canonVal]: ParsedRecord,
+    {rec, bytes, canonVal}: ParsedRecord,
     reqRoles: readonly string[] | null,
     fromPeerId: string | undefined
   ): Promise<
-    [rec: AuthoritativeStateRecord, roles: string[], bytes: number] | 0 | 1
+    | {rec: AuthoritativeStateRecord; roles: string[]; bytes: number}
+    | 'invalid'
+    | 'drop'
   > => {
+    const roomId = getRoomId()
     if (
-      !(await verifyRecordSigWithCanon(
-        rec,
-        appId,
-        getRoomId(),
-        defaultMaxClockSkewMs,
-        canonVal
-      ))
+      rec.appId !== appId ||
+      rec.roomId !== roomId ||
+      (rec.cert && rec.cert.subUserId !== rec.userId)
     ) {
-      return 0
+      return 'invalid'
+    }
+    const signer = await getVerifiedPubKeyRecord(rec.pub)
+    if (!signer || signer[6] !== rec.userId) {
+      return 'invalid'
+    }
+    if (
+      !(await verifySig(rec.pub, stateRecordPayload(rec, canonVal), rec.sig))
+    ) {
+      return 'invalid'
+    }
+    if (
+      rec.hlc > Date.now() + defaultMaxClockSkewMs ||
+      (rec.cert && rec.hlc < rec.cert.iat)
+    ) {
+      return 'drop'
     }
     if (isPeerBanned(rec.userId)) {
-      return 1
+      return 'drop'
     }
     const rp = getRolesProvider()
-    if (rp?.verifyStateRecordRoles) {
+    if (rp) {
       const roleRes = await rp.verifyStateRecordRoles(rec, reqRoles, fromPeerId)
       if (!roleRes.valid) {
-        return 1
+        return 'drop'
       }
-      observeClock(rec.hlc)
-      return [rec, roleRes.roles, bytes]
+      clock.observe(rec.hlc)
+      return {rec, roles: roleRes.roles, bytes}
     }
     if (reqRoles && reqRoles.length > 0) {
-      return 1
+      return 'drop'
     }
-    observeClock(rec.hlc)
-    return [rec, [], bytes]
+    clock.observe(rec.hlc)
+    return {rec, roles: [], bytes}
   }
 
   const stageOfflineUserRecord = (
@@ -834,7 +775,7 @@ export const initStateManager = (
     roles: string[],
     bytes: number
   ): void => {
-    if (bytes > slot.b) {
+    if (bytes > slot.maxBytes) {
       return
     }
     const now = Date.now()
@@ -843,20 +784,26 @@ export const initStateManager = (
       byNs = new Map()
       pendingOfflineUserRecs.set(rec.userId, byNs)
     } else if (
-      !byNs.has(slot.n) &&
+      !byNs.has(slot.namespace) &&
       byNs.size >= maxUserStateNamespacesPerUser
     ) {
       return
     }
-    const prev = byNs.get(slot.n)
+    const prev = byNs.get(slot.namespace)
     if (
       prev &&
-      now - prev[4] < offlineStagingTtlMs &&
-      compareStateRecords(rec, prev[1]) <= 0
+      now - prev.seenAt < offlineStagingTtlMs &&
+      compareStateRecords(rec, prev.rec) <= 0
     ) {
       return
     }
-    byNs.set(slot.n, [slot, rec, [...roles], bytes, now])
+    byNs.set(slot.namespace, {
+      slot,
+      rec,
+      roles: [...roles],
+      bytes,
+      seenAt: now
+    })
   }
 
   const commitEntry = (
@@ -867,51 +814,88 @@ export const initStateManager = (
     skipValidate = false,
     allowStageOffline = false
   ): SlotEntry | null => {
-    const key = slot.k === 's' ? '' : rec.userId
-    if (slot.k === 'u' && !isUserOnline(key)) {
+    const key = slot.kind === 's' ? '' : rec.userId
+    if (slot.kind === 'u' && !isUserOnline(key)) {
       if (allowStageOffline) {
         stageOfflineUserRecord(slot, rec, roles, bytes)
       }
       return null
     }
-    const curRaw = slot.m.get(key)
-    if (curRaw && compareStateRecords(rec, curRaw[0]) <= 0) {
+    const curRaw = slot.entries.get(key)
+    if (curRaw && compareStateRecords(rec, curRaw.rec) <= 0) {
       return null
     }
-    const curLive = curRaw && !curRaw[0].del ? curRaw : undefined
-    const prevVal = curLive ? curLive[1] : slot.i
+    const curLive = curRaw && !curRaw.rec.del ? curRaw : undefined
+    const prevVal = curLive ? curLive.value : slot.initialValue
 
     if (rec.del) {
-      if (slot.k !== 'u' || !withinUserQuota(key, slot, bytes)) {
+      if (slot.kind !== 'u' || !withinUserQuota(key, slot, bytes)) {
         return null
       }
-      const next: SlotEntry = [rec, slot.i, prevVal, [...roles], bytes]
-      slot.m.set(key, next)
+      const next: SlotEntry = {
+        rec,
+        value: slot.initialValue,
+        prev: prevVal,
+        roles: [...roles],
+        bytes
+      }
+      slot.entries.set(key, next)
       if (curLive) {
-        slot.s = null
-        slot.e(undefined, toUserCtx(rec, prevVal, roles, true))
+        slot.snapshot = null
+        slot.emit(undefined, toUserCtx(rec, prevVal, roles, true))
       }
       return next
     }
 
     if (
-      bytes > slot.b ||
-      (slot.k === 'u' && !withinUserQuota(key, slot, bytes))
+      bytes > slot.maxBytes ||
+      (slot.kind === 'u' && !withinUserQuota(key, slot, bytes))
     ) {
       return null
     }
     const nextVal = rec.val
-    const next: SlotEntry = [rec, nextVal, prevVal, [...roles], bytes]
-    const ctx =
-      slot.k === 's'
-        ? toSharedCtx(rec, prevVal, roles)
-        : toUserCtx(rec, prevVal, roles, false)
-    if (!skipValidate && slot.v && !slot.v(nextVal, ctx as never)) {
-      return null
+    const next: SlotEntry = {
+      rec,
+      value: nextVal,
+      prev: prevVal,
+      roles: [...roles],
+      bytes
     }
-    slot.m.set(key, next)
-    slot.s = null
-    slot.e(nextVal, ctx as never)
+
+    if (slot.kind === 's') {
+      const ctx = toSharedCtx(rec, prevVal, roles)
+      if (!skipValidate && slot.validate) {
+        let valid = false
+        try {
+          valid = slot.validate(nextVal, ctx)
+        } catch {
+          valid = false
+        }
+        if (!valid) {
+          return null
+        }
+      }
+      slot.entries.set(key, next)
+      slot.snapshot = null
+      slot.emit(nextVal, ctx)
+      return next
+    }
+
+    const ctx = toUserCtx(rec, prevVal, roles, false)
+    if (!skipValidate && slot.validate) {
+      let valid = false
+      try {
+        valid = slot.validate(nextVal, ctx)
+      } catch {
+        valid = false
+      }
+      if (!valid) {
+        return null
+      }
+    }
+    slot.entries.set(key, next)
+    slot.snapshot = null
+    slot.emit(nextVal, ctx)
     return next
   }
 
@@ -928,100 +912,112 @@ export const initStateManager = (
       onInvalidRecord?.(fromPeerId)
       return null
     }
-    const slot = slots.get(`${parsed[0].k}:${parsed[0].ns}`)
+    if (isPeerBanned(parsed.rec.userId)) {
+      return null
+    }
+    const slot = slots.get(`${parsed.rec.k}:${parsed.rec.ns}`)
     if (!slot) {
       return null
     }
-    const verified = await verifyParsedRecord(parsed, slot.r, fromPeerId)
-    if (verified === 0) {
+    if (!parsed.rec.del && parsed.bytes > slot.maxBytes) {
+      return null
+    }
+    const entryKey = slot.kind === 's' ? '' : parsed.rec.userId
+    if (slot.kind === 's' || isUserOnline(entryKey)) {
+      const curRaw = slot.entries.get(entryKey)
+      if (curRaw && compareStateRecords(parsed.rec, curRaw.rec) <= 0) {
+        return null
+      }
+      if (!withinUserQuota(entryKey, slot, parsed.bytes) && slot.kind === 'u') {
+        return null
+      }
+    }
+
+    const verified = await verifyParsedRecord(
+      parsed,
+      slot.requiredRoles,
+      fromPeerId
+    )
+    if (verified === 'invalid') {
       onInvalidRecord?.(fromPeerId)
       return null
     }
-    if (verified === 1) {
+    if (verified === 'drop') {
       return null
     }
     return commitEntry(
       slot,
-      verified[0],
-      verified[1],
-      verified[2],
+      verified.rec,
+      verified.roles,
+      verified.bytes,
       false,
       allowStageOffline
     )
   }
 
-  const iterAuthorizedSlotEntries = function* (): Generator<
+  const getAuthorizedEntriesSorted = (): Array<
     [digestKey: string, entry: SlotEntry]
-  > {
+  > => {
+    const list: Array<[string, SlotEntry]> = []
     for (const slot of slots.values()) {
-      for (const [entryKey, entry] of slot.m) {
-        if (slot.k === 'u' && !isUserOnline(entryKey)) {
+      for (const [entryKey, entry] of slot.entries) {
+        if (slot.kind === 'u' && !isUserOnline(entryKey)) {
           continue
         }
-        if (isRecordAuthorizedNow(entry[0], slot.r)) {
-          yield [
-            slot.k === 's' ? `s:${slot.n}` : `u:${slot.n}\u0000${entryKey}`,
+        if (isRecordAuthorizedNow(entry.rec, slot.requiredRoles)) {
+          list.push([
+            slot.kind === 's'
+              ? `s:${slot.namespace}`
+              : `u:${slot.namespace}\u0000${entryKey}`,
             entry
-          ]
+          ])
         }
       }
     }
+    list.sort((a, b) => cmpStr(a[0], b[0]))
+    return list
   }
 
-  const buildDigestMap = (): Record<string, DigestEntry> => {
+  const buildDigestMap = (cursor?: string): Record<string, DigestEntry> => {
     const digest: Record<string, DigestEntry> = {}
     let count = 0
-    for (const [dKey, entry] of iterAuthorizedSlotEntries()) {
+    for (const [dKey, entry] of getAuthorizedEntriesSorted()) {
+      if (cursor !== undefined && cmpStr(dKey, cursor) <= 0) {
+        continue
+      }
       if (count >= maxSyncRecordsPerBatch) {
         break
       }
-      digest[dKey] = [entry[0].hlc, sig8(entry[0])]
+      digest[dKey] = [entry.rec.hlc, sig8(entry.rec)]
       count++
     }
     return digest
   }
 
-  const isRegisteredDigestKey = (k: string): boolean => {
-    if (k.startsWith('s:')) {
-      return slots.has(k)
-    }
-    if (k.startsWith('u:')) {
-      const sep = k.indexOf('\u0000')
-      return sep > 2 && slots.has(k.slice(0, sep))
-    }
-    return false
-  }
-
   const sendSyncBatches = (
     peerId: string,
     records: AuthoritativeStateRecord[],
-    wantKeys?: string[],
-    propagate?: boolean
+    nextCursor?: string
   ): void => {
     if (!stateAction || destroyed || !isPeerActive(peerId)) {
       return
     }
-    const capped = records.slice(0, maxSyncRecordsPerBatch)
-    const wants =
-      wantKeys && wantKeys.length > 0
-        ? wantKeys.slice(0, maxSyncRecordsPerBatch)
-        : undefined
     const sendSyncMsg = (
       p: Record<string, string>,
       r: WireStateRecord[],
-      includeWants?: boolean
+      includeCursor: boolean
     ): void =>
       sendState(
         {
           t: 'sync',
           p,
           r,
-          ...(includeWants && wants ? {w: wants} : {}),
-          ...(propagate ? {u: 1} : {})
+          ...(includeCursor && nextCursor ? {n: nextCursor} : {})
         },
         peerId
       )
-    if (!capped.length) {
+
+    if (!records.length) {
       sendSyncMsg({}, [], true)
       return
     }
@@ -1029,7 +1025,7 @@ export const initStateManager = (
     let curP: Record<string, string> = {}
     let curR: WireStateRecord[] = []
     let curBytes = 0
-    for (const rec of capped) {
+    for (const rec of records) {
       const wire = toWireRecord(rec, false)
       const est = estimateWireRecordBytes(wire)
       if (curR.length > 0 && curBytes + est > maxSyncChunkBytes) {
@@ -1048,55 +1044,58 @@ export const initStateManager = (
     chunks.forEach(([p, r], i) => sendSyncMsg(p, r, i === chunks.length - 1))
   }
 
-  const getPreferredDirectNeighbors = (): string[] => {
-    const selfId = getSelfId()
-    return getDirectPeerIds()
-      .filter(id => !isPeerBanned(id))
-      .sort(
-        (a, b) =>
-          hash32(`${selfId}:${a}`) - hash32(`${selfId}:${b}`) || cmpStr(a, b)
-      )
+  const clearPullTimer = (peerId: string): void => {
+    const pull = inFlightPulls.get(peerId)
+    if (pull) {
+      resetTimer(pull.timer)
+      inFlightPulls.delete(peerId)
+    }
   }
 
   const fillPullFanout = (): void => {
-    for (const cand of getPreferredDirectNeighbors()) {
-      if (completedSyncPeers.size + inFlightPullTimers.size >= syncPullFanout) {
+    for (const candidate of selectPullFanoutPeers(
+      getSelfId(),
+      getDirectPeerIds(),
+      isPeerBanned
+    )) {
+      if (completedSyncPeers.size + inFlightPulls.size >= syncPullFanout) {
         break
       }
-      if (!completedSyncPeers.has(cand) && !inFlightPullTimers.has(cand)) {
-        sendPullToPeer(cand)
+      if (!completedSyncPeers.has(candidate) && !inFlightPulls.has(candidate)) {
+        sendPullToPeer(candidate)
       }
     }
   }
 
-  const clearPullTimer = (peerId: string): void => {
-    resetTimer(inFlightPullTimers.get(peerId))
-    inFlightPullTimers.delete(peerId)
-  }
-
-  const sendPullToPeer = (peerId: string): void => {
+  const sendPullToPeer = (peerId: string, cursor?: string, pages = 0): void => {
     if (
       !stateAction ||
       destroyed ||
       slots.size === 0 ||
+      pages >= maxPullPages ||
       !isDirectPeer(peerId) ||
       isPeerBanned(peerId) ||
-      inFlightPullTimers.has(peerId)
+      (cursor === undefined && inFlightPulls.has(peerId))
     ) {
       return
     }
+    clearPullTimer(peerId)
     const timer = setTimeout(() => {
-      inFlightPullTimers.delete(peerId)
+      inFlightPulls.delete(peerId)
       if (!destroyed && completedSyncPeers.size < syncPullFanout) {
         fillPullFanout()
       }
     }, syncPullTimeoutMs)
     unrefTimer(timer)
-    inFlightPullTimers.set(peerId, timer)
+    inFlightPulls.set(peerId, {timer, pages: pages + 1})
 
-    const msg: StateControlMessage = {t: 'pull', d: buildDigestMap()}
+    const msg: StateControlMessage = {
+      t: 'pull',
+      d: buildDigestMap(cursor),
+      ...(cursor !== undefined ? {c: cursor} : {})
+    }
     void stateAction
-      .send(msg as unknown as JsonValue, peerId)
+      .send(msg as unknown as JsonValue, {target: peerId})
       .catch(() => clearPullTimer(peerId))
   }
 
@@ -1122,24 +1121,24 @@ export const initStateManager = (
   if (stateAction) {
     const runWhenReady = (
       peerId: string,
-      fn: (roomId: string) => Promise<void> | void,
-      onQueued?: () => void
+      fn: (roomId: string) => Promise<void> | void
     ): void => {
       const waitP = waitPeerReady(peerId)
       if (waitP === false) {
         return
       }
-      onQueued?.()
-      void readyRoomForPeer(peerId, waitP).then(rid => rid !== null && fn(rid))
+      void readyRoomForPeer(peerId, waitP)
+        .then(rid => (rid !== null ? fn(rid) : undefined))
+        .catch(noOp)
     }
 
-    stateAction.onMessage((raw, fromPeerId) => {
+    stateAction.onMessage((raw, {peerId: fromPeerId}) => {
       if (destroyed || isPeerBanned(fromPeerId) || !isObj(raw)) {
         return
       }
       const msg = raw as unknown as StateControlMessage
       if (msg.t === 'rec') {
-        if (!consumeLiveRate(fromPeerId)) {
+        if (!liveRateLimiter.consume(fromPeerId)) {
           return
         }
         runWhenReady(fromPeerId, async roomId => {
@@ -1155,13 +1154,23 @@ export const initStateManager = (
               return
             }
           }
-          await applyIncoming(rec, fromPeerId, true)
+          const applied = await applyIncoming(rec, fromPeerId, true)
+          if (applied && isScaleActive()) {
+            rebroadcastAppliedRecord(applied.rec, fromPeerId)
+          }
         })
         return
       }
 
       if (msg.t === 'pull') {
         if (hitSyncQuota(fromPeerId) || !isObj(msg.d)) {
+          return
+        }
+        if (
+          msg.c !== undefined &&
+          (typeof msg.c !== 'string' || msg.c.length > 512)
+        ) {
+          onInvalidRecord?.(fromPeerId)
           return
         }
         const dEntries = entries(msg.d as Record<string, unknown>)
@@ -1183,10 +1192,16 @@ export const initStateManager = (
           }
           remoteDigest.set(k, [v[0], v[1]])
         }
+        const cursor = msg.c
         runWhenReady(fromPeerId, () => {
-          const localEntries = new Map(
-            [...iterAuthorizedSlotEntries()].slice(0, maxSyncRecordsPerBatch)
+          const afterCursor = getAuthorizedEntriesSorted().filter(
+            ([k]) => cursor === undefined || cmpStr(k, cursor) > 0
           )
+          const page = afterCursor.slice(0, maxSyncRecordsPerBatch)
+          const nextCursor =
+            afterCursor.length > maxSyncRecordsPerBatch
+              ? page[page.length - 1]![0]
+              : undefined
           const isNewerDigest = (
             hA: number,
             sA: string,
@@ -1194,9 +1209,8 @@ export const initStateManager = (
             sB: string
           ): boolean => hA > hB || (hA === hB && sA !== sB)
           const toSend: AuthoritativeStateRecord[] = []
-          const wantKeys: string[] = []
-          for (const [k, entry] of localEntries) {
-            const localRec = entry[0]
+          for (const [k, entry] of page) {
+            const localRec = entry.rec
             const rem = remoteDigest.get(k)
             if (
               !rem ||
@@ -1205,19 +1219,45 @@ export const initStateManager = (
               toSend.push(localRec)
             }
           }
-          for (const [k, rem] of remoteDigest) {
-            if (!isRegisteredDigestKey(k)) {
-              continue
-            }
-            const localRec = localEntries.get(k)?.[0]
-            if (
-              !localRec ||
-              isNewerDigest(rem[0], rem[1], localRec.hlc, sig8(localRec))
-            ) {
-              wantKeys.push(k)
+          sendSyncBatches(fromPeerId, toSend, nextCursor)
+          if (cursor === undefined && !inFlightPulls.has(fromPeerId)) {
+            for (const [k, rem] of remoteDigest) {
+              let slot: Slot | undefined
+              let entryKey = ''
+              if (k.startsWith('s:')) {
+                const candidate = slots.get(k)
+                if (candidate?.kind === 's') {
+                  slot = candidate
+                }
+              } else if (k.startsWith('u:')) {
+                const sep = k.indexOf('\u0000')
+                if (sep > 2) {
+                  const uid = k.slice(sep + 1)
+                  const candidate = slots.get(k.slice(0, sep))
+                  if (candidate?.kind === 'u' && isUserOnline(uid)) {
+                    slot = candidate
+                    entryKey = uid
+                  }
+                }
+              }
+              if (!slot) {
+                continue
+              }
+              const localEntry = slot.entries.get(entryKey)
+              const validLocal =
+                localEntry &&
+                isRecordAuthorizedNow(localEntry.rec, slot.requiredRoles)
+                  ? localEntry.rec
+                  : undefined
+              if (
+                !validLocal ||
+                isNewerDigest(rem[0], rem[1], validLocal.hlc, sig8(validLocal))
+              ) {
+                sendPullToPeer(fromPeerId)
+                break
+              }
             }
           }
-          sendSyncBatches(fromPeerId, toSend, wantKeys)
         })
         return
       }
@@ -1230,52 +1270,43 @@ export const initStateManager = (
         ) {
           return
         }
-        if (msg.r.length > maxSyncRecordsPerBatch) {
+        if (
+          msg.r.length > maxSyncRecordsPerBatch ||
+          (msg.n !== undefined &&
+            (typeof msg.n !== 'string' || msg.n.length > 512))
+        ) {
           onInvalidRecord?.(fromPeerId)
           return
         }
-        const pubMap = msg.p as Record<string, unknown>
-        const propagate = msg.u === 1
-        const wantList = Array.isArray(msg.w)
-          ? msg.w.filter(isStr).slice(0, maxSyncRecordsPerBatch)
-          : []
-
-        runWhenReady(
-          fromPeerId,
-          async roomId => {
-            const shouldForward = propagate || isGossipActive()
-            for (const wireRec of msg.r) {
-              if (destroyed || isPeerBanned(fromPeerId)) {
-                return
-              }
-              const fullRec = fromWireRecord(wireRec, appId, roomId, pubMap)
-              if (!fullRec) {
-                onInvalidRecord?.(fromPeerId)
-                return
-              }
-              const applied = await applyIncoming(fullRec, fromPeerId, true)
-              if (applied && shouldForward) {
-                rebroadcastAppliedRecord(applied[0], fromPeerId)
-              }
-            }
-            if (wantList.length > 0 && !destroyed && isPeerActive(fromPeerId)) {
-              const wantSet = new Set(wantList)
-              const pushRecs: AuthoritativeStateRecord[] = []
-              for (const [dKey, entry] of iterAuthorizedSlotEntries()) {
-                if (wantSet.has(dKey)) {
-                  pushRecs.push(entry[0])
-                }
-              }
-              if (pushRecs.length > 0) {
-                sendSyncBatches(fromPeerId, pushRecs, undefined, true)
-              }
-            }
-          },
-          () => {
+        const pullState = inFlightPulls.get(fromPeerId)
+        const nextCursor = msg.n
+        if (pullState) {
+          if (nextCursor) {
+            sendPullToPeer(fromPeerId, nextCursor, pullState.pages)
+          } else {
             clearPullTimer(fromPeerId)
             completedSyncPeers.add(fromPeerId)
           }
-        )
+        }
+        const pubMap = msg.p as Record<string, unknown>
+
+        runWhenReady(fromPeerId, async roomId => {
+          const shouldForward = isScaleActive()
+          for (const wireRec of msg.r) {
+            if (destroyed || isPeerBanned(fromPeerId)) {
+              return
+            }
+            const fullRec = fromWireRecord(wireRec, appId, roomId, pubMap)
+            if (!fullRec) {
+              onInvalidRecord?.(fromPeerId)
+              return
+            }
+            const applied = await applyIncoming(fullRec, fromPeerId, true)
+            if (applied && shouldForward) {
+              rebroadcastAppliedRecord(applied.rec, fromPeerId)
+            }
+          }
+        })
       }
     })
   }
@@ -1286,7 +1317,7 @@ export const initStateManager = (
     uid: string
   ): Promise<[cert: RoleCertificate | null, roles: string[]]> => {
     const rp = getRolesProvider()
-    if (rp?.getStateWriteCert) {
+    if (rp) {
       const res = await rp.getStateWriteCert(reqRoles, ns)
       return [res.cert, res.roles]
     }
@@ -1300,19 +1331,49 @@ export const initStateManager = (
 
   const rejectOps = (ops: PendingOp[], err: unknown): void => {
     for (const op of ops) {
-      op[3](err)
+      op.reject(err)
     }
   }
 
+  const waitForSlotPace = (slot: Slot): Promise<void> | void => {
+    if (slot.skipNextPace || slot.lastBroadcastAt <= 0 || destroyed) {
+      slot.skipNextPace = false
+      return
+    }
+    const waitMs =
+      minSlotBroadcastIntervalMs - (Date.now() - slot.lastBroadcastAt)
+    if (waitMs <= 0) {
+      return
+    }
+    return new Promise<void>(resolve => {
+      const finish = (): void => {
+        slot.wakePace = null
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(finish, waitMs)
+      unrefTimer(timer)
+      slot.wakePace = finish
+    })
+  }
+
   const flushSlot = (slot: Slot): Promise<void> => {
-    if (slot.f) {
-      return slot.f
+    if (slot.flushPromise) {
+      return slot.flushPromise
     }
     const p = (async () => {
       try {
-        while (slot.o.length > 0) {
+        while (slot.ops.length > 0) {
+          const paceWait = waitForSlotPace(slot)
+          if (paceWait) {
+            await paceWait
+          }
+          if (slot.ops.length === 0) {
+            break
+          }
+
           let doneStep!: () => void
-          slot.p = new Promise<void>(r => {
+          slot.stepPromise = new Promise<void>(r => {
             doneStep = r
           })
           try {
@@ -1322,44 +1383,57 @@ export const initStateManager = (
             let authCert: RoleCertificate | null
             let authRoles: string[]
             try {
-              ;[readySelfId, readyUser, readyRoomId] = await ensureReady()
+              ;({
+                selfId: readySelfId,
+                user: readyUser,
+                roomId: readyRoomId
+              } = await ensureReady())
               ;[authCert, authRoles] = await obtainWriteAuth(
-                slot.r,
-                slot.n,
+                slot.requiredRoles,
+                slot.namespace,
                 readyUser.userId
               )
             } catch (err) {
-              rejectOps(slot.o.splice(0), err)
+              rejectOps(slot.ops.splice(0), err)
               continue
             }
 
-            let remainingOps = slot.o.splice(0)
+            if (authCert) {
+              clock.observe(authCert.iat)
+            }
+
+            let remainingOps = slot.ops.splice(0)
             if (!remainingOps.length) {
               continue
             }
             const uid = readyUser.userId
-            const entryKey = slot.k === 's' ? '' : uid
+            const entryKey = slot.kind === 's' ? '' : uid
 
             for (
               let attempt = 0;
               attempt < maxFlushRetries && remainingOps.length > 0;
               attempt++
             ) {
-              const cur = getLiveEntry(slot, entryKey)
-              let simVal = cur ? cur[1] : slot.i
+              const curRaw = slot.entries.get(entryKey)
+              const curLive = curRaw && !curRaw.rec.del ? curRaw : undefined
+              let simVal = curLive ? curLive.value : slot.initialValue
               let finalMode: 'set' | 'del' | null = null
               let finalBytes = 0
               let finalCanonJson: string | undefined
               const accepted: PendingOp[] = []
-              const tentativeTs = Math.max(Date.now(), peekClock() + 1)
+              const minHlc = Math.max(
+                (curRaw?.rec.hlc ?? 0) + 1,
+                authCert?.iat ?? 0
+              )
+              const tentativeTs = Math.max(Date.now(), clock.peek() + 1, minHlc)
 
               for (const op of remainingOps) {
-                if (op[0]) {
+                if (op.del) {
                   if (!withinUserQuota(uid, slot, tombstoneBytes)) {
-                    op[3](quotaErr(slot.n))
+                    op.reject(quotaErr(slot.namespace))
                     continue
                   }
-                  simVal = slot.i
+                  simVal = slot.initialValue
                   finalMode = 'del'
                   finalBytes = tombstoneBytes
                   finalCanonJson = undefined
@@ -1369,31 +1443,33 @@ export const initStateManager = (
                 let cand: JsonValue
                 try {
                   cand =
-                    typeof op[1] === 'function'
-                      ? op[1](simVal)
-                      : (op[1] as JsonValue)
+                    typeof op.next === 'function'
+                      ? op.next(simVal)
+                      : (op.next as JsonValue)
                 } catch (err) {
-                  op[3](err)
+                  op.reject(err)
                   continue
                 }
-                const measured = canonicalizeAndMeasureJson(cand, slot.b)
+                const measured = canonicalizeAndMeasureJson(cand, slot.maxBytes)
                 if (!Array.isArray(measured)) {
-                  op[3](
+                  op.reject(
                     measured === 1 &&
                       Array.isArray(canonicalizeAndMeasureJson(cand))
-                      ? mkErr(`state "${slot.n}" exceeds maxBytes (${slot.b})`)
+                      ? mkErr(
+                          `state "${slot.namespace}" exceeds maxBytes (${slot.maxBytes})`
+                        )
                       : mkErr(
-                          `state "${slot.n}" value must contain only finite JSON numbers`
+                          `state "${slot.namespace}" value must contain only finite JSON numbers`
                         )
                   )
                   continue
                 }
                 const [json, bytes] = measured
-                if (slot.k === 'u' && !withinUserQuota(uid, slot, bytes)) {
-                  op[3](quotaErr(slot.n))
+                if (slot.kind === 'u' && !withinUserQuota(uid, slot, bytes)) {
+                  op.reject(quotaErr(slot.namespace))
                   continue
                 }
-                if (slot.v) {
+                if (slot.validate) {
                   const baseCtx = mkCtxBase(
                     simVal,
                     readySelfId,
@@ -1401,17 +1477,25 @@ export const initStateManager = (
                     authRoles,
                     tentativeTs
                   )
-                  const isValid =
-                    slot.k === 's'
-                      ? slot.v(cand, baseCtx)
-                      : slot.v(cand, {
-                          ...baseCtx,
-                          self: true,
-                          online: true,
-                          removed: false
-                        })
+                  let isValid = false
+                  try {
+                    isValid =
+                      slot.kind === 's'
+                        ? slot.validate(cand, baseCtx)
+                        : slot.validate(cand, {
+                            ...baseCtx,
+                            self: true,
+                            online: true,
+                            removed: false
+                          })
+                  } catch (err) {
+                    op.reject(err)
+                    continue
+                  }
                   if (!isValid) {
-                    op[3](mkErr(`state validation failed for "${slot.n}"`))
+                    op.reject(
+                      mkErr(`state validation failed for "${slot.namespace}"`)
+                    )
                     continue
                   }
                 }
@@ -1429,15 +1513,15 @@ export const initStateManager = (
 
               let rec: AuthoritativeStateRecord
               try {
-                rec = await signStateRecordInternal(
+                rec = await signStateRecord(
                   readyUser.sign,
                   readyUser.signPubJwk,
                   {
-                    kind: slot.k,
+                    kind: slot.kind,
                     appId,
                     roomId: readyRoomId,
-                    ns: slot.n,
-                    hlc: nextBoundedClock(slot.n),
+                    ns: slot.namespace,
+                    hlc: clock.nextBounded(slot.namespace, minHlc),
                     peerId: readySelfId,
                     userId: uid,
                     ...(finalMode === 'del' ? {del: true} : {val: simVal}),
@@ -1453,32 +1537,35 @@ export const initStateManager = (
 
               if (destroyed) {
                 for (const op of accepted) {
-                  op[2]()
+                  op.resolve()
                 }
                 remainingOps = []
                 break
               }
-              if (!isRecordAuthorizedNow(rec, slot.r)) {
+              if (!isRecordAuthorizedNow(rec, slot.requiredRoles)) {
                 rejectOps(
                   accepted,
-                  mkErr(`${insufficientAuthPrefix} to update state "${slot.n}"`)
+                  mkErr(
+                    `${insufficientAuthPrefix} to update state "${slot.namespace}"`
+                  )
                 )
                 remainingOps = []
                 break
               }
 
-              const latestRaw = slot.m.get(entryKey)
-              if (latestRaw && compareStateRecords(rec, latestRaw[0]) <= 0) {
-                observeClock(latestRaw[0].hlc)
+              const latestRaw = slot.entries.get(entryKey)
+              if (latestRaw && compareStateRecords(rec, latestRaw.rec) <= 0) {
+                clock.observe(latestRaw.rec.hlc)
                 remainingOps = accepted
                 continue
               }
 
               if (commitEntry(slot, rec, authRoles, finalBytes, true)) {
+                slot.lastBroadcastAt = Date.now()
                 broadcastLiveRecord(rec)
               }
               for (const op of accepted) {
-                op[2]()
+                op.resolve()
               }
               remainingOps = []
               break
@@ -1487,19 +1574,21 @@ export const initStateManager = (
             if (remainingOps.length > 0) {
               rejectOps(
                 remainingOps,
-                mkErr(`concurrent state contention exceeded for "${slot.n}"`)
+                mkErr(
+                  `concurrent state contention exceeded for "${slot.namespace}"`
+                )
               )
             }
           } finally {
-            slot.p = null
+            slot.stepPromise = null
             doneStep()
           }
         }
       } finally {
-        slot.f = null
+        slot.flushPromise = null
       }
     })()
-    slot.f = p
+    slot.flushPromise = p
     return p
   }
 
@@ -1508,59 +1597,36 @@ export const initStateManager = (
     del: boolean,
     next?: JsonValue | ((prev: JsonValue) => JsonValue)
   ): Promise<void> =>
-    new Promise<void>((res, rej) => {
-      slot.o.push([del, next, res, rej])
+    new Promise<void>((resolve, reject) => {
+      slot.ops.push({del, next, resolve, reject})
       void flushSlot(slot)
     })
 
-  const initSlot = <K extends 's' | 'u', Args extends unknown[]>(
-    k: K,
+  const createSlotBase = (
     namespace: string,
-    initialValue: JsonValue | undefined,
-    config:
-      | {
-          maxBytes?: number | undefined
-          roles?: string | readonly string[] | undefined
-          validate?: ((next: any, ctx: any) => boolean) | undefined
-        }
-      | undefined
-  ) => {
-    const isShared = k === 's'
-    const label = isShared ? 'state' : 'user state'
-    const [initVal, maxBytes, reqRoles] = validateSlotArgs(
-      namespace,
-      initialValue,
-      config?.maxBytes,
-      config?.roles,
-      hasRolesPlugin() || Boolean(getRolesProvider()),
-      isShared,
-      isShared ? 'makeState' : 'makeUserState',
-      `${label} role gating`
-    )
-    const [subEmitter, emitEmitter, clearEmitter] = createEventEmitter<Args>(
-      `${label} handler`
-    )
-    const slot = {
-      k,
-      n: namespace,
-      i: initVal,
-      r: reqRoles,
-      b: maxBytes,
-      ...(config?.validate ? {v: config.validate} : {}),
-      m: new Map<string, SlotEntry>(),
-      s: null,
-      e: emitEmitter,
-      c: clearEmitter,
-      a: null as unknown,
-      o: [] as PendingOp[],
-      f: null as Promise<void> | null,
-      p: null as Promise<void> | null
-    } as unknown as K extends 's' ? SharedSlot : UserSlot
-    return [slot, subEmitter] as const
-  }
+    initialValue: JsonValue,
+    requiredRoles: string[] | null,
+    maxBytes: number,
+    clearListeners: () => void
+  ): SlotBase => ({
+    namespace,
+    initialValue,
+    requiredRoles,
+    maxBytes,
+    entries: new Map<string, SlotEntry>(),
+    snapshot: null,
+    clearListeners,
+    api: null,
+    ops: [],
+    flushPromise: null,
+    stepPromise: null,
+    lastBroadcastAt: 0,
+    skipNextPace: false,
+    wakePace: null
+  })
 
   const registerSlot = <T>(mapKey: string, slot: Slot, api: T): T => {
-    slot.a = api
+    slot.api = api
     slots.set(mapKey, slot)
     scheduleRepull()
     return api
@@ -1575,20 +1641,35 @@ export const initStateManager = (
     const mapKey = `s:${namespace}`
     const existing = slots.get(mapKey)
     if (existing) {
-      return existing.a as SharedState<W>
+      return existing.api as SharedState<W>
     }
-    const [slot, subEmitter] = initSlot<'s', [W, StateChangeContext<W>]>(
-      's',
+    const [initVal, maxBytes, reqRoles] = validateSlotArgs(
       namespace,
       initialValue as JsonValue | undefined,
-      config
+      config?.maxBytes,
+      config?.roles,
+      hasRolesPlugin() || Boolean(getRolesProvider()),
+      true,
+      'makeState',
+      'state role gating'
     )
+    const [subEmitter, emitEmitter, clearEmitter] =
+      createEventEmitter<[W, StateChangeContext<W>]>('state handler')
+    const validate = config?.validate as
+      | ((next: JsonValue, ctx: StateChangeContext<JsonValue>) => boolean)
+      | undefined
+    const slot: SharedSlot = {
+      ...createSlotBase(namespace, initVal, reqRoles, maxBytes, clearEmitter),
+      kind: 's',
+      ...(validate ? {validate} : {}),
+      emit: emitEmitter as SharedSlot['emit']
+    }
     return registerSlot(
       mapKey,
       slot,
       lockMethods(
         {
-          get: () => (slot.m.get('')?.[1] ?? slot.i) as W,
+          get: () => (slot.entries.get('')?.value ?? slot.initialValue) as W,
           set: (next: W | ((prev: W) => W)) =>
             enqueueSlotOp(
               slot,
@@ -1596,17 +1677,24 @@ export const initStateManager = (
               next as JsonValue | ((prev: JsonValue) => JsonValue)
             ),
           getMeta: () => {
-            const e = slot.m.get('')
-            return e ? toSharedCtx<W>(e[0], e[2] as W, e[3]) : null
+            const entry = slot.entries.get('')
+            return entry
+              ? toSharedCtx<W>(entry.rec, entry.prev as W, entry.roles)
+              : null
           },
           onChange: (
             handler: (value: W, context: StateChangeContext<W>) => unknown,
             options?: ReplayListenerOptions
           ) =>
             subEmitter(handler, options, () => {
-              const e = slot.m.get('')
-              return e
-                ? [[e[1] as W, toSharedCtx<W>(e[0], e[2] as W, e[3])]]
+              const entry = slot.entries.get('')
+              return entry
+                ? [
+                    [
+                      entry.value as W,
+                      toSharedCtx<W>(entry.rec, entry.prev as W, entry.roles)
+                    ]
+                  ]
                 : []
             })
         } satisfies SharedState<W>,
@@ -1624,12 +1712,31 @@ export const initStateManager = (
     const mapKey = `u:${namespace}`
     const existing = slots.get(mapKey)
     if (existing) {
-      return existing.a as UserState<W>
+      return existing.api as UserState<W>
     }
-    const [slot, subEmitter] = initSlot<
-      'u',
-      [W | undefined, UserStateChangeContext<W>]
-    >('u', namespace, initialValue as JsonValue | undefined, config)
+    const [initVal, maxBytes, reqRoles] = validateSlotArgs(
+      namespace,
+      initialValue as JsonValue | undefined,
+      config?.maxBytes,
+      config?.roles,
+      hasRolesPlugin() || Boolean(getRolesProvider()),
+      false,
+      'makeUserState',
+      'user state role gating'
+    )
+    const [subEmitter, emitEmitter, clearEmitter] =
+      createEventEmitter<[W | undefined, UserStateChangeContext<W>]>(
+        'user state handler'
+      )
+    const validate = config?.validate as
+      | ((next: JsonValue, ctx: UserStateChangeContext<JsonValue>) => boolean)
+      | undefined
+    const slot: UserSlot = {
+      ...createSlotBase(namespace, initVal, reqRoles, maxBytes, clearEmitter),
+      kind: 'u',
+      ...(validate ? {validate} : {}),
+      emit: emitEmitter as UserSlot['emit']
+    }
     const resolveTargetUid = (id?: string): string | undefined =>
       id === undefined || (id !== '' && id === getSelfId())
         ? getLocalUserId() || undefined
@@ -1647,21 +1754,21 @@ export const initStateManager = (
             const uid = resolveTargetUid(id)
             return (
               uid !== undefined
-                ? (getLiveEntry(slot, uid)?.[1] ?? slot.i)
-                : slot.i
+                ? (getLiveEntry(slot, uid)?.value ?? slot.initialValue)
+                : slot.initialValue
             ) as W
           },
           getAll: (): Readonly<Record<string, W>> => {
-            if (!slot.s) {
+            if (!slot.snapshot) {
               const out: Record<string, JsonValue> = {}
-              for (const [uid, entry] of slot.m) {
-                if (!entry[0].del) {
-                  out[uid] = entry[1]
+              for (const [uid, entry] of slot.entries) {
+                if (!entry.rec.del) {
+                  out[uid] = entry.value
                 }
               }
-              slot.s = Object.freeze(out)
+              slot.snapshot = Object.freeze(out)
             }
-            return slot.s as Readonly<Record<string, W>>
+            return slot.snapshot as Readonly<Record<string, W>>
           },
           has: (id?: string): boolean => {
             const uid = resolveTargetUid(id)
@@ -1676,8 +1783,10 @@ export const initStateManager = (
           clear: () => enqueueSlotOp(slot, true),
           getMeta: (id?: string): UserStateChangeContext<W> | null => {
             const uid = resolveTargetUid(id)
-            const e = uid ? getLiveEntry(slot, uid) : undefined
-            return e ? toUserCtx<W>(e[0], e[2] as W, e[3], false) : null
+            const entry = uid ? getLiveEntry(slot, uid) : undefined
+            return entry
+              ? toUserCtx<W>(entry.rec, entry.prev as W, entry.roles, false)
+              : null
           },
           onChange: (
             handler: (
@@ -1689,11 +1798,11 @@ export const initStateManager = (
             subEmitter(handler, options, () => {
               const items: Array<[W | undefined, UserStateChangeContext<W>]> =
                 []
-              for (const e of slot.m.values()) {
-                if (!e[0].del) {
+              for (const entry of slot.entries.values()) {
+                if (!entry.rec.del) {
                   items.push([
-                    e[1] as W,
-                    toUserCtx<W>(e[0], e[2] as W, e[3], false)
+                    entry.value as W,
+                    toUserCtx<W>(entry.rec, entry.prev as W, entry.roles, false)
                   ])
                 }
               }
@@ -1713,12 +1822,12 @@ export const initStateManager = (
     }
     const localUid = getLocalUserId()
     let hasUserWork = false
-    for (const s of slots.values()) {
+    for (const slot of slots.values()) {
       if (
-        s.k === 'u' &&
-        (s.p ||
-          s.o.length > 0 ||
-          Boolean(localUid && getLiveEntry(s, localUid)))
+        slot.kind === 'u' &&
+        (slot.stepPromise ||
+          slot.ops.length > 0 ||
+          Boolean(localUid && getLiveEntry(slot, localUid)))
       ) {
         hasUserWork = true
         break
@@ -1730,13 +1839,17 @@ export const initStateManager = (
     return (async () => {
       try {
         const steps: Promise<void>[] = []
-        for (const s of slots.values()) {
-          if (s.k === 'u') {
-            if (!s.p && s.o.length > 0) {
-              void flushSlot(s)
+        for (const slot of slots.values()) {
+          if (slot.kind === 'u') {
+            if (slot.ops.length > 0) {
+              slot.skipNextPace = true
+              slot.wakePace?.()
+              if (!slot.stepPromise) {
+                void flushSlot(slot)
+              }
             }
-            if (s.p) {
-              steps.push(s.p)
+            if (slot.stepPromise) {
+              steps.push(slot.stepPromise)
             }
           }
         }
@@ -1759,23 +1872,28 @@ export const initStateManager = (
         }
         const p: Record<string, string> = {}
         const r: WireStateRecord[] = []
+        const sentSigs = new Set<string>()
         let usedBytes = 0
-        for (const s of slots.values()) {
-          if (s.k !== 'u') {
+        for (const slot of slots.values()) {
+          if (slot.kind !== 'u') {
             continue
           }
-          const e = getLiveEntry(s, uid)
-          if (!e) {
+          const entry = getLiveEntry(slot, uid)
+          if (!entry) {
             continue
           }
-          const wire = toWireRecord(e[0], false)
+          const wire = toWireRecord(entry.rec, false)
           const est = estimateWireRecordBytes(wire)
           if (usedBytes + est > maxHandshakeStateBytes) {
             continue
           }
-          p[e[0].userId] = e[0].pub
+          p[entry.rec.userId] = entry.rec.pub
           r.push(wire)
+          sentSigs.add(entry.rec.sig)
           usedBytes += est
+        }
+        if (sentSigs.size > 0) {
+          sentHandshakeSigs.set(peerId, sentSigs)
         }
         return r.length > 0
           ? {ok: true as const, p, r: r as unknown as JsonValue[]}
@@ -1805,11 +1923,12 @@ export const initStateManager = (
       }
       let roomId: string
       try {
-        ;[, , roomId] = await ensureReady()
+        ;({roomId} = await ensureReady())
       } catch {
         return
       }
       const pubMap = payload.p as Record<string, unknown>
+      const knownUid = getKnownPeerUserId(fromPeerId)
       const staged: StagedUserItem[] = []
       let totalBytes = 0
       const now = Date.now()
@@ -1822,33 +1941,67 @@ export const initStateManager = (
           rec && rec.k === 'u'
             ? validateAndMeasureRecord(rec, maxAllowedStateBytes)
             : null
-        if (!parsed) {
+        if (!parsed || (knownUid && parsed.rec.userId !== knownUid)) {
           onInvalidRecord?.(fromPeerId)
           return
         }
-        const slot = slots.get(`u:${parsed[0].ns}`)
-        if (!slot || slot.k !== 'u') {
+        const slot = slots.get(`u:${parsed.rec.ns}`)
+        if (!slot || slot.kind !== 'u') {
           continue
         }
-        const res = await verifyParsedRecord(parsed, slot.r, fromPeerId)
-        if (res === 0) {
+        if (parsed.bytes > slot.maxBytes) {
+          continue
+        }
+        const res = await verifyParsedRecord(
+          parsed,
+          slot.requiredRoles,
+          fromPeerId
+        )
+        if (res === 'invalid') {
           onInvalidRecord?.(fromPeerId)
           return
         }
-        if (res === 1) {
+        if (res === 'drop') {
           continue
         }
-        totalBytes += res[2]
+        totalBytes += res.bytes
         if (totalBytes > maxUserStateBytesPerUser) {
           return
         }
-        staged.push([slot, res[0], res[1], res[2], now])
+        staged.push({
+          slot,
+          rec: res.rec,
+          roles: res.roles,
+          bytes: res.bytes,
+          seenAt: now
+        })
       }
       if (!destroyed && !isPeerBanned(fromPeerId) && staged.length > 0) {
-        stagedHs.set(fromPeerId, staged)
+        stagedHandshake.set(fromPeerId, staged)
       }
     } finally {
       onReady?.()
+    }
+  }
+
+  const sendLocalRecordsToPeer = (
+    peerId: string,
+    alreadySent?: ReadonlySet<string>
+  ): void => {
+    const localUid = getLocalUserId()
+    if (!localUid || !stateAction) {
+      return
+    }
+    for (const slot of slots.values()) {
+      const entry = slot.entries.get(slot.kind === 's' ? '' : localUid)
+      if (
+        entry &&
+        entry.rec.userId === localUid &&
+        !alreadySent?.has(entry.rec.sig) &&
+        isRecordAuthorizedNow(entry.rec, slot.requiredRoles)
+      ) {
+        sendState({t: 'rec', r: toWireRecord(entry.rec, true)}, peerId)
+      }
     }
   }
 
@@ -1860,15 +2013,17 @@ export const initStateManager = (
     if (destroyed) {
       return
     }
-    const staged = stagedHs.get(peerId)
+    const alreadySent = sentHandshakeSigs.get(peerId)
+    sentHandshakeSigs.delete(peerId)
+    const staged = stagedHandshake.get(peerId)
     if (staged) {
-      stagedHs.delete(peerId)
-      const isGossip = isGossipActive()
+      stagedHandshake.delete(peerId)
+      const shouldForward = isScaleActive()
       for (const item of staged) {
-        if (item[1].userId === userId) {
-          const entry = commitEntry(item[0], item[1], item[2], item[3])
-          if (entry && isGossip) {
-            rebroadcastAppliedRecord(entry[0], peerId)
+        if (item.rec.userId === userId) {
+          const entry = commitEntry(item.slot, item.rec, item.roles, item.bytes)
+          if (entry && shouldForward) {
+            rebroadcastAppliedRecord(entry.rec, peerId)
           }
         } else {
           onInvalidRecord?.(peerId)
@@ -1882,38 +2037,39 @@ export const initStateManager = (
       const now = Date.now()
       for (const item of stagedOffline.values()) {
         if (
-          now - item[4] < offlineStagingTtlMs &&
-          slots.get(`u:${item[0].n}`) === item[0] &&
-          isRecordAuthorizedNow(item[1], item[0].r)
+          now - item.seenAt < offlineStagingTtlMs &&
+          slots.get(`u:${item.slot.namespace}`) === item.slot &&
+          isRecordAuthorizedNow(item.rec, item.slot.requiredRoles)
         ) {
-          commitEntry(item[0], item[1], item[2], item[3])
+          commitEntry(item.slot, item.rec, item.roles, item.bytes)
         }
       }
     }
 
     resolvePendingJoin(peerId, true)
 
-    if (
-      isDirect &&
-      stateAction &&
-      slots.size > 0 &&
-      (completedSyncPeers.size + inFlightPullTimers.size < syncPullFanout ||
-        isGossipActive())
-    ) {
-      sendPullToPeer(peerId)
+    if (isDirect && stateAction && slots.size > 0) {
+      sendLocalRecordsToPeer(peerId, alreadySent)
+      if (
+        completedSyncPeers.size + inFlightPulls.size < syncPullFanout ||
+        isScaleActive()
+      ) {
+        sendPullToPeer(peerId)
+      }
     }
   }
 
-  const clearPeerPull = (peerId: string): void => {
-    stagedHs.delete(peerId)
-    deleteLiveRate(peerId)
+  const clearPeer = (peerId: string): void => {
+    stagedHandshake.delete(peerId)
+    sentHandshakeSigs.delete(peerId)
+    liveRateLimiter.delete(peerId)
     resolvePendingJoin(peerId, false)
     clearPullTimer(peerId)
     completedSyncPeers.delete(peerId)
   }
 
   const onPeerDisconnected = (peerId: string): void => {
-    clearPeerPull(peerId)
+    clearPeer(peerId)
     if (
       !destroyed &&
       slots.size > 0 &&
@@ -1930,10 +2086,10 @@ export const initStateManager = (
     pendingOfflineUserRecs.delete(userId)
     const now = Date.now()
     for (const slot of slots.values()) {
-      if (slot.k === 'u') {
-        const entry = slot.m.get(userId)
+      if (slot.kind === 'u') {
+        const entry = slot.entries.get(userId)
         if (entry) {
-          evictEntry(slot, userId, entry, now, [...entry[3]])
+          evictEntry(slot, userId, entry, now, [...entry.roles])
         }
       }
     }
@@ -1945,82 +2101,44 @@ export const initStateManager = (
     }
     pendingOfflineUserRecs.delete(bannedUid)
     const now = Date.now()
+    let evictedShared = false
     for (const slot of slots.values()) {
-      const key = slot.k === 's' ? '' : bannedUid
-      const entry = slot.m.get(key)
-      if (entry && (slot.k === 'u' || entry[0].userId === bannedUid)) {
+      const key = slot.kind === 's' ? '' : bannedUid
+      const entry = slot.entries.get(key)
+      if (entry && (slot.kind === 'u' || entry.rec.userId === bannedUid)) {
         evictEntry(slot, key, entry, now, [])
+        if (slot.kind === 's') {
+          evictedShared = true
+        }
       }
+    }
+    if (evictedShared) {
+      scheduleRepull()
     }
   }
 
-  return [
-    makeState,
-    makeUserState,
-    prepareHandshakeReady,
-    stageHandshakeUserState,
-    onPeerJoined,
-    onPeerDisconnected,
-    onUserLeft,
-    purgeBannedUser,
-    clearPeerPull,
-    () => {
-      destroyed = true
-      inFlightPullTimers.forEach(resetTimer)
-      inFlightPullTimers.clear()
-      completedSyncPeers.clear()
-      stagedHs.clear()
-      pendingOfflineUserRecs.clear()
-      clearLiveRate()
-      pendingJoinWaiters.forEach(w => w[1](false))
-      pendingJoinWaiters.clear()
-      slots.forEach(s => s.c())
-    },
-    async (rec, fromPeerId) => Boolean(await applyIncoming(rec, fromPeerId))
-  ]
-}
+  const destroy = (): void => {
+    destroyed = true
+    inFlightPulls.forEach(pull => resetTimer(pull.timer))
+    inFlightPulls.clear()
+    completedSyncPeers.clear()
+    stagedHandshake.clear()
+    sentHandshakeSigs.clear()
+    pendingOfflineUserRecs.clear()
+    liveRateLimiter.clear()
+    pendingJoinWaiters.forEach(waiter => waiter.resolve(false))
+    pendingJoinWaiters.clear()
+    slots.forEach(slot => {
+      slot.wakePace?.()
+      slot.clearListeners()
+    })
+  }
 
-export const createStateManager = (deps: StateManagerDeps): StateManager => {
-  const [
-    makeState,
-    makeUserState,
-    prepareHandshakeReady,
-    stageHandshakeUserState,
-    onPeerJoined,
-    onPeerDisconnected,
-    onUserLeft,
-    purgeBannedUser,
-    clearPeer,
-    destroy,
-    verifyAndApplyStateRecord
-  ] = initStateManager(
-    deps.appId,
-    deps.getRoomId,
-    deps.getSelfId,
-    deps.getLocalUserId,
-    async () => {
-      const r = await deps.ensureReady()
-      return [r.selfId, r.user, r.roomId]
-    },
-    deps.hasRolesPlugin,
-    deps.getRolesProvider,
-    deps.getScaleProvider,
-    deps.isPeerActive,
-    deps.isPeerPendingHandshake,
-    deps.isDirectPeer,
-    deps.getDirectPeerIds,
-    deps.isUserOnline,
-    deps.getKnownPeerUserId,
-    deps.isPeerBanned,
-    deps.getPeerRoles,
-    deps.makeInternalAction,
-    deps.onInvalidRecord,
-    deps.onBroadcastRecord
-  )
   return {
     makeState,
     makeUserState,
-    verifyAndApplyStateRecord,
+    verifyAndApplyStateRecord: async (rec, fromPeerId) =>
+      Boolean(await applyIncoming(rec, fromPeerId)),
     prepareHandshakeReady,
     stageHandshakeUserState,
     onPeerJoined,

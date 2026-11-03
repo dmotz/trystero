@@ -21,7 +21,7 @@ void test('a prewarmed offer does not replay when signal handler is attached', a
   assert.deepEqual(replayedSignals, [])
 })
 
-void test('unanswered offer restarts preserve the pending data channel without rollback', async t => {
+void test('repeated unanswered getOffer calls preserve the pending data channel without rollback, and post-answer negotiation emits a fresh offer', async t => {
   class TrackingRTCPeerConnection extends MockRTCPeerConnection {
     rollbacks = 0
 
@@ -41,35 +41,59 @@ void test('unanswered offer restarts preserve the pending data channel without r
     rtcPolyfill: TrackingRTCPeerConnection as never
   })
   t.after(() => peer.destroy())
+  assert.equal('restartIce' in peer, false)
   const pc = peer.connection as unknown as TrackingRTCPeerConnection
 
-  await peer.getOffer()
+  const initialOffer = await peer.getOffer()
+  assert.ok(initialOffer)
   assert.equal(pc.signalingState, 'have-local-offer')
   assert.equal(pc.remoteDescription, null)
-  await peer.getOffer(true)
+  const repeatedOffer = await peer.getOffer()
+  assert.deepEqual(repeatedOffer, initialOffer)
   assert.equal(pc.rollbacks, 0)
   assert.equal(pc.signalingState, 'have-local-offer')
 
+  const renegotiatedOffers: Array<{type: string; sdp: string}> = []
+  peer.setHandlers({
+    signal: signal => {
+      if (signal.type === 'offer') {
+        renegotiatedOffers.push(signal)
+      }
+    }
+  })
+
   await peer.signal({type: 'answer', sdp: 'mock-answer'})
   assert.equal(pc.signalingState, 'stable')
-  await peer.getOffer(true)
-  await peer.getOffer(true)
-  assert.equal(pc.rollbacks, 1)
+  pc.onnegotiationneeded?.()
+  await flushMicrotasks()
+  assert.equal(renegotiatedOffers.length, 1)
+  assert.notEqual(renegotiatedOffers[0]!.sdp, initialOffer.sdp)
+  assert.equal(pc.rollbacks, 0)
 })
 
-void test('a restarted prewarmed offer does not queue in pendingSignals', async t => {
+void test('repeated prewarmed getOffer calls do not queue in pendingSignals and non-initiator getOffer returns undefined', async t => {
   const peer = initPeer(true, {
+    appId: 'restarted-prewarmed-offer-test',
+    rtcPolyfill: MockRTCPeerConnection as never
+  })
+  const responder = initPeer(false, {
     appId: 'restarted-prewarmed-offer-test',
     rtcPolyfill: MockRTCPeerConnection as never
   })
   t.after(() => {
     peer.destroy()
+    responder.destroy()
   })
 
-  await peer.getOffer()
-  const restarted = await peer.getOffer(true)
-  assert.ok(restarted)
-  assert.equal(restarted.type, 'offer')
+  assert.equal('restartIce' in responder, false)
+  assert.equal(await responder.getOffer(), undefined)
+
+  const first = await peer.getOffer()
+  const repeated = await peer.getOffer()
+  assert.ok(first)
+  assert.ok(repeated)
+  assert.equal(repeated.type, 'offer')
+  assert.equal(repeated.sdp, first.sdp)
 
   const replayedSignals: unknown[] = []
   peer.setHandlers({signal: signal => replayedSignals.push(signal)})

@@ -9,6 +9,7 @@ import {
   canonicalLeaveHeader,
   createOverlayManager,
   descriptorCanonicalPayload,
+  maxDescriptorNeighbors,
   overlayFrameVersion,
   packOverlayControl,
   scale
@@ -16,9 +17,10 @@ import {
 import createRoom, {
   getRoomSignalingBridge
 } from '../../packages/core/src/room.ts'
-import {encodeBytes} from '../../packages/core/src/utils.ts'
+import {encodeBytes, toBase64} from '../../packages/core/src/utils.ts'
 import {
   encodeInternalAction,
+  getTestEndpointByPeerId,
   LinkedPeer,
   linkPeers,
   testPeerId,
@@ -42,7 +44,8 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     selfId: alicePid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 6},
+    config: {maxDirectPeers: 6},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(alicePid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -51,7 +54,8 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     selfId: relayPid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 6},
+    config: {maxDirectPeers: 6},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(relayPid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -60,11 +64,8 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     selfId: bobPid,
     appId,
     roomId,
-    topology: {
-      mode: 'auto',
-      autoThreshold: 12,
-      maxConnections: 6
-    },
+    config: {maxDirectPeers: 6},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(bobPid),
     onVirtualPeerJoin: pid => virtualJoinsAtBob.push(pid),
     onVirtualPeerLeave: pid => virtualLeavesAtBob.push(pid),
     onDeliverData: (from, data) =>
@@ -74,7 +75,8 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     selfId: malloryPid,
     appId,
     roomId,
-    topology: {mode: 'gossip', maxConnections: 6},
+    config: {maxDirectPeers: 6},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(malloryPid),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () => {}
@@ -185,9 +187,8 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
 
     // 1. Mallory sends her own fresh signed descriptor with 15 fake neighbor IDs + legacy down: [alicePid]
     const malloryId = await mallory.getLocalCryptoIdentity()
-    const malloryFakeNeighbors = Array.from(
-      {length: 15},
-      (_, i) => `sybil-neighbor-${i}`
+    const malloryFakeNeighbors = Array.from({length: 15}, (_, i) =>
+      testPeerId(`sybil-neighbor-${i}`)
     )
     const malloryDesc = {
       peerId: malloryPid,
@@ -228,18 +229,27 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
       bob.getSnapshot().roomPeerIds.includes(alicePid),
       'Alice must NOT be evicted when non-neighbor Mallory bundles her own fresh descriptor with down: ["alice"]'
     )
-    // Verify Mallory's 15 fake unverified neighbor IDs did NOT inflate Bob's knownRoster or flip auto mode to gossip
-    assert.equal(
-      bob.getActiveMode(),
-      'mesh',
-      'unverified neighbor claims in a descriptor must not inflate knownRoster to flip auto mode to gossip'
-    )
+    // Verify Mallory's 15 fake unverified neighbor IDs did NOT inflate Bob's roomPeerIds or target neighbors
+    for (const fakeId of malloryFakeNeighbors) {
+      assert.equal(
+        bob.getSnapshot().roomPeerIds.includes(fakeId),
+        false,
+        'unverified neighbor claims in a descriptor must not enter roomPeerIds'
+      )
+      assert.equal(
+        bob.getTargetNeighbors().has(fakeId),
+        false,
+        'unverified neighbor claims in a descriptor must not enter getTargetNeighbors()'
+      )
+    }
 
-    // Also verify excessive neighbor list (> maxDescriptorNeighbors = 18) is rejected as signatureFailure
+    // Also verify excessive neighbor list (> maxDescriptorNeighbors = 64) is rejected as signatureFailure
     const oversizedNeighborsDesc = {
       peerId: malloryPid,
       seq: 51,
-      neighbors: Array.from({length: 25}, (_, i) => `excess-neighbor-${i}`),
+      neighbors: Array.from({length: maxDescriptorNeighbors + 1}, (_, i) =>
+        testPeerId(`excess-neighbor-${i}`)
+      ),
       signPubKey: malloryId.signPubJwk,
       encPubKey: malloryId.encPubJwk,
       sig: 'AA=='
@@ -259,15 +269,17 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
       'descriptor with excessive neighbor array must be rejected'
     )
 
-    // 2. Unicast frame from an unknown origin is rejected at the relay and never forwarded to Bob
+    // 2. Unicast frame from an unknown origin is never forwarded by the relay without verified origin signature
+    const unknownOriginPid = testPeerId('unknown-attacker-origin')
+    const unknownOriginEp = getTestEndpointByPeerId(unknownOriginPid)
     const relaySentBefore = sentFromRelayToBob.length
     const relaySigFailBefore = relay.getSnapshot().stats.signatureFailures
     const fakeUnicastHeader = encodeBytes(
       JSON.stringify({
-        o: 'unknown-attacker-origin',
+        o: unknownOriginPid,
         d: bobPid,
         q: 1,
-        m: 'unknown-attacker-origin:msg-1',
+        m: `${unknownOriginPid}:msg-1`,
         iv: Buffer.from(new Uint8Array(12)).toString('base64'),
         s: Buffer.from(new Uint8Array(64)).toString('base64')
       })
@@ -287,12 +299,46 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     assert.equal(
       sentFromRelayToBob.length,
       relaySentBefore,
-      'relay must drop unicast frame from unknown origin instead of forwarding it'
+      'relay must not forward unicast frame from unverified/unknown origin'
     )
+
+    // Even if unknownOriginPid subsequently publishes a valid descriptor, the forged buffered unicast fails signature verification and is dropped
+    const unknownOriginDesc = {
+      peerId: unknownOriginPid,
+      seq: 1,
+      neighbors: [alicePid],
+      signPubKey: unknownOriginEp.signPubJwk,
+      sig: ''
+    }
+    unknownOriginDesc.sig = toBase64(
+      await unknownOriginEp.sign(
+        encodeBytes(
+          descriptorCanonicalPayload(unknownOriginDesc, appId, roomId)
+        )
+      )
+    )
+    const relaySentBeforeReplay = sentFromRelayToBob.length
+    relay.handleOverlayFrame(
+      alicePid,
+      packOverlayControl({
+        t: 'gossip',
+        descriptors: [unknownOriginDesc]
+      }).slice().buffer
+    )
+    await wait(40)
     assert.equal(
       relay.getSnapshot().stats.signatureFailures,
       relaySigFailBefore + 1,
-      'relay must record signatureFailure for unicast from unknown origin'
+      'relay must record signatureFailure when forged unicast is verified'
+    )
+    // Only gossip control frame(s) may be sent to Bob, never the forged unicast (kind=3)
+    const forwardedUnicasts = sentFromRelayToBob
+      .slice(relaySentBeforeReplay)
+      .filter(f => f[1] === 3)
+    assert.equal(
+      forwardedUnicasts.length,
+      0,
+      'relay must never forward forged unicast to Bob'
     )
 
     // 3. Oversized overlay binary header (> maxOverlayHeaderBytes = 1024 B) is rejected
@@ -422,18 +468,32 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     )
 
     const ghostMsgId = `${alicePid}:ghost-broadcast-after-leave`
+    const ghostTs = Date.now()
     const ghostPayload = new Uint8Array([1, 2, 3, 4])
     const ghostSig = Buffer.from(
       await ecdsaSign(
         aliceId.signPrivateKey,
         buildOverlaySignedBytes(
-          canonicalBroadcastHeader(alicePid, ghostMsgId, 1, appId, roomId),
+          canonicalBroadcastHeader(
+            alicePid,
+            ghostMsgId,
+            1,
+            ghostTs,
+            appId,
+            roomId
+          ),
           ghostPayload
         ) as BufferSource
       )
     ).toString('base64')
     const ghostHeaderBytes = encodeBytes(
-      JSON.stringify({o: alicePid, q: 1, m: ghostMsgId, s: ghostSig})
+      JSON.stringify({
+        o: alicePid,
+        q: 1,
+        t: ghostTs,
+        m: ghostMsgId,
+        s: ghostSig
+      })
     )
     const ghostBroadcastFrame = new Uint8Array(
       5 + ghostHeaderBytes.byteLength + ghostPayload.byteLength
@@ -484,10 +544,10 @@ void test('Bug A regression: virtual peer survives a failed direct dial or hands
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId: 'bug-a-app',
         roomId: 'bug-a-room',
-        use: [scale({mode: 'gossip', maxConnections: 4})]
+        use: [scale({maxDirectPeers: 4})]
       }
     )
     rooms.set(id, r as Room & ScalePluginApi)

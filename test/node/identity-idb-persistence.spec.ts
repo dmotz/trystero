@@ -61,9 +61,11 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
                   queueMicrotask(() => {
                     if (idbStore.has(key)) {
                       addReq.onerror?.()
+                      queueMicrotask(() => tx.onerror?.())
                     } else {
                       idbStore.set(key, val)
                       addReq.onsuccess?.()
+                      queueMicrotask(() => tx.oncomplete?.())
                     }
                   })
                   return addReq
@@ -76,6 +78,7 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
                   queueMicrotask(() => {
                     idbStore.set(key, val)
                     putReq.onsuccess?.()
+                    queueMicrotask(() => tx.oncomplete?.())
                   })
                   return putReq
                 },
@@ -87,10 +90,12 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
                   queueMicrotask(() => {
                     idbStore.delete(key)
                     delReq.onsuccess?.()
+                    queueMicrotask(() => tx.oncomplete?.())
                   })
                   return delReq
                 }
               }),
+              oncomplete: null,
               onabort: null,
               onerror: null
             }

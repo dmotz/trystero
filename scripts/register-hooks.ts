@@ -5,10 +5,6 @@ const workspaceSrcUrls: Record<string, string> = {
     '../packages/core/src/index.ts',
     import.meta.url
   ).href,
-  '@trystero-p2p/core/public': new URL(
-    '../packages/core/src/public.ts',
-    import.meta.url
-  ).href,
   '@trystero-p2p/firebase': new URL(
     '../packages/firebase/src/index.ts',
     import.meta.url

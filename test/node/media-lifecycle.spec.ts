@@ -7,7 +7,13 @@ import {
 import initPeer from '../../packages/core/src/peer.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import type {PeerHandle, Room} from '../../packages/core/src/types.ts'
-import {LinkedMediaPeer, MockPeer, linkPeers, turn} from './peer-harness.ts'
+import {
+  LinkedMediaPeer,
+  MockPeer,
+  linkPeers,
+  testEndpoint,
+  turn
+} from './peer-harness.ts'
 
 void test('media metadata keeps one current alias per native object and preserves native ID lookup', () => {
   const cache = createMediaIdentityCache()
@@ -92,6 +98,8 @@ void test(
     let directRoomB: Room | null = null
 
     try {
+      const epA = testEndpoint('media-direct-a')
+      const epB = testEndpoint('media-direct-b')
       let registerDirectA!: (peer: PeerHandle, id: string) => void
       let registerDirectB!: (peer: PeerHandle, id: string) => void
       directRoomA = createRoom(
@@ -99,14 +107,16 @@ void test(
           registerDirectA = f
         },
         () => {},
-        () => {}
+        () => {},
+        {endpointIdentity: epA, appId: 'media-app', roomId: 'media-room-1'}
       )
       directRoomB = createRoom(
         f => {
           registerDirectB = f
         },
         () => {},
-        () => {}
+        () => {},
+        {endpointIdentity: epB, appId: 'media-app', roomId: 'media-room-1'}
       )
       const joinDirectA = new Promise(resolve =>
         directRoomA!.onPeerJoin(resolve, {once: true})
@@ -118,8 +128,8 @@ void test(
         new LinkedMediaPeer(),
         new LinkedMediaPeer()
       )
-      registerDirectA(directPeerA as unknown as PeerHandle, 'peer-b')
-      registerDirectB(directPeerB as unknown as PeerHandle, 'peer-a')
+      registerDirectA(directPeerA as unknown as PeerHandle, epB.peerId)
+      registerDirectB(directPeerB as unknown as PeerHandle, epA.peerId)
       await Promise.all([joinDirectA, joinDirectB])
 
       const streamEvents: Array<{
@@ -138,7 +148,7 @@ void test(
       })
 
       await directRoomA.addStream(localStream as unknown as MediaStream, {
-        target: 'peer-b',
+        target: epB.peerId,
         metadata: {mode: 'camera'}
       })
       assert.equal(directPeerA.addStreamCalls, 1)
@@ -146,14 +156,14 @@ void test(
         {
           streamId: 'video-stream',
           trackIds: ['initial-video-track'],
-          peerId: 'peer-a',
+          peerId: epA.peerId,
           metadata: {mode: 'camera'}
         }
       ])
 
       // Re-calling addStream with identical tracks and metadata is a no-op on senders and does not re-fire onPeerStream
       await directRoomA.addStream(localStream as unknown as MediaStream, {
-        target: 'peer-b',
+        target: epB.peerId,
         metadata: {mode: 'camera'}
       })
       assert.equal(directPeerA.addStreamCalls, 1)
@@ -165,13 +175,13 @@ void test(
       await directRoomA.replaceTrack(
         initialTrack as unknown as MediaStreamTrack,
         replacementTrack as unknown as MediaStreamTrack,
-        {target: 'peer-b'}
+        {target: epB.peerId}
       )
       assert.equal(directPeerA.replaceTrackCalls, 1)
 
       // Re-announcing stream with updated metadata after replaceTrack keeps the replaced track (no removeTrack/addTrack churn) and fires onPeerStream again
       await directRoomA.addStream(localStream as unknown as MediaStream, {
-        target: 'peer-b',
+        target: epB.peerId,
         metadata: {mode: 'screenshare'}
       })
       assert.equal(directPeerA.addTrackCalls, 0)
@@ -180,14 +190,14 @@ void test(
       assert.deepEqual(streamEvents[1], {
         streamId: 'video-stream',
         trackIds: ['initial-video-track'],
-        peerId: 'peer-a',
+        peerId: epA.peerId,
         metadata: {mode: 'screenshare'}
       })
 
       // Adding a track to the local stream and calling addStream syncs only the added track
       currentTracks = [initialTrack, extraAudioTrack]
       await directRoomA.addStream(localStream as unknown as MediaStream, {
-        target: 'peer-b',
+        target: epB.peerId,
         metadata: {mode: 'screenshare'}
       })
       assert.equal(directPeerA.addTrackCalls, 1)
@@ -203,7 +213,7 @@ void test(
       // Removing a track from the local stream and calling addStream removes that track's sender
       currentTracks = [initialTrack]
       await directRoomA.addStream(localStream as unknown as MediaStream, {
-        target: 'peer-b',
+        target: epB.peerId,
         metadata: {mode: 'screenshare'}
       })
       assert.equal(directPeerA.removeTrackCalls, 1)
@@ -229,6 +239,8 @@ void test(
     let roomB: Room | null = null
 
     try {
+      const epA = testEndpoint('media-multi-a')
+      const epB = testEndpoint('media-multi-b')
       let registerPeerA!: (peer: PeerHandle, id: string) => void
       let registerPeerB!: (peer: PeerHandle, id: string) => void
       roomA = createRoom(
@@ -236,14 +248,16 @@ void test(
           registerPeerA = f
         },
         () => {},
-        () => {}
+        () => {},
+        {endpointIdentity: epA, appId: 'media-app', roomId: 'media-room-2'}
       )
       roomB = createRoom(
         f => {
           registerPeerB = f
         },
         () => {},
-        () => {}
+        () => {},
+        {endpointIdentity: epB, appId: 'media-app', roomId: 'media-room-2'}
       )
       const joinA = new Promise(resolve =>
         roomA!.onPeerJoin(resolve, {once: true})
@@ -255,8 +269,8 @@ void test(
         new LinkedMediaPeer(),
         new LinkedMediaPeer()
       )
-      registerPeerA(peerA as unknown as PeerHandle, 'peer-b')
-      registerPeerB(peerB as unknown as PeerHandle, 'peer-a')
+      registerPeerA(peerA as unknown as PeerHandle, epB.peerId)
+      registerPeerB(peerB as unknown as PeerHandle, epA.peerId)
       await Promise.all([joinA, joinB])
 
       const receivedStreams: Array<{
@@ -279,20 +293,20 @@ void test(
 
       await Promise.all([
         roomA.addStream(avStream as unknown as MediaStream, {
-          target: 'peer-b',
+          target: epB.peerId,
           metadata: {kind: 'camera'}
         }),
         roomA.addStream(screenStream as unknown as MediaStream, {
-          target: 'peer-b',
+          target: epB.peerId,
           metadata: {kind: 'screen'}
         })
       ])
 
       assert.deepEqual(receivedStreams, [
-        {streamId: 'av-stream', peerId: 'peer-a', metadata: {kind: 'camera'}},
+        {streamId: 'av-stream', peerId: epA.peerId, metadata: {kind: 'camera'}},
         {
           streamId: 'screen-stream',
-          peerId: 'peer-a',
+          peerId: epA.peerId,
           metadata: {kind: 'screen'}
         }
       ])
@@ -398,7 +412,7 @@ void test('receiveRemoteStream and receiveStreamMeta emit when receiver transcei
     {
       k: 'stream-key-1',
       s: 'shared-stream-id',
-      t: ['sender-audio-id', 'sender-video-id'],
+      t: 2,
       m: {phase: 'first'}
     },
     'peer-a'
@@ -423,7 +437,7 @@ void test('receiveRemoteStream and receiveStreamMeta emit when receiver transcei
     {
       k: 'stream-key-1',
       s: 'shared-stream-id',
-      t: ['sender-audio-id', 'sender-video-id'],
+      t: 2,
       m: {phase: 'second'}
     },
     'peer-a'

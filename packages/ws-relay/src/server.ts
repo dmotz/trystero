@@ -14,6 +14,8 @@ export type WsRelayServerOptions = WebSocket.ServerOptions & {
   maxTopicLength?: number
   maxSubscriptionsPerSocket?: number
   maxSubscriptions?: number
+  maxMessagesPerSecond?: number
+  maxBurstMessages?: number
 }
 
 export type WsRelayServer = {
@@ -26,6 +28,12 @@ export type WsRelayServer = {
 }
 
 const defaultPort = 8080
+const validTopicPattern = /^[A-Za-z0-9_-]+$/
+
+type RateBucket = {
+  tokens: number
+  lastRefillMs: number
+}
 
 const toError = (err: unknown): Error =>
   err instanceof Error ? err : new Error(String(err))
@@ -54,6 +62,8 @@ export const createWsRelayServer = (
     maxTopicLength = 256,
     maxSubscriptionsPerSocket = 128,
     maxSubscriptions = 10_000,
+    maxMessagesPerSecond = 200,
+    maxBurstMessages = Math.max(256, maxMessagesPerSecond * 2),
     ...wsOptions
   } = options
   let resolveReady = (): void => {}
@@ -82,17 +92,44 @@ export const createWsRelayServer = (
   const wss = new WebSocketServer(
     {
       port: wsOptions.server ? undefined : (wsOptions.port ?? defaultPort),
-      maxPayload: 1024 * 1024,
+      maxPayload: 256 * 1024,
       ...wsOptions
     },
     resolveReadyOnce
   )
   const topics = new Map<string, Set<WebSocket>>()
   const socketTopics = new WeakMap<WebSocket, Set<string>>()
+  const socketRateBuckets = new WeakMap<WebSocket, RateBucket>()
   let subscriptionCount = 0
 
   if (wsOptions.server || wsOptions.noServer) {
     queueMicrotask(resolveReadyOnce)
+  }
+
+  const consumeRateToken = (socket: WebSocket): boolean => {
+    if (maxMessagesPerSecond <= 0 || maxBurstMessages <= 0) {
+      return false
+    }
+    const now = Date.now()
+    let bucket = socketRateBuckets.get(socket)
+    if (!bucket) {
+      bucket = {tokens: maxBurstMessages, lastRefillMs: now}
+      socketRateBuckets.set(socket, bucket)
+    } else {
+      const elapsedSeconds = Math.max(0, now - bucket.lastRefillMs) / 1000
+      if (elapsedSeconds > 0) {
+        bucket.tokens = Math.min(
+          maxBurstMessages,
+          bucket.tokens + elapsedSeconds * maxMessagesPerSecond
+        )
+        bucket.lastRefillMs = now
+      }
+    }
+    if (bucket.tokens < 1) {
+      return false
+    }
+    bucket.tokens -= 1
+    return true
   }
 
   const unsubscribe = (socket: WebSocket, topic: string): void => {
@@ -161,6 +198,7 @@ export const createWsRelayServer = (
   const cleanup = (socket: WebSocket): void => {
     socketTopics.get(socket)?.forEach(topic => unsubscribe(socket, topic))
     socketTopics.delete(socket)
+    socketRateBuckets.delete(socket)
   }
 
   wss.on('connection', socket => {
@@ -170,14 +208,23 @@ export const createWsRelayServer = (
           return
         }
 
-        const msg = parseClientMessage(rawDataToString(data))
-
-        if (!msg) {
+        if (!consumeRateToken(socket)) {
+          socket.close(1008, 'rate limit exceeded')
           return
         }
 
-        if (msg.topic.length > maxTopicLength) {
-          socket.close(1008, 'topic too long')
+        const msg = parseClientMessage(rawDataToString(data))
+
+        if (!msg) {
+          socket.close(1008, 'invalid message')
+          return
+        }
+
+        if (
+          msg.topic.length > maxTopicLength ||
+          !validTopicPattern.test(msg.topic)
+        ) {
+          socket.close(1008, 'invalid topic')
           return
         }
 

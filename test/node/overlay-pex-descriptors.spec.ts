@@ -5,9 +5,10 @@ import type {
   Room,
   ScalePluginApi
 } from '../../packages/core/src/index.ts'
-import {roles, signRoleCertificate} from '../../packages/core/src/authority.ts'
+import {roles} from '../../packages/core/src/authority.ts'
 import {createUserIdentity} from '../../packages/core/src/identity.ts'
 import {ecdsaSign} from '../../packages/core/src/crypto.ts'
+import {signRoleCertInternal} from '../../packages/core/src/signed-record.ts'
 import {
   maxActionFrameBytes,
   maxRoomFrameBytes
@@ -26,6 +27,7 @@ import createRoom from '../../packages/core/src/room.ts'
 import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
 import {
   allocTestPeerIds,
+  getTestEndpointByPeerId,
   LinkedPeer,
   linkPeers,
   testPeerId,
@@ -40,26 +42,25 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
   for (let i = 0; i < 30; i++) {
     const peerUser = await createUserIdentity()
     const peerId = `cert-peer-${String(i).padStart(3, '0')}`
-    const cert = await signRoleCertificate(
+    const cert = await signRoleCertInternal(
       adminUser.sign,
       adminUser.signPubJwk,
-      {
-        appId: 'c1-app',
-        roomId: 'c1-room',
-        subUserId: peerUser.userId,
-        roles: [
-          'moderator',
-          'speaker',
-          'presenter',
-          'curator',
-          'editor',
-          'archivist',
-          'host-assistant',
-          'stage-manager',
-          'broadcaster',
-          'reviewer'
-        ]
-      }
+      peerUser.userId,
+      'c1-app',
+      'c1-room',
+      [
+        'moderator',
+        'speaker',
+        'presenter',
+        'curator',
+        'editor',
+        'archivist',
+        'host-assistant',
+        'stage-manager',
+        'broadcaster',
+        'reviewer'
+      ],
+      Date.now()
     )
     descriptors.push({
       peerId,
@@ -183,13 +184,12 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId,
         roomId,
         use: [
           scale({
-            mode: 'gossip',
-            maxConnections: 6
+            maxDirectPeers: 6
           }),
           roles()
         ],
@@ -202,7 +202,7 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
   try {
     const activeSet = new Set(peerIds)
     for (const id of activeSet) {
-      const targets = computeTargetNeighbors(id, activeSet, 'gossip', 6)
+      const targets = computeTargetNeighbors(id, activeSet, 6)
       for (const targetId of targets) {
         connectPair(id, targetId)
       }
@@ -269,7 +269,7 @@ void test('Mutual edge confirmation, multi-neighbor disconnect eviction, descrip
     () => {},
     () => {},
     {
-      selfId: 'bare-peer',
+      endpointIdentity: getTestEndpointByPeerId(testPeerId('bare-peer')),
       appId: 'bare-app',
       roomId: 'bare-room'
     }
@@ -296,7 +296,9 @@ void test('Mutual edge confirmation, multi-neighbor disconnect eviction, descrip
       () => {},
       () => {},
       {
-        selfId: 'host-default-proofs',
+        endpointIdentity: getTestEndpointByPeerId(
+          testPeerId('host-default-proofs')
+        ),
         appId: 'proof-app',
         roomId: 'proof-room',
         identity: 'none',
@@ -326,7 +328,8 @@ void test('Mutual edge confirmation, multi-neighbor disconnect eviction, descrip
       selfId: id,
       appId: 'mutual-app',
       roomId: 'mutual-room',
-      topology: {mode: 'gossip', maxConnections: 4},
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(id),
       ...(descriptorTtlMs ? {descriptorTtlMs} : {}),
       onVirtualPeerJoin: () => {},
       onVirtualPeerLeave: () => {},
@@ -463,7 +466,8 @@ void test('Mutual edge confirmation, multi-neighbor disconnect eviction, descrip
       selfId: ttlObserverPid,
       appId: 'mutual-app',
       roomId: 'mutual-room',
-      topology: {mode: 'gossip', maxConnections: 4},
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(ttlObserverPid),
       descriptorTtlMs: 250,
       onVirtualPeerJoin: () => {},
       onVirtualPeerLeave: pid => ttlEvicted.push(pid),

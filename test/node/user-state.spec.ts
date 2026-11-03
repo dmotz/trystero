@@ -154,7 +154,7 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
   const join3 = makeJoinRoom('ord-3')
 
   const room1 = join1(
-    {appId: 'order-app', rtcPolyfill, identity: hostId, limit: 2},
+    {appId: 'order-app', rtcPolyfill, identity: hostId, maxUsers: 2},
     'duel'
   )
   const name1 = room1.makeUserState('name', 'Stranger')
@@ -184,7 +184,7 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
 
   // Guest sets name synchronously right after joinRoom() -> piggybacked on @_hsready!
   const room2 = join2(
-    {appId: 'order-app', rtcPolyfill, identity: guestId, limit: 2},
+    {appId: 'order-app', rtcPolyfill, identity: guestId, maxUsers: 2},
     'duel'
   )
   const name2 = room2.makeUserState('name', 'Stranger')
@@ -219,10 +219,10 @@ void test('Presence ordering: pre-join flush populates userState before onUserJo
     'initiator userState must also be populated inside responder onUserJoin'
   )
 
-  // 3rd user attempts to join a full room (limit: 2) with pre-join userState -> rejected, never leaks!
+  // 3rd user attempts to join a full room (maxUsers: 2) with pre-join userState -> rejected, never leaks!
   const errors3: RoomError[] = []
   const room3 = join3(
-    {appId: 'order-app', rtcPolyfill, identity: extraId, limit: 2},
+    {appId: 'order-app', rtcPolyfill, identity: extraId, maxUsers: 2},
     'duel'
   )
   room3.onError(err => errors3.push(err))

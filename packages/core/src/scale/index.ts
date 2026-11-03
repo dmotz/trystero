@@ -1,34 +1,23 @@
-import type {InternalRoomContext} from '../internal-types'
-import {
-  makeInternalPlugin,
-  mkErr,
-  noOp,
-  peerDisconnectedErr,
-  toError,
-  unrefTimer
-} from '../utils'
+import type {InternalRoomContext, KernelScaleProvider} from '../internal-types'
+import {makeInternalPlugin} from '../plugin'
 import type {
   PeerHandle,
   RoomPlugin,
   ScaleConfig,
-  ScalePluginApi,
-  TopologyMode
+  ScalePluginApi
 } from '../types'
-import {initOverlayManager} from './manager'
-import {
-  defaultDescriptorTtlMs,
-  defaultUnreachableGraceMs,
-  normalizeTopologyConfig
-} from './topology'
+import {mkErr, noOp, peerDisconnectedErr, toError, unrefTimer} from '../utils'
+import {createOverlayManager} from './manager'
+import {normalizeTopologyConfig} from './topology'
 
 export * from './topology'
 export * from './crypto-frame'
 export * from './manager'
 
 export const scale = (
-  topology?: TopologyMode | ScaleConfig
+  config?: ScaleConfig
 ): RoomPlugin<'scale', ScalePluginApi> => {
-  normalizeTopologyConfig(topology)
+  normalizeTopologyConfig(config)
 
   const setupInternal = (kernel: InternalRoomContext): ScalePluginApi => {
     const pendingMediaPeers = new Map<
@@ -43,9 +32,43 @@ export const scale = (
       op: 'connect' | 'ack'
     }>('mctrl')
 
+    const manager = createOverlayManager({
+      selfId: kernel.selfId,
+      appId: kernel.appId,
+      roomId: kernel.getRoomId(),
+      password: kernel.password,
+      ...(config ? {config} : {}),
+      ...(kernel.maxUsers !== undefined ? {maxUsers: kernel.maxUsers} : {}),
+      getLocalEndpointIdentity: kernel.getLocalEndpointIdentity,
+      getLocalUserIdentity: kernel.getLocalUserIdentity,
+      onVirtualPeerJoin: kernel.activateVirtualPeer,
+      onVirtualPeerLeave: kernel.deactivateVirtualPeer,
+      onDeliverData: kernel.deliverRawData,
+      authorizePeerAction: (peerId, requiredRoles, inlineCert) =>
+        kernel
+          .getRolesProvider()
+          ?.authorizePeerAction(peerId, requiredRoles, inlineCert) ?? true,
+      onPeerDescriptorCert: (peerId, signPubKey, cert, userId) => {
+        if (userId) {
+          kernel.setPeerUserId(peerId, userId)
+        }
+        kernel.setPeerPublicKey(peerId, signPubKey)
+        if (userId) {
+          kernel.getRolesProvider()?.onPeerDescriptorCert(peerId, userId, cert)
+        }
+      },
+      onError: cause =>
+        kernel.emitError({
+          code: 'plugin-failed',
+          plugin: 'scale',
+          message: toError(cause, 'scale plugin failed').message,
+          cause
+        })
+    })
+
     const prepareMediaPeer = (id: string): Promise<PeerHandle> => {
       const existingDirect = kernel.getPeerHandle(id, false)
-      if (existingDirect && provider.isDirectPeer(id)) {
+      if (existingDirect && manager.isDirectPeer(id)) {
         return Promise.resolve(existingDirect)
       }
       const pending = pendingMediaPeers.get(id)
@@ -64,8 +87,8 @@ export const scale = (
       )
       unrefTimer(timer)
       const fallbackDialTimer = setTimeout(() => {
-        if (pendingMediaPeers.has(id) && !provider.isDirectPeer(id)) {
-          provider.requireDirectPeer(id)
+        if (pendingMediaPeers.has(id) && !manager.isDirectPeer(id)) {
+          manager.requireDirectPeer(id)
         }
       }, 150)
       unrefTimer(fallbackDialTimer)
@@ -75,54 +98,20 @@ export const scale = (
         pendingMediaPeers.delete(id)
       })
       pendingMediaPeers.set(id, [settled, resolve, reject])
-      provider.requireDirectPeer(id, {dial: false})
+      manager.requireDirectPeer(id, {dial: false})
       void mediaControlAction
-        .send({op: 'connect'}, id)
+        .send({op: 'connect'}, {target: id})
         .catch(err => reject(toError(err, 'failed connecting media peer')))
       return settled
     }
 
-    const [provider, setRoomId] = initOverlayManager(
-      kernel.selfId,
-      kernel.appId,
-      kernel.getRoomId(),
-      kernel.password,
-      topology,
-      defaultDescriptorTtlMs,
-      defaultUnreachableGraceMs,
-      kernel.limit,
-      kernel.getLocalUserIdentity,
-      kernel.activateVirtualPeer,
-      kernel.deactivateVirtualPeer,
-      kernel.deliverRawData,
-      prepareMediaPeer,
-      (peerId, reason) => {
-        if (reason) {
-          pendingMediaPeers.get(peerId)?.[2](reason)
-        }
-      },
-      (peerId, requiredRoles, inlineCert) =>
-        kernel
-          .getRolesProvider()
-          ?.canPeerSendAction(peerId, requiredRoles, inlineCert) ?? true,
-      (peerId, signPubKey, cert, userId) => {
-        if (userId) {
-          kernel.setPeerUserId(peerId, userId)
-        }
-        kernel.setPeerPublicKey(peerId, signPubKey)
-        kernel
-          .getRolesProvider()
-          ?.onPeerDescriptorCert(peerId, signPubKey, cert, userId)
-      }
-    )
-
-    mediaControlAction.onMessage((msg, id) => {
+    mediaControlAction.onMessage((msg, {peerId: id}) => {
       if (msg?.op === 'connect') {
-        if (provider.acceptMediaConnectRequest(id)) {
-          void mediaControlAction.send({op: 'ack'}, id).catch(noOp)
+        if (manager.acceptMediaConnectRequest(id)) {
+          void mediaControlAction.send({op: 'ack'}, {target: id}).catch(noOp)
         }
       } else if (msg?.op === 'ack' && pendingMediaPeers.has(id)) {
-        provider.requireDirectPeer(id)
+        manager.requireDirectPeer(id)
       }
     })
 
@@ -139,11 +128,45 @@ export const scale = (
       pendingMediaPeers.clear()
     })
 
+    const provider: KernelScaleProvider = {
+      isDirectPeer: manager.isDirectPeer,
+      isVirtualPeer: manager.isVirtualPeer,
+      getRoute: manager.getRoute,
+      getSnapshot: manager.getSnapshot,
+      handleFrame: manager.handleFrame,
+      addDirectPeer: manager.addDirectPeer,
+      removeDirectPeer: (peerId, peer, reason) => {
+        if (reason) {
+          pendingMediaPeers.get(peerId)?.[2](reason)
+        }
+        manager.removeDirectPeer(peerId, peer, reason)
+      },
+      prepareMediaPeer,
+      setPeerMediaPinned: manager.setPeerMediaPinned,
+      broadcastInline: (frame, onProgress, signal) =>
+        manager.canBroadcastDirectMesh()
+          ? false
+          : manager.broadcastInline(frame, onProgress, signal),
+      requireDirectPeer: id => manager.requireDirectPeer(id),
+      notePeerDiscovered: manager.notePeerDiscovered,
+      shouldConnectPeer: manager.shouldConnectPeer,
+      getTargetNeighbors: manager.getTargetNeighbors,
+      setOnTargetsChanged: manager.setOnTargetsChanged,
+      announceLeave: manager.announceLeave,
+      destroy: manager.destroy,
+      setPeerSignPublicKey: manager.setPeerSignPublicKey,
+      setLocalRoleCertificate: manager.setLocalRoleCertificate,
+      markPeerBanned: manager.markPeerBanned,
+      unmarkPeerBanned: manager.unmarkPeerBanned,
+      isPeerBanned: manager.isPeerBanned,
+      registerActionAuthority: manager.registerActionAuthority
+    }
+
     kernel.registerScaleProvider(provider)
-    kernel.onRoomIdChanged(setRoomId)
+    kernel.onRoomIdChanged(manager.setRoomId)
 
     return {
-      getTopology: provider.getSnapshot
+      getTopology: manager.getSnapshot
     }
   }
 

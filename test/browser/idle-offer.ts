@@ -3,7 +3,7 @@ import type {StrategyConfig} from '../strategy-configs'
 import {sleep, withStrategyBrowserPair} from './harness'
 import {joinRoomAndWaitForPeer, leaveRoom, ping} from './room-helpers'
 
-test('Trystero: browser: restarting an unanswered data channel offer retains its media section', async ({
+test('Trystero: browser: repeated unanswered data channel getOffer retains its media section', async ({
   page
 }) => {
   await page.goto(`https://127.0.0.1:${process.env['TRYSTERO_TEST_PORT']}/test`)
@@ -14,12 +14,11 @@ test('Trystero: browser: restarting an unanswered data channel offer retains its
 
     try {
       const initial = await peer.getOffer()
-      const replacement = await peer.getOffer(true)
+      const repeated = await peer.getOffer()
       return {
         initial: initial?.sdp,
-        replacement: replacement?.sdp,
+        repeated: repeated?.sdp,
         initialIceUfrag: initial?.sdp.match(/^a=ice-ufrag:(.*)$/m)?.[1],
-        replacementIceUfrag: replacement?.sdp.match(/^a=ice-ufrag:(.*)$/m)?.[1],
         state: peer.connection.signalingState,
         remoteDescription: peer.connection.remoteDescription?.type ?? null
       }
@@ -29,10 +28,8 @@ test('Trystero: browser: restarting an unanswered data channel offer retains its
   })
 
   expect(offers.initial).toMatch(/^m=application/m)
-  expect(offers.replacement).toMatch(/^m=application/m)
+  expect(offers.repeated).toBe(offers.initial)
   expect(offers.initialIceUfrag).toBeTruthy()
-  expect(offers.replacementIceUfrag).toBeTruthy()
-  expect(offers.replacementIceUfrag).not.toBe(offers.initialIceUfrag)
   expect(offers.state).toBe('have-local-offer')
   expect(offers.remoteDescription).toBeNull()
 })

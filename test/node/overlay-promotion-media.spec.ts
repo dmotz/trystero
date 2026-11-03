@@ -5,10 +5,10 @@ import {wait, waitFor} from './peer-harness.ts'
 
 void test('Media streaming over scale overlay: direct neighbor delivery, multi-hop direct promotion, track replacement, and stream removal', async () => {
   const peerCount = 24
-  const maxConnections = 6
+  const maxDirectPeers = 6
   const cluster = await createOverlayCluster({
     peerCount,
-    topology: {mode: 'gossip', maxConnections},
+    topology: {maxDirectPeers},
     media: true
   })
 
@@ -125,7 +125,7 @@ void test('Media streaming over scale overlay: direct neighbor delivery, multi-h
 void test('Targeted media stays private for direct and multi-hop recipients', async () => {
   const cluster = await createOverlayCluster({
     peerCount: 8,
-    topology: {mode: 'gossip', maxConnections: 4},
+    topology: {maxDirectPeers: 4},
     media: true
   })
   try {
@@ -163,7 +163,7 @@ void test('Targeted media stays private for direct and multi-hop recipients', as
 void test('Removing a broadcast stream prevents replay after topology healing', async () => {
   const cluster = await createOverlayCluster({
     peerCount: 8,
-    topology: {mode: 'gossip', maxConnections: 4},
+    topology: {maxDirectPeers: 4},
     media: true
   })
   try {
@@ -197,7 +197,7 @@ void test('Removing and replacing tracks updates streams before promoting additi
   for (const replace of [false, true]) {
     const cluster = await createOverlayCluster({
       peerCount: 8,
-      topology: {mode: 'gossip', maxConnections: 4},
+      topology: {maxDirectPeers: 4},
       media: true
     })
     try {

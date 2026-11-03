@@ -1,33 +1,39 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import type {
+  MessageAction,
+  PeerHandle,
   RolesPluginApi,
   Room,
   ScalePluginApi
 } from '../../packages/core/src/index.ts'
 import {
-  computePayloadDigest,
-  roles,
-  signRoleCertificate,
-  verifyRoleCertificateChain
-} from '../../packages/core/src/authority.ts'
+  actionWireVersion,
+  inspectActionWireHeader
+} from '../../packages/core/src/action-wire.ts'
+import {roles} from '../../packages/core/src/authority.ts'
 import {
   createUserIdentity,
   exportUserIdentity,
   importUserIdentity
 } from '../../packages/core/src/identity.ts'
-import {inspectActionWireHeader} from '../../packages/core/src/action-wire.ts'
+import createRoom from '../../packages/core/src/room.ts'
 import {
   buildOverlaySignedBytes,
   canonicalUnicastHeader,
   createOverlayManager,
   overlayUnicastKind,
   packOverlayBinary,
-  scale
+  scale,
+  unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
-import createRoom from '../../packages/core/src/room.ts'
+import {
+  signRoleCertInternal,
+  verifyRoleCertificate
+} from '../../packages/core/src/signed-record.ts'
 import {encodeBytes} from '../../packages/core/src/utils.ts'
 import {
+  getTestEndpointByPeerId,
   LinkedPeer,
   linkPeers,
   testPeerId,
@@ -35,13 +41,15 @@ import {
   waitFor
 } from './peer-harness.ts'
 
-void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading delegator revocation, anti-replay, offer-time role rejection, plaintext unicast rejection, and concurrent makeState serialization', async () => {
-  // 1. UserIdentity deterministically preserves the same userId across export/import and room formatting
+void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, RoleCertificate validation, overlay anti-replay, offer-time role rejection, maxUsers admission, plaintext unicast rejection, and concurrent makeState serialization', async () => {
+  // 1. UserIdentity deterministically preserves the same userId and signPubJwk across export/import
   const hostUser = await createUserIdentity()
   const reimportedHostUser = await importUserIdentity(
     exportUserIdentity(hostUser)
   )
   const otherUser = await createUserIdentity()
+  assert.equal('publicKey' in hostUser, false)
+  assert.equal(hostUser.signPubJwk.kty, 'EC')
   assert.equal(
     hostUser.userId,
     reimportedHostUser.userId,
@@ -53,39 +61,37 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
     'different UserIdentities must derive distinct userIds'
   )
 
-  // 2. Chunked computePayloadDigest (> 256 KiB) matches across Blob and Uint8Array without full-Blob copy
-  const largeBytes = new Uint8Array(300_000)
-  for (let i = 0; i < largeBytes.length; i++) {
-    largeBytes[i] = (i * 31) & 0xff
-  }
-  const largeBlob = new Blob([largeBytes])
-  const digestUint8 = await computePayloadDigest(largeBytes)
-  const digestBlob = await computePayloadDigest(largeBlob)
-  assert.equal(
-    digestBlob,
-    digestUint8,
-    'chunked Blob digest must match Uint8Array digest for payloads > 256 KiB'
-  )
-  const digestUint8Meta = await computePayloadDigest(largeBytes, {tag: 'v1'})
-  const digestBlobMeta = await computePayloadDigest(largeBlob, {tag: 'v1'})
-  assert.equal(
-    digestBlobMeta,
-    digestUint8Meta,
-    'chunked Blob digest with metadata must match Uint8Array digest with metadata'
-  )
-  assert.notEqual(digestUint8, digestUint8Meta)
-
-  // 3. Future-iat RoleCertificate rejection in verifyRoleCertificateChain
+  // 2. RoleCertificate validation: future-iat rejection and reserved 'admin' role rejection
   const rootId = await createUserIdentity()
   const subId = await createUserIdentity()
-  const futureCert = await signRoleCertificate(rootId.sign, rootId.signPubJwk, {
-    subUserId: subId.userId,
-    appId: 'test-app',
-    roomId: 'test-room',
-    roles: ['moderator'],
-    now: Date.now() + 3_600_000 // 1 hour in the future (> 60s skew allowance)
-  })
-  const futureRes = await verifyRoleCertificateChain(
+
+  const validModCert = await signRoleCertInternal(
+    rootId.sign,
+    rootId.signPubJwk,
+    subId.userId,
+    'test-app',
+    'test-room',
+    ['moderator'],
+    Date.now()
+  )
+  const validModRes = await verifyRoleCertificate(
+    validModCert,
+    'test-app',
+    'test-room',
+    new Set([rootId.userId])
+  )
+  assert.deepEqual(validModRes, {valid: true, roles: ['moderator']})
+
+  const futureCert = await signRoleCertInternal(
+    rootId.sign,
+    rootId.signPubJwk,
+    subId.userId,
+    'test-app',
+    'test-room',
+    ['moderator'],
+    Date.now() + 3_600_000 // 1 hour in the future (> 60s skew allowance)
+  )
+  const futureRes = await verifyRoleCertificate(
     futureCert,
     'test-app',
     'test-room',
@@ -97,8 +103,30 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
     'certificate with far-future iat must be rejected'
   )
 
-  // 4. Multi-hop topology: room.getPeers() PeerInfo, cascading delegator revocation,
-  //    offer-stage bulk rejection on role-protected actions, and serialized concurrent state.set()
+  const delegatedAdminCert = await signRoleCertInternal(
+    rootId.sign,
+    rootId.signPubJwk,
+    subId.userId,
+    'test-app',
+    'test-room',
+    ['admin'],
+    Date.now()
+  )
+  const delegatedAdminRes = await verifyRoleCertificate(
+    delegatedAdminCert,
+    'test-app',
+    'test-room',
+    new Set([rootId.userId])
+  )
+  assert.equal(
+    delegatedAdminRes.valid,
+    false,
+    "certificate granting reserved 'admin' role to non-root user must be rejected"
+  )
+
+  // 3. Multi-hop topology: room.getPeers() PeerInfo, role grant/revocation,
+  //    offer-stage bulk rejection on role-protected actions, overlay packet anti-replay,
+  //    and serialized concurrent state.set()
   //    Line topology: admin -- bob -- carol -- mallory
   const auditAdminIdentity = await createUserIdentity()
   const roomId = `audit-room~${auditAdminIdentity.userId}`
@@ -108,7 +136,7 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
   const carolId = testPeerId('audit-carol')
   const malloryId = testPeerId('audit-mallory')
   const peerIds = [adminId, bobId, carolId, malloryId]
-  const regMap = new Map<string, (peer: any, id: string) => void>()
+  const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
   const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
 
   for (const id of peerIds) {
@@ -119,14 +147,14 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId,
         roomId,
-        use: [scale({mode: 'gossip', maxConnections: 4}), roles()],
+        use: [scale({maxDirectPeers: 4}), roles()],
         identity: peerIdentity
       }
     )
-    rooms.set(id, room as any)
+    rooms.set(id, room as unknown as Room & RolesPluginApi & ScalePluginApi)
   }
 
   const directHandles = new Map<string, LinkedPeer>()
@@ -134,8 +162,8 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
     const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
     directHandles.set(`${a}->${b}`, peerA)
     directHandles.set(`${b}->${a}`, peerB)
-    regMap.get(a)!(peerA, b)
-    regMap.get(b)!(peerB, a)
+    regMap.get(a)!(peerA as unknown as PeerHandle, b)
+    regMap.get(b)!(peerB as unknown as PeerHandle, a)
   }
 
   try {
@@ -185,7 +213,7 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
 
     // Register a role-protected action 'mod-file' (requires 'moderator' or 'admin')
     const receivedModPayloads = new Map<string, Uint8Array[]>()
-    const modSenders = new Map<string, any>()
+    const modSenders = new Map<string, MessageAction<Uint8Array>['send']>()
     for (const id of peerIds) {
       receivedModPayloads.set(id, [])
       const act = rooms.get(id)!.makeAction<Uint8Array>('mod-file', {
@@ -251,41 +279,46 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
       {kind: 'rejected'}
     )
 
-    // Also verify Carol's local send on 'mod-file' is blocked after cascading revocation:
+    // Also verify Carol's local send on 'mod-file' is blocked after revocation:
     await assert.rejects(
-      () => modSenders.get(carolId)(new Uint8Array([1, 2, 3])),
+      () => modSenders.get(carolId)!(new Uint8Array([1, 2, 3])),
       /insufficient authority/
     )
 
-    // Anti-replay enforcement on ActionAuthEnvelope:
-    // Capture a valid targeted 'mod-file' action wire frame from admin -> bob, then replay the exact wire frame
+    // Anti-replay enforcement on multi-hop overlay unicast packets:
+    // Capture a signed+encrypted overlay unicast frame from admin -> bob destined for 2-hop carol,
+    // then replay the exact wire frame on admin -> bob.
     const adminToBobPeer = directHandles.get(`${adminId}->${bobId}`)!
-    const capturedModFrames: Uint8Array[] = []
+    const capturedUnicastFrames: Uint8Array[] = []
     const origSend = adminToBobPeer.sendData.bind(adminToBobPeer)
     adminToBobPeer.sendData = (data: Uint8Array) => {
-      const h = inspectActionWireHeader(data)
-      if (h?.type === 'mod-file') {
-        capturedModFrames.push(data.slice())
+      const unpacked = unpackOverlayFrame(data)
+      if (
+        unpacked?.[0] === overlayUnicastKind &&
+        unpacked[2]['o'] === adminId &&
+        unpacked[2]['d'] === carolId
+      ) {
+        capturedUnicastFrames.push(data.slice())
       }
       origSend(data)
     }
-    await modSenders.get(adminId)(new Uint8Array([42, 43]), {target: bobId})
-    await waitFor(() => receivedModPayloads.get(bobId)!.length === 1, 1_000)
-    assert.equal(capturedModFrames.length, 1)
+    await modSenders.get(adminId)!(new Uint8Array([42, 43]), {target: carolId})
+    await waitFor(() => receivedModPayloads.get(carolId)!.length === 1, 1_000)
+    assert.ok(capturedUnicastFrames.length >= 1)
 
-    const bobSigFailBefore = rooms.get(bobId)!.getTopology()
-      .stats.signatureFailures
-    origSend(capturedModFrames[0]!)
+    const bobDupsBefore = rooms.get(bobId)!.getTopology()
+      .stats.duplicatesDropped
+    origSend(capturedUnicastFrames[0]!)
     await wait(40)
     assert.equal(
-      receivedModPayloads.get(bobId)!.length,
+      receivedModPayloads.get(carolId)!.length,
       1,
-      'replayed ActionAuthEnvelope frame must NOT be delivered a second time'
+      'replayed overlay unicast packet must NOT be delivered a second time'
     )
     assert.equal(
-      rooms.get(bobId)!.getTopology().stats.signatureFailures,
-      bobSigFailBefore + 1,
-      'replayed ActionAuthEnvelope frame must increment signatureFailures'
+      rooms.get(bobId)!.getTopology().stats.duplicatesDropped,
+      bobDupsBefore + 1,
+      'replayed overlay unicast packet must increment duplicatesDropped'
     )
 
     // Verify concurrent state.set(prev => ...) calls serialize cleanly without dropping updates
@@ -335,6 +368,67 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
     await Promise.all(peerIds.map(id => rooms.get(id)!.leave()))
   }
 
+  // 4. maxUsers admission limit is enforced with scale()
+  const maxUIds = [
+    testPeerId('maxu-1'),
+    testPeerId('maxu-2'),
+    testPeerId('maxu-3')
+  ]
+  const maxURegs = new Map<string, (peer: PeerHandle, id: string) => void>()
+  const maxURooms = new Map<string, Room & ScalePluginApi>()
+  for (const id of maxUIds) {
+    const u = await createUserIdentity()
+    maxURooms.set(
+      id,
+      createRoom(
+        f => maxURegs.set(id, f),
+        () => {},
+        () => {},
+        {
+          endpointIdentity: getTestEndpointByPeerId(id),
+          appId: 'maxu-app',
+          roomId: 'maxu-room',
+          maxUsers: 2,
+          identity: u,
+          use: [scale({maxDirectPeers: 4})]
+        }
+      ) as unknown as Room & ScalePluginApi
+    )
+  }
+  try {
+    const link12 = linkPeers(new LinkedPeer(), new LinkedPeer())
+    maxURegs.get(maxUIds[0]!)!(
+      link12.peerA as unknown as PeerHandle,
+      maxUIds[1]!
+    )
+    maxURegs.get(maxUIds[1]!)!(
+      link12.peerB as unknown as PeerHandle,
+      maxUIds[0]!
+    )
+    await waitFor(
+      () => Object.keys(maxURooms.get(maxUIds[0]!)!.getPeers()).length === 1,
+      1_500
+    )
+
+    const link13 = linkPeers(new LinkedPeer(), new LinkedPeer())
+    maxURegs.get(maxUIds[0]!)!(
+      link13.peerA as unknown as PeerHandle,
+      maxUIds[2]!
+    )
+    maxURegs.get(maxUIds[2]!)!(
+      link13.peerB as unknown as PeerHandle,
+      maxUIds[0]!
+    )
+    await wait(60)
+    assert.equal(
+      maxUIds[2]! in maxURooms.get(maxUIds[0]!)!.getPeers(),
+      false,
+      '3rd distinct user must be rejected when maxUsers === 2'
+    )
+  } finally {
+    await Promise.all(maxUIds.map(id => maxURooms.get(id)!.leave()))
+  }
+
   // 5. Plaintext unicast downgrade (missing iv) is rejected by overlay
   const ovAId = testPeerId('ov-a')
   const ovBId = testPeerId('ov-b')
@@ -342,7 +436,8 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
     selfId: ovAId,
     appId: 'unicast-app',
     roomId: 'unicast-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(ovAId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () =>
@@ -352,7 +447,8 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
     selfId: ovBId,
     appId: 'unicast-app',
     roomId: 'unicast-room',
-    topology: {mode: 'gossip', maxConnections: 4},
+    config: {maxDirectPeers: 4},
+    getLocalEndpointIdentity: () => getTestEndpointByPeerId(ovBId),
     onVirtualPeerJoin: () => {},
     onVirtualPeerLeave: () => {},
     onDeliverData: () =>
@@ -397,14 +493,18 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, cascading del
   ovA.destroy()
   ovB.destroy()
 
-  // 6. inspectActionWireHeader parses v2 inline/offer frames cleanly
+  // 6. inspectActionWireHeader parses v3 inline/offer frames cleanly and rejects v2
   const sampleMeta = encodeBytes(JSON.stringify({hello: 'world'}))
   const sampleFrame = new Uint8Array(36 + sampleMeta.byteLength + 4)
-  sampleFrame[0] = 2
+  sampleFrame[0] = actionWireVersion
   sampleFrame[1] = 0
   sampleFrame.set(encodeBytes('chat'), 2)
   new DataView(sampleFrame.buffer).setUint16(34, sampleMeta.byteLength)
   sampleFrame.set(sampleMeta, 36)
   const headerInfo = inspectActionWireHeader(sampleFrame)
   assert.deepEqual(headerInfo, {type: 'chat', metadata: {hello: 'world'}})
+
+  const legacyV2Frame = sampleFrame.slice()
+  legacyV2Frame[0] = 2
+  assert.equal(inspectActionWireHeader(legacyV2Frame), null)
 })

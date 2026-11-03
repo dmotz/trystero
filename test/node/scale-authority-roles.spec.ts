@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import type {
+  MessageAction,
+  PeerHandle,
   RolesPluginApi,
   Room,
-  ScalePluginApi
+  RoomError,
+  ScalePluginApi,
+  UserIdentity
 } from '../../packages/core/src/index.ts'
 import {
   formatSelfCertifyingRoomId,
@@ -16,12 +20,13 @@ import {
   exportUserIdentity,
   importUserIdentity
 } from '../../packages/core/src/identity.ts'
-import {scale} from '../../packages/core/src/scale/index.ts'
 import createRoom from '../../packages/core/src/room.ts'
+import {scale} from '../../packages/core/src/scale/index.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
 import {
   allocTestPeerIds,
+  getTestEndpointByPeerId,
   joinAsTestPeer,
   LinkedPeer,
   linkPeers,
@@ -32,10 +37,11 @@ import {
 } from './peer-harness.ts'
 
 void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ use: [roles({selfAsAdmin: true})] }), UserIdentity.userId, and userId-pinned rooms', async () => {
-  // 1. UserIdentity exposes 22-char Base62 userId directly for offline room ID formatting
+  // 1. UserIdentity exposes 22-char Base62 userId and signPubJwk directly for offline room ID formatting
   const provisionedIdentity = await createUserIdentity()
   assert.match(provisionedIdentity.userId, /^[0-9A-Za-z]{22}$/)
   assert.equal('fingerprint' in provisionedIdentity, false)
+  assert.equal('publicKey' in provisionedIdentity, false)
   const provisionedRoomId = `watch-party~${provisionedIdentity.userId}`
   assert.equal(
     provisionedRoomId,
@@ -47,7 +53,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     userId: provisionedIdentity.userId
   })
   assert.equal(
-    await deriveUserId(provisionedIdentity.publicKey),
+    await deriveUserId(provisionedIdentity.signPubJwk),
     provisionedIdentity.userId
   )
 
@@ -92,7 +98,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         identity: hostIdentity,
         use: [roles({selfAsAdmin: true})],
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'game-lobby'
     )
@@ -101,6 +108,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const hostAuth = await hostRoom.getSelf()
     assert.equal(hostAuth.baseRoomId, 'game-lobby')
     assert.equal('fingerprint' in hostAuth, false)
+    assert.equal('persisted' in hostAuth, false)
+    assert.equal(hostAuth.identityPersistence, 'custom')
     assert.match(hostAuth.userId, /^[0-9A-Za-z]{22}$/)
     assert.equal(hostAuth.userId, hostIdentity.userId)
     assert.equal(hostAuth.roomId, `game-lobby~${hostAuth.userId}`)
@@ -111,7 +120,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const dottedRoom = makeJoinRoom('dotted-room-peer')(
       {
         appId: 'auth-bootstrap-app',
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       `lobby-0.${hostAuth.userId}`
     )
@@ -123,7 +133,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         makeJoinRoom('missing-roles-peer')(
           {
             appId: 'auth-bootstrap-app',
-            rtcPolyfill: MockRTCPeerConnection as any
+            rtcPolyfill:
+              MockRTCPeerConnection as unknown as typeof RTCPeerConnection
           },
           hostAuth.roomId
         ),
@@ -135,7 +146,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       {
         appId: 'auth-bootstrap-app',
         use: [roles()],
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       hostAuth.roomId
     )
@@ -144,6 +156,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     assert.equal(guestAuth.roomId, hostAuth.roomId)
     assert.equal(guestAuth.baseRoomId, 'game-lobby')
     assert.equal('fingerprint' in guestAuth, false)
+    assert.equal('persisted' in guestAuth, false)
+    assert.equal(guestAuth.identityPersistence, 'none')
     assert.equal(guestAuth.isAdmin, false)
     assert.deepEqual(guestAuth.roles, [])
 
@@ -154,7 +168,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         identity: impostorIdentity,
         use: [roles()],
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       hostAuth.roomId
     )
@@ -173,7 +188,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         identity: coAdminIdentity,
         use: [roles({admins: [coAdminIdentity.userId]})],
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       hostAuth.roomId
     )
@@ -191,7 +207,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         identity: await importUserIdentity(exportUserIdentity(hostIdentity)),
         use: [roles()],
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       hostAuth.roomId
     )
@@ -207,7 +224,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
         appId: 'auth-bootstrap-app',
         identity: hostIdentity,
         use: [roles({admins: [hostIdentity.userId]})],
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'clean-slug'
     )
@@ -215,6 +233,7 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
     const fixedHostAuth = await fixedHostRoom.getSelf()
     assert.equal(fixedHostAuth.roomId, 'clean-slug')
     assert.equal('fingerprint' in fixedHostAuth, false)
+    assert.equal('persisted' in fixedHostAuth, false)
     assert.equal(fixedHostAuth.isAdmin, true)
     assert.deepEqual(fixedHostAuth.roles, ['admin'])
 
@@ -222,7 +241,8 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
       {
         appId: 'auth-bootstrap-app',
         use: [roles({admins: [hostIdentity.userId]})],
-        rtcPolyfill: MockRTCPeerConnection as any
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'clean-slug'
     )
@@ -235,19 +255,19 @@ void test('Authority bootstrap: Self-certifying room IDs, on-the-fly joinRoom({ 
   }
 })
 
-void test('Privileged actions, role delegation, sub-delegation, and revocation across mesh and multi-hop overlays', async () => {
+void test('Privileged actions, role grants, reserved admin role, root-only moderation, and revocation across multi-hop overlays', async () => {
   const adminIdentity = await createUserIdentity()
   const roomId = `raid-room~${adminIdentity.userId}`
   const appId = 'priv-action-app'
 
-  // Set up a 4-peer multi-hop chain in small-world overlay:
+  // Set up a 4-peer multi-hop chain in gossip overlay:
   // admin <-> bob <-> carol <-> mallory
   const adminId = testPeerId('priv-admin')
   const bobId = testPeerId('priv-bob')
   const carolId = testPeerId('priv-carol')
   const malloryId = testPeerId('priv-mallory')
   const peers = [adminId, bobId, carolId, malloryId] as const
-  const regMap = new Map<string, (peer: any, id: string) => void>()
+  const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
   const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
 
   for (const id of peers) {
@@ -258,21 +278,21 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId,
         roomId,
-        use: [scale({mode: 'gossip', maxConnections: 4}), roles()],
+        use: [scale({maxDirectPeers: 4}), roles()],
         identity: peerIdentity
       }
     )
-    rooms.set(id, room as any)
+    rooms.set(id, room as unknown as Room & RolesPluginApi & ScalePluginApi)
   }
 
   try {
     const connectDirect = (a: string, b: string) => {
       const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
-      regMap.get(a)!(peerA, b)
-      regMap.get(b)!(peerB, a)
+      regMap.get(a)!(peerA as unknown as PeerHandle, b)
+      regMap.get(b)!(peerB as unknown as PeerHandle, a)
     }
 
     connectDirect(adminId, bobId)
@@ -290,9 +310,9 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
 
     const receivedAlerts = new Map<
       string,
-      Array<{data: any; from: string; meta: any; roles: string[]}>
+      Array<{data: {msg: string}; from: string; meta: unknown; roles: string[]}>
     >()
-    const actions = new Map<string, any>()
+    const actions = new Map<string, MessageAction<{msg: string}>>()
 
     for (const id of peers) {
       receivedAlerts.set(id, [])
@@ -314,7 +334,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
 
     // 1. Admin sends a privileged broadcast across the multi-hop overlay with user metadata
     await actions
-      .get(adminId)
+      .get(adminId)!
       .send({msg: 'boss-phase-1'}, {metadata: {priority: 'high'}})
     await waitFor(
       () =>
@@ -332,7 +352,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
 
     // 2. Non-privileged Mallory attempts to send on 'mod-alert' -> rejected locally
     await assert.rejects(
-      () => actions.get(malloryId).send({msg: 'forged-alert'}),
+      () => actions.get(malloryId)!.send({msg: 'forged-alert'}),
       /insufficient authority/
     )
 
@@ -342,7 +362,13 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       2_000
     )
 
-    // 3. Root admin grants 'moderator' to Bob
+    // 3. Even root admin cannot grant reserved 'admin' role to non-root Bob (Q5=A)
+    await assert.rejects(
+      () => rooms.get(adminId)!.grantRole(bobId, 'admin'),
+      /'admin' role is reserved for room root admins/
+    )
+
+    // 4. Root admin grants 'moderator' to Bob
     await rooms.get(adminId)!.grantRole(bobId, 'moderator')
     await waitFor(
       () =>
@@ -353,7 +379,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
     )
 
     // Bob can now broadcast on 'mod-alert'
-    await actions.get(bobId).send({msg: 'mod-warning-1'})
+    await actions.get(bobId)!.send({msg: 'mod-warning-1'})
     await waitFor(
       () =>
         receivedAlerts
@@ -369,7 +395,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       .find(a => a.data.msg === 'mod-warning-1')!
     assert.deepEqual(bobAlertOnMallory.roles, ['moderator'])
 
-    // 4. Bob cannot grant roles (2-tier model: only root admins can grant roles), while root admin grants 'moderator' to Carol
+    // 5. Moderator Bob cannot grantRole, revokeRole, ban, or unban (Q5=A, Q6=A: root-only authority)
     await assert.rejects(
       () => rooms.get(bobId)!.grantRole(carolId, 'admin'),
       /insufficient authority/
@@ -378,6 +404,15 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       () => rooms.get(bobId)!.grantRole(carolId, 'moderator'),
       /insufficient authority/
     )
+    await assert.rejects(
+      () => rooms.get(bobId)!.ban(malloryId),
+      /insufficient authority: only a root admin can ban a peer/
+    )
+    await assert.rejects(
+      () => rooms.get(bobId)!.unban(malloryId),
+      /insufficient authority: only a root admin can unban a peer/
+    )
+
     await rooms.get(adminId)!.grantRole(carolId, 'moderator')
     await waitFor(
       () =>
@@ -387,7 +422,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
     )
 
     // Carol can now broadcast on 'mod-alert'
-    await actions.get(carolId).send({msg: 'carol-mod-notice'})
+    await actions.get(carolId)!.send({msg: 'carol-mod-notice'})
     await waitFor(
       () =>
         receivedAlerts
@@ -396,13 +431,17 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
       2_000
     )
 
-    // 5. Non-admin moderator Bob cannot revoke root admin
+    // 6. Non-admin moderator Bob cannot revoke root admin or Carol
     await assert.rejects(
       () => rooms.get(bobId)!.revokeRole(adminId),
       /insufficient authority/
     )
+    await assert.rejects(
+      () => rooms.get(bobId)!.revokeRole(carolId, 'moderator'),
+      /insufficient authority/
+    )
 
-    // 6. Root admin revokes Carol's 'moderator' role
+    // 7. Root admin revokes Carol's 'moderator' role
     await rooms.get(adminId)!.revokeRole(carolId, 'moderator')
     await waitFor(
       () =>
@@ -414,7 +453,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
 
     // Carol can no longer send on 'mod-alert'
     await assert.rejects(
-      () => actions.get(carolId).send({msg: 'after-revocation'}),
+      () => actions.get(carolId)!.send({msg: 'after-revocation'}),
       /insufficient authority/
     )
   } finally {
@@ -422,7 +461,7 @@ void test('Privileged actions, role delegation, sub-delegation, and revocation a
   }
 })
 
-void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as a PeerBanRecord', async () => {
+void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as a PeerModerationRecord and kicks abusive sender after repeated invalid records', async () => {
   const c3AdminIdentity = await createUserIdentity()
   const roomId = `c3-live-room~${c3AdminIdentity.userId}`
   const appId = 'c3-live-app'
@@ -432,18 +471,25 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
   ])
   const [adminPeerId, attackerPeerId, modPeerId] = allocTestPeerIds(3)
   const peerIds = [adminPeerId!, modPeerId!, attackerPeerId!]
-  const usersByPeer: Record<string, any> = {
+  const usersByPeer: Record<string, UserIdentity> = {
     [adminPeerId!]: c3AdminIdentity,
     [modPeerId!]: modUser,
     [attackerPeerId!]: attackerUser
   }
-  const registerCallbacks = new Map<string, (peer: any, id: string) => void>()
+  const registerCallbacks = new Map<
+    string,
+    (peer: PeerHandle, id: string) => void
+  >()
   const rooms = new Map<string, Room & RolesPluginApi & ScalePluginApi>()
   const directLinks = new Map<string, {peerA: LinkedPeer; peerB: LinkedPeer}>()
   const capturedAuthFrames: Uint8Array[] = []
+  const adminErrors: RoomError[] = []
+
+  const linkKey = (idA: string, idB: string) =>
+    idA < idB ? `${idA}<->${idB}` : `${idB}<->${idA}`
 
   const connectPair = (idA: string, idB: string) => {
-    const key = idA < idB ? `${idA}<->${idB}` : `${idB}<->${idA}`
+    const key = linkKey(idA, idB)
     if (directLinks.has(key)) {
       return
     }
@@ -458,8 +504,8 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       }
     }
     directLinks.set(key, {peerA, peerB})
-    registerCallbacks.get(idA)!(peerA, idB)
-    registerCallbacks.get(idB)!(peerB, idA)
+    registerCallbacks.get(idA)!(peerA as unknown as PeerHandle, idB)
+    registerCallbacks.get(idB)!(peerB as unknown as PeerHandle, idA)
   }
 
   for (const id of peerIds) {
@@ -467,17 +513,27 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       peerRegister => {
         registerCallbacks.set(id, peerRegister)
       },
-      () => {},
+      pid => {
+        const pair = directLinks.get(linkKey(id, pid))
+        if (pair) {
+          directLinks.delete(linkKey(id, pid))
+          pair.peerA.destroy()
+          pair.peerB.destroy()
+        }
+      },
       () => {},
       {
-        selfId: id,
+        endpointIdentity: getTestEndpointByPeerId(id),
         appId,
         roomId,
         use: [scale(), roles()],
         identity: usersByPeer[id]!
       }
     )
-    rooms.set(id, room as any)
+    if (id === adminPeerId) {
+      room.onError(err => adminErrors.push(err))
+    }
+    rooms.set(id, room as unknown as Room & RolesPluginApi & ScalePluginApi)
   }
 
   try {
@@ -520,13 +576,17 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       2_000
     )
 
-    // Extract the signed RoleRevocationRecord from the captured '$auth' frame
-    let capturedRevocation: any = null
+    // Extract the signed RoleRevocationRecord from the captured '@_auth' frame
+    let capturedRevocation: Record<string, unknown> | null = null
     for (const frame of capturedAuthFrames) {
       const text = decodeBytes(frame)
       const jsonStart = text.indexOf('{"t":"revoke"')
       if (jsonStart !== -1) {
-        capturedRevocation = JSON.parse(text.slice(jsonStart)).revocation
+        capturedRevocation = (
+          JSON.parse(text.slice(jsonStart)) as {
+            revocation: Record<string, unknown>
+          }
+        ).revocation
       }
     }
     assert.ok(
@@ -534,22 +594,24 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       'expected attacker to capture signed RoleRevocationRecord from wire'
     )
 
-    // Attacker re-wraps the captured RoleRevocationRecord into a PeerBanRecord with the same signature
-    const forgedBan = {
-      v: capturedRevocation.v,
-      appId: capturedRevocation.appId,
-      roomId: capturedRevocation.roomId,
-      issuerUserId: capturedRevocation.issuerUserId,
-      targetUserId: capturedRevocation.targetUserId,
-      ...(capturedRevocation.role ? {reason: capturedRevocation.role} : {}),
-      seq: capturedRevocation.seq,
-      ts: capturedRevocation.ts,
-      issuerCert: capturedRevocation.issuerCert,
-      signerPubKey: capturedRevocation.signerPubKey,
-      sig: capturedRevocation.sig
+    // Attacker re-wraps the captured RoleRevocationRecord into a PeerModerationRecord (op: 'ban') with the same signature
+    const forgedMod = {
+      v: capturedRevocation['v'],
+      op: 'ban' as const,
+      appId: capturedRevocation['appId'],
+      roomId: capturedRevocation['roomId'],
+      issuerUserId: capturedRevocation['issuerUserId'],
+      targetUserId: capturedRevocation['targetUserId'],
+      ...(capturedRevocation['role']
+        ? {reason: capturedRevocation['role']}
+        : {}),
+      seq: capturedRevocation['seq'],
+      ts: capturedRevocation['ts'],
+      signerPubKey: capturedRevocation['signerPubKey'],
+      sig: capturedRevocation['sig']
     }
 
-    // Craft a raw '$auth' wire frame carrying {t: 'ban', ban: forgedBan} and inject it into admin-peer and mod-peer
+    // Craft a raw '@_auth' wire frame carrying {t: 'mod', moderation: forgedMod} and inject it into admin-peer and mod-peer
     const revokeFrame = capturedAuthFrames.find(f =>
       decodeBytes(f).includes('{"t":"revoke"')
     )!
@@ -559,22 +621,33 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       0,
       encodeBytes(revokeText.slice(0, jsonOffset)).byteLength
     )
-    const forgedBanBodyBytes = encodeBytes(
-      JSON.stringify({t: 'ban', ban: forgedBan})
+    const forgedModBodyBytes = encodeBytes(
+      JSON.stringify({t: 'mod', moderation: forgedMod})
     )
-    const forgedBanWireFrame = new Uint8Array(
-      frameHeaderPrefix.byteLength + forgedBanBodyBytes.byteLength
+    const forgedModWireFrame = new Uint8Array(
+      frameHeaderPrefix.byteLength + forgedModBodyBytes.byteLength
     )
-    forgedBanWireFrame.set(frameHeaderPrefix, 0)
-    forgedBanWireFrame.set(forgedBanBodyBytes, frameHeaderPrefix.byteLength)
+    forgedModWireFrame.set(frameHeaderPrefix, 0)
+    forgedModWireFrame.set(forgedModBodyBytes, frameHeaderPrefix.byteLength)
 
-    const adminSigFailBefore = adminRoom.getTopology().stats.signatureFailures
-    directLinks
-      .get(`${adminPeerId!}<->${attackerPeerId!}`)!
-      .peerB.sendData(forgedBanWireFrame)
-    directLinks
-      .get(`${attackerPeerId!}<->${modPeerId!}`)!
-      .peerA.sendData(forgedBanWireFrame)
+    const adminAttackerLink = directLinks.get(
+      linkKey(adminPeerId!, attackerPeerId!)
+    )!
+    const attackerSideToAdmin =
+      adminPeerId! < attackerPeerId!
+        ? adminAttackerLink.peerB
+        : adminAttackerLink.peerA
+
+    const modAttackerLink = directLinks.get(
+      linkKey(modPeerId!, attackerPeerId!)
+    )!
+    const attackerSideToMod =
+      modPeerId! < attackerPeerId!
+        ? modAttackerLink.peerB
+        : modAttackerLink.peerA
+
+    attackerSideToAdmin.sendData(forgedModWireFrame)
+    attackerSideToMod.sendData(forgedModWireFrame)
     await wait(60)
 
     assert.equal(
@@ -593,12 +666,23 @@ void test('C3 regression: live room rejects a RoleRevocationRecord re-wrapped as
       'modRoom must not ban mod-peer from a re-wrapped revocation'
     )
     assert.ok(
-      adminRoom.getTopology().stats.signatureFailures > adminSigFailBefore,
-      'forged ban from revocation must increment signatureFailures'
-    )
-    assert.ok(
       adminRoom.getTopology().directPeerIds.includes(modPeerId!),
       'mod-peer must remain connected in adminRoom'
+    )
+
+    // Repeated forged '@_auth' records (8 total) trigger peer-error and kick the attacker
+    for (let i = 0; i < 7; i++) {
+      attackerSideToAdmin.sendData(forgedModWireFrame)
+    }
+    await waitFor(
+      () =>
+        adminErrors.some(
+          e =>
+            e.code === 'peer-error' &&
+            e.peerId === attackerPeerId &&
+            e.message.includes('excessive invalid authority records')
+        ) && !adminRoom.getTopology().directPeerIds.includes(attackerPeerId!),
+      1_500
     )
   } finally {
     await Promise.all([...rooms.values()].map(r => r.leave()))

@@ -1,68 +1,34 @@
 import {
-  type BoundedCache,
-  type BoundedSet,
-  base62Alphabet,
   base64UrlRe,
-  bytesMatch,
   bytesToBigInt,
   createBoundedCache,
-  createBoundedSet,
   decodeBytes,
+  domainTag,
   encodeBytes,
-  fromBase64,
   fromBase64Url,
-  fromJson,
-  hash32,
-  libId,
-  libName,
   mkErr,
-  peerIdLength,
-  toBase64,
   toBase64Url,
-  toHex,
-  toJson,
-  userIdLength
+  toJson
 } from './primitives'
-
-export {
-  type BoundedCache,
-  type BoundedSet,
-  base62Alphabet,
-  base64UrlRe,
-  bytesMatch,
-  bytesToBigInt,
-  createBoundedCache,
-  createBoundedSet,
-  decodeBytes,
-  encodeBytes,
-  fromBase64,
-  fromBase64Url,
-  fromJson,
-  hash32,
-  libId,
-  libName,
-  mkErr,
-  peerIdLength,
-  toBase64,
-  toBase64Url,
-  toHex,
-  toJson,
-  userIdLength
-}
 
 export const ecdsaKeyAlgo: EcKeyImportParams = {
   name: 'ECDSA',
   namedCurve: 'P-256'
 }
 
-export const ecdhKeyAlgo: EcKeyImportParams = {
+const ecdhKeyAlgo: EcKeyImportParams = {
   name: 'ECDH',
   namedCurve: 'P-256'
 }
 
-export const ecdsaSignAlgo: EcdsaParams = {
+const ecdsaSignAlgo: EcdsaParams = {
   name: 'ECDSA',
   hash: 'SHA-256'
+}
+
+type DerivedRoomKeys = {
+  aesKey: CryptoKey
+  hmacKey: CryptoKey
 }
 
 const algo = 'AES-GCM'
@@ -70,17 +36,16 @@ const gcmIvBytes = 12
 const gcmTagBytes = 16
 const hmacAlgo = 'HMAC'
 const pbkdf2Iterations = 600_000
+const emptyHkdfSalt = /*@__PURE__*/ new Uint8Array(32)
+const roomAesInfo = /*@__PURE__*/ encodeBytes(domainTag('room-aes', 3))
+const roomHmacInfo = /*@__PURE__*/ encodeBytes(domainTag('room-hmac', 3))
 const topicHashCache = /*@__PURE__*/ createBoundedCache<string, string>(4_096)
-const derivedKeyCache = /*@__PURE__*/ createBoundedCache<
+const derivedRoomKeysCache = /*@__PURE__*/ createBoundedCache<
   string,
-  Promise<CryptoKey>
->(64)
-const derivedAuthKeyCache = /*@__PURE__*/ createBoundedCache<
-  string,
-  Promise<CryptoKey>
+  Promise<DerivedRoomKeys>
 >(64)
 
-export const p256N =
+const p256N =
   0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
 const p256HalfN = p256N >> 1n
 const p256NBytes = /*@__PURE__*/ new Uint8Array([
@@ -129,19 +94,15 @@ export const isLowSP256Signature = (sig: Uint8Array): boolean => {
   return r > 0n && r < p256N && s > 0n && s <= p256HalfN
 }
 
-export const hashWith = async (
-  algorithm: string,
+export const sha256 = async (
   input: string | BufferSource
 ): Promise<Uint8Array> =>
   new Uint8Array(
     await crypto.subtle.digest(
-      algorithm,
+      'SHA-256',
       typeof input === 'string' ? (encodeBytes(input) as BufferSource) : input
     )
   )
-
-export const sha256 = (input: string | BufferSource): Promise<Uint8Array> =>
-  hashWith('SHA-256', input)
 
 export const ecdsaSign = async (
   privateKey: CryptoKey,
@@ -167,50 +128,108 @@ export const hashTopic = async (str: string): Promise<string> => {
   return digest
 }
 
-const derivePbkdf2Key = (
-  cache: BoundedCache<string, Promise<CryptoKey>>,
-  domainTag: string,
+const deriveRoomKeys = (
   secret: string,
   appId: string,
-  roomId: string,
-  derivedKeyType: AesKeyGenParams | HmacKeyGenParams,
-  keyUsages: KeyUsage[]
-): Promise<CryptoKey> => {
+  roomId: string
+): Promise<DerivedRoomKeys> => {
   const cacheKey = toJson([secret, appId, roomId])
-  const existing = cache.get(cacheKey)
+  const existing = derivedRoomKeysCache.get(cacheKey)
   if (existing) {
     return existing
   }
 
-  const deriveP = (async () => {
+  const deriveP = (async (): Promise<DerivedRoomKeys> => {
+    if (!secret) {
+      const [aesRaw, hmacRaw] = await Promise.all([
+        sha256(toJson([domainTag('room-aes', 3), appId, roomId])),
+        sha256(toJson([domainTag('room-hmac', 3), appId, roomId]))
+      ])
+      const [aesKey, hmacKey] = await Promise.all([
+        crypto.subtle.importKey(
+          'raw',
+          aesRaw as BufferSource,
+          {name: algo},
+          false,
+          ['encrypt', 'decrypt']
+        ),
+        crypto.subtle.importKey(
+          'raw',
+          hmacRaw as BufferSource,
+          {name: hmacAlgo, hash: 'SHA-256'},
+          false,
+          ['sign', 'verify']
+        )
+      ])
+      return {aesKey, hmacKey}
+    }
+
     const [baseKey, salt] = await Promise.all([
       crypto.subtle.importKey(
         'raw',
         encodeBytes(secret) as BufferSource,
         'PBKDF2',
         false,
-        ['deriveKey']
+        ['deriveBits']
       ),
-      sha256(toJson([domainTag, appId, roomId]))
+      sha256(toJson([domainTag('pbkdf2-master', 3), appId, roomId]))
     ])
-    return crypto.subtle.deriveKey(
-      {
-        name: 'PBKDF2',
-        salt: salt as BufferSource,
-        iterations: pbkdf2Iterations,
-        hash: 'SHA-256'
-      },
-      baseKey,
-      derivedKeyType,
-      false,
-      keyUsages
+    const masterBits = new Uint8Array(
+      await crypto.subtle.deriveBits(
+        {
+          name: 'PBKDF2',
+          salt: salt as BufferSource,
+          iterations: pbkdf2Iterations,
+          hash: 'SHA-256'
+        },
+        baseKey,
+        256
+      )
     )
+    try {
+      const hkdfKey = await crypto.subtle.importKey(
+        'raw',
+        masterBits as BufferSource,
+        'HKDF',
+        false,
+        ['deriveKey']
+      )
+      const [aesKey, hmacKey] = await Promise.all([
+        crypto.subtle.deriveKey(
+          {
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: emptyHkdfSalt as BufferSource,
+            info: roomAesInfo as BufferSource
+          },
+          hkdfKey,
+          {name: algo, length: 256},
+          false,
+          ['encrypt', 'decrypt']
+        ),
+        crypto.subtle.deriveKey(
+          {
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: emptyHkdfSalt as BufferSource,
+            info: roomHmacInfo as BufferSource
+          },
+          hkdfKey,
+          {name: hmacAlgo, hash: 'SHA-256', length: 256},
+          false,
+          ['sign', 'verify']
+        )
+      ])
+      return {aesKey, hmacKey}
+    } finally {
+      masterBits.fill(0)
+    }
   })()
 
   deriveP.catch(() => {
-    cache.delete(cacheKey)
+    derivedRoomKeysCache.delete(cacheKey)
   })
-  cache.set(cacheKey, deriveP)
+  derivedRoomKeysCache.set(cacheKey, deriveP)
   return deriveP
 }
 
@@ -218,41 +237,7 @@ export const genKey = async (
   secret: string,
   appId: string,
   roomId: string
-): Promise<CryptoKey> =>
-  secret
-    ? derivePbkdf2Key(
-        derivedKeyCache,
-        `${libId}:pbkdf2:v2`,
-        secret,
-        appId,
-        roomId,
-        {name: algo, length: 256},
-        ['encrypt', 'decrypt']
-      )
-    : crypto.subtle.importKey(
-        'raw',
-        (await sha256(
-          toJson([`${libId}:room-key:v2`, appId, roomId])
-        )) as BufferSource,
-        {name: algo},
-        false,
-        ['encrypt', 'decrypt']
-      )
-
-export const genAuthKey = (
-  secret: string,
-  appId: string,
-  roomId: string
-): Promise<CryptoKey> =>
-  derivePbkdf2Key(
-    derivedAuthKeyCache,
-    `${libId}:pbkdf2-auth:v1`,
-    secret,
-    appId,
-    roomId,
-    {name: hmacAlgo, hash: 'SHA-256', length: 256},
-    ['sign', 'verify']
-  )
+): Promise<CryptoKey> => (await deriveRoomKeys(secret, appId, roomId)).aesKey
 
 const roomAuthPayload = (
   appId: string,
@@ -260,7 +245,7 @@ const roomAuthPayload = (
   peerId: string,
   seq: number
 ): Uint8Array =>
-  encodeBytes(toJson([`${libId}:ov-auth:v2`, appId, roomId, peerId, seq]))
+  encodeBytes(toJson([domainTag('ov-auth', 3), appId, roomId, peerId, seq]))
 
 export const signRoomAuth = async (
   secret: string,
@@ -269,10 +254,10 @@ export const signRoomAuth = async (
   peerId: string,
   seq: number
 ): Promise<string> => {
-  const key = await genAuthKey(secret, appId, roomId)
+  const {hmacKey} = await deriveRoomKeys(secret, appId, roomId)
   const mac = await crypto.subtle.sign(
     hmacAlgo,
-    key,
+    hmacKey,
     roomAuthPayload(appId, roomId, peerId, seq) as BufferSource
   )
   return toBase64Url(new Uint8Array(mac))
@@ -294,10 +279,10 @@ export const verifyRoomAuth = async (
     if (sigBytes.byteLength !== 32 || toBase64Url(sigBytes) !== token) {
       return false
     }
-    const key = await genAuthKey(secret, appId, roomId)
+    const {hmacKey} = await deriveRoomKeys(secret, appId, roomId)
     return await crypto.subtle.verify(
       hmacAlgo,
-      key,
+      hmacKey,
       sigBytes as BufferSource,
       roomAuthPayload(appId, roomId, peerId, seq) as BufferSource
     )
@@ -337,12 +322,12 @@ export const derivePairwiseAesKey = async (
         false,
         ['deriveKey']
       ),
-      sha256(toJson([`${libId}:e2e-salt:v2`, appId, roomId]))
+      sha256(toJson([domainTag('e2e-salt', 2), appId, roomId]))
     ])
     const [firstPeer, secondPeer] =
       peerA < peerB ? [peerA, peerB] : [peerB, peerA]
     const info = encodeBytes(
-      toJson([`${libId}:e2e-info:v2`, appId, roomId, firstPeer, secondPeer])
+      toJson([domainTag('e2e-info', 2), appId, roomId, firstPeer, secondPeer])
     )
     return await crypto.subtle.deriveKey(
       {

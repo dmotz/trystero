@@ -35,15 +35,26 @@ export const installLoopbackMdnsInWindow = (): void => {
     return Object.assign(new Event(event.type), {candidate: wrappedCandidate})
   }
 
-  class LoopbackMdnsPeerConnection extends NativePeerConnection {
-    #onIceCandidateHandler:
-      | ((this: RTCPeerConnection, ev: RTCPeerConnectionIceEvent) => unknown)
-      | null = null
-    #listenerMap = new WeakMap<
-      EventListenerOrEventListenerObject,
-      EventListener
-    >()
+  const iceHandlers = new WeakMap<
+    RTCPeerConnection,
+    ((this: RTCPeerConnection, ev: RTCPeerConnectionIceEvent) => unknown) | null
+  >()
+  const listenerMaps = new WeakMap<
+    RTCPeerConnection,
+    WeakMap<EventListenerOrEventListenerObject, EventListener>
+  >()
+  const getListenerMap = (
+    pc: RTCPeerConnection
+  ): WeakMap<EventListenerOrEventListenerObject, EventListener> => {
+    let map = listenerMaps.get(pc)
+    if (!map) {
+      map = new WeakMap()
+      listenerMaps.set(pc, map)
+    }
+    return map
+  }
 
+  class LoopbackMdnsPeerConnection extends NativePeerConnection {
     override get localDescription(): RTCSessionDescription | null {
       const desc = super.localDescription
       if (!desc) {
@@ -60,7 +71,7 @@ export const installLoopbackMdnsInWindow = (): void => {
     override get onicecandidate():
       | ((this: RTCPeerConnection, ev: RTCPeerConnectionIceEvent) => unknown)
       | null {
-      return this.#onIceCandidateHandler
+      return iceHandlers.get(this) ?? null
     }
 
     override set onicecandidate(
@@ -68,7 +79,7 @@ export const installLoopbackMdnsInWindow = (): void => {
         | ((this: RTCPeerConnection, ev: RTCPeerConnectionIceEvent) => unknown)
         | null
     ) {
-      this.#onIceCandidateHandler = handler
+      iceHandlers.set(this, handler)
       super.onicecandidate = handler
         ? ev =>
             handler.call(this, wrapIceEvent(ev) as RTCPeerConnectionIceEvent)
@@ -95,7 +106,8 @@ export const installLoopbackMdnsInWindow = (): void => {
         }
         return
       }
-      let wrapped = this.#listenerMap.get(listener)
+      const map = getListenerMap(this)
+      let wrapped = map.get(listener)
       if (!wrapped) {
         wrapped = ev => {
           const nextEv = wrapIceEvent(ev)
@@ -105,7 +117,7 @@ export const installLoopbackMdnsInWindow = (): void => {
             listener.handleEvent(nextEv)
           }
         }
-        this.#listenerMap.set(listener, wrapped)
+        map.set(listener, wrapped)
       }
       if (options === undefined) {
         super.addEventListener(type, wrapped)
@@ -119,7 +131,7 @@ export const installLoopbackMdnsInWindow = (): void => {
       listener: EventListenerOrEventListenerObject | null,
       options?: boolean | EventListenerOptions
     ): void {
-      const wrapped = listener ? this.#listenerMap.get(listener) : undefined
+      const wrapped = listener ? getListenerMap(this).get(listener) : undefined
       if (options === undefined) {
         super.removeEventListener(
           type,

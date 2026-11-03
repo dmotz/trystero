@@ -61,8 +61,22 @@ jobs:
       - name: Build packages
         run: pnpm build
 
-      - name: Check types and lint
-        run: pnpm typecheck && pnpm lint
+      - name: Check types, lint, and formatting
+        run: pnpm typecheck && pnpm lint && pnpm format
+
+      - name: Run Node test suite
+        env:
+          TRYSTERO_SKIP_PUBLIC_RELAYS: '1'
+        run: pnpm test:node
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright ws-relay browser suite
+        run: pnpm run build:test && npx playwright test test/ws-relay.spec.ts
+
+      - name: Build clean release packages
+        run: pnpm build
 
       - name: Copy README into each package
         run: pnpm copy-readmes-for-publish

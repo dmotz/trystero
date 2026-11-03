@@ -17,9 +17,7 @@ import {
   resolveUserIdentity,
   verifyUserIdKey
 } from '../../packages/core/src/identity.ts'
-import createRoom, {
-  getRoomSignalingBridge
-} from '../../packages/core/src/room.ts'
+import createRoom from '../../packages/core/src/room.ts'
 import {
   buildSignalAad,
   createSignalHandler,
@@ -28,13 +26,23 @@ import {
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import type {PeerHandle, Room, Signal} from '../../packages/core/src/types.ts'
 import {linkHandles} from './overlay-harness.ts'
-import {MockRTCPeerConnection, wait, waitFor} from './peer-harness.ts'
+import {
+  MockRTCPeerConnection,
+  actionStartFrame,
+  allocTestPeerIds,
+  getTestEndpointByPeerId,
+  internalActionPrefix,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 const execFileAsync = promisify(execFile)
+const encoder = new TextEncoder()
 
 void test('S3: identity or plugin resolution failure reports onError with zero unhandled rejections in Node', async () => {
   const script = `
-    import {createTopicStrategy, definePlugin, roles} from './packages/core/dist/index.mjs'
+    import {createTopicStrategy, roles} from './packages/core/src/index.ts'
+    import {makeInternalPlugin} from './packages/core/src/plugin.ts'
 
     let unhandled = 0
     process.on('unhandledRejection', () => { unhandled++ })
@@ -65,9 +73,8 @@ void test('S3: identity or plugin resolution failure reports onError with zero u
     )
     room1.onError(d => joinErrors.push(d))
 
-    const badPlugin = definePlugin('bad', {
-      resolveRoomId: async () => { throw new Error('boom-plugin') },
-      setup: () => ({})
+    const badPlugin = makeInternalPlugin('scale', () => ({}), {
+      resolveRoomId: async () => { throw new Error('boom-plugin') }
     })
     const room2 = joinRoom(
       {
@@ -95,7 +102,7 @@ void test('S3: identity or plugin resolution failure reports onError with zero u
       !idErr ||
       idErr.roomId !== 's3-room-1' ||
       !plugErr ||
-      plugErr.plugin !== 'bad' ||
+      plugErr.plugin !== 'scale' ||
       plugErr.roomId !== 's3-room-2'
     ) {
       console.error({unhandled, joinErrors})
@@ -103,6 +110,8 @@ void test('S3: identity or plugin resolution failure reports onError with zero u
     }
   `
   const {stderr} = await execFileAsync(process.execPath, [
+    '--import',
+    './scripts/register-hooks.ts',
     '--input-type=module',
     '-e',
     script
@@ -111,48 +120,60 @@ void test('S3: identity or plugin resolution failure reports onError with zero u
 })
 
 void test('S4: solo occupant is never evicted by later joiners with lexicographically smaller peerIds', async () => {
-  const mkHostAndJoiners = async (limit: number, joinerIds: string[]) => {
+  const mkHostAndJoiners = async (maxUsers: number, joinerCount: number) => {
+    const sortedIds = allocTestPeerIds(joinerCount + 1)
+    const hostId = sortedIds[joinerCount]!
+    const joinerIds = sortedIds.slice(0, joinerCount)
+
     const regs = new Map<
       string,
       (peer: PeerHandle, id: string) => void | Promise<void>
     >()
     const errors = new Map<string, string[]>()
-    const mk = (id: string) => {
+    const mk = (id: string, peerMaxUsers?: number) => {
       errors.set(id, [])
       const r = createRoom(
         f => regs.set(id, f),
         () => {},
         () => {},
         {
-          selfId: id,
+          endpointIdentity: getTestEndpointByPeerId(id),
           appId: 's4-app',
-          roomId: `s4-room-${limit}`,
-          limit
+          roomId: `s4-room-${maxUsers}`,
+          ...(peerMaxUsers === undefined ? {} : {maxUsers: peerMaxUsers})
         }
       )
       r.onError(err => errors.get(id)!.push(err.message))
       return r
     }
 
-    const host = mk('zzz-solo-host')
-    await wait(20)
+    const host = mk(hostId, maxUsers)
+    await host.getSelf()
 
-    const joiners = joinerIds.map(id => ({id, room: mk(id)}))
+    const joinerMaxUsers = maxUsers > 1 ? maxUsers : undefined
+    const joiners = joinerIds.map(id => ({id, room: mk(id, joinerMaxUsers)}))
+    await Promise.all(joiners.map(j => j.room.getSelf()))
     for (const j of joiners) {
       const {peerA, peerB} = linkHandles()
-      void regs.get('zzz-solo-host')!(peerA, j.id)
-      void regs.get(j.id)!(peerB, 'zzz-solo-host')
+      void regs.get(hostId)!(peerA, j.id)
+      void regs.get(j.id)!(peerB, hostId)
+    }
+    if (maxUsers > 1) {
+      await waitFor(
+        () => Object.keys(host.getPeers()).length === maxUsers - 1,
+        3_000
+      )
     }
     await wait(80)
 
     const hostPeers = Object.keys(host.getPeers())
     assert.equal(
       hostPeers.length,
-      limit - 1,
-      `host with limit=${limit} must retain exactly ${limit - 1} peers`
+      maxUsers - 1,
+      `host with maxUsers=${maxUsers} must retain exactly ${maxUsers - 1} peers`
     )
     assert.deepEqual(
-      errors.get('zzz-solo-host'),
+      errors.get(hostId),
       [],
       'established solo host must never report self room-full error'
     )
@@ -160,8 +181,8 @@ void test('S4: solo occupant is never evicted by later joiners with lexicographi
     await Promise.all([host.leave(), ...joiners.map(j => j.room.leave())])
   }
 
-  await mkHostAndJoiners(1, ['000-attacker-a', '000-attacker-b'])
-  await mkHostAndJoiners(2, ['000-joiner-a', '000-joiner-b', '000-joiner-c'])
+  await mkHostAndJoiners(1, 2)
+  await mkHostAndJoiners(2, 3)
 })
 
 void test('S9: unauthenticated hsready {ok: false, err: "room full"} before identity verification is ignored', async () => {
@@ -175,9 +196,9 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
 
   const victimUser = await createUserIdentity()
   const legitUser = await createUserIdentity()
-  const victimEp = await getDefaultEndpointIdentity(undefined, 's9-victim')
-  const legitEp = await getDefaultEndpointIdentity(undefined, 's9-legit')
-  const spoofEp = await getDefaultEndpointIdentity(undefined, 's9-spoof')
+  const victimEp = await getDefaultEndpointIdentity('s9-app', 's9-victim')
+  const legitEp = await getDefaultEndpointIdentity('s9-app', 's9-legit')
+  const spoofEp = await getDefaultEndpointIdentity('s9-app', 's9-spoof')
 
   const makeVerifiedRoom = (
     ep: EndpointIdentity,
@@ -186,38 +207,23 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
       fn: (peer: PeerHandle, id: string) => void | Promise<void>
     ) => void,
     recordErr?: (err: string) => void
-  ) => {
-    let roomRef: Room | null = null
-    const idHs = createIdentityHandshake({
-      endpointIdentityP: Promise.resolve(ep),
-      appId: 's9-app',
-      roomId: 's9-room',
-      getUserIdentity: async () => user,
-      getPeerHandle: pid =>
-        getRoomSignalingBridge(roomRef!)?.getPeerHandle(pid),
-      onVerified: (pid, verified) => {
-        getRoomSignalingBridge(roomRef!)?.onPeerIdentityVerified(pid, verified)
-      }
-    })
-    roomRef = createRoom(
+  ): Room => {
+    const room = createRoom(
       setReg,
       () => {},
       () => {},
       {
-        selfId: ep.peerId,
-        endpointIdentityP: Promise.resolve(ep),
+        endpointIdentity: ep,
         appId: 's9-app',
         roomId: 's9-room',
-        limit: 2,
-        verifyPeerIdentity: true,
-        identity: user,
-        onPeerHandshake: idHs.compose()
+        maxUsers: 2,
+        identity: user
       }
     )
     if (recordErr) {
-      roomRef.onError(err => recordErr(err.message))
+      room.onError(err => recordErr(err.message))
     }
-    return roomRef
+    return room
   }
 
   const victimRoom = makeVerifiedRoom(
@@ -234,29 +240,28 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
   })
 
   try {
+    await Promise.all([victimRoom.getSelf(), legitRoom.getSelf()])
+
     // Attacker connects raw WebRTC data channel and immediately sends unauthenticated hsready {ok:false, err:'room full'}
     const {peerA: victimSideSpoof, peerB: attackerRawPeer} = linkHandles()
     void victimReg!(victimSideSpoof, spoofEp.peerId)
     await wait(10)
 
-    // Use a real dummy room without verifyPeerIdentity to emit a wire-encoded hsready {ok:false, err:'room full'} frame over attackerRawPeer
-    let dummyReg: ((p: PeerHandle, id: string) => void) | null = null
-    const dummyAttacker = createRoom(
-      f => {
-        dummyReg = f
-      },
-      () => {},
-      () => {},
+    const forgedHsReadyPayload = encoder.encode(
+      JSON.stringify({ok: false, err: 'room full'})
+    )
+    const forgedHsReadyFrame = actionStartFrame(
+      0,
+      forgedHsReadyPayload.byteLength,
       {
-        selfId: spoofEp.peerId,
-        appId: 's9-app',
-        roomId: 's9-room',
-        limit: 1
+        type: `${internalActionPrefix}hsready`,
+        payload: forgedHsReadyPayload,
+        format: 1
       }
     )
-    dummyReg!(attackerRawPeer, victimEp.peerId)
+    attackerRawPeer.sendData(new Uint8Array(forgedHsReadyFrame))
     await wait(40)
-    await dummyAttacker.leave()
+    attackerRawPeer.destroy()
 
     assert.equal(
       joinErrors.includes('room full') || joinErrors.includes('room-full'),
@@ -278,29 +283,29 @@ void test('S9: unauthenticated hsready {ok: false, err: "room full"} before iden
 
 void test('S14: signal-handler drops invalid peerIds before allocating peerStates and hashTopic cache is bounded', async () => {
   const peerStates: Record<string, unknown> = {}
+  const selfId = 'K'.repeat(20)
   const receive = createSignalHandler({
     appId: 's14-app',
-    roomId: 's14-room',
+    getRoomId: () => 's14-room',
     config: {appId: 's14-app'},
     peerStates: peerStates as never,
-    rootTopicPlaintext: 'root',
+    getRootTopicPlaintext: () => 'root',
     rootTopicP: Promise.resolve('root'),
     selfTopicP: Promise.resolve('self'),
     toPlain: async s => s,
     toCipher: async s => s,
     encryptOffer: async () => 'enc',
     isLeaving: () => false,
-    offerManager: {
-      checkout: async () => [],
-      claimLeased: () => {},
-      reclaimLeased: () => {}
-    } as never,
+    checkoutOffers: async () => [],
+    claimLeasedOffer: () => {},
+    reclaimLeasedOffer: () => {},
     initPeer: (() => ({})) as never,
     connectPeer: () => {},
     disconnectPeer: () => {},
     announceIntervals: [],
     announceIntervalMs: 5_000,
-    selfId: 'K'.repeat(20),
+    getSelfIdNow: () => selfId,
+    selfIdP: Promise.resolve(selfId),
     onError: undefined
   }).handleMessage(0)
 
@@ -360,12 +365,13 @@ void test('S15: undecryptable offers allocate 0 RTCPeerConnections and announce 
   }
 
   const peerStates: Record<string, unknown> = {}
+  const selfId = '0'.repeat(20)
   const receive = createSignalHandler({
     appId: 's15-app',
-    roomId: 's15-room',
+    getRoomId: () => 's15-room',
     config: {appId: 's15-app'},
     peerStates: peerStates as never,
-    rootTopicPlaintext: 'root',
+    getRootTopicPlaintext: () => 'root',
     rootTopicP: Promise.resolve('root'),
     selfTopicP: Promise.resolve('self'),
     toPlain: async () => {
@@ -374,19 +380,18 @@ void test('S15: undecryptable offers allocate 0 RTCPeerConnections and announce 
     toCipher: async s => s,
     encryptOffer: async () => 'enc-offer',
     isLeaving: () => leaving,
-    offerManager: {
-      checkout: async () => [
-        {peer: makeMockPeer(), offer: 'enc-offer', offerId: 'offer-id-1234'}
-      ],
-      claimLeased: () => {},
-      reclaimLeased: () => {}
-    } as never,
+    checkoutOffers: async () => [
+      {peer: makeMockPeer(), offer: 'enc-offer', offerId: 'offer-id-1234'}
+    ],
+    claimLeasedOffer: () => {},
+    reclaimLeasedOffer: () => {},
     initPeer: makeMockPeer as never,
     connectPeer: () => {},
     disconnectPeer: () => {},
     announceIntervals: [],
     announceIntervalMs: 60_000,
-    selfId: '0'.repeat(20),
+    getSelfIdNow: () => selfId,
+    selfIdP: Promise.resolve(selfId),
     onError: undefined
   }).handleMessage(0)
 
@@ -449,28 +454,40 @@ void test('S16: corrupt IndexedDB identity record is validated and repaired via 
         req.result = {
           objectStoreNames: {contains: () => true},
           close: () => {},
-          transaction: () => ({
-            objectStore: () => ({
-              get: (k: string) => {
-                const r: MockIdbReq = {result: storeMap.get(k)}
-                queueMicrotask(() => r.onsuccess?.())
-                return r
-              },
-              put: (val: unknown, k: string) => {
-                putCalls++
-                storeMap.set(k, val)
-                const r: MockIdbReq = {result: k}
-                queueMicrotask(() => r.onsuccess?.())
-                return r
-              },
-              add: (val: unknown, k: string) => {
-                storeMap.set(k, val)
-                const r: MockIdbReq = {result: k}
-                queueMicrotask(() => r.onsuccess?.())
-                return r
-              }
-            })
-          })
+          transaction: () => {
+            const tx: {
+              oncomplete?: () => void
+              objectStore: () => unknown
+            } = {
+              objectStore: () => ({
+                get: (k: string) => {
+                  const r: MockIdbReq = {result: storeMap.get(k)}
+                  queueMicrotask(() => r.onsuccess?.())
+                  return r
+                },
+                put: (val: unknown, k: string) => {
+                  putCalls++
+                  storeMap.set(k, val)
+                  const r: MockIdbReq = {result: k}
+                  queueMicrotask(() => {
+                    r.onsuccess?.()
+                    tx.oncomplete?.()
+                  })
+                  return r
+                },
+                add: (val: unknown, k: string) => {
+                  storeMap.set(k, val)
+                  const r: MockIdbReq = {result: k}
+                  queueMicrotask(() => {
+                    r.onsuccess?.()
+                    tx.oncomplete?.()
+                  })
+                  return r
+                }
+              })
+            }
+            return tx
+          }
         }
         req.onsuccess?.()
       })
@@ -491,8 +508,8 @@ void test('S16: corrupt IndexedDB identity record is validated and repaired via 
       await verifyUserIdKey(resolved.userId, resolved.signPubJwk),
       true
     )
-    assert.equal(resolved.persisted, true)
     assert.equal(resolved.persistence, 'local')
+    assert.equal('persisted' in resolved, false)
   } finally {
     if (prevWindow === undefined) {
       delete globals['window']
@@ -537,12 +554,13 @@ void test('D2: signaling ciphertexts bind type|peerId|offerId via AAD and reject
 
   // Signal handler drops offers/answers/candidates missing offerId before calling toPlain
   let toPlainCalls = 0
+  const selfId = 'K'.repeat(20)
   const receive = createSignalHandler({
     appId: 'd2-app',
-    roomId: 'd2-room',
+    getRoomId: () => 'd2-room',
     config: {appId: 'd2-app'},
     peerStates: {} as never,
-    rootTopicPlaintext: 'root',
+    getRootTopicPlaintext: () => 'root',
     rootTopicP: Promise.resolve('root'),
     selfTopicP: Promise.resolve('self'),
     toPlain: async (s: Signal) => {
@@ -552,17 +570,16 @@ void test('D2: signaling ciphertexts bind type|peerId|offerId via AAD and reject
     toCipher: async s => s,
     encryptOffer: async () => 'enc',
     isLeaving: () => false,
-    offerManager: {
-      checkout: async () => [],
-      claimLeased: () => {},
-      reclaimLeased: () => {}
-    } as never,
+    checkoutOffers: async () => [],
+    claimLeasedOffer: () => {},
+    reclaimLeasedOffer: () => {},
     initPeer: (() => ({})) as never,
     connectPeer: () => {},
     disconnectPeer: () => {},
     announceIntervals: [],
     announceIntervalMs: 5_000,
-    selfId: 'K'.repeat(20),
+    getSelfIdNow: () => selfId,
+    selfIdP: Promise.resolve(selfId),
     onError: undefined
   }).handleMessage(0)
 
@@ -574,8 +591,8 @@ void test('D2: signaling ciphertexts bind type|peerId|offerId via AAD and reject
 
 void test('D3: createIdentityHandshake fails closed when peer.connection lacks SDP DTLS fingerprints', async () => {
   const user = await createUserIdentity()
-  const epA = await getDefaultEndpointIdentity(undefined, 'd3-app-a')
-  const epB = await getDefaultEndpointIdentity(undefined, 'd3-app-b')
+  const epA = await getDefaultEndpointIdentity('d3-app', 'd3-client-a')
+  const epB = await getDefaultEndpointIdentity('d3-app', 'd3-client-b')
 
   const fingerprintlessPeer = {
     connection: {
@@ -605,9 +622,9 @@ void test('D3: createIdentityHandshake fails closed when peer.connection lacks S
 })
 
 void test('D12: endpoint identities are partitioned per appId and use non-extractable private keys', async () => {
-  const epAppA1 = await getDefaultEndpointIdentity(undefined, 'd12-app-alpha')
-  const epAppA2 = await getDefaultEndpointIdentity(undefined, 'd12-app-alpha')
-  const epAppB = await getDefaultEndpointIdentity(undefined, 'd12-app-beta')
+  const epAppA1 = await getDefaultEndpointIdentity('d12-app-alpha', 'client-1')
+  const epAppA2 = await getDefaultEndpointIdentity('d12-app-alpha', 'client-1')
+  const epAppB = await getDefaultEndpointIdentity('d12-app-beta', 'client-1')
 
   assert.equal(epAppA1.peerId, epAppA2.peerId)
   assert.notEqual(
@@ -619,12 +636,12 @@ void test('D12: endpoint identities are partitioned per appId and use non-extrac
   assert.equal(epAppB.signPrivateKey.extractable, false)
 })
 
-void test('D13: SelfInfo and resolved UserIdentity surface persisted and identityPersistence on storage downgrade', async () => {
-  // Outside browser (no IndexedDB), resolveUserIdentity({identity: 'local'}) downgrades to ephemeral and reports persisted: false
+void test('D13: SelfInfo and resolved UserIdentity surface persistence and identityPersistence on storage downgrade', async () => {
+  // Outside browser (no IndexedDB), resolveUserIdentity({identity: 'local'}) downgrades to ephemeral and reports persistence: 'none'
   const degradedIdentity = await resolveUserIdentity('d13-app', 'd13-room', {
     identity: 'local'
   })
-  assert.equal(degradedIdentity.persisted, false)
+  assert.equal('persisted' in degradedIdentity, false)
   assert.equal(degradedIdentity.persistence, 'none')
   assert.match(degradedIdentity.userId, /^[0-9A-Za-z]{22}$/)
   assert.equal('fingerprint' in degradedIdentity, false)
@@ -644,7 +661,7 @@ void test('D13: SelfInfo and resolved UserIdentity surface persisted and identit
   )
   try {
     const selfEphemeral = await roomEphemeral.getSelf()
-    assert.equal(selfEphemeral.persisted, false)
+    assert.equal('persisted' in selfEphemeral, false)
     assert.equal(selfEphemeral.identityPersistence, 'none')
   } finally {
     await roomEphemeral.leave()
@@ -661,7 +678,7 @@ void test('D13: SelfInfo and resolved UserIdentity surface persisted and identit
   )
   try {
     const selfCustom = await roomCustom.getSelf()
-    assert.equal(selfCustom.persisted, true)
+    assert.equal('persisted' in selfCustom, false)
     assert.equal(selfCustom.identityPersistence, 'custom')
     assert.equal(customUser.userId, selfCustom.userId)
   } finally {

@@ -25,15 +25,17 @@ boilerplate—and eliminates subtle security and topology footguns.
    `onUserJoin` and `onUserLeave` fire once per unique user and automatically
    deduplicate multiple tabs.
 3. **Out-of-the-Box Room Authority, Limits, and State**: Advisory per-peer room
-   capacity limits (`config.limit`), opt-in cryptographic admin ownership
-   (`roles(...)`), role-based access control (`grantRole`, `revokeRole`, `ban`),
-   and synchronized authoritative state (`room.makeState`) are now built into
-   the core protocol and tree-shaken when `roles()` is not imported.
+   capacity limits (`config.maxUsers`), per-user state (`room.makeUserState`),
+   shared room state (`room.makeState`), opt-in cryptographic admin ownership
+   (`roles(...)`), and role-based access control (`grantRole`, `revokeRole`,
+   `ban`, `unban`) are now built into the core protocol (`roles()` is
+   tree-shaken when not imported).
 4. **Scalable Multi-Hop Topologies**: Rooms are no longer restricted to
-   full-mesh WebRTC (`O(N²)` connections). By opting in with `scale()` (supports
-   `'auto'` or `'gossip'`), rooms can scale to hundreds of participants using
-   multi-hop overlay routing with end-to-end cryptographic sender verification,
-   while apps that don't import `scale()` pay zero bundle overhead.
+   full-mesh WebRTC (`O(N²)` connections). By opting in with `scale()`
+   (`scale({maxDirectPeers?: number})`, default `6`), small rooms naturally form
+   a direct mesh while larger rooms scale across multi-hop overlay routing with
+   end-to-end cryptographic sender verification—and apps that don't import
+   `scale()` pay zero bundle overhead.
 5. **Prebuilt `.min.js` Bundles Removed**: Prebuilt `dist/trystero-*.min.js`
    release bundles have been removed in favor of tree-shaking bundlers (or ESM
    CDNs like `esm.run`) so optional plugins like `roles()` and `scale()` are
@@ -57,12 +59,12 @@ security footguns:
 
 1. **False Sense of Security in Multi-Hop Topologies**: `onPeerHandshake`
    operated during the physical WebRTC connection setup. In scalable topologies
-   (`scale()` with `'auto'` or `'gossip'`), a peer only establishes physical
-   WebRTC connections with a handful of 1-hop neighbors (`maxConnections`),
-   while communicating with everyone else over multi-hop overlay routing. A
-   physical handshake gate would **never run** for 2+ hop peers—giving
-   developers a false sense of security that they had gated the room when
-   unverified peers could still route messages through neighbors.
+   (`scale()`), a peer only establishes physical WebRTC connections with up to
+   `maxDirectPeers` 1-hop neighbors (`6` by default), while communicating with
+   everyone else over multi-hop overlay routing. A physical handshake gate would
+   **never run** for 2+ hop peers—giving developers a false sense of security
+   that they had gated the room when unverified peers could still route messages
+   through neighbors.
 2. **Unverified Signaling IDs**: Previously, `peerId` was just a random string
    announced over the signaling server. Using `onPeerHandshake` to check an
    allowlist of `peerId`s was vulnerable to spoofing on public relays unless
@@ -71,16 +73,17 @@ security footguns:
    - **Identity verification**: Handled automatically by self-certifying
      `userId` and `peerId` cryptographic handshakes and end-to-end signed
      overlay envelopes.
-   - **Room capacity limits**: Handled natively by `joinRoom({limit: N})` as a
-     best-effort per-peer cap that accounts for multi-tab users (`userId`)
+   - **Room capacity limits**: Handled natively by `joinRoom({maxUsers: N})` as
+     a best-effort per-peer cap that accounts for multi-tab users (`userId`)
      without locking out a user who refreshes their page.
    - **Roles and moderation**: Handled cryptographically by `roles(...)`,
-     `room.grantRole()`, `roles` filters on `makeAction` / `makeState`, and
-     `room.ban()`. These authorize actions and enforce bans after joining; they
-     are not a custom pre-connection admission hook.
+     `room.grantRole()`, `roles` filters on `makeAction` / `makeState` /
+     `makeUserState`, `room.ban()`, and `room.unban()`. These authorize actions
+     and enforce bans after joining; they are not a custom pre-connection
+     admission hook.
    - **Custom profile / app-version exchange**: Handled cleanly across both
-     direct and multi-hop peers using
-     `room.makeAction('hello', {kind: 'request'})` and `room.makeState()`.
+     direct and multi-hop peers using `room.makeUserState()`,
+     `room.makeState()`, and `room.makeAction('hello', {kind: 'request'})`.
 
 ---
 
@@ -221,7 +224,7 @@ await room.addStream(stream)
 
 ---
 
-### 3. Action Callbacks (`makeAction`)
+### 3. Action Callbacks, Errors, and Target Semantics (`makeAction`)
 
 Register action listeners with `.on*(fn)` methods (`onMessage`, `onRequest`,
 `onReceive`, `onReceiveProgress`) rather than property assignment or passing
@@ -229,6 +232,23 @@ handlers in `makeAction(namespace, config)`. Existing `{peerId, metadata}`
 destructuring continues to work, and **`userId`** and **`roles`** are
 automatically included in every callback context (`onMessage`, `onRequest`,
 `onReceive`, `onProgress`, `onReceiveProgress`).
+
+Additional 0.27 action behavior updates:
+
+- **Explicit-target `send()` validation**: `action.send(data, {target})` now
+  rejects if a specified `userId` or `peerId` is not currently connected
+  (broadcast `action.send(data)` with no `target` still resolves when zero peers
+  are present).
+- **Structured `ActionError` & `requestMany` outcomes**: Rejected action
+  promises reject with an `ActionError` (`error.kind`:
+  `'timeout' | 'disconnected' | 'aborted' | 'rejected'`), throwing an `Error`
+  inside `onRequest` forwards its `message` to the caller's `ActionError`, and
+  `requestMany()` settles each target with `status`
+  `'fulfilled' | 'timeout' | 'rejected' | 'disconnected'`.
+- **Zero-copy bulk binary `send()`**: Binary buffers larger than `16 KiB` are
+  chunked directly from the passed `ArrayBuffer` / `TypedArray` without cloning;
+  do not mutate a binary buffer passed to `send()` until its returned `Promise`
+  settles.
 
 If you are migrating from a release before 0.25.0 and were still using the
 legacy tuple destructuring (`const [send, get] = room.makeAction(...)`), migrate
@@ -273,7 +293,7 @@ const unsubMove = move.onMessage((data, {userId, metadata, roles}) => {
   top-level `selfId` export has been removed so endpoint P-256 identity keys are
   generated lazily via WebCrypto without top-level `await`. Use
   `await room.getSelf()` to get your verified
-  `{peerId, userId, roomId, baseRoomId, isAdmin, roles}`.
+  `{peerId, userId, identityPersistence, roomId, baseRoomId, isAdmin, roles}`.
 
 #### Before (0.26.x)
 
@@ -355,17 +375,17 @@ Previously, capping a room (for example, a 2-player game) required tracking peer
 counts inside `onPeerHandshake` and rejecting latecomers—which suffered from
 race conditions and locked out players who refreshed their browser tab.
 
-In 0.27.0, pass `limit` to `joinRoom()` for a best-effort, advisory per-peer
+In 0.27.0, pass `maxUsers` to `joinRoom()` for a best-effort, advisory per-peer
 capacity limit. Each peer refuses new `userId`s once its own view reaches
-`limit` (without ever evicting itself or trusting a stranger's `'room full'` to
-drop other peers), and a player who refreshes their tab or opens another tab
+`maxUsers` (without ever evicting itself or trusting a stranger's `'room full'`
+to drop other peers), and a player who refreshes their tab or opens another tab
 automatically reuses their existing user slot:
 
 ```js
 const room = joinRoom(
   {
     appId: 'chess-app',
-    limit: 2 // Advisory cap of 2 unique users in this peer's view
+    maxUsers: 2 // Advisory cap of 2 unique users in this peer's view
   },
   roomId
 )
@@ -384,7 +404,7 @@ room.onError(err => {
 Instead of gating physical connections with `onPeerHandshake`, 0.27.0 provides
 cryptographic **self-certifying rooms** (`use: [roles({selfAsAdmin: true})]`),
 **signed role certificates** (`grantRole`), **action/state role gating**, and
-**signed bans** (`ban`) that work across both full-mesh and multi-hop
+**signed bans** (`ban` / `unban`) that work across both full-mesh and multi-hop
 topologies.
 
 ```js

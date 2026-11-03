@@ -1,5 +1,5 @@
 import {schnorr} from '@noble/secp256k1'
-import {encodeBytes, hash32, toJson} from '@trystero-p2p/core'
+import {encodeBytes, toJson} from '@trystero-p2p/core'
 
 export type NostrSigner = {
   secretKey: Uint8Array
@@ -10,7 +10,6 @@ export const tag = 'x'
 export const eventMsgType = 'EVENT'
 
 const subscribeClockSkewSeconds = 60
-const kindCache: Record<string, number> = {}
 const sha256TopicRe = /^[A-Za-z0-9_-]{43}$/
 
 const toHex = (bytes: Uint8Array): string =>
@@ -26,7 +25,7 @@ export const createSigner = (): NostrSigner => {
   return {secretKey, pubkey: toHex(publicKey)}
 }
 
-const deriveTopicKind = (topic: string): number => {
+export const topicToKind = (topic: string): number => {
   if (sha256TopicRe.test(topic)) {
     const bin = atob(topic.slice(0, 8).replace(/-/g, '+').replace(/_/g, '/'))
     let val = 0
@@ -35,16 +34,17 @@ const deriveTopicKind = (topic: string): number => {
     }
     return (val % 10_000) + 20_000
   }
-  return (hash32(topic) % 10_000) + 20_000
+  let h = 0x811c9dc5
+  for (let i = 0; i < topic.length; i++) {
+    h = Math.imul(h ^ topic.charCodeAt(i), 0x01000193)
+  }
+  return ((h >>> 0) % 10_000) + 20_000
 }
-
-export const topicToKind = (topic: string): number =>
-  (kindCache[topic] ??= deriveTopicKind(topic))
 
 export const createEvent = async (
   topic: string,
   content: string,
-  signer: NostrSigner = createSigner()
+  signer: NostrSigner
 ): Promise<string> => {
   const payload = {
     kind: topicToKind(topic),

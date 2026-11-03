@@ -6,27 +6,7 @@ const noOp = (): void => {}
 const logHandlerErr = (kind: string, err: unknown): void =>
   console.error(`${libName} ${kind} error:`, err)
 
-export const lockMethods = <T extends object>(
-  target: T,
-  methodNames: readonly (keyof T & string)[]
-): T => {
-  for (const name of methodNames) {
-    const fn = target[name]
-    Object.defineProperty(target, name, {
-      get: () => fn,
-      set: () => {
-        throw new TypeError(
-          `${libName}: ${name} is a method; call ${name}(handler), which returns an unsubscribe function`
-        )
-      },
-      enumerable: true,
-      configurable: true
-    })
-  }
-  return target
-}
-
-export type EventEmitter<Args extends unknown[]> = readonly [
+type EventEmitter<Args extends unknown[]> = readonly [
   subscribe: (
     handler: (...args: Args) => unknown,
     options?: ReplayListenerOptions,
@@ -129,13 +109,13 @@ export const createEventEmitter = <Args extends unknown[]>(
   ]
 }
 
-export type SingleHandlerTuple<F extends (...args: any[]) => any> = readonly [
+type SingleHandlerTuple<F extends (...args: never[]) => unknown> = readonly [
   set: (handler: F, options?: ListenerOptions) => Unsubscribe,
   get: () => F | null,
   clear: () => void
 ]
 
-export const initSingleHandler = <F extends (...args: any[]) => any>(
+export const initSingleHandler = <F extends (...args: never[]) => unknown>(
   name: string,
   onChange?: (handler: F | null) => void
 ): SingleHandlerTuple<F> => {
@@ -173,7 +153,7 @@ export const initSingleHandler = <F extends (...args: any[]) => any>(
         if (once) {
           unsub()
         }
-        return handler(...args)
+        return handler(...args) as ReturnType<F>
       }) as F
       const entry: [call: F, unsub: () => void] = [call, unsub]
       current = entry
@@ -184,18 +164,4 @@ export const initSingleHandler = <F extends (...args: any[]) => any>(
     (): F | null => current?.[0] ?? null,
     (): void => current?.[1]()
   ]
-}
-
-export type SingleHandler<F extends (...args: any[]) => any> = {
-  set: (handler: F, options?: ListenerOptions) => Unsubscribe
-  get: () => F | null
-  clear: () => void
-}
-
-export const createSingleHandler = <F extends (...args: any[]) => any>(
-  name: string,
-  onChange?: (handler: F | null) => void
-): SingleHandler<F> => {
-  const [set, get, clear] = initSingleHandler(name, onChange)
-  return {set, get, clear}
 }

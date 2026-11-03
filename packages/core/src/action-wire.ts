@@ -1,11 +1,17 @@
 import {
   maxActionFrameBytes as maxFrameBytes,
+  pendingDataTimeoutMs,
   transferTimeoutMs
 } from './data-limits'
-import {
-  createDirectPeerTransport,
-  type PeerDataTransport
-} from './peer-registry'
+import type {TargetPeers} from './internal-types'
+import type {PeerDataTransport} from './peer-transport'
+import type {
+  ActionError,
+  ActionErrorKind,
+  ActionReceiveContext,
+  DataPayload,
+  JsonValue
+} from './types'
 import {
   actionRedefinedErr,
   all,
@@ -16,6 +22,7 @@ import {
   logActionHandlerErr,
   logErr,
   mkErr,
+  noActivePeerMsg,
   noOp,
   operationAbortedMsg,
   peerDisconnectedMsg,
@@ -23,24 +30,18 @@ import {
   resetTimer,
   toJson,
   toPayloadSource,
-  warn,
-  warnNoPeer
+  unrefTimer,
+  warn
 } from './utils'
-import type {
-  ActionReceiveContext,
-  DataPayload,
-  JsonValue,
-  PeerHandle,
-  TargetPeers
-} from './types'
 
-const version = 2
-const inline = 0
-const offer = 1
-const chunk = 2
-const accepted = 3
-const rejected = 4
-const cancelled = 5
+export const actionWireVersion = 3
+const inlineKind = 0
+const offerKind = 1
+const chunkKind = 2
+const acceptedKind = 3
+const rejectedKind = 4
+const cancelledKind = 5
+
 const inlineHeaderSize = 36 // version, kind/format, action name, metadata length
 const offerHeaderSize = 48 // inline header, uint32 id, float64 byte length
 const controlHeaderSize = 6 // version, kind, uint32 id
@@ -53,107 +54,153 @@ const maxPendingTransfers = 1024
 const maxPendingPerPeer = 64
 const maxDecisions = 128
 const maxDecisionsPerPeer = 8
+const maxPreListenerMessages = 32
 const emptyBytes = new Uint8Array()
 const sizeLimitMsg = 'payload exceeds receiver size limit'
 const invalidPayloadMsg = invalidActionMsg('payload')
 
-export const textFormat = 0
-export const jsonFormat = 1
-export const binaryFormat = 2
+const textFormat = 0
+const jsonFormat = 1
+const binaryFormat = 2
 
 const phasePending = 0
 const phaseDeciding = 1
 const phaseReady = 2
 const phaseReleased = 3
 
-type WireReceiveContext = Omit<ActionReceiveContext, 'kind' | 'userId'>
-export type WireReceiveHandler = (
+type WireReceiveContext = Omit<
+  ActionReceiveContext,
+  'kind' | 'userId' | 'roles'
+>
+
+type WireReceiveHandler = (
   context: WireReceiveContext
 ) => boolean | Promise<boolean>
 
-export type ReceiveScope = readonly [
+type ReceiveScope = readonly [
   key: string,
   signal: AbortSignal,
   receive: WireReceiveHandler | null,
   reject: (reason: string) => void
 ]
 
-export type ReceiveScopeResolver = (
+type ReceiveScopeResolver = (
   peerId: string,
   metadata?: JsonValue
 ) => ReceiveScope | null
 
-export type ReceiveOptions = {
-  receiveScope?: ReceiveScopeResolver
-  maxPayloadBytes?: number
-}
-
-export type WireRejectHandler = (
+type WireRejectHandler = (
   peerId: string,
   metadata: JsonValue | undefined,
   reason: string
 ) => void
 
-type ReceiveAction = {
-  l?: number
-  s?: ReceiveScopeResolver
-  r: ((data: DataPayload, peerId: string, metadata?: JsonValue) => void) | null
-  p: (percent: number, peerId: string, metadata?: JsonValue) => void
-  g: WireReceiveHandler | null
-  x: WireRejectHandler | null
+export type WireActionOptions = {
+  sendToPending?: boolean
+  receiveWhilePending?: boolean
+  maxPayloadBytes?: number
+  receiveScope?: ReceiveScopeResolver
 }
 
-type Message = readonly [
-  peerId: string,
-  type: string,
-  format: number,
-  size: number,
+export type WireAction<T extends DataPayload = DataPayload> = {
+  send: (
+    data: T,
+    targets?: TargetPeers,
+    metadata?: JsonValue,
+    progress?: (percent: number, peerId: string, metadata?: JsonValue) => void,
+    signal?: AbortSignal
+  ) => Promise<void>
+  onMessage: (
+    receiver: ((data: T, peerId: string, metadata?: JsonValue) => void) | null
+  ) => void
+  onProgress: (
+    handler: (percent: number, peerId: string, metadata?: JsonValue) => void
+  ) => void
+  onReceive: (handler: WireReceiveHandler | null) => void
+  onReject: (handler: WireRejectHandler) => void
+}
+
+type ReceiveRegistration = {
+  maxPayloadBytes?: number
+  receiveScope?: ReceiveScopeResolver
+  receiver:
+    | ((data: DataPayload, peerId: string, metadata?: JsonValue) => void)
+    | null
+  onProgress: (percent: number, peerId: string, metadata?: JsonValue) => void
+  receiveGate: WireReceiveHandler | null
+  onReject: WireRejectHandler | null
+}
+
+type RegisteredWireAction = {
+  sendToPending: boolean
+  receiveWhilePending: boolean
+  maxPayloadBytes: number | undefined
+  receiveScope: ReceiveScopeResolver | undefined
+  action: WireAction
+}
+
+type IncomingMessageMeta = {
+  peerId: string
+  type: string
+  format: number
+  size: number
   metadata: JsonValue | undefined
-]
-
-type Admission = {
-  m: Message
-  s?: ReceiveScope
-  u?: () => void
-  p: 0 | 1 | 2 | 3
-  c: AbortController | null
-  l: number
-  t: ReturnType<typeof setTimeout> | null
 }
 
-type Inline = Admission & {k: 0; y: string; d: Uint8Array}
-type Bulk = Admission & {
-  k: 1
-  i: number
-  w: 0 | 1
-  d: Uint8Array | null
-  o: number
-}
-type Incoming = Inline | Bulk
-type PeerIncoming = {
-  b: Map<number, Bulk>
-  n: Map<string, Inline[]>
-  a: Bulk | null
-  c: number
+type AdmissionBase = {
+  message: IncomingMessageMeta
+  scope?: ReceiveScope
+  unbindAbort?: () => void
+  phase: 0 | 1 | 2 | 3
+  controller: AbortController | null
+  lastSeenAt: number
+  timer: ReturnType<typeof setTimeout> | null
 }
 
-export type ActionErrorKind =
-  | 'timeout'
-  | 'disconnected'
-  | 'aborted'
-  | 'rejected'
+type IncomingInline = AdmissionBase & {
+  kind: 'inline'
+  queueKey: string
+  data: Uint8Array
+}
 
-export type ActionError = Error & {
-  kind?: ActionErrorKind
+type IncomingBulk = AdmissionBase & {
+  kind: 'bulk'
+  transferId: number
+  accepted: boolean
+  data: Uint8Array | null
+  seenChunks: Uint8Array | null
+  offset: number
+}
+
+type IncomingTransfer = IncomingInline | IncomingBulk
+
+type PeerIncomingState = {
+  bulkTransfers: Map<number, IncomingBulk>
+  inlineQueues: Map<string, IncomingInline[]>
+  activeBulk: IncomingBulk | null
+  pendingCount: number
+}
+
+type PreListenerEntry = {
+  message: IncomingMessageMeta
+  data: Uint8Array
+  receivedAt: number
+}
+
+type OutgoingTransfer = {
+  accept: () => boolean
+  fail: (error: Error, fromReceiver?: boolean) => void
+  touch: () => void
 }
 
 export const makeActionError = (
   kind: ActionErrorKind,
   message: string
 ): ActionError => {
-  const error = mkErr(message) as ActionError
-  error.kind = kind
-  error.name = kind === 'aborted' ? 'AbortError' : error.name
+  const error = Object.assign(mkErr(message), {kind})
+  if (kind === 'aborted') {
+    error.name = 'AbortError'
+  }
   return error
 }
 
@@ -163,54 +210,16 @@ export const throwIfAborted = (signal?: AbortSignal): void => {
   }
 }
 
-export type ActionOptions = ReceiveOptions & {
-  sendToPending: boolean
-  receiveWhilePending: boolean
-}
-export type InternalActionSender<T extends DataPayload = DataPayload> = (
-  data: T,
-  targetPeers?: TargetPeers,
-  metadata?: JsonValue,
-  progress?: (percent: number, peerId: string, metadata?: JsonValue) => void,
-  signal?: AbortSignal
-) => Promise<void>
-export type InternalActionReceiver<T extends DataPayload = DataPayload> = (
-  receiver: ((data: T, peerId: string, metadata?: JsonValue) => void) | null
-) => void
-export type InternalAction<T extends DataPayload = DataPayload> = {
-  send: InternalActionSender<T>
-  onMessage: InternalActionReceiver<T>
-  onProgress: (
-    handler: (percent: number, peerId: string, metadata?: JsonValue) => void
-  ) => void
-  onReceive: (handler: WireReceiveHandler | null) => void
-  onReject: (handler: WireRejectHandler) => void
-}
+const viewOf = (bytes: Uint8Array): DataView =>
+  new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
-type WireActionTuple = [
-  sendToPending: boolean,
-  receiveWhilePending: boolean,
-  maxPayloadBytes: number | undefined,
-  receiveScope: ReceiveScopeResolver | undefined,
-  action: InternalAction
-]
-
-type OutgoingTuple = [
-  accept: () => boolean,
-  fail: (error: Error, fromReceiver?: boolean) => void,
-  touch: () => void
-]
-
-const viewOf = (b: Uint8Array): DataView =>
-  new DataView(b.buffer, b.byteOffset, b.byteLength)
-
-const packet = (
+const buildControlPacket = (
   kind: number,
   id: number,
   size = controlHeaderSize
 ): Uint8Array => {
   const bytes = new Uint8Array(size)
-  bytes[0] = version
+  bytes[0] = actionWireVersion
   bytes[1] = kind
   viewOf(bytes).setUint32(2, id)
   return bytes
@@ -219,17 +228,21 @@ const packet = (
 const startIdleTimer = (
   getLast: () => number,
   onTimeout: () => void,
-  setTimer: (t: ReturnType<typeof setTimeout>) => void
+  setTimer: (timer: ReturnType<typeof setTimeout>) => void
 ): void => {
   const tick = (): void => {
-    const rem = transferTimeoutMs - (Date.now() - getLast())
-    if (rem > 0) {
-      setTimer(setTimeout(tick, rem))
+    const remaining = transferTimeoutMs - (Date.now() - getLast())
+    if (remaining > 0) {
+      const next = setTimeout(tick, remaining)
+      unrefTimer(next)
+      setTimer(next)
     } else {
       onTimeout()
     }
   }
-  setTimer(setTimeout(tick, transferTimeoutMs))
+  const initial = setTimeout(tick, transferTimeoutMs)
+  unrefTimer(initial)
+  setTimer(initial)
 }
 
 const decodeActionType = (frame: Uint8Array): string =>
@@ -267,94 +280,80 @@ const decodePayload = (
       : decodeBytes(bytes)
 
 const emitRxProgress = (
-  action: ReceiveAction,
+  registration: ReceiveRegistration,
   value: number,
   peerId: string,
   metadata?: JsonValue
 ): void => {
   try {
-    action.p(value, peerId, metadata)
+    registration.onProgress(value, peerId, metadata)
   } catch (error) {
     logErr('progress handler', error)
   }
 }
 
 const deliverPayload = (
-  action: ReceiveAction,
+  registration: ReceiveRegistration,
   data: DataPayload,
   peerId: string,
   metadata?: JsonValue
 ): void => {
-  emitRxProgress(action, 1, peerId, metadata)
+  emitRxProgress(registration, 1, peerId, metadata)
   try {
-    action.r?.(data, peerId, metadata)
+    registration.receiver?.(data, peerId, metadata)
   } catch (error) {
     logActionHandlerErr(error)
   }
 }
 
-export const toPeerTransportGetter = (
-  getTransport?: (
-    id: string,
-    includePending: boolean
-  ) => PeerDataTransport | undefined,
-  getPeer?: (id: string, includePending: boolean) => PeerHandle | undefined
-): ((id: string, includePending: boolean) => PeerDataTransport | undefined) => {
-  if (getTransport) {
-    return getTransport
-  }
-  const cache = new WeakMap<PeerHandle, PeerDataTransport>()
-  return (peerId, includePending) => {
-    const peer = getPeer?.(peerId, includePending)
-    if (!peer) {
-      return undefined
-    }
-    let cached = cache.get(peer)
-    if (!cached) {
-      cached = createDirectPeerTransport(peer, () => {
-        const cur = getPeer?.(peerId, true) ?? getPeer?.(peerId, false)
-        return Boolean(cur && !cur.isDead)
-      })
-      cache.set(peer, cached)
-    }
-    return cached
-  }
-}
-
-export const initActionWireManager = (
-  getPeerIds: (includePending: boolean) => string[],
-  canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean,
-  onPeerError: (peerId: string, error: Error) => void,
+export type ActionWireManagerDeps = {
+  onPeerError: (peerId: string, error: Error) => void
   resolveTransport: (
     id: string,
     includePending: boolean
-  ) => PeerDataTransport | undefined,
+  ) => PeerDataTransport | undefined
+  getPeerIds: (includePending: boolean) => string[]
+  canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
   broadcastInline?: (
     frame: Uint8Array,
     onProgress?: (peerId: string) => void,
     signal?: AbortSignal
-  ) => Promise<boolean> | boolean,
-  checkAborted: (signal?: AbortSignal) => void = throwIfAborted,
-  maxReceiveBytes: number = defaultMaxReceiveBytes
-): readonly [
-  makeInternalAction: <T extends DataPayload = DataPayload>(
+  ) => Promise<boolean> | boolean
+  checkAborted?: (signal?: AbortSignal) => void
+  maxReceiveBytes?: number
+}
+
+export const createActionWireManager = ({
+  resolveTransport,
+  getPeerIds,
+  canReceiveFromPeer,
+  onPeerError,
+  broadcastInline,
+  checkAborted = throwIfAborted,
+  maxReceiveBytes = defaultMaxReceiveBytes
+}: ActionWireManagerDeps): {
+  makeWireAction: <T extends DataPayload = DataPayload>(
     type: string,
-    options?: Partial<ActionOptions>
-  ) => InternalAction<T>,
-  handleData: (id: string, data: ArrayBuffer) => void,
+    options?: WireActionOptions
+  ) => WireAction<T>
+  handleData: (id: string, data: ArrayBuffer) => void
   clearPeer: (id: string) => void
-] => {
+} => {
   if (!Number.isSafeInteger(maxReceiveBytes) || maxReceiveBytes <= 0) {
     throw posSafeIntErr('maxReceiveBytes')
   }
-  const actions = new Map<string, WireActionTuple>()
-  const rxActions = new Map<string, ReceiveAction>()
-  const outgoing = new Map<string, Map<number, OutgoingTuple>>()
-  const peers = new Map<string, PeerIncoming>()
-  const waiting = new Set<Bulk>()
+
+  const actions = new Map<string, RegisteredWireAction>()
+  const rxActions = new Map<string, ReceiveRegistration>()
+  const outgoing = new Map<string, Map<number, OutgoingTransfer>>()
+  const peers = new Map<string, PeerIncomingState>()
+  const preListenerQueues = new Map<string, Map<string, PreListenerEntry[]>>()
+  const waitingBulk = new Set<IncomingBulk>()
   const decisions = new Map<string, number>()
   const failedTransports = new WeakSet<PeerDataTransport>()
-  let nextId = 0
+
+  let preListenerSweepTimer: ReturnType<typeof setTimeout> | null = null
+  let nextTransferId = 0
   let pendingCount = 0
   let decisionCount = 0
   let reservedBytes = 0
@@ -364,9 +363,10 @@ export const initActionWireManager = (
   const disconnectedTransferErr = (): ActionError =>
     makeActionError('disconnected', peerDisconnectedMsg)
   const invalidFrameMsg = invalidActionMsg('frame')
-  const current = (state: Incoming): boolean => state.p !== phaseReleased
-  const payloadLimit = (action?: ReceiveAction): number =>
-    Math.min(maxReceiveBytes, action?.l ?? maxReceiveBytes)
+  const isCurrent = (state: IncomingTransfer): boolean =>
+    state.phase !== phaseReleased
+  const payloadLimit = (registration?: ReceiveRegistration): number =>
+    Math.min(maxReceiveBytes, registration?.maxPayloadBytes ?? maxReceiveBytes)
 
   const failPeer = (peerId: string, reason: string): void => {
     const target = resolveTransport(peerId, true)
@@ -388,7 +388,7 @@ export const initActionWireManager = (
       return
     }
     const text = encodeBytes(reason).subarray(0, 200)
-    const bytes = packet(kind, id, controlHeaderSize + text.length)
+    const bytes = buildControlPacket(kind, id, controlHeaderSize + text.length)
     bytes.set(text, controlHeaderSize)
     try {
       if (target.bufferedAmount > maxControlBufferedBytes) {
@@ -400,7 +400,7 @@ export const initActionWireManager = (
     }
   }
 
-  const control = (
+  const sendControl = (
     peerId: string,
     id: number,
     kind: number,
@@ -410,94 +410,107 @@ export const initActionWireManager = (
   }
 
   const notifyRejected = (
-    message: Message,
+    message: IncomingMessageMeta,
     reason: string,
     scope?: ReceiveScope,
     bulkId?: number
   ): void => {
     scope?.[3](reason)
-    rxActions.get(message[1])?.x?.(message[0], message[4], reason)
+    rxActions
+      .get(message.type)
+      ?.onReject?.(message.peerId, message.metadata, reason)
     if (bulkId !== undefined) {
-      control(message[0], bulkId, rejected, reason)
+      sendControl(message.peerId, bulkId, rejectedKind, reason)
     }
   }
 
   const rotateWaitingForPeer = (peerId: string): void => {
-    for (const queued of Array.from(waiting)) {
-      if (queued.m[0] === peerId) {
-        waiting.delete(queued)
-        waiting.add(queued)
+    for (const queued of Array.from(waitingBulk)) {
+      if (queued.message.peerId === peerId) {
+        waitingBulk.delete(queued)
+        waitingBulk.add(queued)
       }
     }
   }
 
-  const release = (state: Incoming): void => {
-    if (!current(state)) {
+  const release = (state: IncomingTransfer): void => {
+    if (!isCurrent(state)) {
       return
     }
-    state.p = phaseReleased
-    state.u?.()
-    state.t = resetTimer(state.t)
-    const peerId = state.m[0]
-    const peer = peers.get(peerId)!
-    if (state.k === 0) {
-      const queue = peer.n.get(state.y)!
-      queue.splice(queue.indexOf(state), 1)
-      if (!queue.length) {
-        peer.n.delete(state.y)
-      }
-      state.d = emptyBytes
-    } else {
-      peer.b.delete(state.i)
-      waiting.delete(state)
-      state.d = null
-      if (state.w === 1) {
-        reservedBytes -= state.m[3]
-        if (peer.a === state) {
-          peer.a = null
-          rotateWaitingForPeer(peerId)
+    state.phase = phaseReleased
+    state.unbindAbort?.()
+    state.timer = resetTimer(state.timer)
+    const {peerId} = state.message
+    const peer = peers.get(peerId)
+    if (peer) {
+      if (state.kind === 'inline') {
+        const queue = peer.inlineQueues.get(state.queueKey)
+        if (queue) {
+          const idx = queue.indexOf(state)
+          if (idx >= 0) {
+            queue.splice(idx, 1)
+          }
+          if (!queue.length) {
+            peer.inlineQueues.delete(state.queueKey)
+          }
         }
-        drainAgain = true
+        state.data = emptyBytes
+      } else {
+        peer.bulkTransfers.delete(state.transferId)
+        waitingBulk.delete(state)
+        state.data = null
+        state.seenChunks = null
+        if (state.accepted) {
+          reservedBytes -= state.message.size
+          if (peer.activeBulk === state) {
+            peer.activeBulk = null
+            rotateWaitingForPeer(peerId)
+          }
+          drainAgain = true
+        }
+      }
+      peer.pendingCount--
+      pendingCount--
+      if (!peer.pendingCount) {
+        peers.delete(peerId)
       }
     }
-    peer.c--
-    pendingCount--
-    if (!peer.c) {
-      peers.delete(peerId)
-    }
-    state.c?.abort()
+    state.controller?.abort()
   }
 
-  const rejectRx = (state: Incoming, reason: string): void => {
-    if (!current(state)) {
+  const rejectRx = (state: IncomingTransfer, reason: string): void => {
+    if (!isCurrent(state)) {
       return
     }
     release(state)
     notifyRejected(
-      state.m,
+      state.message,
       reason,
-      state.s,
-      state.k === 1 ? state.i : undefined
+      state.scope,
+      state.kind === 'bulk' ? state.transferId : undefined
     )
   }
 
-  const admit = (state: Incoming, action: ReceiveAction): boolean => {
-    if (state.p !== phasePending) {
-      return state.p === phaseReady
+  const admit = (
+    state: IncomingTransfer,
+    registration: ReceiveRegistration
+  ): boolean => {
+    if (state.phase !== phasePending) {
+      return state.phase === phaseReady
     }
-    if (state.m[3] > payloadLimit(action)) {
+    if (state.message.size > payloadLimit(registration)) {
       rejectRx(state, sizeLimitMsg)
       return false
     }
-    const receive = state.s ? state.s[2] : action.g
+    const receive = state.scope ? state.scope[2] : registration.receiveGate
     if (!receive) {
-      if (!action.r) {
+      if (!registration.receiver) {
         return false
       }
-      state.p = phaseReady
+      state.phase = phaseReady
       return true
     }
-    const peerId = state.m[0]
+    const {peerId} = state.message
     if (
       decisionCount >= maxDecisions ||
       (decisions.get(peerId) ?? 0) >= maxDecisionsPerPeer
@@ -505,32 +518,34 @@ export const initActionWireManager = (
       rejectRx(state, 'too many pending receive decisions')
       return false
     }
-    state.p = phaseDeciding
+    state.phase = phaseDeciding
     const controller = new AbortController()
-    state.c = controller
+    state.controller = controller
     decisionCount++
     decisions.set(peerId, (decisions.get(peerId) ?? 0) + 1)
     const result = decideReceive(
       () =>
         receive({
-          byteLength: state.m[3],
+          byteLength: state.message.size,
           peerId,
           signal: controller.signal,
-          ...(state.m[4] === undefined ? {} : {metadata: state.m[4]})
+          ...(state.message.metadata === undefined
+            ? {}
+            : {metadata: state.message.metadata})
         }),
       allow => {
         decisionCount--
-        const count = decisions.get(peerId)! - 1
-        if (count) {
+        const count = (decisions.get(peerId) ?? 1) - 1
+        if (count > 0) {
           decisions.set(peerId, count)
         } else {
           decisions.delete(peerId)
         }
-        if (!current(state)) {
+        if (!isCurrent(state)) {
           return false
         }
         if (allow) {
-          state.p = phaseReady
+          state.phase = phaseReady
         } else {
           rejectRx(state, 'payload rejected by receiver')
         }
@@ -545,57 +560,77 @@ export const initActionWireManager = (
   }
 
   const complete = (
-    state: Incoming,
-    action: ReceiveAction,
-    bytes: Uint8Array
+    state: IncomingTransfer,
+    registration: ReceiveRegistration,
+    bytes: Uint8Array,
+    copyBinary: boolean
   ): void => {
     let payload: DataPayload
     try {
-      payload = decodePayload(bytes, state.m[2], state.k === 0)
+      payload = decodePayload(bytes, state.message.format, copyBinary)
     } catch {
       release(state)
-      failPeer(state.m[0], invalidPayloadMsg)
+      failPeer(state.message.peerId, invalidPayloadMsg)
       return
     }
     release(state)
-    deliverPayload(action, payload, state.m[0], state.m[4])
+    deliverPayload(
+      registration,
+      payload,
+      state.message.peerId,
+      state.message.metadata
+    )
   }
 
-  const tryInline = (state: Inline): void => {
-    const action = rxActions.get(state.m[1])
-    if (current(state) && action && admit(state, action) && action.r) {
-      complete(state, action, state.d)
+  const tryInline = (state: IncomingInline): void => {
+    const registration = rxActions.get(state.message.type)
+    if (
+      isCurrent(state) &&
+      registration &&
+      admit(state, registration) &&
+      registration.receiver
+    ) {
+      complete(state, registration, state.data, true)
     }
   }
 
-  const tryBulk = (state: Bulk): void => {
-    const action = rxActions.get(state.m[1])
-    if (!current(state) || !action || !admit(state, action) || !action.r) {
+  const tryBulk = (state: IncomingBulk): void => {
+    const registration = rxActions.get(state.message.type)
+    if (
+      !isCurrent(state) ||
+      !registration ||
+      !admit(state, registration) ||
+      !registration.receiver
+    ) {
       return
     }
-    if (state.w === 1) {
-      if (state.o === state.m[3]) {
-        complete(state, action, state.d!)
+    if (state.accepted) {
+      if (state.offset === state.message.size && state.data) {
+        complete(state, registration, state.data, false)
       }
       return
     }
-    const peer = peers.get(state.m[0])!
-    if (!peer.a && reservedBytes + state.m[3] <= maxReceiveBytes) {
-      peer.a = state
-      state.w = 1
-      reservedBytes += state.m[3]
-      state.l = Date.now()
-      waiting.delete(state)
-      control(state.m[0], state.i, accepted)
+    const peer = peers.get(state.message.peerId)
+    if (
+      peer &&
+      !peer.activeBulk &&
+      reservedBytes + state.message.size <= maxReceiveBytes
+    ) {
+      peer.activeBulk = state
+      state.accepted = true
+      reservedBytes += state.message.size
+      state.lastSeenAt = Date.now()
+      waitingBulk.delete(state)
+      sendControl(state.message.peerId, state.transferId, acceptedKind)
     }
   }
 
-  const drainInline = (peerId: string, key: string): void => {
-    const queue = peers.get(peerId)?.n.get(key)
+  const drainInline = (peerId: string, queueKey: string): void => {
+    const queue = peers.get(peerId)?.inlineQueues.get(queueKey)
     while (queue?.[0]) {
       const state = queue[0]
       tryInline(state)
-      if (current(state)) {
+      if (isCurrent(state)) {
         break
       }
     }
@@ -610,16 +645,16 @@ export const initActionWireManager = (
     try {
       do {
         drainAgain = false
-        for (const state of waiting) {
+        for (const state of waitingBulk) {
           tryBulk(state)
         }
         for (const [id, peer] of peers) {
-          for (const state of peer.b.values()) {
-            if (state.o === state.m[3]) {
+          for (const state of peer.bulkTransfers.values()) {
+            if (state.offset === state.message.size) {
               tryBulk(state)
             }
           }
-          for (const key of peer.n.keys()) {
+          for (const key of peer.inlineQueues.keys()) {
             drainInline(id, key)
           }
         }
@@ -629,53 +664,147 @@ export const initActionWireManager = (
     }
   }
 
-  const enqueue = (state: Incoming): boolean => {
-    const peerId = state.m[0]
-    let peer = peers.get(peerId)
-    if (
-      pendingCount >= maxPendingTransfers ||
-      (peer?.c ?? 0) >= maxPendingPerPeer
-    ) {
-      notifyRejected(
-        state.m,
-        'too many pending transfers',
-        state.s,
-        state.k === 1 ? state.i : undefined
+  const sweepPreListenerQueues = (): void => {
+    preListenerSweepTimer = resetTimer(preListenerSweepTimer)
+    const now = Date.now()
+    let hasRemaining = false
+    for (const [peerId, byType] of preListenerQueues) {
+      for (const [type, ring] of byType) {
+        while (
+          ring.length > 0 &&
+          now - ring[0]!.receivedAt > pendingDataTimeoutMs
+        ) {
+          ring.shift()
+        }
+        if (ring.length === 0) {
+          byType.delete(type)
+        } else {
+          hasRemaining = true
+        }
+      }
+      if (byType.size === 0) {
+        preListenerQueues.delete(peerId)
+      }
+    }
+    if (hasRemaining) {
+      preListenerSweepTimer = setTimeout(
+        sweepPreListenerQueues,
+        pendingDataTimeoutMs
       )
-      return false
+      unrefTimer(preListenerSweepTimer)
     }
-    if (!peer) {
-      peer = {b: new Map(), n: new Map(), a: null, c: 0}
-      peers.set(peerId, peer)
+  }
+
+  const bufferPreListenerInline = (
+    message: IncomingMessageMeta,
+    dataSlice: Uint8Array
+  ): void => {
+    const now = Date.now()
+    let byType = preListenerQueues.get(message.peerId)
+    if (!byType) {
+      byType = new Map()
+      preListenerQueues.set(message.peerId, byType)
     }
-    peer.c++
-    pendingCount++
-    if (state.k === 0) {
-      const queue = peer.n.get(state.y) ?? []
-      queue.push(state)
-      peer.n.set(state.y, queue)
-    } else {
-      peer.b.set(state.i, state)
-      waiting.add(state)
+    let ring = byType.get(message.type)
+    if (!ring) {
+      ring = []
+      byType.set(message.type, ring)
+    }
+    while (
+      ring.length > 0 &&
+      now - ring[0]!.receivedAt > pendingDataTimeoutMs
+    ) {
+      ring.shift()
+    }
+    if (ring.length >= maxPreListenerMessages) {
+      ring.shift()
+    }
+    ring.push({message, data: dataSlice.slice(), receivedAt: now})
+    if (!preListenerSweepTimer) {
+      preListenerSweepTimer = setTimeout(
+        sweepPreListenerQueues,
+        pendingDataTimeoutMs
+      )
+      unrefTimer(preListenerSweepTimer)
+    }
+  }
+
+  const createAdmissionBase = (
+    message: IncomingMessageMeta,
+    scope?: ReceiveScope
+  ): AdmissionBase => ({
+    message,
+    ...(scope ? {scope} : {}),
+    phase: phasePending,
+    controller: null,
+    lastSeenAt: Date.now(),
+    timer: null
+  })
+
+  const ensureIdleTimer = (state: IncomingTransfer): void => {
+    if (!isCurrent(state) || state.timer) {
+      return
     }
     startIdleTimer(
-      () => state.l,
+      () => state.lastSeenAt,
       () => {
         rejectRx(state, 'action transfer timed out')
         drain()
       },
-      t => {
-        state.t = t
+      timer => {
+        state.timer = timer
       }
     )
-    if (state.s) {
-      const sig = state.s[1]
+  }
+
+  const enqueueTransfer = (
+    state: IncomingTransfer,
+    deferTimer = false
+  ): boolean => {
+    const {peerId} = state.message
+    let peer = peers.get(peerId)
+    if (
+      pendingCount >= maxPendingTransfers ||
+      (peer?.pendingCount ?? 0) >= maxPendingPerPeer
+    ) {
+      notifyRejected(
+        state.message,
+        'too many pending transfers',
+        state.scope,
+        state.kind === 'bulk' ? state.transferId : undefined
+      )
+      return false
+    }
+    if (!peer) {
+      peer = {
+        bulkTransfers: new Map(),
+        inlineQueues: new Map(),
+        activeBulk: null,
+        pendingCount: 0
+      }
+      peers.set(peerId, peer)
+    }
+    peer.pendingCount++
+    pendingCount++
+    if (state.kind === 'inline') {
+      const queue = peer.inlineQueues.get(state.queueKey) ?? []
+      queue.push(state)
+      peer.inlineQueues.set(state.queueKey, queue)
+    } else {
+      peer.bulkTransfers.set(state.transferId, state)
+      waitingBulk.add(state)
+    }
+    if (!deferTimer) {
+      ensureIdleTimer(state)
+    }
+    if (state.scope) {
+      const sig = state.scope[1]
       const cancel = (): void => {
         rejectRx(state, 'receive cancelled')
         drain()
       }
       sig.addEventListener('abort', cancel, {once: true})
-      state.u = () => sig.removeEventListener('abort', cancel)
+      state.unbindAbort = () => sig.removeEventListener('abort', cancel)
       if (sig.aborted) {
         cancel()
         return false
@@ -684,583 +813,721 @@ export const initActionWireManager = (
     return true
   }
 
+  const flushPreListenerType = (
+    type: string,
+    registration: ReceiveRegistration
+  ): void => {
+    if (!registration.receiver && !registration.receiveGate) {
+      return
+    }
+    const now = Date.now()
+    for (const [peerId, byType] of preListenerQueues) {
+      const ring = byType.get(type)
+      if (!ring) {
+        continue
+      }
+      byType.delete(type)
+      if (byType.size === 0) {
+        preListenerQueues.delete(peerId)
+      }
+      for (const entry of ring) {
+        if (now - entry.receivedAt > pendingDataTimeoutMs) {
+          continue
+        }
+        if (entry.message.size > payloadLimit(registration)) {
+          notifyRejected(entry.message, sizeLimitMsg)
+          continue
+        }
+        if (
+          registration.receiver &&
+          !registration.receiveGate &&
+          !peers.get(peerId)?.inlineQueues.has(type)
+        ) {
+          let payload: DataPayload
+          try {
+            payload = decodePayload(entry.data, entry.message.format, false)
+          } catch {
+            failPeer(peerId, invalidPayloadMsg)
+            break
+          }
+          deliverPayload(registration, payload, peerId, entry.message.metadata)
+        } else {
+          const state: IncomingInline = {
+            ...createAdmissionBase(entry.message),
+            kind: 'inline',
+            queueKey: type,
+            data: entry.data
+          }
+          if (enqueueTransfer(state, true)) {
+            drainInline(peerId, type)
+            ensureIdleTimer(state)
+          }
+        }
+      }
+    }
+  }
+
   const resolveAdmission = (
-    message: Message,
+    message: IncomingMessageMeta,
     bulkId?: number
   ):
-    | [action: ReceiveAction | undefined, scope: ReceiveScope | undefined]
+    | [registration: ReceiveRegistration, scope: ReceiveScope | undefined]
     | null => {
-    const action = rxActions.get(message[1])
-    const scope = action?.s?.(message[0], message[4])
-    if (scope === null || scope?.[1].aborted) {
+    const registration = rxActions.get(message.type)
+    if (!registration) {
       if (bulkId !== undefined) {
-        control(message[0], bulkId, rejected, 'unexpected response')
+        sendControl(message.peerId, bulkId, rejectedKind, 'unregistered action')
       }
       return null
     }
-    if (message[3] > payloadLimit(action)) {
+    const scope = registration.receiveScope?.(message.peerId, message.metadata)
+    if (scope === null || scope?.[1].aborted) {
+      if (bulkId !== undefined) {
+        sendControl(message.peerId, bulkId, rejectedKind, 'unexpected response')
+      }
+      return null
+    }
+    if (message.size > payloadLimit(registration)) {
       notifyRejected(message, sizeLimitMsg, scope, bulkId)
       return null
     }
-    return [action, scope]
+    return [registration, scope]
   }
 
-  const admission = (m: Message, s?: ReceiveScope): Admission => ({
-    m,
-    ...(s ? {s} : {}),
-    p: phasePending,
-    c: null,
-    l: Date.now(),
-    t: null
-  })
-
   const clearPeer = (peerId: string): void => {
-    for (const state of outgoing.get(peerId)?.values() ?? []) {
-      state[1](disconnectedTransferErr())
+    for (const transfer of outgoing.get(peerId)?.values() ?? []) {
+      transfer.fail(disconnectedTransferErr())
     }
     outgoing.delete(peerId)
+    preListenerQueues.delete(peerId)
     const peer = peers.get(peerId)
     if (peer) {
-      for (const state of peer.b.values()) {
+      for (const state of peer.bulkTransfers.values()) {
         release(state)
       }
-      for (const queue of peer.n.values()) {
+      for (const queue of peer.inlineQueues.values()) {
         queue.slice().forEach(release)
       }
     }
     drain()
   }
 
-  return [
-    <T extends DataPayload = DataPayload>(
-      type: string,
-      options: Partial<ActionOptions> = {}
-    ): InternalAction<T> => {
-      const sendToPending = Boolean(options.sendToPending)
-      const receiveWhilePending = Boolean(options.receiveWhilePending)
-      const {maxPayloadBytes, receiveScope} = options
-      const cached = actions.get(type)
-      if (cached) {
-        if (
-          cached[0] !== sendToPending ||
-          cached[1] !== receiveWhilePending ||
-          cached[2] !== maxPayloadBytes ||
-          cached[3] !== receiveScope
-        ) {
-          throw actionRedefinedErr(type)
-        }
-        return cached[4] as unknown as InternalAction<T>
+  const sendFrameToTransport = async (
+    transport: PeerDataTransport,
+    bytes: Uint8Array,
+    check: () => void,
+    signal: AbortSignal | undefined,
+    transferId?: number,
+    isOffer?: boolean
+  ): Promise<void> => {
+    check()
+    const drainRes = transport.waitForDrain(signal)
+    if (drainRes !== true) {
+      if (!(await drainRes)) {
+        checkAborted(signal)
+        throw makeActionError('disconnected', 'data channel stopped draining')
       }
-      const typeBytes = encodeBytes(type)
-      if (!type || type.includes('\0') || typeBytes.length > 32) {
-        throw mkErr('action type must be 1–32 non-null UTF-8 bytes')
-      }
-      const rxAction: ReceiveAction = {
-        ...(maxPayloadBytes === undefined ? {} : {l: maxPayloadBytes}),
-        ...(receiveScope ? {s: receiveScope} : {}),
-        r: null,
-        g: null,
-        x: null,
-        p: noOp
-      }
-      rxActions.set(type, rxAction)
-      const actionObj: InternalAction = {
-        onMessage: (handler => {
-          rxAction.r = handler as ReceiveAction['r']
-          drain()
-        }) as InternalAction['onMessage'],
-        onReceive: handler => {
-          rxAction.g = handler
-          drain()
-        },
-        onReject: handler => {
-          rxAction.x = handler
-        },
-        onProgress: handler => {
-          rxAction.p = handler
-        },
-        send: async (data, targets, metadata, progressCb, signal) => {
-          checkAborted(signal)
-          if (data === undefined) {
-            throw mkErr('action data cannot be undefined')
-          }
-          const [format, rawSource] = toPayloadSource(data)
-          let source = rawSource
-          const size =
-            source instanceof Uint8Array ? source.byteLength : source.size
-          const meta =
-            metadata === undefined ? emptyBytes : encodeBytes(toJson(metadata))
-          if (meta.length > maxFrameBytes - offerHeaderSize) {
-            throw mkErr('action metadata is too large')
-          }
-          const small = inlineHeaderSize + meta.length + size <= maxFrameBytes
-          if (
-            !small &&
-            format === binaryFormat &&
-            source instanceof Uint8Array
-          ) {
-            source = source.slice()
-          }
-          const id = small ? 0 : nextId++ >>> 0
-          const headerSize = small ? inlineHeaderSize : offerHeaderSize
-          const start = new Uint8Array(
-            headerSize + meta.length + (small ? size : 0)
-          )
-          start[0] = version
-          start[1] = (small ? inline : offer) | (format << 4)
-          start.set(typeBytes, 2)
-          const view = viewOf(start)
-          view.setUint16(34, meta.length)
-          if (!small) {
-            view.setUint32(36, id)
-            view.setFloat64(40, size)
-          }
-          start.set(meta, headerSize)
-          if (small) {
-            start.set(
-              source instanceof Uint8Array
-                ? source
-                : new Uint8Array(await source.arrayBuffer()),
-              headerSize + meta.length
-            )
-          }
-          if (
-            !targets &&
-            small &&
-            !sendToPending &&
-            broadcastInline &&
-            (await broadcastInline(
-              start,
-              peerId => progressCb?.(1, peerId, metadata),
-              signal
-            ))
-          ) {
-            return
-          }
-          const ids = targets ? [targets].flat() : getPeerIds(sendToPending)
-          await all(
-            [...new Set(ids)].map(async peerId => {
-              const transport = resolveTransport(peerId, sendToPending)
-              if (!transport) {
-                warnNoPeer(peerId)
-                return
-              }
-              let failure: Error | null = null
-              const check = (): void => {
-                if (failure) {
-                  throw failure
-                }
-                checkAborted(signal)
-                if (!transport.isOpen) {
-                  throw disconnectedTransferErr()
-                }
-              }
-              const sendFrame = async (
-                bytes: Uint8Array,
-                isOffer?: boolean
-              ): Promise<void> => {
-                check()
-                const drainRes = transport.waitForDrain(signal)
-                if (drainRes !== true) {
-                  if (!(await drainRes)) {
-                    checkAborted(signal)
-                    throw makeActionError(
-                      'disconnected',
-                      'data channel stopped draining'
-                    )
-                  }
-                  check()
-                }
-                try {
-                  transport.sendFrame(bytes, small ? undefined : id, isOffer)
-                } catch {
-                  throw disconnectedTransferErr()
-                }
-              }
-              if (small) {
-                await sendFrame(start)
-                progressCb?.(1, peerId, metadata)
-                return
-              }
-              let didSendOffer = false
-              let settledByReceiver = false
-              let lastSeen = Date.now()
-              let acceptOffer!: () => void
-              let rejectOffer!: (error: Error) => void
-              const permission = new Promise<void>((resolve, rejectPromise) => {
-                acceptOffer = resolve
-                rejectOffer = rejectPromise
-              })
-              void permission.catch(noOp)
-              const transfers =
-                outgoing.get(peerId) ?? new Map<number, OutgoingTuple>()
-              if (transfers.has(id)) {
-                throw mkErr('action transfer id in use')
-              }
-              outgoing.set(peerId, transfers)
-              let timer: ReturnType<typeof setTimeout> | null = null
-              const state: OutgoingTuple = [
-                () => {
-                  if (!timer || failure) {
-                    return false
-                  }
-                  timer = resetTimer(timer)
-                  acceptOffer()
-                  return true
-                },
-                (error, fromReceiver = false) => {
-                  if (fromReceiver) {
-                    settledByReceiver = true
-                  }
-                  failure = error
-                  rejectOffer(error)
-                },
-                () => {
-                  if (timer) {
-                    lastSeen = Date.now()
-                  }
-                }
-              ]
-              transfers.set(id, state)
-              startIdleTimer(
-                () => lastSeen,
-                () =>
-                  state[1](
-                    makeActionError('timeout', 'action offer timed out')
-                  ),
-                t => {
-                  timer = t
-                }
-              )
-              const abort = (): void => {
-                try {
-                  checkAborted(signal)
-                } catch (error) {
-                  state[1](error as Error)
-                }
-              }
-              signal?.addEventListener('abort', abort, {once: true})
-              try {
-                await sendFrame(start, true)
-                didSendOffer = true
-                await permission
-                for (let offset = 0; offset < size; offset += chunkSize) {
-                  check()
-                  const length = Math.min(chunkSize, size - offset)
-                  const bytes = packet(chunk, id, chunkHeaderSize + length)
-                  viewOf(bytes).setFloat64(controlHeaderSize, offset)
-                  bytes.set(
-                    source instanceof Uint8Array
-                      ? source.subarray(offset, offset + length)
-                      : new Uint8Array(
-                          await source
-                            .slice(offset, offset + length)
-                            .arrayBuffer()
-                        ),
-                    chunkHeaderSize
-                  )
-                  await sendFrame(bytes)
-                  transfers.forEach(p => p[2]())
-                  progressCb?.((offset + length) / size, peerId, metadata)
-                }
-                check()
-              } catch (error) {
-                if (
-                  didSendOffer &&
-                  !settledByReceiver &&
-                  transport.isOpen &&
-                  transport.bufferedAmount <= maxControlBufferedBytes
-                ) {
-                  sendControlFrame(peerId, transport, id, cancelled)
-                }
-                throw error
-              } finally {
-                timer = resetTimer(timer)
-                signal?.removeEventListener('abort', abort)
-                transfers.delete(id)
-                if (!transfers.size && outgoing.get(peerId) === transfers) {
-                  outgoing.delete(peerId)
-                }
-              }
-            })
-          )
-        }
-      }
-      actions.set(type, [
-        sendToPending,
-        receiveWhilePending,
-        maxPayloadBytes,
-        receiveScope,
-        actionObj
-      ])
-      return actionObj as unknown as InternalAction<T>
-    },
+      check()
+    }
+    try {
+      transport.sendFrame(bytes, transferId, isOffer)
+    } catch {
+      throw disconnectedTransferErr()
+    }
+  }
 
-    (peerId: string, data: ArrayBuffer): void => {
-      if (data.byteLength < 2 || data.byteLength > maxFrameBytes) {
-        failPeer(peerId, invalidFrameMsg)
-        return
+  const sendBulkToPeer = async (
+    peerId: string,
+    transport: PeerDataTransport,
+    offerFrame: Uint8Array,
+    transferId: number,
+    source: Uint8Array | Blob,
+    size: number,
+    metadata: JsonValue | undefined,
+    progressCb:
+      | ((percent: number, peerId: string, metadata?: JsonValue) => void)
+      | undefined,
+    signal: AbortSignal | undefined
+  ): Promise<void> => {
+    let failure: Error | null = null
+    const check = (): void => {
+      if (failure) {
+        throw failure
       }
-      const bytes = new Uint8Array(data)
-      if (bytes[0] !== version) {
-        failPeer(peerId, 'incompatible action protocol version')
-        return
+      checkAborted(signal)
+      if (!transport.isOpen) {
+        throw disconnectedTransferErr()
       }
-      const kind = bytes[1]! & 15
-      const format = bytes[1]! >>> 4
-      const view = viewOf(bytes)
-      if (
-        kind > cancelled ||
-        format > binaryFormat ||
-        (kind > offer && format !== textFormat)
-      ) {
-        failPeer(peerId, invalidFrameMsg)
-        return
-      }
-      if (kind >= chunk) {
-        if (
-          bytes.length < controlHeaderSize ||
-          ((kind === accepted || kind === cancelled) &&
-            bytes.length !== controlHeaderSize) ||
-          (kind === rejected && bytes.length > controlHeaderSize + 200)
-        ) {
-          failPeer(peerId, invalidActionMsg('control'))
-          return
+    }
+
+    let didSendOffer = false
+    let settledByReceiver = false
+    let lastSeen = Date.now()
+    let acceptOffer!: () => void
+    let rejectOffer!: (error: Error) => void
+    const permission = new Promise<void>((resolve, rejectPromise) => {
+      acceptOffer = resolve
+      rejectOffer = rejectPromise
+    })
+    void permission.catch(noOp)
+
+    const transfers =
+      outgoing.get(peerId) ?? new Map<number, OutgoingTransfer>()
+    if (transfers.has(transferId)) {
+      throw mkErr('action transfer id in use')
+    }
+    outgoing.set(peerId, transfers)
+
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const transferState: OutgoingTransfer = {
+      accept: () => {
+        if (!timer || failure) {
+          return false
         }
-        const id = view.getUint32(2)
-        if (kind === accepted) {
-          const transfers = outgoing.get(peerId)
-          if (transfers?.get(id)?.[0]()) {
-            transfers.forEach(p => p[2]())
-          }
-          return
+        timer = resetTimer(timer)
+        acceptOffer()
+        return true
+      },
+      fail: (error, fromReceiver = false) => {
+        if (fromReceiver) {
+          settledByReceiver = true
         }
-        if (kind === rejected) {
-          outgoing
-            .get(peerId)
-            ?.get(id)?.[1](
-              makeActionError(
-                'rejected',
-                decodeBytes(bytes.subarray(controlHeaderSize))
-              ),
-              true
-            )
-          return
+        failure = error
+        rejectOffer(error)
+      },
+      touch: () => {
+        if (timer) {
+          lastSeen = Date.now()
         }
-        if (kind === cancelled) {
-          const state = peers.get(peerId)?.b.get(id)
-          if (state) {
-            release(state)
-            state.s?.[3]('response cancelled by sender')
-          }
-          drain()
-        } else {
-          const offset =
-            bytes.length >= chunkHeaderSize
-              ? view.getFloat64(controlHeaderSize)
-              : NaN
-          const chunkData = bytes.subarray(chunkHeaderSize)
-          const peer = peers.get(peerId)
-          const state = peer?.b.get(id)
-          if (!state) {
-            return
-          }
-          const totalSize = state.m[3]
-          if (
-            state.w !== 1 ||
-            offset !== state.o ||
-            !chunkData.length ||
-            chunkData.length !== Math.min(chunkSize, totalSize - state.o)
-          ) {
-            failPeer(peerId, invalidActionMsg('chunk'))
-            return
-          }
-          try {
-            state.d ??= new Uint8Array(totalSize)
-          } catch {
-            rejectRx(state, 'unable to allocate receive buffer')
-            drain()
-            return
-          }
-          state.d.set(chunkData, state.o)
-          state.o += chunkData.length
-          const now = Date.now()
-          state.l = now
-          for (const queued of waiting) {
-            if (queued.p === phaseReady && rxActions.get(queued.m[1])?.r) {
-              queued.l = now
-            }
-          }
-          if (state.o === totalSize) {
-            tryBulk(state)
-            if (current(state) && peer?.a === state) {
-              peer.a = null
-              rotateWaitingForPeer(peerId)
-            }
-            drain()
-          } else {
-            emitRxProgress(
-              rxActions.get(state.m[1])!,
-              state.o / totalSize,
-              peerId,
-              state.m[4]
-            )
-          }
-        }
-        return
       }
-      const headerSize = kind === inline ? inlineHeaderSize : offerHeaderSize
-      if (bytes.length < headerSize) {
-        failPeer(peerId, invalidActionMsg('header'))
-        return
+    }
+    transfers.set(transferId, transferState)
+    startIdleTimer(
+      () => lastSeen,
+      () =>
+        transferState.fail(
+          makeActionError('timeout', 'action offer timed out')
+        ),
+      nextTimer => {
+        timer = nextTimer
       }
-      const type = decodeActionType(bytes)
-      const action = actions.get(type)
-      if (!canReceiveFromPeer(peerId, Boolean(action?.[1]))) {
-        return
-      }
-      const metaLength = view.getUint16(34)
-      const payloadIndex = headerSize + metaLength
-      const size =
-        kind === inline ? bytes.length - payloadIndex : view.getFloat64(40)
-      const id = kind === offer ? view.getUint32(36) : 0
-      if (
-        !type ||
-        payloadIndex > bytes.length ||
-        !Number.isSafeInteger(size) ||
-        size < 0 ||
-        (kind === offer && (size === 0 || payloadIndex !== bytes.length))
-      ) {
-        failPeer(peerId, invalidActionMsg('proposal'))
-        return
-      }
-      let metadata: JsonValue | undefined
+    )
+
+    const onAbort = (): void => {
       try {
-        if (metaLength) {
-          metadata = fromJson<JsonValue>(
-            decodeBytes(bytes.subarray(headerSize, payloadIndex))
+        checkAborted(signal)
+      } catch (error) {
+        transferState.fail(error as Error)
+      }
+    }
+    signal?.addEventListener('abort', onAbort, {once: true})
+
+    try {
+      await sendFrameToTransport(
+        transport,
+        offerFrame,
+        check,
+        signal,
+        transferId,
+        true
+      )
+      didSendOffer = true
+      await permission
+      for (let offset = 0; offset < size; offset += chunkSize) {
+        check()
+        const length = Math.min(chunkSize, size - offset)
+        const bytes = buildControlPacket(
+          chunkKind,
+          transferId,
+          chunkHeaderSize + length
+        )
+        viewOf(bytes).setFloat64(controlHeaderSize, offset)
+        bytes.set(
+          source instanceof Uint8Array
+            ? source.subarray(offset, offset + length)
+            : new Uint8Array(
+                await source.slice(offset, offset + length).arrayBuffer()
+              ),
+          chunkHeaderSize
+        )
+        await sendFrameToTransport(transport, bytes, check, signal, transferId)
+        transfers.forEach(t => t.touch())
+        progressCb?.((offset + length) / size, peerId, metadata)
+      }
+      check()
+    } catch (error) {
+      if (
+        didSendOffer &&
+        !settledByReceiver &&
+        transport.isOpen &&
+        transport.bufferedAmount <= maxControlBufferedBytes
+      ) {
+        sendControlFrame(peerId, transport, transferId, cancelledKind)
+      }
+      throw error
+    } finally {
+      timer = resetTimer(timer)
+      signal?.removeEventListener('abort', onAbort)
+      transfers.delete(transferId)
+      if (!transfers.size && outgoing.get(peerId) === transfers) {
+        outgoing.delete(peerId)
+      }
+    }
+  }
+
+  const handleControlOrChunk = (
+    peerId: string,
+    bytes: Uint8Array,
+    kind: number,
+    view: DataView
+  ): void => {
+    if (
+      bytes.length < controlHeaderSize ||
+      ((kind === acceptedKind || kind === cancelledKind) &&
+        bytes.length !== controlHeaderSize) ||
+      (kind === rejectedKind && bytes.length > controlHeaderSize + 200)
+    ) {
+      failPeer(peerId, invalidActionMsg('control'))
+      return
+    }
+    const id = view.getUint32(2)
+    if (kind === acceptedKind) {
+      const transfers = outgoing.get(peerId)
+      if (transfers?.get(id)?.accept()) {
+        transfers.forEach(t => t.touch())
+      }
+      return
+    }
+    if (kind === rejectedKind) {
+      outgoing
+        .get(peerId)
+        ?.get(id)
+        ?.fail(
+          makeActionError(
+            'rejected',
+            decodeBytes(bytes.subarray(controlHeaderSize))
+          ),
+          true
+        )
+      return
+    }
+    if (kind === cancelledKind) {
+      const state = peers.get(peerId)?.bulkTransfers.get(id)
+      if (state) {
+        release(state)
+        state.scope?.[3]('response cancelled by sender')
+      }
+      drain()
+      return
+    }
+
+    const offset =
+      bytes.length >= chunkHeaderSize ? view.getFloat64(controlHeaderSize) : NaN
+    const chunkData = bytes.subarray(chunkHeaderSize)
+    const peer = peers.get(peerId)
+    const state = peer?.bulkTransfers.get(id)
+    if (!state) {
+      return
+    }
+    const totalSize = state.message.size
+    if (
+      !state.accepted ||
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset >= totalSize ||
+      offset % chunkSize !== 0 ||
+      !chunkData.length ||
+      chunkData.length !== Math.min(chunkSize, totalSize - offset)
+    ) {
+      failPeer(peerId, invalidActionMsg('chunk'))
+      return
+    }
+    const chunkIdx = offset / chunkSize
+    const byteIdx = chunkIdx >>> 3
+    const bitMask = 1 << (chunkIdx & 7)
+    try {
+      state.data ??= new Uint8Array(totalSize)
+      state.seenChunks ??= new Uint8Array(
+        Math.ceil(Math.ceil(totalSize / chunkSize) / 8)
+      )
+    } catch {
+      rejectRx(state, 'unable to allocate receive buffer')
+      drain()
+      return
+    }
+    if ((state.seenChunks[byteIdx]! & bitMask) !== 0) {
+      failPeer(peerId, invalidActionMsg('chunk'))
+      return
+    }
+    state.seenChunks[byteIdx]! |= bitMask
+    state.data.set(chunkData, offset)
+    state.offset += chunkData.length
+    const now = Date.now()
+    state.lastSeenAt = now
+    for (const queued of waitingBulk) {
+      if (
+        queued.phase === phaseReady &&
+        rxActions.get(queued.message.type)?.receiver
+      ) {
+        queued.lastSeenAt = now
+      }
+    }
+    if (state.offset === totalSize) {
+      tryBulk(state)
+      if (isCurrent(state) && peer?.activeBulk === state) {
+        peer.activeBulk = null
+        rotateWaitingForPeer(peerId)
+      }
+      drain()
+    } else {
+      const registration = rxActions.get(state.message.type)
+      if (registration) {
+        emitRxProgress(
+          registration,
+          state.offset / totalSize,
+          peerId,
+          state.message.metadata
+        )
+      }
+    }
+  }
+
+  const makeWireAction = <T extends DataPayload = DataPayload>(
+    type: string,
+    options: WireActionOptions = {}
+  ): WireAction<T> => {
+    const sendToPending = Boolean(options.sendToPending)
+    const receiveWhilePending = Boolean(options.receiveWhilePending)
+    const {maxPayloadBytes, receiveScope} = options
+    const cached = actions.get(type)
+    if (cached) {
+      if (
+        cached.sendToPending !== sendToPending ||
+        cached.receiveWhilePending !== receiveWhilePending ||
+        cached.maxPayloadBytes !== maxPayloadBytes ||
+        cached.receiveScope !== receiveScope
+      ) {
+        throw actionRedefinedErr(type)
+      }
+      return cached.action as unknown as WireAction<T>
+    }
+
+    const typeBytes = encodeBytes(type)
+    if (!type || type.includes('\0') || typeBytes.length > 32) {
+      throw mkErr('action type must be 1–32 non-null UTF-8 bytes')
+    }
+
+    const registration: ReceiveRegistration = {
+      ...(maxPayloadBytes === undefined ? {} : {maxPayloadBytes}),
+      ...(receiveScope ? {receiveScope} : {}),
+      receiver: null,
+      receiveGate: null,
+      onReject: null,
+      onProgress: noOp
+    }
+    rxActions.set(type, registration)
+
+    const actionObj: WireAction = {
+      onMessage: handler => {
+        registration.receiver = handler as ReceiveRegistration['receiver']
+        flushPreListenerType(type, registration)
+        drain()
+      },
+      onReceive: handler => {
+        registration.receiveGate = handler
+        flushPreListenerType(type, registration)
+        drain()
+      },
+      onReject: handler => {
+        registration.onReject = handler
+      },
+      onProgress: handler => {
+        registration.onProgress = handler
+      },
+      send: async (data, targets, metadata, progressCb, signal) => {
+        checkAborted(signal)
+        if (data === undefined) {
+          throw mkErr('action data cannot be undefined')
+        }
+        const [format, source] = toPayloadSource(data)
+        const size =
+          source instanceof Uint8Array ? source.byteLength : source.size
+        const metaBytes =
+          metadata === undefined ? emptyBytes : encodeBytes(toJson(metadata))
+        if (metaBytes.length > maxFrameBytes - offerHeaderSize) {
+          throw mkErr('action metadata is too large')
+        }
+
+        const isSmall =
+          inlineHeaderSize + metaBytes.length + size <= maxFrameBytes
+        const transferId = isSmall ? 0 : nextTransferId++ >>> 0
+        const headerSize = isSmall ? inlineHeaderSize : offerHeaderSize
+        const startFrame = new Uint8Array(
+          headerSize + metaBytes.length + (isSmall ? size : 0)
+        )
+        startFrame[0] = actionWireVersion
+        startFrame[1] = (isSmall ? inlineKind : offerKind) | (format << 4)
+        startFrame.set(typeBytes, 2)
+        const view = viewOf(startFrame)
+        view.setUint16(34, metaBytes.length)
+        if (!isSmall) {
+          view.setUint32(36, transferId)
+          view.setFloat64(40, size)
+        }
+        startFrame.set(metaBytes, headerSize)
+        if (isSmall) {
+          startFrame.set(
+            source instanceof Uint8Array
+              ? source
+              : new Uint8Array(await source.arrayBuffer()),
+            headerSize + metaBytes.length
           )
         }
-      } catch {
-        failPeer(peerId, invalidActionMsg('metadata'))
-        return
-      }
-      const message = [peerId, type, format, size, metadata] as const
-      if (kind === inline) {
-        const dataSlice = bytes.subarray(payloadIndex)
-        const resolved = resolveAdmission(message)
-        if (!resolved) {
-          return
-        }
-        const [rxAct, scope] = resolved
-        const key = scope ? `${type}\0${scope[0]}` : type
-        if (
-          rxAct?.r &&
-          !(scope ? scope[2] : rxAct.g) &&
-          !peers.get(peerId)?.n.has(key)
-        ) {
-          let payload: DataPayload
-          try {
-            payload = decodePayload(dataSlice, format, true)
-          } catch {
-            failPeer(peerId, invalidPayloadMsg)
+
+        const isExplicitTarget = targets !== undefined && targets !== null
+        if (!isExplicitTarget && isSmall && !sendToPending && broadcastInline) {
+          const bcastResult = broadcastInline(
+            startFrame,
+            peerId => progressCb?.(1, peerId, metadata),
+            signal
+          )
+          if (
+            typeof bcastResult === 'boolean' ? bcastResult : await bcastResult
+          ) {
             return
           }
-          deliverPayload(rxAct, payload, peerId, metadata)
-          return
         }
-        const state: Inline = {
-          ...admission(message, scope),
-          k: 0,
-          y: key,
-          d: dataSlice
+
+        const rawIds = isExplicitTarget
+          ? [targets].flat()
+          : getPeerIds(sendToPending)
+        const uniqueIds = [...new Set(rawIds)]
+        if (isExplicitTarget && uniqueIds.length === 0) {
+          throw makeActionError('disconnected', noActivePeerMsg(''))
         }
-        if (enqueue(state)) {
-          drainInline(peerId, key)
+
+        const pendingPromises: Promise<void>[] = []
+        for (const peerId of uniqueIds) {
+          const transport = resolveTransport(peerId, sendToPending)
+          if (!transport || !transport.isOpen) {
+            if (isExplicitTarget) {
+              throw makeActionError('disconnected', noActivePeerMsg(peerId))
+            }
+            continue
+          }
+          if (isSmall) {
+            checkAborted(signal)
+            const drainRes = transport.waitForDrain(signal)
+            if (drainRes === true) {
+              try {
+                transport.sendFrame(startFrame)
+              } catch {
+                throw disconnectedTransferErr()
+              }
+              progressCb?.(1, peerId, metadata)
+            } else {
+              pendingPromises.push(
+                (async () => {
+                  await sendFrameToTransport(
+                    transport,
+                    startFrame,
+                    () => {
+                      checkAborted(signal)
+                      if (!transport.isOpen) {
+                        throw disconnectedTransferErr()
+                      }
+                    },
+                    signal
+                  )
+                  progressCb?.(1, peerId, metadata)
+                })()
+              )
+            }
+          } else {
+            pendingPromises.push(
+              sendBulkToPeer(
+                peerId,
+                transport,
+                startFrame,
+                transferId,
+                source,
+                size,
+                metadata,
+                progressCb,
+                signal
+              )
+            )
+          }
         }
-      } else {
-        if (peers.get(peerId)?.b.has(id)) {
-          failPeer(peerId, 'duplicate action offer')
-          return
-        }
-        const resolved = resolveAdmission(message, id)
-        if (!resolved) {
-          return
-        }
-        const state: Bulk = {
-          ...admission(message, resolved[1]),
-          k: 1,
-          i: id,
-          w: 0,
-          o: 0,
-          d: null
-        }
-        if (enqueue(state)) {
-          drain()
+
+        if (pendingPromises.length > 0) {
+          await all(pendingPromises)
         }
       }
-    },
+    }
 
-    clearPeer
-  ]
-}
+    actions.set(type, {
+      sendToPending,
+      receiveWhilePending,
+      maxPayloadBytes,
+      receiveScope,
+      action: actionObj
+    })
+    return actionObj as unknown as WireAction<T>
+  }
 
-export const createActionWireManager = ({
-  getTransport,
-  getPeer,
-  getPeerIds,
-  canReceiveFromPeer,
-  onPeerError,
-  broadcastInline,
-  throwIfAborted: checkAborted = throwIfAborted,
-  maxReceiveBytes = defaultMaxReceiveBytes
-}: {
-  onPeerError: (peerId: string, error: Error) => void
-  getTransport?: (
-    id: string,
-    includePending: boolean
-  ) => PeerDataTransport | undefined
-  getPeer?: (id: string, includePending: boolean) => PeerHandle | undefined
-  getPeerIds: (includePending: boolean) => string[]
-  canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
-  broadcastInline?: (
-    frame: Uint8Array,
-    onProgress?: (peerId: string) => void,
-    signal?: AbortSignal
-  ) => Promise<boolean> | boolean
-  throwIfAborted?: (signal?: AbortSignal) => void
-  maxReceiveBytes?: number
-}): {
-  makeInternalAction: <T extends DataPayload = DataPayload>(
-    type: string,
-    options?: Partial<ActionOptions>
-  ) => InternalAction<T>
-  handleData: (id: string, data: ArrayBuffer) => void
-  clearPeer: (id: string) => void
-} => {
-  const [makeInternalAction, handleData, clearPeer] = initActionWireManager(
-    getPeerIds,
-    canReceiveFromPeer,
-    onPeerError,
-    toPeerTransportGetter(getTransport, getPeer),
-    broadcastInline,
-    checkAborted,
-    maxReceiveBytes
-  )
-  return {makeInternalAction, handleData, clearPeer}
+  const handleData = (peerId: string, data: ArrayBuffer): void => {
+    if (data.byteLength < 2 || data.byteLength > maxFrameBytes) {
+      failPeer(peerId, invalidFrameMsg)
+      return
+    }
+    const bytes = new Uint8Array(data)
+    if (bytes[0] !== actionWireVersion) {
+      failPeer(peerId, 'incompatible action protocol version')
+      return
+    }
+    const kind = bytes[1]! & 15
+    const format = bytes[1]! >>> 4
+    const view = viewOf(bytes)
+    if (
+      kind > cancelledKind ||
+      format > binaryFormat ||
+      (kind > offerKind && format !== textFormat)
+    ) {
+      failPeer(peerId, invalidFrameMsg)
+      return
+    }
+    if (kind >= chunkKind) {
+      handleControlOrChunk(peerId, bytes, kind, view)
+      return
+    }
+
+    const headerSize = kind === inlineKind ? inlineHeaderSize : offerHeaderSize
+    if (bytes.length < headerSize) {
+      failPeer(peerId, invalidActionMsg('header'))
+      return
+    }
+    const type = decodeActionType(bytes)
+    const registered = actions.get(type)
+    if (!canReceiveFromPeer(peerId, Boolean(registered?.receiveWhilePending))) {
+      return
+    }
+    const metaLength = view.getUint16(34)
+    const payloadIndex = headerSize + metaLength
+    const size =
+      kind === inlineKind ? bytes.length - payloadIndex : view.getFloat64(40)
+    const transferId = kind === offerKind ? view.getUint32(36) : 0
+    if (
+      !type ||
+      payloadIndex > bytes.length ||
+      !Number.isSafeInteger(size) ||
+      size < 0 ||
+      (kind === offerKind && (size === 0 || payloadIndex !== bytes.length))
+    ) {
+      failPeer(peerId, invalidActionMsg('proposal'))
+      return
+    }
+
+    let metadata: JsonValue | undefined
+    try {
+      if (metaLength) {
+        metadata = fromJson<JsonValue>(
+          decodeBytes(bytes.subarray(headerSize, payloadIndex))
+        )
+      }
+    } catch {
+      failPeer(peerId, invalidActionMsg('metadata'))
+      return
+    }
+
+    const message: IncomingMessageMeta = {
+      peerId,
+      type,
+      format,
+      size,
+      metadata
+    }
+
+    if (kind === inlineKind) {
+      const dataSlice = bytes.subarray(payloadIndex)
+      const resolved = resolveAdmission(message)
+      if (!resolved) {
+        return
+      }
+      const [registration, scope] = resolved
+      const queueKey = scope ? `${type}\0${scope[0]}` : type
+      const hasGate = Boolean(scope ? scope[2] : registration.receiveGate)
+
+      if (
+        registration.receiver &&
+        !hasGate &&
+        !peers.get(peerId)?.inlineQueues.has(queueKey)
+      ) {
+        let payload: DataPayload
+        try {
+          payload = decodePayload(dataSlice, format, true)
+        } catch {
+          failPeer(peerId, invalidPayloadMsg)
+          return
+        }
+        deliverPayload(registration, payload, peerId, metadata)
+        return
+      }
+
+      if (!registration.receiver && !hasGate && !scope) {
+        bufferPreListenerInline(message, dataSlice)
+        return
+      }
+
+      const state: IncomingInline = {
+        ...createAdmissionBase(message, scope),
+        kind: 'inline',
+        queueKey,
+        data: dataSlice.slice()
+      }
+      if (enqueueTransfer(state, true)) {
+        drainInline(peerId, queueKey)
+        ensureIdleTimer(state)
+      }
+      return
+    }
+
+    if (peers.get(peerId)?.bulkTransfers.has(transferId)) {
+      failPeer(peerId, 'duplicate action offer')
+      return
+    }
+    const resolved = resolveAdmission(message, transferId)
+    if (!resolved) {
+      return
+    }
+    const state: IncomingBulk = {
+      ...createAdmissionBase(message, resolved[1]),
+      kind: 'bulk',
+      transferId,
+      accepted: false,
+      offset: 0,
+      data: null,
+      seenChunks: null
+    }
+    if (enqueueTransfer(state)) {
+      drain()
+    }
+  }
+
+  return {makeWireAction, handleData, clearPeer}
 }
 
 export const inspectActionWireHeader = (
   frame: Uint8Array
 ): {type: string; metadata?: JsonValue} | null => {
-  if (frame.byteLength < inlineHeaderSize || frame[0] !== version) {
+  if (frame.byteLength < inlineHeaderSize || frame[0] !== actionWireVersion) {
     return null
   }
   const kind = frame[1]! & 15
-  if (kind !== inline && kind !== offer) {
+  if (kind !== inlineKind && kind !== offerKind) {
     return null
   }
-  const headerLen = kind === inline ? inlineHeaderSize : offerHeaderSize
+  const headerLen = kind === inlineKind ? inlineHeaderSize : offerHeaderSize
   if (frame.byteLength < headerLen) {
     return null
   }

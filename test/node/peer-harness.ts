@@ -1,8 +1,6 @@
 import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
-import createRoom, {
-  getRoomSignalingBridge
-} from '../../packages/core/src/room.ts'
+import createRoom from '../../packages/core/src/room.ts'
 import type {
   PeerHandle,
   Room,
@@ -12,6 +10,7 @@ import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 import {
   allocTestPeerIds,
   createSortedJoinRooms,
+  getTestEndpointByPeerId,
   joinAsTestPeer,
   testEndpoint,
   testPeerId,
@@ -21,6 +20,7 @@ import {
 export {
   allocTestPeerIds,
   createSortedJoinRooms,
+  getTestEndpointByPeerId,
   internalActionPrefix,
   joinAsTestPeer,
   testEndpoint,
@@ -87,7 +87,7 @@ export const encodeInternalAction = (type: string): ArrayBuffer => {
   assert.ok(typeBytes.byteLength <= internalTypeByteLimit)
 
   const packet = new Uint8Array(36)
-  packet[0] = 2 // wire version; inline empty string, with no metadata
+  packet[0] = 3 // wire version; inline empty string, with no metadata
   packet.set(typeBytes, 2)
 
   return packet.buffer
@@ -115,7 +115,7 @@ export const actionStartFrame = (
   const header = payload ? 36 : 48
   const bytes = new Uint8Array(header + meta.length + (payload?.length ?? 0))
   const view = new DataView(bytes.buffer)
-  bytes[0] = 2
+  bytes[0] = 3
   bytes[1] = (payload ? 0 : 1) | (format << 4)
   bytes.set(encoder.encode(type), 2)
   view.setUint16(34, meta.length)
@@ -474,6 +474,8 @@ export const linkPeers = <A extends LinkedPeer, B extends LinkedPeer>(
 }
 
 export const createJoinedRooms = async () => {
+  const epA = testEndpoint('joined-room-a')
+  const epB = testEndpoint('joined-room-b')
   let registerPeerA: ((peer: PeerHandle, id: string) => void) | null = null
   let registerPeerB: ((peer: PeerHandle, id: string) => void) | null = null
   const roomA = createRoom(
@@ -481,14 +483,16 @@ export const createJoinedRooms = async () => {
       registerPeerA = f
     },
     () => {},
-    () => {}
+    () => {},
+    {endpointIdentity: epA, appId: 'joined-app', roomId: 'joined-room'}
   )
   const roomB = createRoom(
     f => {
       registerPeerB = f
     },
     () => {},
-    () => {}
+    () => {},
+    {endpointIdentity: epB, appId: 'joined-app', roomId: 'joined-room'}
   )
   const joinA = new Promise(resolve => roomA.onPeerJoin(resolve, {once: true}))
   const joinB = new Promise(resolve => roomB.onPeerJoin(resolve, {once: true}))
@@ -499,16 +503,23 @@ export const createJoinedRooms = async () => {
   }
   ;(registerPeerA as (peer: PeerHandle, id: string) => void)(
     peerA as unknown as PeerHandle,
-    'peer-b'
+    epB.peerId
   )
   ;(registerPeerB as (peer: PeerHandle, id: string) => void)(
     peerB as unknown as PeerHandle,
-    'peer-a'
+    epA.peerId
   )
 
   await Promise.all([joinA, joinB])
 
-  return {roomA, roomB, peerA, peerB}
+  return {
+    roomA,
+    roomB,
+    peerA,
+    peerB,
+    peerIdA: epA.peerId,
+    peerIdB: epB.peerId
+  }
 }
 
 export const linkedActions = (maxReceiveBytes?: number) => {
@@ -590,6 +601,8 @@ export const createLinkedHandlePair = () => {
   let handlersB: Parameters<PeerHandle['setHandlers']>[0] = {}
   let deadA = false
   let deadB = false
+  const sdpA = nextMockFingerprintSdp()
+  const sdpB = nextMockFingerprintSdp()
 
   const makeEndpoint = (
     isA: boolean
@@ -603,6 +616,8 @@ export const createLinkedHandlePair = () => {
       connectionState: 'connected',
       iceConnectionState: 'connected',
       signalingState: 'stable',
+      localDescription: {type: 'offer', sdp: isA ? sdpA : sdpB},
+      remoteDescription: {type: 'answer', sdp: isA ? sdpB : sdpA},
       getSenders: () => [],
       getTransceivers: () => []
     } as unknown as RTCPeerConnection,
@@ -692,25 +707,15 @@ export const createLinkedHandlePair = () => {
 
 export const connectVerifiedPeers = (
   regMap: Map<string, (peer: PeerHandle, id: string) => void>,
-  roomA: Room,
+  _roomA: Room,
   idA: string,
-  userA: UserIdentity,
-  roomB: Room,
+  _userA: UserIdentity,
+  _roomB: Room,
   idB: string,
-  userB: UserIdentity
+  _userB: UserIdentity
 ) => {
   const link = createLinkedHandlePair()
   regMap.get(idA)!(link.peerA, idB)
   regMap.get(idB)!(link.peerB, idA)
-  getRoomSignalingBridge(roomA)!.onPeerIdentityVerified(idB, {
-    userId: userB.userId,
-    peerPubKey: userB.signPubJwk,
-    userPubKey: userB.signPubJwk
-  })
-  getRoomSignalingBridge(roomB)!.onPeerIdentityVerified(idA, {
-    userId: userA.userId,
-    peerPubKey: userA.signPubJwk,
-    userPubKey: userA.signPubJwk
-  })
   return link
 }

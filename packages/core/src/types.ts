@@ -1,5 +1,3 @@
-import type {ActionOptions, InternalAction} from './action-wire'
-
 export type JsonPrimitive = null | string | number | boolean
 
 export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue}
@@ -8,9 +6,17 @@ export type DataPayload = JsonValue | Blob | ArrayBuffer | ArrayBufferView
 
 export type PeerTarget = string | string[] | null
 
-export type TargetPeers = PeerTarget | undefined
-
 export type MaybePromise<T> = T | Promise<T>
+
+export type ActionErrorKind =
+  | 'timeout'
+  | 'disconnected'
+  | 'aborted'
+  | 'rejected'
+
+export type ActionError = Error & {
+  readonly kind: ActionErrorKind
+}
 
 export type RoomErrorBase = {
   message: string
@@ -42,15 +48,6 @@ export type RoomErrorCode = RoomError['code']
 
 export type RoomErrorHandler = (error: RoomError) => unknown
 
-type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
-  ? Omit<T, K>
-  : never
-
-export type KernelRoomErrorInput = DistributiveOmit<
-  RoomError,
-  'appId' | 'roomId'
->
-
 export type Unsubscribe = () => void
 
 export type ListenerOptions = {
@@ -61,25 +58,6 @@ export type ListenerOptions = {
 export type ReplayListenerOptions = ListenerOptions & {
   replay?: boolean
 }
-
-export type HandshakePayload = {
-  data: DataPayload
-  metadata?: JsonValue
-}
-
-export type HandshakeSender = (
-  data: DataPayload,
-  metadata?: JsonValue
-) => Promise<void>
-
-export type HandshakeReceiver = () => Promise<HandshakePayload>
-
-export type PeerHandshake = (
-  peerId: string,
-  send: HandshakeSender,
-  receive: HandshakeReceiver,
-  isInitiator: boolean
-) => Promise<void>
 
 export type TurnServerConfig = {
   urls: string | string[]
@@ -99,18 +77,13 @@ export type RelayConfig = BaseRelayConfig & {
   redundancy?: number
 }
 
-export type TopologyMode = 'auto' | 'gossip'
-
 export type ScaleConfig = {
-  mode?: TopologyMode
-  maxConnections?: number
-  autoThreshold?: number
+  maxDirectPeers?: number
 }
 
 export type TopologyRoute = {
   nextHop: string
   hops: number
-  backupNextHop?: string
 }
 
 export type TopologyStats = {
@@ -122,9 +95,7 @@ export type TopologyStats = {
 }
 
 export type TopologySnapshot = {
-  mode: TopologyMode
-  activeMode: 'mesh' | 'gossip'
-  selfId: string
+  peerId: string
   directPeerIds: string[]
   roomPeerIds: string[]
   routes: Record<string, TopologyRoute>
@@ -137,10 +108,8 @@ export type ResolvedIdentityPersistence = UserIdentityPersistence | 'custom'
 
 export type UserIdentity = {
   userId: string
-  publicKey: string
   signPubJwk: JsonWebKey
   sign: (payload: Uint8Array) => MaybePromise<Uint8Array>
-  persisted?: boolean
   persistence?: ResolvedIdentityPersistence
 }
 
@@ -160,7 +129,7 @@ export type UserIdentityConfig =
 
 export type RolesConfig = {
   selfAsAdmin?: boolean
-  admins?: string[]
+  admins?: readonly string[]
 }
 
 export type RoleCertificate = {
@@ -199,8 +168,6 @@ export type SharedState<T = JsonValue> = {
   ) => Unsubscribe
 }
 
-export type AuthoritativeState<T = JsonValue> = SharedState<T>
-
 export type UserStateChangeContext<T = JsonValue> = StateChangeContext<T> & {
   self: boolean
   online: boolean
@@ -229,100 +196,23 @@ export type UserState<T = JsonValue> = {
   ) => Unsubscribe
 }
 
-export type PublicRolesProvider = {
-  getEffectiveRoomId: () => string
-  getPeerRoles: (peerOrUserId?: string) => string[]
-  isPeerBanned: (peerOrUserId: string) => boolean
-  getBanReason?: (peerOrUserId: string) => string | undefined
-}
-
-export type PublicScaleProvider = {
-  getActiveMode: () => 'mesh' | 'gossip'
-  isDirectPeer: (peerId: string) => boolean
-  isVirtualPeer: (peerId: string) => boolean
-  getRoute: (peerId: string) => TopologyRoute | undefined
-  getSnapshot: () => TopologySnapshot
-}
-
-export type PluginContext = {
-  readonly selfId: string
-  readonly appId: string
-  readonly initialRoomId: string
-  readonly password: string
-  readonly limit?: number | undefined
-  getRoomId: () => string
-  getLocalUserIdentity: () => Promise<UserIdentity>
-  getPeerUserId: (peerId: string) => string
-  getKnownPeerUserId: (peerId: string) => string | undefined
-  getUserPeerIds: (userId: string) => string[]
-  getPeerPublicKey: (peerId: string) => JsonWebKey | undefined
-  getActivePeerIds: () => string[]
-  getAllPeerIds: () => string[]
-  isPeerActive: (peerId: string) => boolean
-  getPeerHandle: (
-    peerId: string,
-    includePending?: boolean
-  ) => PeerHandle | undefined
-  resolveSendTarget: (
-    targets: TargetPeers,
-    includePending?: boolean
-  ) => TargetPeers
-  resolveRequestTarget: (
-    target: string,
-    includePending?: boolean
-  ) => string | undefined
-  kickPeer: (peerId: string, reason?: Error) => void
-  emitError: (error: KernelRoomErrorInput) => void
-  makeAction: Room['makeAction']
-  makeInternalAction: <T extends DataPayload = DataPayload>(
-    namespace: string,
-    options?: Partial<ActionOptions>
-  ) => InternalAction<T>
-  getRolesProvider: () => PublicRolesProvider | null
-  getScaleProvider: () => PublicScaleProvider | null
-  readonly onPeerActivated: (
-    listener: (peerId: string, peer: PeerHandle) => unknown,
-    options?: ReplayListenerOptions
-  ) => Unsubscribe
-  readonly onPeerDeactivated: (
-    listener: (peerId: string) => unknown,
-    options?: ListenerOptions
-  ) => Unsubscribe
-  readonly onRoomIdChanged: (
-    listener: (roomId: string) => unknown,
-    options?: ListenerOptions
-  ) => Unsubscribe
-  readonly onLeave: (
-    listener: () => unknown,
-    options?: ListenerOptions
-  ) => Unsubscribe
-}
-
-export type RoomKernel = PluginContext
+declare const pluginApiBrand: unique symbol
 
 export type RoomPlugin<
   TName extends string = string,
-  TApi extends Record<string, unknown> = Record<string, never>
+  TApi extends object = Record<never, never>
 > = {
   readonly name: TName
-  readonly resolveRoomId?:
-    | ((context: {
-        appId: string
-        roomId: string
-        userIdentityP: Promise<UserIdentity>
-      }) => Promise<{effectiveRoomId: string; state?: unknown}> | undefined)
-    | undefined
-  readonly setup: (
-    kernel: PluginContext,
-    preResolvedState?: unknown
-  ) => TApi | void
+  readonly [pluginApiBrand]?: TApi
 }
+
+export type AnyRoomPlugin = RoomPlugin<string, object>
 
 export interface BaseRoomConfig {
   appId: string
   identity?: UserIdentityConfig
-  limit?: number
-  use?: readonly RoomPlugin<string, any>[]
+  maxUsers?: number
+  use?: readonly AnyRoomPlugin[]
   maxReceiveBytes?: number
   password?: string
   passive?: boolean
@@ -355,7 +245,7 @@ export type ActionReceiveContext = {
   kind: 'message' | 'request' | 'response'
   signal: AbortSignal
   metadata?: JsonValue
-  roles?: string[]
+  roles: string[]
 }
 
 export type ActionReceiveHandler = (
@@ -366,7 +256,7 @@ export type MessageContext = {
   peerId: string
   userId: string
   metadata?: JsonValue
-  roles?: string[]
+  roles: string[]
 }
 
 export type RequestContext = {
@@ -374,7 +264,7 @@ export type RequestContext = {
   userId: string
   metadata?: JsonValue
   signal: AbortSignal
-  roles?: string[]
+  roles: string[]
 }
 
 export type PeerResult<R extends DataPayload = DataPayload> =
@@ -458,12 +348,12 @@ export type RequestAction<
 
 export type MessageActionConfig = {
   kind?: 'message'
-  roles?: string | string[]
+  roles?: string | readonly string[]
 }
 
 export type RequestActionConfig = {
   kind: 'request'
-  roles?: string | string[]
+  roles?: string | readonly string[]
 }
 
 export type AddMediaOptions = {
@@ -472,6 +362,10 @@ export type AddMediaOptions = {
 }
 
 export type RemoveMediaOptions = {
+  target?: PeerTarget
+}
+
+export type ReplaceTrackOptions = {
   target?: PeerTarget
 }
 
@@ -519,7 +413,6 @@ export type UserInfo = {
 export type SelfInfo = {
   peerId: string
   userId: string
-  persisted: boolean
   identityPersistence: ResolvedIdentityPersistence
   roomId: string
   baseRoomId: string
@@ -541,14 +434,19 @@ export type Widen<T> = [JsonValue] extends [T]
             ? {[K in keyof T]: Widen<T[K]>}
             : T
 
+export type BanOptions = {
+  reason?: string
+}
+
 export type RolesPluginApi = {
   grantRole: (
     targetId: string,
-    role: string | string[]
+    role: string | readonly string[]
   ) => Promise<RoleCertificate>
   revokeRole: (targetId: string, role?: string) => Promise<void>
   getRoles: (targetId?: string) => string[]
-  ban: (targetId: string, options?: {reason?: string}) => Promise<void>
+  ban: (targetId: string, options?: BanOptions) => Promise<void>
+  unban: (targetId: string) => Promise<void>
   isBanned: (targetId: string) => boolean
 }
 
@@ -602,7 +500,7 @@ export type Room = {
   replaceTrack: (
     oldTrack: MediaStreamTrack,
     newTrack: MediaStreamTrack,
-    options?: RemoveMediaOptions
+    options?: ReplaceTrackOptions
   ) => Promise<void>
   readonly onPeerJoin: (
     handler: (context: PeerJoinContext) => unknown,
@@ -655,7 +553,7 @@ export type PeerHandle = {
   connection: RTCPeerConnection
   channel: RTCDataChannel | null
   isDead: boolean
-  getOffer: (restartIce?: boolean) => Promise<Signal | void>
+  getOffer: () => Promise<Signal | void>
   signal: (sdp: Signal) => Promise<Signal | void>
   sendData: (data: Uint8Array) => void
   destroy: () => void
@@ -677,14 +575,10 @@ type UnionToIntersection<U> = (
   : never
 
 export type InferPluginApi<TPlugin> =
-  TPlugin extends RoomPlugin<string, infer TApi>
-    ? 0 extends 1 & TApi
-      ? unknown
-      : TApi
-    : Record<string, never>
+  TPlugin extends RoomPlugin<string, infer TApi> ? TApi : Record<never, never>
 
 export type RoomWithPlugins<
-  TPlugins extends readonly RoomPlugin<string, any>[] | undefined = undefined
+  TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
 > = Room &
   (TPlugins extends readonly (infer P)[]
     ? [P] extends [never]
@@ -695,8 +589,7 @@ export type RoomWithPlugins<
 declare const joinRoomConfigBrand: unique symbol
 
 export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (<
-  const TPlugins extends readonly RoomPlugin<string, any>[] | undefined =
-    undefined
+  const TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
 >(
   config: TConfig & {use?: TPlugins},
   roomId: string

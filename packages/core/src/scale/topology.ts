@@ -1,72 +1,54 @@
-import {hash32} from '../crypto'
+import {hash32} from '../primitives'
+import type {ScaleConfig, TopologyRoute} from '../types'
 import {cmpStr, createBoundedCache, mkErr, toJson} from '../utils'
-import type {ScaleConfig, TopologyMode, TopologyRoute} from '../types'
 
-export const defaultMaxConnections = 6
+const defaultMaxDirectPeers = 6
+const minMaxDirectPeers = 4
+const maxMaxDirectPeers = 32
 export const defaultMinConnections = 3
-export const defaultAutoThreshold = 12
 export const maxAllowedHops = 64
-export const defaultMaxHops = 16
 export const defaultDescriptorTtlMs = 180_000
 export const defaultUnreachableGraceMs = 1_200
 
 export type ResolvedTopologyConfig = {
-  mode: TopologyMode
-  maxConnections: number
-  autoThreshold: number
+  maxDirectPeers: number
 }
 
 export const deriveMaxHops = (
   rosterSize: number,
-  maxConnections: number = defaultMaxConnections
+  maxDirectPeers: number = defaultMaxDirectPeers
 ): number => {
   const n = Math.max(2, rosterSize)
-  const dims = Math.max(2, Math.floor(maxConnections / 2))
+  const dims = Math.max(2, Math.floor(maxDirectPeers / 2))
   const theoreticalDiameter = Math.ceil(dims * Math.pow(n, 1 / dims))
   return Math.min(maxAllowedHops, Math.max(12, theoreticalDiameter * 2))
 }
 
-const validModes = /*@__PURE__*/ new Set<TopologyMode>(['auto', 'gossip'])
-
 export const normalizeTopologyConfig = (
-  topology?: TopologyMode | ScaleConfig
+  config?: ScaleConfig
 ): ResolvedTopologyConfig => {
-  if (!topology) {
-    return {
-      mode: 'auto',
-      maxConnections: defaultMaxConnections,
-      autoThreshold: defaultAutoThreshold
-    }
+  if (config === undefined) {
+    return {maxDirectPeers: defaultMaxDirectPeers}
   }
-
-  const raw: ScaleConfig =
-    typeof topology === 'string' ? {mode: topology} : topology
-  const mode = raw.mode ?? 'auto'
-
-  if (!validModes.has(mode)) {
-    throw mkErr(`invalid topology mode "${String(mode)}"`)
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw mkErr('scale config must be an object')
   }
-
-  const maxConnections = raw.maxConnections ?? defaultMaxConnections
-  if (!Number.isSafeInteger(maxConnections) || maxConnections < 4) {
-    throw mkErr('scale.maxConnections must be an integer >= 4')
+  const maxDirectPeers = config.maxDirectPeers ?? defaultMaxDirectPeers
+  if (
+    !Number.isSafeInteger(maxDirectPeers) ||
+    maxDirectPeers < minMaxDirectPeers ||
+    maxDirectPeers > maxMaxDirectPeers
+  ) {
+    throw mkErr(
+      `scale.maxDirectPeers must be an integer between ${minMaxDirectPeers} and ${maxMaxDirectPeers}`
+    )
   }
-
-  const autoThreshold = raw.autoThreshold ?? defaultAutoThreshold
-  if (!Number.isSafeInteger(autoThreshold) || autoThreshold < 2) {
-    throw mkErr('scale.autoThreshold must be an integer >= 2')
-  }
-
-  return {
-    mode,
-    maxConnections,
-    autoThreshold
-  }
+  return {maxDirectPeers}
 }
 
 const ringKeyCache = /*@__PURE__*/ createBoundedCache<string, string>(8_192)
 
-export const hashRingKey = (ringSalt: string, peerId: string): string => {
+const hashRingKey = (ringSalt: string, peerId: string): string => {
   const input = toJson([ringSalt, peerId])
   const cached = ringKeyCache.get(input)
   if (cached !== undefined) {
@@ -82,8 +64,7 @@ export const hashRingKey = (ringSalt: string, peerId: string): string => {
 export const computeTargetNeighbors = (
   localPeerId: string,
   rosterIds: Iterable<string>,
-  activeMode: 'mesh' | 'gossip',
-  maxConnections: number,
+  maxDirectPeers: number = defaultMaxDirectPeers,
   roomSalt: string = ''
 ): Set<string> => {
   const unique = new Set<string>(rosterIds)
@@ -95,7 +76,7 @@ export const computeTargetNeighbors = (
     return targets
   }
 
-  if (activeMode === 'mesh' || total - 1 <= maxConnections) {
+  if (total - 1 <= maxDirectPeers) {
     for (const id of [...unique].sort()) {
       if (id !== localPeerId) {
         targets.add(id)
@@ -104,9 +85,9 @@ export const computeTargetNeighbors = (
     return targets
   }
 
-  // Union of d = floor(maxConnections / 2) independent permuted Hamiltonian cycles:
-  // strictly symmetric, degree <= 2*d <= maxConnections at every node, O(log N) expander diameter.
-  const numRings = Math.max(2, Math.floor(maxConnections / 2))
+  // Union of d = floor(maxDirectPeers / 2) independent permuted Hamiltonian cycles:
+  // strictly symmetric, degree <= 2*d <= maxDirectPeers at every node, O(log N) expander diameter.
+  const numRings = Math.max(2, Math.floor(maxDirectPeers / 2))
   const uniqueList = [...unique]
 
   for (let r = 0; r < numRings; r++) {
@@ -184,7 +165,6 @@ export const computeShortestPathRoutes = (
   const graph = buildUndirectedGraph(adjacency, localPeerId, directSet)
 
   const visited = new Map<string, [nextHop: string, hops: number]>()
-  const backupNextHops = new Map<string, string>()
   const queue: Array<[node: string, nextHop: string, hops: number]> = []
 
   for (const d of [...directSet].sort()) {
@@ -204,26 +184,18 @@ export const computeShortestPathRoutes = (
     }
 
     for (const neighbor of neighbors) {
-      if (neighbor === localPeerId) {
+      if (neighbor === localPeerId || visited.has(neighbor)) {
         continue
       }
-
-      const existing = visited.get(neighbor)
-      if (!existing) {
-        visited.set(neighbor, [nextHop, hops + 1])
-        queue.push([neighbor, nextHop, hops + 1])
-      } else if (existing[0] !== nextHop && !backupNextHops.has(neighbor)) {
-        backupNextHops.set(neighbor, nextHop)
-      }
+      visited.set(neighbor, [nextHop, hops + 1])
+      queue.push([neighbor, nextHop, hops + 1])
     }
   }
 
   for (const [peerId, info] of visited.entries()) {
-    const backup = backupNextHops.get(peerId)
     routes[peerId] = {
       nextHop: info[0],
-      hops: info[1],
-      ...(backup ? {backupNextHop: backup} : {})
+      hops: info[1]
     }
   }
 

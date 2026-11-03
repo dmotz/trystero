@@ -10,20 +10,34 @@ import type {
 import {
   createJoinedRooms,
   encodeInternalAction,
-  MockPeer,
+  LinkedPeer,
+  linkPeers,
+  testEndpoint,
   tick
 } from './peer-harness.ts'
 
 void test('Trystero: remote leave packets fire peer-leave callbacks once', async () => {
-  let registerPeer = null as ((peer: PeerHandle, id: string) => void) | null
+  const epLocal = testEndpoint('peer-leave-local')
+  const epRemote = testEndpoint('peer-leave-remote')
+  let registerLocal = null as ((peer: PeerHandle, id: string) => void) | null
+  let registerRemote = null as ((peer: PeerHandle, id: string) => void) | null
   const strategyPeerLeaves: string[] = []
   const roomPeerLeaves: string[] = []
   const roomRef = room(
     f => {
-      registerPeer = f
+      registerLocal = f
     },
     id => strategyPeerLeaves.push(id),
-    () => {}
+    () => {},
+    {endpointIdentity: epLocal, appId: 'leave-app', roomId: 'leave-room'}
+  )
+  const remoteRoom = room(
+    f => {
+      registerRemote = f
+    },
+    () => {},
+    () => {},
+    {endpointIdentity: epRemote, appId: 'leave-app', roomId: 'leave-room'}
   )
   const joinPromise = new Promise(resolve =>
     roomRef.onPeerJoin(({peerId}) => resolve(peerId), {once: true})
@@ -31,28 +45,38 @@ void test('Trystero: remote leave packets fire peer-leave callbacks once', async
 
   roomRef.onPeerLeave(({peerId}) => roomPeerLeaves.push(peerId))
 
-  const peer = new MockPeer()
+  const {peerA: localPeer, peerB: remotePeer} = linkPeers(
+    new LinkedPeer(),
+    new LinkedPeer()
+  )
+  let destroyCount = 0
+  const origDestroy = localPeer.destroy.bind(localPeer)
+  localPeer.destroy = () => {
+    destroyCount++
+    origDestroy()
+  }
 
-  assert.ok(registerPeer, 'expected room to register its peer callback')
-  registerPeer(peer as unknown as PeerHandle, 'remote-peer')
+  assert.ok(
+    registerLocal && registerRemote,
+    'expected rooms to register peer callbacks'
+  )
+  registerLocal(localPeer as unknown as PeerHandle, epRemote.peerId)
+  registerRemote(remotePeer as unknown as PeerHandle, epLocal.peerId)
 
+  assert.equal(await joinPromise, epRemote.peerId)
+
+  localPeer.handlers.data?.(encodeInternalAction('leave'))
   await tick()
-  peer.handlers.data?.(encodeInternalAction('hsready'))
 
-  assert.equal(await joinPromise, 'remote-peer')
+  assert.equal(destroyCount, 1)
+  assert.deepEqual(roomPeerLeaves, [epRemote.peerId])
+  assert.deepEqual(strategyPeerLeaves, [epRemote.peerId])
 
-  peer.handlers.data?.(encodeInternalAction('leave'))
-  await tick()
-
-  assert.equal(peer.destroyCount, 1)
-  assert.deepEqual(roomPeerLeaves, ['remote-peer'])
-  assert.deepEqual(strategyPeerLeaves, ['remote-peer'])
-
-  await roomRef.leave()
+  await Promise.all([roomRef.leave(), remoteRoom.leave()])
 })
 
 void test('Trystero: metadata is delivered for non-binary payloads and falsy values', async () => {
-  const {roomA, roomB} = await createJoinedRooms()
+  const {roomA, roomB, peerIdA} = await createJoinedRooms()
 
   try {
     const textActionA = roomA.makeAction('text-meta')
@@ -68,7 +92,7 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
 
     assert.deepEqual(await textReceived, {
       payload: 'hello',
-      peerId: 'peer-a',
+      peerId: peerIdA,
       metadata: false
     })
 
@@ -85,7 +109,7 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
 
     assert.deepEqual(await jsonReceived, {
       payload: {kind: 'object'},
-      peerId: 'peer-a',
+      peerId: peerIdA,
       metadata: 0
     })
 
@@ -106,7 +130,7 @@ void test('Trystero: metadata is delivered for non-binary payloads and falsy val
 
     assert.deepEqual(await queuedReceived, {
       payload: 'later',
-      peerId: 'peer-a',
+      peerId: peerIdA,
       metadata: null
     })
   } finally {
@@ -153,14 +177,26 @@ void test('Trystero: action creation uses action objects', async () => {
 })
 
 void test('Trystero: room event methods fan out and unsubscribe cleanly', async () => {
-  let registerPeer = null as ((peer: PeerHandle, id: string) => void) | null
+  const epLocal = testEndpoint('fanout-local')
+  const epRemote = testEndpoint('fanout-remote')
+  let registerLocal = null as ((peer: PeerHandle, id: string) => void) | null
+  let registerRemote = null as ((peer: PeerHandle, id: string) => void) | null
   const joined: string[] = []
   const roomRef = room(
     f => {
-      registerPeer = f
+      registerLocal = f
     },
     () => {},
-    () => {}
+    () => {},
+    {endpointIdentity: epLocal, appId: 'fanout-app', roomId: 'fanout-room'}
+  )
+  const remoteRoom = room(
+    f => {
+      registerRemote = f
+    },
+    () => {},
+    () => {},
+    {endpointIdentity: epRemote, appId: 'fanout-app', roomId: 'fanout-room'}
   )
 
   try {
@@ -172,27 +208,32 @@ void test('Trystero: room event methods fan out and unsubscribe cleanly', async 
     )
     unsubFirst()
 
-    assert.ok(registerPeer, 'expected room to register its peer callback')
-    const peer = new MockPeer()
+    assert.ok(
+      registerLocal && registerRemote,
+      'expected rooms to register peer callbacks'
+    )
+    const joinDone = new Promise(resolve =>
+      roomRef.onPeerJoin(resolve, {once: true})
+    )
+    const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
 
-    registerPeer(peer as unknown as PeerHandle, 'remote-peer')
-    await tick()
-    peer.handlers.data?.(encodeInternalAction('hsready'))
-    await tick()
+    registerLocal(peerA as unknown as PeerHandle, epRemote.peerId)
+    registerRemote(peerB as unknown as PeerHandle, epLocal.peerId)
+    await joinDone
 
-    assert.deepEqual(joined, ['second:remote-peer'])
+    assert.deepEqual(joined, [`second:${epRemote.peerId}`])
 
     unsubSecond()
     assert.throws(() => {
       ;(roomRef as unknown as Record<string, unknown>)['onPeerJoin'] = null
     }, TypeError)
   } finally {
-    await roomRef.leave()
+    await Promise.all([roomRef.leave(), remoteRoom.leave()])
   }
 })
 
 void test('Trystero: request actions resolve, reject, wait for handlers, and fan out', async () => {
-  const {roomA, roomB} = await createJoinedRooms()
+  const {roomA, roomB, peerIdB} = await createJoinedRooms()
 
   try {
     const isEvenA = roomA.makeAction('is-even', {kind: 'request'})
@@ -202,7 +243,7 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
       })
       .onRequest(value => (value as number) % 2 === 0)
 
-    assert.equal(await isEvenA.request(4, {target: 'peer-b'}), true)
+    assert.equal(await isEvenA.request(4, {target: peerIdB}), true)
 
     const rejectsA = roomA.makeAction('rejects', {kind: 'request'})
     roomB
@@ -214,14 +255,14 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
       })
 
     await assert.rejects(
-      () => rejectsA.request('please', {target: 'peer-b'}),
+      () => rejectsA.request('please', {target: peerIdB}),
       /no thanks/
     )
 
     const lateA = roomA.makeAction('late-request', {kind: 'request'})
     const lateB = roomB.makeAction('late-request', {kind: 'request'})
     const lateResult = lateA.request('hello', {
-      target: 'peer-b',
+      target: peerIdB,
       timeoutMs: 1_000
     })
 
@@ -236,7 +277,7 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
     await assert.rejects(
       () =>
         missingA.request('hello', {
-          target: 'peer-b',
+          target: peerIdB,
           timeoutMs: 1_000
         }),
       /timed out/
@@ -244,14 +285,14 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
 
     const fanoutResults: PeerResult<DataPayload>[] = []
     const many = await isEvenA.requestMany(6, {
-      targets: ['missing-peer', 'peer-b'],
+      targets: ['missing-peer', peerIdB],
       timeoutMs: 1_000,
       onResult: result => fanoutResults.push(result)
     })
 
     assert.deepEqual(
       many.map(result => result.peerId),
-      ['missing-peer', 'peer-b']
+      ['missing-peer', peerIdB]
     )
     assert.deepEqual(
       many.map(result => result.status),
@@ -270,7 +311,7 @@ void test('Trystero: request actions resolve, reject, wait for handlers, and fan
 })
 
 void test('Trystero: request actions reject on abort and ignore late responses', async () => {
-  const {roomA, roomB} = await createJoinedRooms()
+  const {roomA, roomB, peerIdB} = await createJoinedRooms()
 
   try {
     const slowA = roomA.makeAction('slow-request', {kind: 'request'})
@@ -284,7 +325,7 @@ void test('Trystero: request actions reject on abort and ignore late responses',
       })
     const controller = new AbortController()
     const pending = slowA.request('later', {
-      target: 'peer-b',
+      target: peerIdB,
       signal: controller.signal
     })
 
@@ -301,7 +342,7 @@ void test('Trystero: request actions reject on abort and ignore late responses',
 })
 
 void test('Trystero: incoming request context signal aborts when requesting peer disconnects', async () => {
-  const {roomA, roomB, peerA, peerB} = await createJoinedRooms()
+  const {roomA, roomB, peerA, peerB, peerIdB} = await createJoinedRooms()
 
   try {
     let requestSignal: AbortSignal | undefined
@@ -326,7 +367,7 @@ void test('Trystero: incoming request context signal aborts when requesting peer
         })
       })
 
-    const pending = slowA.request('work', {target: 'peer-b'})
+    const pending = slowA.request('work', {target: peerIdB})
     await tick()
     assert.ok(requestSignal)
     assert.equal(requestSignal.aborted, false)
@@ -343,7 +384,7 @@ void test('Trystero: incoming request context signal aborts when requesting peer
 })
 
 void test('Trystero: sendData throws during send or request reject with disconnected ActionError', async () => {
-  const {roomA, roomB, peerA} = await createJoinedRooms()
+  const {roomA, roomB, peerA, peerIdB} = await createJoinedRooms()
 
   try {
     const actionA = roomA.makeAction('broken-send')
@@ -354,10 +395,10 @@ void test('Trystero: sendData throws during send or request reject with disconne
       throw new Error('RTCDataChannel is not open')
     }
 
-    await assert.rejects(() => actionA.send('payload', {target: 'peer-b'}), {
+    await assert.rejects(() => actionA.send('payload', {target: peerIdB}), {
       kind: 'disconnected'
     })
-    await assert.rejects(() => reqA.request('payload', {target: 'peer-b'}), {
+    await assert.rejects(() => reqA.request('payload', {target: peerIdB}), {
       kind: 'disconnected'
     })
   } finally {

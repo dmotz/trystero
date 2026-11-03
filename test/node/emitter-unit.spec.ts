@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {
+  createEventEmitter,
+  initSingleHandler
+} from '../../packages/core/src/emitter.ts'
+import {
   createUserIdentity,
   roles,
   type ReplayListenerOptions
@@ -21,9 +25,118 @@ import {
   createLinkedHandlePair,
   linkedActions,
   makeStream,
+  testEndpoint,
   turn,
   waitFor
 } from './peer-harness.ts'
+
+void test('createEventEmitter and initSingleHandler tuple APIs, active transitions, replay, once, signal, and clear', () => {
+  const activeChanges: boolean[] = []
+  const [subscribe, emit, clear, hasListeners] = createEventEmitter<
+    [string, number]
+  >('onCustom', active => activeChanges.push(active))
+
+  assert.equal(hasListeners(), false)
+  assert.throws(
+    () => subscribe(null as never),
+    /onCustom handler must be a function/
+  )
+
+  const [subHandlerNamed] = createEventEmitter<[string]>('action handler')
+  assert.throws(
+    () => subHandlerNamed(null as never),
+    /action handler must be a function/
+  )
+
+  // Pre-aborted subscription does not trigger onActiveChange or add a listener
+  const unsubPreAborted = subscribe(() => {}, {signal: AbortSignal.abort()})
+  unsubPreAborted()
+  assert.equal(hasListeners(), false)
+  assert.deepEqual(activeChanges, [])
+
+  // Replay with {once: true} consumes first replay item without entering live set
+  const onceReplaySeen: Array<[string, number]> = []
+  subscribe(
+    (k, v) => onceReplaySeen.push([k, v]),
+    {replay: true, once: true},
+    () => [
+      ['r1', 1],
+      ['r2', 2]
+    ]
+  )
+  assert.deepEqual(onceReplaySeen, [['r1', 1]])
+  assert.equal(hasListeners(), false)
+  assert.deepEqual(activeChanges, [])
+
+  // Live subscriptions track active state transitions and clear()
+  const seenA: Array<[string, number]> = []
+  const seenB: Array<[string, number]> = []
+  const offA = subscribe((k, v) => seenA.push([k, v]))
+  assert.equal(hasListeners(), true)
+  assert.deepEqual(activeChanges, [true])
+
+  const offB = subscribe((k, v) => seenB.push([k, v]), {once: true})
+  assert.deepEqual(activeChanges, [true])
+
+  emit('live', 10)
+  assert.deepEqual(seenA, [['live', 10]])
+  assert.deepEqual(seenB, [['live', 10]])
+  assert.equal(hasListeners(), true)
+
+  emit('live', 20)
+  assert.deepEqual(seenA, [
+    ['live', 10],
+    ['live', 20]
+  ])
+  assert.deepEqual(seenB, [['live', 10]])
+
+  offB()
+  offA()
+  offA()
+  assert.equal(hasListeners(), false)
+  assert.deepEqual(activeChanges, [true, false])
+
+  subscribe(() => {})
+  subscribe(() => {})
+  assert.equal(hasListeners(), true)
+  assert.deepEqual(activeChanges, [true, false, true])
+  clear()
+  assert.equal(hasListeners(), false)
+  assert.deepEqual(activeChanges, [true, false, true, false])
+
+  // initSingleHandler tuple [set, get, clear]
+  const slotChanges: Array<boolean> = []
+  const [setSlot, getSlot, clearSlot] = initSingleHandler<
+    (x: number) => number
+  >('onRequest', fn => slotChanges.push(fn !== null))
+  assert.equal(getSlot(), null)
+  assert.throws(
+    () => setSlot(null as never),
+    /onRequest handler must be a function/
+  )
+
+  const offSlot = setSlot(x => x * 2)
+  assert.deepEqual(slotChanges, [true])
+  const activeCall = getSlot()!
+  assert.equal(activeCall(5), 10)
+  assert.throws(
+    () => setSlot(x => x * 3),
+    /onRequest handler already registered; unsubscribe first/
+  )
+
+  offSlot()
+  assert.equal(getSlot(), null)
+  assert.equal(activeCall(5), undefined)
+  assert.deepEqual(slotChanges, [true, false])
+
+  setSlot(x => x + 1, {once: true})
+  assert.equal(getSlot()!(9), 10)
+  assert.equal(getSlot(), null)
+
+  setSlot(x => x - 1)
+  clearSlot()
+  assert.equal(getSlot(), null)
+})
 
 void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsubscribe across Room, Action, and State', async () => {
   const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
@@ -36,24 +149,29 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
   const effectiveRoomId = `fanout-room~${hostIdentity.userId}`
 
   const makePeerRoom = (
-    id: string,
+    label: string,
     identity: typeof hostIdentity
-  ): Room & RolesPluginApi =>
-    createRoom(
-      f => regMap.set(id, f),
+  ): {room: Room & RolesPluginApi; peerId: string} => {
+    const ep = testEndpoint(`emitter-fanout-${label}`)
+    const room = createRoom(
+      f => regMap.set(ep.peerId, f),
       () => {},
       () => {},
       {
-        selfId: id,
+        endpointIdentity: ep,
         appId,
         roomId: effectiveRoomId,
         identity,
-        verifyPeerIdentity: true,
         use: [roles()]
       }
     ) as Room & RolesPluginApi
+    return {room, peerId: ep.peerId}
+  }
 
-  const hostRoom = makePeerRoom('peer-host', hostIdentity)
+  const {room: hostRoom, peerId: hostPeerId} = makePeerRoom(
+    'peer-host',
+    hostIdentity
+  )
   await hostRoom.getSelf()
 
   const userJoinA: UserJoinContext[] = []
@@ -92,7 +210,10 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
 
   const scoreHost = hostRoom.makeState('score', 0)
 
-  const bobRoom = makePeerRoom('peer-bob-1', bobIdentity)
+  const {room: bobRoom, peerId: bobPeerId} = makePeerRoom(
+    'peer-bob-1',
+    bobIdentity
+  )
   await bobRoom.getSelf()
 
   const scoreBob = bobRoom.makeState('score', 0)
@@ -109,17 +230,16 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
     connectVerifiedPeers(
       regMap,
       hostRoom,
-      'peer-host',
+      hostPeerId,
       hostIdentity,
       bobRoom,
-      'peer-bob-1',
+      bobPeerId,
       bobIdentity
     )
 
     await waitFor(
       () =>
-        'peer-bob-1' in hostRoom.getPeers() &&
-        'peer-host' in bobRoom.getPeers(),
+        bobPeerId in hostRoom.getPeers() && hostPeerId in bobRoom.getPeers(),
       3_000
     )
 
@@ -144,12 +264,12 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
     assert.deepEqual(stateChangesA[0], {
       val: 10,
       prev: 0,
-      peerId: 'peer-host'
+      peerId: hostPeerId
     })
     assert.deepEqual(stateChangesB[0], {
       val: 10,
       prev: 0,
-      peerId: 'peer-host'
+      peerId: hostPeerId
     })
 
     // Unsubscribe all "A" listeners (and call twice to verify idempotence)
@@ -173,8 +293,8 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
 
     await chatBob.send('second')
     await waitFor(() => msgB.length === 2)
-    assert.deepEqual(msgA, ['peer-bob-1:first'])
-    assert.deepEqual(msgB, ['peer-bob-1:first', 'peer-bob-1:second'])
+    assert.deepEqual(msgA, [`${bobPeerId}:first`])
+    assert.deepEqual(msgB, [`${bobPeerId}:first`, `${bobPeerId}:second`])
 
     await binBob.send(new Uint8Array(40 * 1024).fill(9))
     await waitFor(() => progressB.length > prevProgBCount)
@@ -186,7 +306,7 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
     assert.deepEqual(stateChangesB[1], {
       val: 25,
       prev: 10,
-      peerId: 'peer-host'
+      peerId: hostPeerId
     })
 
     // Bob leaves and Carol joins: only "B" listeners fire
@@ -195,20 +315,23 @@ void test('Multi-listener fan-out, independent unsubscribe, and idempotent unsub
     assert.equal(peerLeaveA.length, 0)
     assert.equal(userLeaveA.length, 0)
 
-    const carolRoom = makePeerRoom('peer-carol', carolIdentity)
+    const {room: carolRoom, peerId: carolPeerId} = makePeerRoom(
+      'peer-carol',
+      carolIdentity
+    )
     await carolRoom.getSelf()
     try {
       connectVerifiedPeers(
         regMap,
         hostRoom,
-        'peer-host',
+        hostPeerId,
         hostIdentity,
         carolRoom,
-        'peer-carol',
+        carolPeerId,
         carolIdentity
       )
 
-      await waitFor(() => 'peer-carol' in hostRoom.getPeers(), 3_000)
+      await waitFor(() => carolPeerId in hostRoom.getPeers(), 3_000)
       assert.equal(userJoinA.length, 1)
       assert.equal(userJoinB.length, 2)
       assert.equal(peerJoinA.length, 1)
@@ -261,34 +384,37 @@ void test('ListenerOptions ({once, signal}): pre-aborted signals, mid-replay abo
   }
 
   // 2. Mid-replay abort and AbortSignal listener leak prevention across unsub(), once, and room.leave()
+  const epA = testEndpoint('sig-peer-a')
+  const epB = testEndpoint('sig-peer-b')
+  const epC = testEndpoint('sig-peer-c')
   const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
   const roomA = createRoom(
     f => regMap.set('a', f),
     () => {},
     () => {},
-    {selfId: 'peer-a', appId: 'sig-app', roomId: 'sig-room'}
+    {endpointIdentity: epA, appId: 'sig-app', roomId: 'sig-room'}
   )
   const roomB = createRoom(
     f => regMap.set('b', f),
     () => {},
     () => {},
-    {selfId: 'peer-b', appId: 'sig-app', roomId: 'sig-room'}
+    {endpointIdentity: epB, appId: 'sig-app', roomId: 'sig-room'}
   )
   const roomC = createRoom(
     f => regMap.set('c', f),
     () => {},
     () => {},
-    {selfId: 'peer-c', appId: 'sig-app', roomId: 'sig-room'}
+    {endpointIdentity: epC, appId: 'sig-app', roomId: 'sig-room'}
   )
 
   try {
     const ab = createLinkedHandlePair()
-    regMap.get('a')!(ab.peerA, 'peer-b')
-    regMap.get('b')!(ab.peerB, 'peer-a')
+    regMap.get('a')!(ab.peerA, epB.peerId)
+    regMap.get('b')!(ab.peerB, epA.peerId)
 
     const ac = createLinkedHandlePair()
-    regMap.get('a')!(ac.peerA, 'peer-c')
-    regMap.get('c')!(ac.peerB, 'peer-a')
+    regMap.get('a')!(ac.peerA, epC.peerId)
+    regMap.get('c')!(ac.peerB, epA.peerId)
 
     await waitFor(() => Object.keys(roomA.getPeers()).length === 2, 2_000)
 

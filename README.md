@@ -53,7 +53,6 @@ You can see what people are building with Trystero
   - [Room size limits](#room-size-limits)
   - [Room admins, roles, and authoritative state](#room-admins-roles-and-authoritative-state)
   - [Scaling large rooms](#scaling-large-rooms)
-  - [Custom room plugins](#custom-room-plugins)
   - [React](#react)
   - [Troubleshooting connection issues](#troubleshooting-connection-issues)
   - [Running server-side (Node, Bun, Deno)](#running-server-side-node-bun-deno)
@@ -65,7 +64,6 @@ You can see what people are building with Trystero
   - [`joinRoom(config, roomId)`](#joinroomconfig-roomid)
   - [`roles([config])`](#rolesconfig)
   - [`scale([config])`](#scaleconfig)
-  - [`definePlugin(name, spec)`](#definepluginname-spec)
   - [`createUserIdentity()`](#createuseridentity)
   - [`importUserIdentity(input)`](#importuseridentityinput)
   - [`exportUserIdentity(identity)`](#exportuseridentityidentity)
@@ -603,9 +601,8 @@ member mode**:
 - **Whole-value last-writer-wins (LWW)**: Concurrent writes do not deep-merge
   object fields—every peer deterministically converges to the highest bounded
   Hybrid Logical Clock record `(hlc, userId, peerId, sig)`. Keep per-user fields
-  in `makeUserState`, and use a CRDT plugin (such as Yjs; see
-  [Custom room plugins](#custom-room-plugins)) if you need concurrent character-
-  or list-level merging.
+  in `makeUserState`, and layer a CRDT (such as Yjs or Automerge) over
+  `makeAction` if you need concurrent character- or list-level merging.
 - **Bounded clock-skew window**: Peers reject state records dated more than 60
   seconds into the future, bounding how far a misconfigured clock or griefing
   member in an open room can pin a timestamp.
@@ -674,9 +671,17 @@ memory.
 ### Action promises
 
 Sender promises resolve when local sending finishes; they do not confirm
-delivery or application handling. If a receiver declines a large transfer, the
-promise rejects with `error.kind === 'rejected'`. Use request actions when you
-need a response.
+delivery or application handling. Broadcast `send(data)` resolves immediately
+when zero peers are connected, whereas an explicit-target `send(data, {target})`
+rejects if any specified target is not currently connected. Failed `send()` and
+`request()` calls reject with an `ActionError` (`error.kind`:
+`'timeout' | 'disconnected' | 'aborted' | 'rejected'`). If a receiver declines a
+large transfer via `onReceive`, or an `onRequest` handler throws an `Error`, the
+caller's promise rejects with `error.kind === 'rejected'` (preserving the thrown
+`Error`'s `message` for `onRequest`). For binary payloads larger than `16 KiB`,
+`send()` chunks directly from the caller's buffer without copying—do not mutate
+a binary buffer passed to `send()` until its returned `Promise` settles. Use
+request actions when you need a response.
 
 ```js
 await file.send(amplePayload)
@@ -756,14 +761,14 @@ room. For example, you might be building:
 - **A private 1-on-1 video call** where only two people connect at a time.
 
 To set an advisory per-peer limit on how many unique users (`userId`s, including
-the local user) can be in a peer's room view at once, pass `limit` in your
+the local user) can be in a peer's room view at once, pass `maxUsers` in your
 `joinRoom()` config and listen for `'room-full'` via `room.onError()`:
 
 ```js
 const room = joinRoom(
   {
     appId: 'chess-club',
-    limit: 2 // advisory cap of 2 unique users in this peer's view (you + 1 opponent)
+    maxUsers: 2 // advisory cap of 2 unique users in this peer's view (you + 1 opponent)
   },
   'match-42'
 )
@@ -780,7 +785,7 @@ When a peer's room view is already at capacity:
 - Any extra user (`userId`) who tries to connect is refused by that peer before
   activation, receives `{code: 'room-full'}` in `onError`, and has that peer
   link closed.
-- Because `limit` counts unique `userId`s rather than raw tabs, an admitted
+- Because `maxUsers` counts unique `userId`s rather than raw tabs, an admitted
   player who refreshes the page or opens another tab shares their existing seat.
 - Existing players in the room are never interrupted—`onPeerJoin` and
   `onPeerLeave` won't fire for someone who was turned away at the door.
@@ -792,7 +797,7 @@ When a peer's room view is already at capacity:
 
 - **Best-effort advisory per-peer check**: Without a central server or room
   admin, capacity is enforced locally by each peer on its own view. When a
-  peer's active unique `userId` count (including itself) reaches `limit`, it
+  peer's active unique `userId` count (including itself) reaches `maxUsers`, it
   refuses new `userId`s during the admission handshake before they are added to
   `getPeers()` or trigger `onPeerJoin`.
 - **No self-eviction or unverified `'room full'` propagation**: A peer never
@@ -997,14 +1002,20 @@ console.log(room.getRoles(userId)) // => ['moderator']
 // Remove the 'moderator' role from a user
 await room.revokeRole(userId, 'moderator')
 
-// As an admin, kick and ban a disruptive user from the room
+// As a root admin, kick and ban a disruptive user from the room
 await room.ban(maliciousUserId, {reason: 'spam'})
+
+// Lift a previous ban so the user can rejoin
+await room.unban(maliciousUserId)
 ```
 
-Revoked or banned admins cannot issue new moderation commands, and banned users
-receive `{code: 'banned', reason}` via `room.onError()` (both when kicked
-mid-session and if they try to rejoin). Only root admins can issue role
-certificates.
+Only root admins (the self-certifying room creator or `userId`s listed in
+`roles({admins})`) hold the `'admin'` role and can call `grantRole`,
+`revokeRole`, `ban`, or `unban` (`'admin'` cannot be granted to non-root users).
+Banned users have their granted roles cleared and their `makeUserState` /
+`makeState` records purged across peers, and receive `{code: 'banned', reason}`
+via `room.onError()` (both when kicked mid-session and if they try to rejoin
+before `room.unban()`).
 
 <details>
   <summary>How it works behind the scenes</summary>
@@ -1012,8 +1023,8 @@ certificates.
 - **Zero-trust public-key signatures**: Room authority is unified directly with
   each user's WebCrypto ECDSA P-256 `UserIdentity` (`userId`). Private keys
   never leave the user's device. Every privileged action, state update, role
-  grant, or ban is signed with the sender's private key and verified by every
-  peer before being accepted.
+  grant, revocation, ban, or unban is signed with the sender's private key and
+  verified by every peer before being accepted.
 - **Self-certifying room IDs**: A user's 22-character Base62 `userId` is derived
   directly from the SHA-256 digest of their P-256 public key
   (`sha256(pubJwk) mod 62²²`, ~131 bits). When you create a room with
@@ -1021,16 +1032,18 @@ certificates.
   room ID (`<baseRoomId>~<userId>`). When peers connect—or when the host rejoins
   with the same persistent identity—everyone can mathematically verify from the
   `userId` suffix alone who owns the room.
-- **2-tier role certificates**: Calling `room.grantRole()` issues a signed
-  `RoleCertificate` binding the recipient's `subUserId` to the granted role(s).
-  Because the certificate binds `subUserId`, a promoted user retains their roles
-  across page reloads and multiple open tabs automatically. Peers verify the
-  root admin's signature on the certificate and check against signed
-  `RoleRevocationRecord`s. Likewise, `room.ban()` bans the target `userId`
-  across all current and future tabs. Concurrent moderation records (such as
-  delegated admins revoking or banning one another) are evaluated in a total
-  causal order `(iat, recordType, sig)` so all peers converge to the exact same
-  set of active roles and bans regardless of message arrival or sync order.
+- **Root-signed role certificates & moderation**: Calling `room.grantRole()`
+  issues a signed `RoleCertificate` binding the recipient's `subUserId` to the
+  granted custom role(s). Because the certificate binds `subUserId`, a promoted
+  user retains their roles across page reloads and multiple open tabs
+  automatically. Peers verify the root admin's signature on the certificate and
+  check against signed `RoleRevocationRecord`s and `PeerModerationRecord`s
+  (`op: 'ban' | 'unban'`). Likewise, `room.ban()` bans the target `userId`
+  across all current and future tabs until a root admin calls `room.unban()`.
+  Concurrent moderation records (such as co-admins issuing bans/unbans or
+  revocations) are evaluated in a total causal order `(ts, seq, op, sig)` so all
+  peers converge to the exact same set of active roles and bans regardless of
+  message arrival or sync order.
 - **Tamper-proof state syncing (`makeState` & `makeUserState`)**: Shared and
   per-user state updates share a unified signed envelope bound to `appId`,
   `roomId`, `ns`, `userId`, `peerId`, a skew-bounded Hybrid Logical Clock
@@ -1041,21 +1054,21 @@ certificates.
   to 60 seconds of future wall-clock skew across devices.
 - **Edge filtering & private signaling**: In multi-hop topologies, immediate
   neighbors (Hop-1 relays) verify role certificates, signatures, and
-  `PeerBanRecord`s before forwarding packets, stopping unauthorized traffic or
-  banned peers at the edge. Role certificates and ban records are exchanged only
-  over encrypted WebRTC data channels after connecting so user IDs and ban
-  metadata are never exposed to signaling relays.
+  `PeerModerationRecord`s before forwarding packets, stopping unauthorized
+  traffic or banned peers at the edge. Role certificates and moderation records
+  are exchanged only over encrypted WebRTC data channels after connecting so
+  user IDs and ban metadata are never exposed to signaling relays.
 
 </details>
 
 ### Scaling large rooms
 
 Normally in WebRTC, every browser in a room opens a direct connection to every
-other browser (`'mesh'`). That works great for small groups (and keeps your
-bundle size minimal when you don't need multi-hop routing), but once a room
-grows past a dozen people—like a busy game lobby, a collaborative canvas with 50
-cursors, or a live watch party—maintaining that many connections at once can
-slow down or overwhelm a user's browser.
+other browser. That works great for small groups (and keeps your bundle size
+minimal when you don't need multi-hop routing), but once a room grows past a
+dozen people—like a busy game lobby, a collaborative canvas with 50 cursors, or
+a live watch party—maintaining that many connections at once can slow down or
+overwhelm a user's browser.
 
 **Opt into automatic scaling with `scale()` _(experimental)_:**
 
@@ -1069,15 +1082,19 @@ const room = joinRoom({appId: 'massive-canvas', use: [scale()]}, 'lobby-1')
 > dozens of peers (tested up to 48 concurrent browser instances and 250+
 > simulated peers).
 
-When you include `use: [scale()]` (which defaults to `'auto'` mode):
+When you include `use: [scale()]`:
 
-- When a room is small (`12` peers or fewer), everyone connects directly to
-  everyone else for the lowest possible latency.
-- If more people join, Trystero automatically switches the room to a `'gossip'`
-  relay network targeting `maxConnections` direct connections per browser (`6`
-  by default, minimum `4`; actual direct connection counts are a target and can
-  temporarily reach ~2–3× under burst joins due to inbound soft ceilings and
-  minimum-degree fallbacks) and routes small messages across hops.
+- When the room has `maxDirectPeers + 1` or fewer peers (`7` peers or fewer at
+  the default `maxDirectPeers: 6`), everyone connects directly in a full mesh
+  with zero multi-hop routing overhead.
+- As more people join, Trystero automatically forms a bounded-degree multi-hop
+  gossip network targeting `maxDirectPeers` direct WebRTC connections per
+  browser (`6` by default, configurable `4..32`; actual direct neighbor counts
+  are a target and can temporarily exceed it under burst joins due to inbound
+  soft ceilings and minimum-degree fallbacks) while routing messages across hops
+  to the entire room. (`maxDirectPeers` controls direct WebRTC neighbor links
+  per peer, **not** the maximum number of users allowed in the room—use
+  `maxUsers` if you want to cap room membership.)
 
 All of your code (`makeAction`, `makeState`, `makeUserState`, `addStream`,
 `replaceTrack`, `ping`, `onUserJoin`, `onUserLeave`, and `getUsers()`) works the
@@ -1089,20 +1106,11 @@ KiB) automatically promote the target peer(s) to a direct 1-hop WebRTC
 connection on demand so relays never decode or forward audio/video tracks or
 bulk chunks. Because media and bulk transfers use direct connections, they scale
 as a 1-to-N mesh for the sender, and promoted connections can exceed the
-overlay's `maxConnections` target. Await the promise returned by `addStream` or
+overlay's `maxDirectPeers` target. Await the promise returned by `addStream` or
 `replaceTrack` to handle connection failures.
 
-You can customize how `scale()` connects peers by passing a mode string or
-config object:
-
-- `'auto'` _(default when `scale()` is called with no arguments)_ – Best for
-  most large-room apps. Uses direct connections for small groups and
-  automatically switches to `'gossip'` when a room exceeds `autoThreshold`
-  (default: `12` peers).
-- `'gossip'` – Always uses the bounded-degree gossip relay network, even in
-  small rooms. Useful when you want multi-hop routing active from the start.
-
-You can also fine-tune connection limits by passing an object to `scale()`:
+You can customize the direct-neighbor target by passing `maxDirectPeers` to
+`scale()`:
 
 ```js
 const room = joinRoom(
@@ -1110,9 +1118,7 @@ const room = joinRoom(
     appId: 'massive-canvas',
     use: [
       scale({
-        mode: 'auto',
-        autoThreshold: 12, // switch to 'gossip' above 12 peers
-        maxConnections: 6 // target direct WebRTC connections per peer (>= 4)
+        maxDirectPeers: 8 // target direct WebRTC neighbors per peer (4..32, default: 6)
       })
     ]
   },
@@ -1121,22 +1127,23 @@ const room = joinRoom(
 ```
 
 Once `await room.ready` resolves, you can call `room.getTopology()` at any time
-to see which mode is active, which peers are connected directly vs. through
-relays, and how data routes are organized.
+to see which peers are connected directly vs. across multiple hops, how data
+routes are organized, and forwarding statistics.
 
 <details>
   <summary>How it works behind the scenes</summary>
 
-- **Gossip overlay (`'gossip'`)**: Peers arrange themselves on a room-salted,
-  per-user-capped multi-ring expander (`floor(maxConnections / 2)` independent
-  permuted cycles for `O(log N)` diameter), and derive hop-capped shortest-path
-  routes dynamically from the verified room roster size so unreachable peers
-  beyond the hop limit are never falsely exposed as active. Routing tables
-  require mutual neighbor confirmation in signed link-state descriptors
-  (refreshed by heartbeats and verified data traffic with a 180 s TTL and a 1.2
-  s route-churn grace window) before using an edge. Broadcasts propagate across
-  neighbor links with persistent per-origin sliding replay windows and
-  message-ID deduplication, while point-to-point messages (`target`) route along
+- **Unified multi-ring gossip overlay**: Peers arrange themselves on a
+  room-salted, per-user-capped multi-ring expander (`floor(maxDirectPeers / 2)`
+  independent permuted cycles for `O(log N)` diameter)—naturally forming a full
+  mesh when `N <= maxDirectPeers + 1`—and derive hop-capped shortest-path routes
+  dynamically from the verified room roster size so unreachable peers beyond the
+  hop limit are never falsely exposed as active. Routing tables require mutual
+  neighbor confirmation in signed link-state descriptors (refreshed by
+  heartbeats and verified data traffic with a 180 s TTL and a 1.2 s route-churn
+  grace window) before using an edge. Broadcasts propagate across neighbor links
+  with persistent per-origin sliding replay windows and message-ID
+  deduplication, while point-to-point messages (`target`) route along
   backpressure-aware shortest paths with disjoint backup next-hops and signed
   short-lived stream leases that amortize ECDSA signatures across packet bursts.
 - **Direct WebRTC promotion for media & bulk transfers**: Calling `addStream()`
@@ -1157,42 +1164,6 @@ relays, and how data routes are organized.
   packets or inflate the roster up to the configured per-user and room caps.
 
 </details>
-
-### Custom room plugins
-
-Both `roles()` and `scale()` are built on Trystero's opt-in room plugin standard
-(`definePlugin`), which you can also use to author tree-shakeable 1st- or
-3rd-party extensions (such as CRDT bindings like Yjs/Automerge, custom
-telemetry, or state sync adapters) with full TypeScript return-type inference:
-
-```js
-import {joinRoom, definePlugin} from 'trystero'
-
-const myPlugin = (options = {}) =>
-  definePlugin('myPlugin', {
-    setup(kernel) {
-      const sync = kernel.makeInternalAction('my_sync')
-      kernel.onLeave(() => {
-        // clean up resources when room.leave() is called
-      })
-      // Any methods returned here are merged onto the Room instance when room.ready resolves
-      return {
-        syncNow: data => sync.send(data)
-      }
-    }
-  })
-
-const room = joinRoom(
-  {
-    appId: 'collab-doc',
-    use: [myPlugin()]
-  },
-  'doc-1'
-)
-
-await room.ready
-await room.syncNow({hello: 'world'})
-```
 
 ### React
 
@@ -1496,7 +1467,7 @@ the same namespace will return the same room instance.
     for them to connect; prefer high-entropy secrets for sensitive rooms. See
     [encryption](#encryption) for more details.
 
-  - `limit` - **(optional)** Positive integer setting a best-effort, advisory
+  - `maxUsers` - **(optional)** Positive integer setting a best-effort, advisory
     per-peer cap on the number of unique users (`userId`s) in the peer's room
     view at once (including the local user). When a peer's view is at capacity,
     additional joiners with a new `userId` are rejected on that peer link before
@@ -1528,15 +1499,14 @@ the same namespace will return the same room instance.
       Supplies a `UserIdentity` (from `createUserIdentity()` or
       `importUserIdentity()`) or a custom sync/async loader function.
 
-  - `use` - **(optional)** Array of `RoomPlugin`s created with `roles()`,
-    `scale()`, or `definePlugin()`. TypeScript automatically infers the extra
+  - `use` - **(optional)** Array of built-in `RoomPlugin`s created with
+    `roles()` and/or `scale()`. TypeScript automatically infers the extra
     methods added to the returned `Room` instance (`RoomWithPlugins`) from the
-    plugins passed in `use` (e.g. `grantRole`, `revokeRole`, `getRoles`, `ban`,
-    and `isBanned` from `roles()`, or `getTopology` from `scale()`). Including
-    `roles()` also enables `{roles}` authorization options on `makeAction`,
-    `makeState`, and `makeUserState`. Plugin methods attach to `room` when
-    `await room.ready` (or `await room.getSelf()`) resolves. See the
-    [Plugin Authoring Guide](docs/plugins.md) for creating custom plugins.
+    plugins passed in `use` (`grantRole`, `revokeRole`, `getRoles`, `ban`,
+    `unban`, and `isBanned` from `roles()`, and `getTopology` from `scale()`).
+    Including `roles()` also enables `{roles}` authorization options on
+    `makeAction`, `makeState`, and `makeUserState`. Plugin methods attach to
+    `room` when `await room.ready` (or `await room.getSelf()`) resolves.
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
     Object containing strategy-specific relay settings:
@@ -1617,17 +1587,15 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   room:
   - `peerId` - The 20-character Base62 endpoint ID.
   - `userId` - The local user's 22-character Base62 user ID.
+  - `identityPersistence` - Effective storage tier
+    (`'local' | 'custom' | 'none'`; `'none'` if browser storage downgraded to an
+    ephemeral key).
   - `roomId` - The full room ID (including the `~<userId>` suffix when created
     with `roles({selfAsAdmin: true})`).
   - `baseRoomId` - The base room name without the `~<userId>` suffix.
   - `isAdmin` - Boolean indicating whether the local user is a verified
     `'admin'`.
   - `roles` - Array of verified roles currently held by the local user.
-  - `persisted` - Boolean indicating whether the local `UserIdentity` is backed
-    by persistent storage (`false` if `identity: 'none'` or if browser storage
-    downgraded to an ephemeral key).
-  - `identityPersistence` - Effective storage tier
-    (`'local' | 'custom' | 'none'`).
 
 - ### `getUsers()`
 
@@ -1658,17 +1626,17 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 
   _(Added to `Room` when `scale(...)` is included in `use: [...]`; available
   after `await room.ready`)_ Returns a `TopologySnapshot` describing how peers
-  in the room are currently connected and routing data: `mode`, `activeMode`
-  (`'mesh' | 'gossip'`), `selfId`, `directPeerIds`, `roomPeerIds`, `routes`, and
-  `stats` (`messagesSent`, `messagesReceived`, `messagesForwarded`,
-  `duplicatesDropped`, `signatureFailures`).
+  in the room are currently connected and routing data: `peerId` (the local
+  endpoint ID), `directPeerIds`, `roomPeerIds`, `routes`, and `stats`
+  (`messagesSent`, `messagesReceived`, `messagesForwarded`, `duplicatesDropped`,
+  `signatureFailures`).
 
 - ### `makeState(namespace, [initialValue], [config])`
 
-  Creates or retrieves a shared JSON state container (`SharedState<T>`, also
-  exported as `AuthoritativeState<T>`) synchronously on `room`. Open to any room
-  member when `roles()` is not loaded; defaults to `roles: ['admin']`
-  (fail-closed) when `roles()` is included in `use: [...]`.
+  Creates or retrieves a shared JSON state container (`SharedState<T>`)
+  synchronously on `room`. Open to any room member when `roles()` is not loaded;
+  defaults to `roles: ['admin']` (fail-closed) when `roles()` is included in
+  `use: [...]`.
   - `namespace` - Unique non-empty name (<= 256 chars) for this shared state
     within the room.
   - `initialValue` - **(optional)** Initial JSON value before any update is
@@ -1746,16 +1714,16 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 - ### `grantRole(targetId, role)`
 
   _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
-  after `await room.ready`)_ Grants `role` (a role name string or array of
-  strings) to `targetId` (which can be either a `peerId` or a `userId`).
-  Requires the local user to be a root `'admin'`.
+  after `await room.ready`)_ Grants `role` (a custom role name string or array
+  of strings; `'admin'` is reserved for root room admins) to `targetId`
+  (`peerId` or `userId`). Requires the local user to be a root `'admin'`.
 
 - ### `revokeRole(targetId, [role])`
 
   _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
-  after `await room.ready`)_ Revokes `role` (or all roles if omitted) from
-  `targetId` (`peerId` or `userId`). Delegated moderators cannot revoke a root
-  `'admin'`.
+  after `await room.ready`)_ Revokes `role` (or all granted custom roles if
+  omitted) from `targetId` (`peerId` or `userId`). Requires the local user to be
+  a root `'admin'`.
 
 - ### `getRoles([targetId])`
 
@@ -1767,14 +1735,21 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 - ### `ban(targetId, [options])`
 
   _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
-  after `await room.ready`)_ Permanently bans `targetId` (`peerId` or `userId`)
-  from the room (requires `'admin'` role). Immediately disconnects all endpoints
-  belonging to that peer or user, removes any roles they held, purges any
+  after `await room.ready`)_ Bans `targetId` (`peerId` or `userId`) from the
+  room (requires root `'admin'`). Immediately disconnects all endpoints
+  belonging to that peer or user, clears any granted roles they held, purges any
   `makeState` or `makeUserState` records authored by that user, and blocks
-  future connection offers or messages from them.
+  future connection offers or messages from them until `room.unban()` is called.
   - `options.reason` - **(optional)** Optional reason string for the ban (also
     surfaced to the banned user via `room.onError()` as
     `{code: 'banned', reason}`).
+
+- ### `unban(targetId)`
+
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Lifts an active ban on `targetId` (`peerId` or
+  `userId`) so they may rejoin the room (requires root `'admin'`). Roles cleared
+  when the user was banned remain cleared unless re-granted with `grantRole()`.
 
 - ### `isBanned(targetId)`
 
@@ -1921,7 +1896,7 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     (`{code, message, appId, roomId, cause?, ...}`). Switch on `error.code` to
     inspect structured fields:
     - `'room-full'` (`{peerId}`) - Refused during admission because the remote
-      peer's room view has reached `config.limit`.
+      peer's room view has reached `config.maxUsers`.
     - `'banned'` (`{peerId?, reason?}`) - Disconnected mid-session or refused
       during handshake because an admin banned the local user (`reason` contains
       `options.reason` from `room.ban()` when provided).
@@ -1979,17 +1954,17 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   Message actions expose:
   - `send(data, [options])` - Sends data to users and resolves when local
     sending is complete. `options.target` accepts a `userId` (which fans out to
-    all active tabs of that user), a `peerId`, or an array of either. To cancel
-    an in-progress send, pass an `AbortController`'s `signal` in the options
-    (e.g. `send(data, {signal: controller.signal})`) and call
-    `controller.abort()`.
+    all active tabs of that user), a `peerId`, or an array of either; passing an
+    explicit `target` rejects if any targeted user or peer is not connected. To
+    cancel an in-progress send, pass an `AbortController`'s `signal` in the
+    options (e.g. `send(data, {signal: controller.signal})`) and call
+    `controller.abort()`. Do not mutate binary buffers (`> 16 KiB`) passed to
+    `send()` until its returned `Promise` settles.
   - `onMessage(callback, [options])` - Multi-listener method subscribing
     `(data, {userId, peerId, metadata, roles}) => void | Promise<void>` for
-    received messages and returning an `Unsubscribe` function. Delivered
-    synchronously on arrival by default, or asynchronously after signature
-    verification when `config.roles` is set. Inbound messages arriving before
-    any listener is attached are buffered and drained in order to the first
-    subscriber.
+    received messages and returning an `Unsubscribe` function. Inbound messages
+    arriving before any listener is attached are buffered and drained in order
+    to the first subscriber.
   - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
     `(percent, {userId, peerId, metadata}) => void` for inbound progress and
     returning an `Unsubscribe` function.
@@ -1998,15 +1973,19 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   - `request(data, options)` - Sends to one user or tab (`options.target` can be
     a `userId` or `peerId`; when given a `userId`, it deterministically routes
     to one active tab of that user, preferring a direct 1-hop connection and
-    breaking ties by lowest `peerId`) and resolves with its response.
+    breaking ties by lowest `peerId`) and resolves with its response (or rejects
+    with an `ActionError` where `error.kind` is
+    `'timeout' | 'disconnected' | 'aborted' | 'rejected'`).
   - `requestMany(data, options)` - Sends to many users or tabs
     (`options.targets` accepts `userId`s and/or `peerId`s) and resolves with
-    labeled settled results (`{userId, peerId, status, value | error}`).
+    labeled `PeerResult` items (`status: 'fulfilled'` with `value`,
+    `status: 'rejected'` with `error: ActionError`, `status: 'timeout'`, or
+    `status: 'disconnected'`).
   - `onRequest(callback, [options])` - Single-handler method registering
     `(data, {userId, peerId, metadata, signal, roles}) => response` and
-    returning an `Unsubscribe` function. Invoked synchronously upon request
-    arrival by default, or asynchronously after signature verification when
-    `config.roles` is set. Throws an error if called while an `onRequest`
+    returning an `Unsubscribe` function. Throwing an `Error` inside `callback`
+    rejects the caller's `request()` with `error.kind === 'rejected'` and
+    forwards `error.message`. Throws an error if called while an `onRequest`
     handler is already active (unsubscribe first).
   - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
     `(percent, {userId, peerId, metadata}) => void` for inbound progress and
@@ -2085,28 +2064,17 @@ for `joinRoom()`. Pass in `use: [roles(config)]`:
 
 Creates the experimental opt-in multi-hop scaling plugin
 (`RoomPlugin<'scale', ScalePluginApi>`) for `joinRoom()`. Pass in
-`use: [scale(config)]`, where `config` is `'auto'` (default), `'gossip'`, or a
-`ScaleConfig` object:
+`use: [scale(config)]`, where `config` is an optional `ScaleConfig` object:
 
-- `mode` - `'auto' | 'gossip'` (default: `'auto'`).
-- `maxConnections` - Target direct WebRTC connections per browser in scalable
-  modes (default: `6`, minimum: `4`; may temporarily reach ~2–3× under burst
-  joins).
-- `autoThreshold` - Peer count at which `'auto'` switches from `'mesh'` to
-  `'gossip'` (default: `12`).
-
-### `definePlugin(name, spec)`
-
-Creates a custom or 3rd-party `RoomPlugin<TName, TApi>` that can be passed to
-`joinRoom()` via `use: [myPlugin()]`. Any methods returned from `spec.setup()`
-are merged onto the returned `Room` instance when `room.ready` resolves and
-inferred by TypeScript (`RoomWithPlugins`). See the
-[Plugin Authoring Guide](docs/plugins.md).
+- `maxDirectPeers` - **(optional)** Target number of direct WebRTC neighbor
+  connections maintained per peer (`4..32`, default: `6`; naturally forms a full
+  mesh when `roomSize <= maxDirectPeers + 1`, and may temporarily exceed the
+  target under burst joins or direct media/bulk promotions).
 
 ### `createUserIdentity()`
 
 Returns a promise resolving to a fresh self-certifying ECDSA P-256
-`UserIdentity` (`{userId, publicKey, signPubJwk, sign}`). Use
+`UserIdentity` (`{userId, signPubJwk, sign, persistence}`). Use
 `exportUserIdentity(identity)` to serialize its private key material if you want
 to persist it in custom storage.
 

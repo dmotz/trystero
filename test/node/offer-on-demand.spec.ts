@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-import {OfferManager} from '../../packages/core/src/offer-manager.ts'
+import {createOfferManager} from '../../packages/core/src/offer-manager.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import type {PeerHandle} from '../../packages/core/src/types.ts'
 
@@ -150,7 +150,7 @@ void test('Trystero: leaving during offer creation closes the pending peer', asy
   let release!: (offer: string) => void
   let closed = 0
   const pendingOffer = new Promise<string>(resolve => (release = resolve))
-  const manager = new OfferManager(
+  const manager = createOfferManager(
     () => ({destroy: () => (closed += 1)}) as unknown as PeerHandle
   )
 
@@ -160,4 +160,59 @@ void test('Trystero: leaving during offer creation closes the pending peer', asy
 
   await assert.rejects(result, /room left while preparing offer/)
   assert.equal(closed, 1)
+})
+
+void test('Trystero: createOfferManager retries once on encrypt failure and manages leased peers', async () => {
+  let created = 0
+  let destroyed = 0
+  const makeFakePeer = () => {
+    created += 1
+    let isDead = false
+    return {
+      get isDead() {
+        return isDead
+      },
+      destroy() {
+        if (!isDead) {
+          isDead = true
+          destroyed += 1
+        }
+      }
+    } as unknown as PeerHandle
+  }
+
+  const manager = createOfferManager(makeFakePeer)
+  let attempts = 0
+  const [retriedRecord] = await manager.getOffers(1, async () => {
+    attempts += 1
+    if (attempts === 1) {
+      throw new Error('transient encrypt failure')
+    }
+    return 'encrypted-offer'
+  })
+
+  assert.equal(
+    created,
+    2,
+    'should allocate a second peer after transient failure'
+  )
+  assert.equal(
+    destroyed,
+    1,
+    'failed first peer should be destroyed immediately'
+  )
+  assert.equal(retriedRecord!.offer, 'encrypted-offer')
+
+  // Claiming a leased offer keeps the peer alive even when manager.destroy() runs
+  retriedRecord!.claim?.()
+  const [unclaimedRecord] = await manager.getOffers(1, async () => 'offer-2')
+  assert.equal(created, 3)
+
+  manager.destroy()
+  assert.equal(retriedRecord!.peer.isDead, false, 'claimed peer stays open')
+  assert.equal(
+    unclaimedRecord!.peer.isDead,
+    true,
+    'unclaimed leased peer is destroyed on manager.destroy()'
+  )
 })

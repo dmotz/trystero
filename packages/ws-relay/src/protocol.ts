@@ -10,10 +10,10 @@ export type WsRelayServerMessage<TPayload = JsonValue> = {
   payload: TPayload
 }
 
-export const isRecord = (value: unknown): value is Record<string, unknown> =>
+const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
-export const isPayload = (value: unknown): value is JsonValue =>
+const isPayload = (value: unknown): value is JsonValue =>
   value === null ||
   typeof value === 'string' ||
   typeof value === 'number' ||
@@ -21,27 +21,31 @@ export const isPayload = (value: unknown): value is JsonValue =>
   Array.isArray(value) ||
   isRecord(value)
 
-export const isStrategyMessage = (value: unknown): value is StrategyMessage =>
+const isStrategyMessage = (value: unknown): value is StrategyMessage =>
   typeof value === 'string' || isRecord(value)
 
 export const parseClientMessage = (
   raw: string
 ): WsRelayClientMessage | null => {
-  const msg = JSON.parse(raw) as Partial<WsRelayClientMessage>
+  try {
+    const msg = JSON.parse(raw) as Partial<WsRelayClientMessage>
 
-  if (!isRecord(msg) || typeof msg.topic !== 'string') {
+    if (!isRecord(msg) || typeof msg.topic !== 'string') {
+      return null
+    }
+
+    if (msg.type === 'subscribe' || msg.type === 'unsubscribe') {
+      return {type: msg.type, topic: msg.topic}
+    }
+
+    if (msg.type === 'publish' && isPayload(msg.payload)) {
+      return {type: 'publish', topic: msg.topic, payload: msg.payload}
+    }
+
+    return null
+  } catch {
     return null
   }
-
-  if (msg.type === 'subscribe' || msg.type === 'unsubscribe') {
-    return {type: msg.type, topic: msg.topic}
-  }
-
-  if (msg.type === 'publish' && isPayload(msg.payload)) {
-    return {type: 'publish', topic: msg.topic, payload: msg.payload}
-  }
-
-  return null
 }
 
 export const parseServerMessage = (
