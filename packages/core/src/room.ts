@@ -694,7 +694,7 @@ export const createRoomWithBridge = <
     resolveSendTarget,
     resolveRequestTarget,
     onUnknownType: type => {
-      if (type === '@_state') {
+      if (type === '@_state' && !leavePromise) {
         ensureStateManager()
       }
     },
@@ -879,7 +879,11 @@ export const createRoomWithBridge = <
         hs.clearPeer(id, roomLeftErr)
       }
       emitLeave()
-      const leaveTargets = scaleProvider ? getDirectPeerIds(false) : undefined
+      const leaveTargets = scaleProvider
+        ? getDirectPeerIds(false).filter(
+            id => peerEntries.get(id)?.direct?.transport.isOpen
+          )
+        : undefined
       const hasOpenPeers =
         peerEntries.size > 0 && (!leaveTargets || leaveTargets.length > 0)
       const controller = new AbortController()

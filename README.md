@@ -616,7 +616,12 @@ member mode**:
 - **Bounded clock-skew window**: Peers reject state records dated more than 10
   seconds into the future (up to `cert.iat + 10s` for role-certified writes,
   capped at 60 seconds), bounding how far a misconfigured clock or griefing
-  member in an open room can pin a timestamp.
+  member in an open room can pin a timestamp. If an uncertified member
+  overwrites a role-certified write whose timestamp is > 10 seconds ahead, peers
+  already holding that certified write accept the same-wall counter bump
+  immediately, while late joiners without the prior certificate ignore the
+  future timestamp until their clock catches up (`<= 50s`) and then converge on
+  the next pull or write.
 - **Upgrade to `roles()` for untrusted/public rooms**: Whenever untrusted
   strangers can join and you need host-only state, custom writer roles, or peer
   banning, pass `use: [roles(...)]` (see
@@ -785,7 +790,7 @@ const room = joinRoom(
 )
 
 room.onError(err => {
-  if (err.code === 'room-full') {
+  if (err.code === 'room-full' && room.getPeers().length === 0) {
     showBanner('Sorry, this match is already full!')
   }
 })
@@ -795,7 +800,9 @@ When a peer's room view is already at capacity:
 
 - Any extra user (`userId`) who tries to connect is refused by that peer before
   activation, receives `{code: 'room-full'}` in `onError`, and has that peer
-  link closed.
+  link closed (an already-admitted peer can also receive `{code: 'room-full'}`
+  if it handshakes with a remote peer whose own view is full, so check
+  `room.getPeers()` before treating it as your own rejection).
 - Because `maxUsers` counts unique `userId`s rather than raw tabs, an admitted
   player who refreshes the page or opens another tab shares their existing seat.
 - Existing players in the room are never interrupted—`onPeerJoin` and
@@ -1979,7 +1986,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     (`{code, message, appId, roomId, cause?, ...}`). Switch on `error.code` to
     inspect structured fields:
     - `'room-full'` (`{peerId}`) - Refused during admission because the remote
-      peer's room view has reached `config.maxUsers`.
+      peer's room view has reached `config.maxUsers` (can also fire on an
+      already-admitted peer for a remote peer whose own view is full; check
+      `room.getPeers()` before treating it as a local join rejection).
     - `'banned'` (`{peerId?, reason?}`) - Disconnected mid-session or refused
       during handshake because an admin banned the local user (`reason` contains
       `options.reason` from `room.ban()` when provided).
@@ -2008,7 +2017,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   room.onError(err => {
     switch (err.code) {
       case 'room-full':
-        showBanner('This room is full.')
+        if (room.getPeers().length === 0) {
+          showBanner('This room is full.')
+        }
         break
       case 'banned':
         showBanner(`Removed from room${err.reason ? `: ${err.reason}` : ''}`)

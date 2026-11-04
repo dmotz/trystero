@@ -10,7 +10,6 @@ import {
   type UserIdentity
 } from '../../packages/core/src/index.ts'
 import {actionWireVersion} from '../../packages/core/src/action-wire.ts'
-import {formatSelfCertifyingRoomId} from '../../packages/core/src/authority.ts'
 import {jwkToCompactPub} from '../../packages/core/src/identity.ts'
 import {
   canonicalBroadcastHeader,
@@ -24,7 +23,10 @@ import {
   signOverlayPayload,
   signPeerDescriptor
 } from '../../packages/core/src/scale/index.ts'
-import {encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  encodeBytes,
+  formatSelfCertifyingRoomId
+} from '../../packages/core/src/utils.ts'
 import {
   createTestScaleCluster,
   createTrackedRoom as createRoom,

@@ -601,9 +601,9 @@ export const createActionWireManager = ({
     if (registration.receiver) {
       complete(state, registration, state.data, true)
     } else if (!state.scope) {
-      const {data, message} = state
+      const {data, lastSeenAt, message} = state
       release(state)
-      bufferPreListenerInline(message, data, true, true)
+      bufferPreListenerInline(message, data, true, true, lastSeenAt)
     }
   }
 
@@ -866,7 +866,7 @@ export const createActionWireManager = ({
               preListenerQueues.set(peerId, curByType)
             }
             const existing = curByType.get(type)
-            curByType.set(type, existing ? [...rest, ...existing] : rest)
+            curByType.set(type, existing ? [...existing, ...rest] : rest)
           }
           break
         }
@@ -905,7 +905,6 @@ export const createActionWireManager = ({
         } else {
           const state: IncomingInline = {
             ...createAdmissionBase(entry.message),
-            ...(entry.admitted ? {phase: phaseReady} : {}),
             kind: 'inline',
             queueKey: type,
             data: entry.data

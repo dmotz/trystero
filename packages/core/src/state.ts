@@ -747,7 +747,7 @@ export const createStateManager = ({
       Math.max(
         now + stateMaxFutureSkewMs,
         rec.cert ? rec.cert.iat + stateMaxFutureSkewMs : 0,
-        existingWall ? existingWall + 1_000 : 0
+        existingWall
       )
     )
     if (rec.hlc[0] > maxFutureWall || (rec.cert && rec.hlc[0] < rec.cert.iat)) {
@@ -1298,6 +1298,7 @@ export const createStateManager = ({
 
       if (msg.t === 'sync') {
         if (
+          (msg.f && !isScaleActive()) ||
           (msg.f ? hitFwdSyncQuota : hitSyncQuota)(fromPeerId) ||
           !isObj(msg.p) ||
           !Array.isArray(msg.r)

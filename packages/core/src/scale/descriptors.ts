@@ -56,7 +56,7 @@ export type DescriptorStoreDeps = {
   loadLocalCryptoIdentity: () => Promise<CryptoIdentity>
   syncSelfIdFromIdentity: (peerId: string) => void
   isDirectPeer: (peerId: string) => boolean
-  isVirtualPeer?: ((peerId: string) => boolean) | undefined
+  isVirtualPeer: (peerId: string) => boolean
   getDirectPeerIds: () => IterableIterator<string>
   getDirectPeerCount: () => number
   getDiscoveredCandidateCount: () => number
@@ -303,8 +303,7 @@ export const createDescriptorStore = (
           Boolean(pubJwkToUncompressedBytes(d.encPubKey)))) &&
       (d.userPubKey === undefined ||
         (isStr(d.userPubKey) &&
-          Boolean(pubJwkToUncompressedBytes(d.userPubKey)))) &&
-      !isPeerBanned(d.peerId)
+          Boolean(pubJwkToUncompressedBytes(d.userPubKey))))
     )
 
   const verifyDescriptor = (
@@ -520,7 +519,7 @@ export const createDescriptorStore = (
     d: PeerDescriptor,
     isValid: boolean
   ): void => {
-    if (!isValid || isDestroyed()) {
+    if (!isValid || isDestroyed() || isPeerBanned(d.peerId)) {
       if (!isValid && !isDestroyed()) {
         recordSenderInvalid(fromPeerId)
       }
@@ -570,7 +569,7 @@ export const createDescriptorStore = (
       }
     }
     adjacency.set(d.peerId, nextAdj)
-    if (wasMarkedLeft && !isPeerBanned(d.peerId)) {
+    if (wasMarkedLeft) {
       for (const [otherId, otherDesc] of descriptors.entries()) {
         if (
           otherId !== selfId &&
@@ -588,7 +587,7 @@ export const createDescriptorStore = (
       wasMarkedLeft ||
       adjChanged ||
       encKeyRotated ||
-      (!isDirectPeer(d.peerId) && !(isVirtualPeer?.(d.peerId) ?? true))
+      (!isDirectPeer(d.peerId) && !isVirtualPeer(d.peerId))
     ) {
       pendingTopologyDirty = true
     }

@@ -10,7 +10,6 @@ import type {
   UserIdentity
 } from '../../packages/core/src/index.ts'
 import {
-  formatSelfCertifyingRoomId,
   parseSelfCertifyingRoomId,
   roles
 } from '../../packages/core/src/authority.ts'
@@ -23,7 +22,11 @@ import {
 import createRoom from '../../packages/core/src/room.ts'
 import {scale} from '../../packages/core/src/scale/index.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
-import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  decodeBytes,
+  encodeBytes,
+  formatSelfCertifyingRoomId
+} from '../../packages/core/src/utils.ts'
 import {
   allocTestPeerIds,
   getTestEndpointByPeerId,

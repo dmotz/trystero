@@ -6,10 +6,7 @@ import type {
   ScalePluginApi,
   UserIdentity
 } from '../../packages/core/src/index.ts'
-import {
-  formatSelfCertifyingRoomId,
-  roles
-} from '../../packages/core/src/authority.ts'
+import {roles} from '../../packages/core/src/authority.ts'
 import {maxRoomFrameBytes} from '../../packages/core/src/data-limits.ts'
 import {
   createRoomWithBridge,
@@ -20,6 +17,7 @@ import type {
   AnyRoomPlugin,
   RoomWithPlugins
 } from '../../packages/core/src/types.ts'
+import {formatSelfCertifyingRoomId} from '../../packages/core/src/utils.ts'
 
 const roomBridges = new WeakMap<Room, RoomSignalingBridge>()
 

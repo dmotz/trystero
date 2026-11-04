@@ -58,8 +58,6 @@ import {
   validateRoleCertificateShape
 } from './utils'
 
-export {formatSelfCertifyingRoomId}
-
 const authSyncPageSize = 256
 const maxStoredTargets = 1_024
 const maxStoredModerations = 4_096

@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {createAntiEntropySync} from '../../packages/core/src/anti-entropy.ts'
-import {
-  createRoomAuthority,
-  formatSelfCertifyingRoomId,
-  roles
-} from '../../packages/core/src/authority.ts'
+import {createRoomAuthority, roles} from '../../packages/core/src/authority.ts'
 import {
   compactPubToJwk,
   createEndpointIdentity,
@@ -47,6 +43,7 @@ import {
   overlayUnicastKind,
   packOverlayBinary,
   packOverlayControl,
+  scale,
   signOverlayPayload,
   signPeerDescriptor
 } from '../../packages/core/src/scale/index.ts'
@@ -54,19 +51,17 @@ import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import type {MessageAction} from '../../packages/core/src/types.ts'
 import {
   encodeBytes,
+  formatSelfCertifyingRoomId,
   mkViolationErr,
-  peerBannedErr,
   toBase64Url
 } from '../../packages/core/src/utils.ts'
 import {createWsRelayServer} from '../../packages/ws-relay/src/server.ts'
 import {createTestScaleCluster} from './overlay-harness.ts'
 import {
-  LinkedPeer,
   MockRTCPeerConnection,
   connectVerifiedPeers,
   createLinkedHandlePair,
   getTestEndpointByPeerId,
-  linkPeers,
   testPeerId,
   wait,
   waitFor
@@ -333,11 +328,48 @@ void test('Shared anti-entropy pagination, RoleCertificate seq skew cutoff, 4,09
   })
   syncRef.current = syncEngine
   try {
-    syncEngine.onPeerJoined('peerA', true)
+    syncEngine.onPeerJoined('peerA')
     await wait(10)
     assert.deepEqual(requestedCursors, [undefined, 'page-1', 'page-2'])
   } finally {
     syncEngine.destroy()
+  }
+
+  // 1b. Pull timeout enters 10s cooldown (skipping fanout) while periodic fallback still retries sole peer
+  const cooldownPulls: string[] = []
+  let activeCooldownPeers = ['deadPeer', 'livePeer']
+  const cooldownEngine = createAntiEntropySync({
+    fanout: 1,
+    pullTimeoutMs: 20,
+    periodicIntervalMs: 35,
+    getDirectPeers: () => activeCooldownPeers,
+    isPeerSendable: () => true,
+    sendPull: peerId => {
+      cooldownPulls.push(peerId)
+    }
+  })
+  try {
+    cooldownEngine.onPeerJoined('deadPeer', true)
+    await Promise.resolve()
+    assert.deepEqual(cooldownPulls, ['deadPeer'])
+    // Wait for deadPeer pull to time out and enter 10s cooldown; fillFanout picks livePeer instead
+    await waitFor(() => cooldownPulls.includes('livePeer'), 500)
+    cooldownEngine.onSyncPage('livePeer', undefined)
+    // When livePeer drops, deadPeer is cooling so onPeerDisconnected skips immediate retry,
+    // then periodicIntervalMs falls back to the cooling sole peer
+    activeCooldownPeers = ['deadPeer']
+    const countBeforeDisconnect = cooldownPulls.length
+    cooldownEngine.onPeerDisconnected('livePeer')
+    await Promise.resolve()
+    assert.equal(
+      cooldownPulls.length,
+      countBeforeDisconnect,
+      'cooling peer must be skipped on immediate fanout refill'
+    )
+    await waitFor(() => cooldownPulls.length > countBeforeDisconnect, 500)
+    assert.equal(cooldownPulls.at(-1), 'deadPeer')
+  } finally {
+    cooldownEngine.destroy()
   }
 
   // 2. RoleCertificate monotonic seq ordering beats clock-skewed cert.iat, plus 4,096 active ban cap
@@ -812,7 +844,6 @@ void test('Overlay & action-wire regressions: unicast ts/IV checks, root-admin 2
     } finally {
       charlie.destroy()
     }
-    void peerBannedErr
   } finally {
     alice.destroy()
     relay.destroy()
@@ -894,20 +925,16 @@ void test('Overlay & action-wire regressions: unicast ts/IV checks, root-admin 2
       'multi-target send must validate all targets up front before transmitting to earlier targets'
     )
 
-    // And a valid send to twoHopId still succeeds immediately (transfer budget completely healthy!)
-    await dmByPeer.get(adminId)!.send('after-70-gated', {target: twoHopId})
+    // And a >16 KiB bulk send to twoHopId still succeeds immediately (64-slot transfer budget completely healthy!)
+    const bulkAfterRing = 'x'.repeat(32 * 1024)
+    await dmByPeer.get(adminId)!.send(bulkAfterRing, {target: twoHopId})
     await waitFor(
-      () => receivedDirect.get(twoHopId)!.includes('after-70-gated'),
+      () => receivedDirect.get(twoHopId)!.includes(bulkAfterRing),
       2_000
     )
   } finally {
     await cluster.cleanup()
   }
-
-  // Verify linkPeers helper unused-import cleanliness
-  const linked = linkPeers(new LinkedPeer(), new LinkedPeer())
-  linked.peerA.destroy()
-  linked.peerB.destroy()
 })
 
 void test('Round-3 regressions: optimistic state skew overwrite & rollback, pre-identity defer, offer-allocation failure recovery, user onReceive-before-onMessage ring, and authority verify-before-evict', async () => {
@@ -954,52 +981,100 @@ void test('Round-3 regressions: optimistic state skew overwrite & rollback, pre-
       }
     )
 
-    const mgr = createStateManager({
-      appId,
-      getRoomId: () => roomId,
-      getSelfId: () => memberEp.peerId,
-      getLocalUserId: () => memberUser.userId,
-      ensureReady: async () => ({
-        selfId: memberEp.peerId,
-        user: memberUser,
-        roomId
-      }),
-      hasRolesPlugin: () => true,
-      getRolesProvider: () =>
-        ({
-          isAuthorityResolved: () => true,
-          getPeerRoles: (uid: string) =>
-            uid === adminUser.userId ? ['admin'] : [],
-          getStateWriteCert: async () => ({cert: null, roles: []}),
-          verifyStateRecordRoles: async (rec: {userId: string}) => ({
-            valid: true,
-            roles: rec.userId === adminUser.userId ? ['admin'] : []
-          })
-        }) as never,
-      isPeerActive: () => true,
-      isPeerPendingHandshake: () => false,
-      isDirectPeer: () => false,
-      getDirectPeerIds: () => [],
-      isUserOnline: () => true,
-      getKnownPeerUserId: () => undefined,
-      isPeerBanned: () => false,
-      getPeerRoles: () => []
-    })
+    const rolesProviderStub = {
+      isAuthorityResolved: () => true,
+      getPeerRoles: (uid: string) =>
+        uid === adminUser.userId ? ['admin'] : [],
+      getStateWriteCert: async () => ({cert: null, roles: []}),
+      verifyStateRecordRoles: async (rec: {userId: string}) => ({
+        valid: true,
+        roles: rec.userId === adminUser.userId ? ['admin'] : []
+      })
+    }
+    const mkStateMgr = () =>
+      createStateManager({
+        appId,
+        getRoomId: () => roomId,
+        getSelfId: () => memberEp.peerId,
+        getLocalUserId: () => memberUser.userId,
+        ensureReady: async () => ({
+          selfId: memberEp.peerId,
+          user: memberUser,
+          roomId
+        }),
+        hasRolesPlugin: () => true,
+        getRolesProvider: () => rolesProviderStub as never,
+        isPeerActive: () => true,
+        isPeerPendingHandshake: () => false,
+        isDirectPeer: () => false,
+        getDirectPeerIds: () => [],
+        isUserOnline: () => true,
+        getKnownPeerUserId: () => undefined,
+        isPeerBanned: () => false,
+        getPeerRoles: () => []
+      })
+
+    const mgr = mkStateMgr()
+    const receiverMgr = mkStateMgr()
+    const freshMgr = mkStateMgr()
 
     try {
       const cursor = mgr.makeState<number>('cursor', 0, {roles: '*'})
+      const receiverCursor = receiverMgr.makeState<number>('cursor', 0, {
+        roles: '*'
+      })
+      freshMgr.makeState<number>('cursor', 0, {roles: '*'})
+
       const applied = await mgr.verifyAndApplyStateRecord(
         fastRec,
         adminEp.peerId
       )
       assert.ok(applied, 'expected +15s cert-bearing record to be accepted')
       assert.equal(cursor.get(), 5)
+      assert.equal(
+        await receiverMgr.verifyAndApplyStateRecord(fastRec, adminEp.peerId),
+        true
+      )
 
       await cursor.set(7)
       assert.equal(
         cursor.get(),
         7,
         'plain member must be able to overwrite an accepted +15s cert record'
+      )
+
+      // Receiver-side check (Round-4 F2): a peer holding fastRec accepts the plain member's
+      // [fastIat, 1] same-wall counter bump, whereas a fresh late joiner without fastRec drops it
+      const memberOverwriteRec = await signStateRecord(
+        memberUser.sign,
+        memberUser.signPubJwk,
+        {
+          kind: 's',
+          appId,
+          roomId,
+          ns: 'cursor',
+          hlc: [fastIat, 1],
+          peerId: memberEp.peerId,
+          userId: memberUser.userId,
+          val: 7
+        }
+      )
+      assert.equal(
+        await receiverMgr.verifyAndApplyStateRecord(
+          memberOverwriteRec,
+          memberEp.peerId
+        ),
+        true,
+        'peer holding cert record must accept plain member overwrite at [fastIat, 1]'
+      )
+      assert.equal(receiverCursor.get(), 7)
+      assert.equal(
+        await freshMgr.verifyAndApplyStateRecord(
+          memberOverwriteRec,
+          memberEp.peerId
+        ),
+        false,
+        'fresh late-joiner without cert record must drop uncertified future timestamp'
       )
 
       // Now simulate local wall clock jumping backward by 90s so minHlcVal (fastIat) exceeds now + 60s
@@ -1021,6 +1096,98 @@ void test('Round-3 regressions: optimistic state skew overwrite & rollback, pre-
       assert.deepEqual(unhandled, [])
     } finally {
       mgr.destroy()
+      receiverMgr.destroy()
+      freshMgr.destroy()
+    }
+
+    // 1b. Round-4 F1: plain member cannot ratchet an open shared namespace past now + 10s
+    const ratchetRoomId = 'r4-no-ratchet-room'
+    const [attackerUser, attackerEp, honestUser, honestEp] = await Promise.all([
+      createUserIdentity(),
+      createEndpointIdentity(),
+      createUserIdentity(),
+      createEndpointIdentity()
+    ])
+    const mkOpenMgr = () =>
+      createStateManager({
+        appId,
+        getRoomId: () => ratchetRoomId,
+        getSelfId: () => honestEp.peerId,
+        getLocalUserId: () => honestUser.userId,
+        ensureReady: async () => ({
+          selfId: honestEp.peerId,
+          user: honestUser,
+          roomId: ratchetRoomId
+        }),
+        hasRolesPlugin: () => false,
+        getRolesProvider: () => null,
+        isPeerActive: () => true,
+        isPeerPendingHandshake: () => false,
+        isDirectPeer: () => false,
+        getDirectPeerIds: () => [],
+        isUserOnline: () => true,
+        getKnownPeerUserId: () => undefined,
+        isPeerBanned: () => false,
+        getPeerRoles: () => []
+      })
+    const victimMgr = mkOpenMgr()
+    const lateOpenMgr = mkOpenMgr()
+    try {
+      const board = victimMgr.makeState<number>('board', 0)
+      const lateBoard = lateOpenMgr.makeState<number>('board', 0)
+      const t0 = Date.now()
+      let acceptedCount = 0
+      let maxAcceptedWall = 0
+      for (let i = 0; i < 70; i++) {
+        const wall = t0 + 9_500 + i * 1_000
+        const rec = await signStateRecord(
+          attackerUser.sign,
+          attackerUser.signPubJwk,
+          {
+            kind: 's',
+            appId,
+            roomId: ratchetRoomId,
+            ns: 'board',
+            hlc: [wall, 0],
+            peerId: attackerEp.peerId,
+            userId: attackerUser.userId,
+            val: i + 1
+          }
+        )
+        if (await victimMgr.verifyAndApplyStateRecord(rec, attackerEp.peerId)) {
+          acceptedCount++
+          maxAcceptedWall = wall
+        }
+      }
+      assert.ok(
+        maxAcceptedWall <= Date.now() + 10_000,
+        `plain member must never pin namespace beyond now + 10s (got +${maxAcceptedWall - Date.now()}ms across ${acceptedCount} accepted records)`
+      )
+      await board.set(999)
+      assert.equal(board.get(), 999)
+      const honestRec = await signStateRecord(
+        honestUser.sign,
+        honestUser.signPubJwk,
+        {
+          kind: 's',
+          appId,
+          roomId: ratchetRoomId,
+          ns: 'board',
+          hlc: [maxAcceptedWall, 1],
+          peerId: honestEp.peerId,
+          userId: honestUser.userId,
+          val: 999
+        }
+      )
+      assert.equal(
+        await lateOpenMgr.verifyAndApplyStateRecord(honestRec, honestEp.peerId),
+        true,
+        'fresh late-joiner must accept honest follow-up bounded within now + 10s'
+      )
+      assert.equal(lateBoard.get(), 999)
+    } finally {
+      victimMgr.destroy()
+      lateOpenMgr.destroy()
     }
 
     // 2. Pre-identity set() defers optimistic apply instead of emitting userId: ''
@@ -1301,6 +1468,108 @@ void test('Round-3 regressions: optimistic state skew overwrite & rollback, pre-
     // Replaying the superseded genuine banRec must STILL be rejected because victimUser's unban tombstone survived!
     assert.equal(await receiverAuth.verifyAndApplyModeration(banRec), false)
     assert.equal(receiverAuth.isPeerBanned(victimUser.userId), false)
+
+    // 6. Scale-room leave() sends direct leave frame synchronously to open neighbors even if another direct channel is closing
+    const pidLeaveA = testPeerId('leave-scale-a')
+    const pidLeaveB = testPeerId('leave-scale-b')
+    const pidLeaveC = testPeerId('leave-scale-c')
+    let onPeerA!: (peer: PeerHandle, id: string) => void
+    let onPeerB!: (peer: PeerHandle, id: string) => void
+    let onPeerC!: (peer: PeerHandle, id: string) => void
+    const bLeftIds: string[] = []
+    const leaveRoomA = createRoom(
+      f => {
+        onPeerA = f
+      },
+      () => {},
+      () => {},
+      {
+        appId: 'r4-leave-app',
+        roomId: 'r4-leave-room',
+        endpointIdentity: getTestEndpointByPeerId(pidLeaveA),
+        use: [scale({maxDirectPeers: 4})]
+      }
+    )
+    const leaveRoomB = createRoom(
+      f => {
+        onPeerB = f
+      },
+      () => {},
+      () => {},
+      {
+        appId: 'r4-leave-app',
+        roomId: 'r4-leave-room',
+        endpointIdentity: getTestEndpointByPeerId(pidLeaveB),
+        use: [scale({maxDirectPeers: 4})]
+      }
+    )
+    leaveRoomB.onPeerLeave(({peerId}) => {
+      bLeftIds.push(peerId)
+    })
+    const leaveRoomC = createRoom(
+      f => {
+        onPeerC = f
+      },
+      () => {},
+      () => {},
+      {
+        appId: 'r4-leave-app',
+        roomId: 'r4-leave-room',
+        endpointIdentity: getTestEndpointByPeerId(pidLeaveC),
+        use: [scale({maxDirectPeers: 4})]
+      }
+    )
+    try {
+      const {peerA: abA, peerB: abB} = createLinkedHandlePair()
+      const {peerA: acA, peerB: acC} = createLinkedHandlePair()
+      const bJoinedP = new Promise<void>(res =>
+        leaveRoomB.onPeerJoin(({peerId}) => {
+          if (peerId === pidLeaveA) {
+            res()
+          }
+        })
+      )
+      const aJoinedC = new Promise<void>(res =>
+        leaveRoomA.onPeerJoin(({peerId}) => {
+          if (peerId === pidLeaveC) {
+            res()
+          }
+        })
+      )
+      onPeerA(abA, pidLeaveB)
+      onPeerB(abB, pidLeaveA)
+      onPeerA(acA, pidLeaveC)
+      onPeerC(acC, pidLeaveA)
+      await Promise.all([bJoinedP, aJoinedC])
+
+      // Simulate C's channel entering 'closing' before its close event fires, then call leaveRoomA.leave()
+      ;(acA.channel as {readyState: string}).readyState = 'closing'
+      const syncSentToB: Uint8Array[] = []
+      const origSendB = abA.sendData.bind(abA)
+      abA.sendData = data => {
+        syncSentToB.push(new Uint8Array(data))
+        origSendB(data)
+      }
+      const leaveP = leaveRoomA.leave()
+      assert.equal(
+        syncSentToB.length,
+        1,
+        'leave() must write @_leave synchronously to open direct neighbors even when another direct channel is closing'
+      )
+      assert.ok(
+        new TextDecoder().decode(syncSentToB[0]!).includes('@_leave'),
+        'synchronous leave frame must carry @_leave'
+      )
+      await waitFor(() => bLeftIds.includes(pidLeaveA), 1_000)
+      await leaveP
+    } finally {
+      await Promise.all([
+        leaveRoomA.leave(),
+        leaveRoomB.leave(),
+        leaveRoomC.leave()
+      ])
+    }
+
     assert.deepEqual(unhandled, [])
   } finally {
     process.off('unhandledRejection', onUnhandled)
