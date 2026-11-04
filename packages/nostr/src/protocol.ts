@@ -10,7 +10,6 @@ export const tag = 'x'
 export const eventMsgType = 'EVENT'
 
 const subscribeClockSkewSeconds = 60
-const sha256TopicRe = /^[A-Za-z0-9_-]{43}$/
 
 const toHex = (bytes: Uint8Array): string =>
   Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
@@ -26,14 +25,6 @@ export const createSigner = (): NostrSigner => {
 }
 
 export const topicToKind = (topic: string): number => {
-  if (sha256TopicRe.test(topic)) {
-    const bin = atob(topic.slice(0, 8).replace(/-/g, '+').replace(/_/g, '/'))
-    let val = 0
-    for (let i = 0; i < 6; i++) {
-      val = val * 256 + bin.charCodeAt(i)
-    }
-    return (val % 10_000) + 20_000
-  }
   let h = 0x811c9dc5
   for (let i = 0; i < topic.length; i++) {
     h = Math.imul(h ^ topic.charCodeAt(i), 0x01000193)

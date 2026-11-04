@@ -51,6 +51,16 @@ void test('Built dist/*.mjs entrypoints expose exact public contracts and strip 
     false,
     '@trystero-p2p/core/public (dist/public.mjs) must not exist'
   )
+  assert.equal(
+    existsSync(resolve(coreDistDir, 'types.mjs')),
+    false,
+    '@trystero-p2p/core/types must be types-only (no dist/types.mjs runtime bundle)'
+  )
+  assert.equal(
+    existsSync(resolve(coreDistDir, 'types.d.mts')),
+    true,
+    '@trystero-p2p/core/types declaration file dist/types.d.mts must exist'
+  )
 
   const [
     coreDist,

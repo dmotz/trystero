@@ -25,8 +25,7 @@ import {
   packGossipControlFrames
 } from '../../packages/core/src/scale/index.ts'
 import {ecdsaSign} from '../../packages/core/src/crypto.ts'
-import {encodeBytes} from '../../packages/core/src/primitives.ts'
-import {toBase64} from '../../packages/core/src/utils.ts'
+import {encodeBytes, toBase64Url} from '../../packages/core/src/primitives.ts'
 import {createMemorySignalBus} from './memory-rtc.ts'
 import {testPeerId, waitFor} from './peer-harness.ts'
 
@@ -524,6 +523,14 @@ void test('Canonical JWK & compact pubkey normalization: compactPubToJwk accepts
       kty: 'EC',
       crv: 'P-256'
     }
+    const permutedUserJwk: JsonWebKey = {
+      y: remoteUser.signPubJwk.y!,
+      x: remoteUser.signPubJwk.x!,
+      ext: true,
+      key_ops: ['verify'],
+      kty: 'EC',
+      crv: 'P-256'
+    }
     const proof = await signUserEndpointProof(remoteUser, {
       appId,
       roomId,
@@ -536,23 +543,16 @@ void test('Canonical JWK & compact pubkey normalization: compactPubToJwk accepts
       seq: 1,
       ts: Date.now(),
       neighbors: [observerId],
-      signPubKey: permutedSignJwk,
-      encPubKey: permutedEncJwk,
+      signPubKey: jwkToCompactPub(permutedSignJwk),
+      encPubKey: jwkToCompactPub(permutedEncJwk),
       userId: remoteUser.userId,
-      userPubKey: {
-        y: remoteUser.signPubJwk.y,
-        x: remoteUser.signPubJwk.x,
-        ext: true,
-        key_ops: ['verify'],
-        kty: 'EC',
-        crv: 'P-256'
-      },
+      userPubKey: jwkToCompactPub(permutedUserJwk),
       userProof: proof
     }
     const canon = encodeBytes(
       descriptorCanonicalPayload(descriptor, appId, roomId)
     )
-    descriptor.sig = toBase64(
+    descriptor.sig = toBase64Url(
       await ecdsaSign(remoteEp.signPrivateKey, canon as BufferSource)
     )
 

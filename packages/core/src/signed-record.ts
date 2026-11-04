@@ -1,46 +1,44 @@
 import {ecdsaSign, normalizeLowSP256Signature} from './crypto'
+import {jwkToCompactPub, verifyWithP256} from './identity'
+import type {MaybePromise} from './internal-types'
+import type {JsonValue, RoleCertificate} from './types'
 import {
-  getVerifiedPubKeyRecord,
-  jwkToCompactPub,
-  pubJwkToUncompressedBytes,
-  verifyWithP256
-} from './identity'
-import {hash32} from './primitives'
-import type {JsonValue, MaybePromise, RoleCertificate} from './types'
-import {
-  cmpStr,
   createBoundedCache,
+  domainTag,
   encodeBytes,
   fromBase64Url,
-  isObj,
+  isPosSafeInt,
   keys,
   mkErr,
   toBase64Url,
-  toJson,
-  validateRoleCertificateShape
+  toJson
 } from './utils'
 
 export type StateSigner =
   | CryptoKey
   | ((payload: Uint8Array) => MaybePromise<Uint8Array>)
 
+export type Hlc = readonly [wallMs: number, counter: number]
+
+export const zeroHlc: Hlc = [0, 0]
 export const defaultMaxClockSkewMs = 60_000
+export const stateMaxFutureSkewMs = 10_000
 export const maxObservedClockDragMs = 5_000
 
 const maxJsonDepth = 64
 
-export const canonTag = (tag: string, items: unknown[]): string =>
-  toJson([`trystero:${tag}:v1`, ...items])
+export const canonTag = (tag: string, items: unknown[], version = 1): string =>
+  toJson([domainTag(tag, version), ...items])
 
-export const isValidJwk = (value: unknown): value is JsonWebKey =>
-  isObj(value) && Boolean(pubJwkToUncompressedBytes(value as JsonWebKey))
+export const isValidHlc = (v: unknown): v is Hlc =>
+  Array.isArray(v) &&
+  v.length === 2 &&
+  isPosSafeInt(v[0]) &&
+  typeof v[1] === 'number' &&
+  Number.isSafeInteger(v[1]) &&
+  v[1] >= 0
 
-export const toCleanJwk = (jwk: JsonWebKey): JsonWebKey => ({
-  kty: 'EC',
-  crv: 'P-256',
-  x: jwk.x ?? '',
-  y: jwk.y ?? ''
-})
+export const compareHlc = (a: Hlc, b: Hlc): number => a[0] - b[0] || a[1] - b[1]
 
 export const signWith = async (
   signer: StateSigner,
@@ -124,7 +122,7 @@ export const canonicalizeAndMeasureJson = (
         const key = sortedKeys[i]!
         const prop = record[key]
         if (prop === undefined) {
-          return null
+          continue
         }
         const serialized = walk(prop, depth + 1)
         if (serialized === null) {
@@ -158,51 +156,58 @@ export type MonotonicClock = {
   peek: () => number
   observe: (ts: number, maxForwardMs?: number) => void
   next: (minTs?: number) => number
-  nextBounded: (ns: string, minTs?: number, maxSkewMs?: number) => number
+  nextHlc: (ns: string, minHlc?: Hlc, maxSkewMs?: number) => Hlc
 }
 
 export const createMonotonicClock = (initial = 0): MonotonicClock => {
-  let last = initial
+  let lastWall = initial
+  let lastCounter = 0
   return {
-    peek: () => last,
+    peek: () => lastWall,
     observe: (ts, maxForwardMs = maxObservedClockDragMs) => {
       const bounded = Math.min(ts, Date.now() + maxForwardMs)
-      if (bounded > last) {
-        last = bounded
+      if (bounded > lastWall) {
+        lastWall = bounded
+        lastCounter = 0
       }
     },
     next: (minTs = 0) => {
-      last = Math.max(Date.now(), last + 1, minTs)
-      return last
-    },
-    nextBounded: (ns, minTs = 0, maxSkewMs = defaultMaxClockSkewMs) => {
       const now = Date.now()
-      const candidate = Math.max(now, last + 1, minTs)
-      if (candidate > now + maxSkewMs) {
+      const target = Math.max(now, lastWall + 1, minTs)
+      const maxGlobal = now + maxObservedClockDragMs
+      if (target <= maxGlobal) {
+        lastWall = target
+      } else if (maxGlobal > lastWall) {
+        lastWall = maxGlobal
+      }
+      lastCounter = 0
+      return target
+    },
+    nextHlc: (ns, minHlc = zeroHlc, maxSkewMs = stateMaxFutureSkewMs) => {
+      const now = Date.now()
+      const targetWall = Math.max(now, lastWall, minHlc[0])
+      if (targetWall > now + maxSkewMs) {
         throw mkErr(`state clock skew exceeded for "${ns}"`)
       }
+      const counter =
+        targetWall > lastWall && targetWall > minHlc[0]
+          ? 0
+          : Math.max(
+              targetWall === lastWall ? lastCounter : -1,
+              targetWall === minHlc[0] ? minHlc[1] : -1
+            ) + 1
       const maxGlobal = now + maxObservedClockDragMs
-      if (candidate <= maxGlobal) {
-        last = candidate
-      } else if (maxGlobal > last) {
-        last = maxGlobal
+      if (targetWall <= maxGlobal) {
+        lastWall = targetWall
+        lastCounter = counter
+      } else if (maxGlobal > lastWall) {
+        lastWall = maxGlobal
+        lastCounter = 0
       }
-      return candidate
+      return [targetWall, counter]
     }
   }
 }
-
-export const selectPullFanoutPeers = (
-  selfId: string,
-  directPeerIds: readonly string[],
-  isBanned: (peerId: string) => boolean
-): string[] =>
-  directPeerIds
-    .filter(id => !isBanned(id))
-    .sort(
-      (a, b) =>
-        hash32(`${selfId}:${a}`) - hash32(`${selfId}:${b}`) || cmpStr(a, b)
-    )
 
 export const roleCertPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
   canonTag('role-cert', [
@@ -213,6 +218,7 @@ export const roleCertPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
     cert.appId,
     cert.roomId,
     [...cert.roles].sort(),
+    cert.seq,
     cert.iat
   ])
 
@@ -223,12 +229,13 @@ export const invalidRoles = (): {valid: false; roles: string[]} => ({
 
 export const signRoleCertInternal = async (
   signer: StateSigner,
-  issuerPubJwk: JsonWebKey,
+  issuerPubJwk: JsonWebKey | string,
   subUserId: string,
   appId: string,
   roomId: string,
   roles: string[],
-  iat: number
+  iat: number,
+  seq = 1
 ): Promise<RoleCertificate> => {
   const unsigned: Omit<RoleCertificate, 'sig'> = {
     v: 1,
@@ -238,34 +245,10 @@ export const signRoleCertInternal = async (
     appId,
     roomId,
     roles: [...new Set(roles)].sort(),
+    seq,
     iat
   }
   return {...unsigned, sig: await signWith(signer, roleCertPayload(unsigned))}
-}
-
-export const verifyRoleCertificate = async (
-  cert: RoleCertificate,
-  appId: string,
-  roomId: string,
-  rootUserIds: Set<string>,
-  clockSkewMs: number = defaultMaxClockSkewMs
-): Promise<{valid: boolean; roles: string[]}> => {
-  if (
-    !validateRoleCertificateShape(cert) ||
-    cert.appId !== appId ||
-    cert.roomId !== roomId ||
-    cert.iat > Date.now() + clockSkewMs ||
-    (!rootUserIds.has(cert.subUserId) && cert.roles.includes('admin'))
-  ) {
-    return invalidRoles()
-  }
-  const issuer = await getVerifiedPubKeyRecord(cert.issuerPubKey)
-  if (!issuer || !rootUserIds.has(issuer[6])) {
-    return invalidRoles()
-  }
-  return (await verifySig(cert.issuerPubKey, roleCertPayload(cert), cert.sig))
-    ? {valid: true, roles: [...cert.roles]}
-    : invalidRoles()
 }
 
 export type SlidingReplayWindow = {

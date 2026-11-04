@@ -1,22 +1,22 @@
 import {hashTopic} from './crypto'
 import type {
   AnswerReplayState,
+  BaseRoomConfig,
   OfferRecord,
+  PeerHandle,
   PeerState,
+  Signal,
   SignalContext,
   SignalPeer
 } from './internal-types'
-import type {BaseRoomConfig, PeerHandle, Signal} from './types'
 import {
   all,
   candidateType,
   createBoundedCache,
-  entries,
   fromJson,
   genId,
   hasIceUrl,
   isObj,
-  keys,
   logErr,
   mkErr,
   noOp,
@@ -28,13 +28,13 @@ import {
 
 const signalKeys = ['offer', 'answer', 'candidate'] as const
 const maxSignalMessageChars: number = 128 * 1024
-const maxSignalPeerIdChars = 64
 const maxSignalOfferIdChars = 64
 const maxSignalSdpChars: number = 64 * 1024
 const maxSignalCandidateChars = 4_096
 const maxTrackedSignalPeers = 256
 export const maxPendingPeerConnections = 64
 const decryptErrDedupeTtlMs = 60_000
+const signalPeerIdPattern = /^[0-9A-Za-z]{20}$/
 const signalIdPattern = /^[\w.~:!-]{1,64}$/
 
 export const buildSignalAad = (
@@ -50,7 +50,7 @@ const isValidSignalId = (value: unknown, maxLen: number): value is string =>
   signalIdPattern.test(value)
 
 export const isValidSignalPeerId = (value: unknown): value is string =>
-  isValidSignalId(value, maxSignalPeerIdChars)
+  typeof value === 'string' && signalPeerIdPattern.test(value)
 
 const isValidSignalOfferId = (value: unknown): value is string =>
   isValidSignalId(value, maxSignalOfferIdChars)
@@ -167,11 +167,11 @@ const answeringTtlMs = 23_333
 const offerRelayPlaceholder = 'offer-placeholder'
 
 const countPendingPeerConnections = (
-  peerStates: Record<string, PeerState>,
+  peerStates: Map<string, PeerState>,
   excludePeerId?: string
 ): number => {
   let count = 0
-  for (const [id, s] of entries(peerStates)) {
+  for (const [id, s] of peerStates) {
     if (id === excludePeerId || s.connectedPeer) {
       continue
     }
@@ -185,8 +185,8 @@ const countPendingPeerConnections = (
   return count
 }
 
-export const prunePeerStates = (peerStates: Record<string, PeerState>): void =>
-  entries(peerStates).forEach(([peerId, s]) => {
+export const prunePeerStates = (peerStates: Map<string, PeerState>): void => {
+  for (const [peerId, s] of peerStates) {
     if (
       !s.connectedPeer &&
       !s.answeringPeer &&
@@ -194,9 +194,10 @@ export const prunePeerStates = (peerStates: Record<string, PeerState>): void =>
       !s.offerPeer &&
       !s.offerRelays.some(Boolean)
     ) {
-      delete peerStates[peerId]
+      peerStates.delete(peerId)
     }
-  })
+  }
+}
 
 const counterAnnounceTimestamps = /*@__PURE__*/ new WeakMap<
   PeerState,
@@ -302,35 +303,37 @@ export const resetOfferState = (state: PeerState): void => {
 }
 
 export const getState = (
-  peerStates: Record<string, PeerState>,
+  peerStates: Map<string, PeerState>,
   peerId: string
 ): PeerState => {
-  const existing = peerStates[peerId]
+  const existing = peerStates.get(peerId)
   if (existing) {
     return existing
   }
-  const stateKeys = keys(peerStates)
-  if (stateKeys.length >= maxTrackedSignalPeers) {
-    const evictKey =
-      stateKeys.find(k => {
-        const s = peerStates[k]
-        return s && !s.connectedPeer && !s.answeringPeer && !s.offerPeer
-      }) ??
-      stateKeys.find(k => {
-        const s = peerStates[k]
-        return s && !s.connectedPeer
-      })
-    if (evictKey) {
-      const evicted = peerStates[evictKey]
+  if (peerStates.size >= maxTrackedSignalPeers) {
+    let evictKey: string | undefined
+    let fallbackKey: string | undefined
+    for (const [k, s] of peerStates) {
+      if (!s.connectedPeer && !s.answeringPeer && !s.offerPeer) {
+        evictKey = k
+        break
+      }
+      if (fallbackKey === undefined && !s.connectedPeer) {
+        fallbackKey = k
+      }
+    }
+    const targetKey = evictKey ?? fallbackKey
+    if (targetKey !== undefined) {
+      const evicted = peerStates.get(targetKey)
       if (evicted) {
         destroyAlive(evicted.answeringPeer)
         resetOfferState(evicted)
         resetAnsweringState(evicted)
       }
-      delete peerStates[evictKey]
+      peerStates.delete(targetKey)
     }
   }
-  return (peerStates[peerId] = {
+  const created: PeerState = {
     offerPeer: null,
     offerId: null,
     offerInitPromise: null,
@@ -348,7 +351,9 @@ export const getState = (
     didSendAnswer: false,
     answerReplay: null,
     didReportConnectFailure: false
-  })
+  }
+  peerStates.set(peerId, created)
+  return created
 }
 
 export const createSignalHandler = (
@@ -447,7 +452,7 @@ export const createSignalHandler = (
   ): void => {
     resetTimer(state.answeringExpiryTimer)
     state.answeringExpiryTimer = setTimeout(() => {
-      const current = peerStates[peerId]
+      const current = peerStates.get(peerId)
       if (!current || current.connectedPeer || current.answeringPeer !== peer) {
         return
       }
@@ -468,7 +473,7 @@ export const createSignalHandler = (
     resetTimer(state.offerExpiryTimer)
     const offerId = state.offerId
     state.offerExpiryTimer = setTimeout(() => {
-      const current = peerStates[peerId]
+      const current = peerStates.get(peerId)
       if (!current || current.connectedPeer || current.offerId !== offerId) {
         return
       }
@@ -585,7 +590,7 @@ export const createSignalHandler = (
     signalPeer: SignalPeer,
     retryAttempt = 0
   ): Promise<void> => {
-    const state = peerStates[peerId]
+    const state = peerStates.get(peerId)
     if (
       !state ||
       state.connectedPeer ||
@@ -640,7 +645,7 @@ export const createSignalHandler = (
           state.offerPeer !== offerPeer ||
           state.offerId !== offerId
         ) {
-          const cur = peerStates[peerId]
+          const cur = peerStates.get(peerId)
           if (cur && !cur.connectedPeer && cur.offerRelays[relayId]) {
             clearOfferRelay(cur, relayId)
             prunePeerStates(peerStates)
@@ -754,7 +759,7 @@ export const createSignalHandler = (
       return
     }
 
-    const existingState = peerStates[peerId]
+    const existingState = peerStates.get(peerId)
     if (
       existingState &&
       (existingState.answeringPeer || existingState.offerAnswered)
@@ -937,7 +942,7 @@ export const createSignalHandler = (
     if (!offerId) {
       return
     }
-    const state = peerStates[peerId]
+    const state = peerStates.get(peerId)
     if (!peer && !state?.offerPeer && !state?.answeringPeer) {
       return
     }
@@ -953,7 +958,7 @@ export const createSignalHandler = (
       return
     }
 
-    const currentState = peerStates[peerId]
+    const currentState = peerStates.get(peerId)
     const targetPeer =
       peer && !peer.isDead
         ? peer
@@ -1029,7 +1034,7 @@ export const createSignalHandler = (
       return
     }
 
-    const state = peerStates[peerId]
+    const state = peerStates.get(peerId)
     if (
       !state ||
       !state.offerPeer ||
@@ -1101,7 +1106,7 @@ export const createSignalHandler = (
 
           onPeerDiscovered?.(peerId, relayId, signalPeer)
 
-          const state = peerStates[peerId]
+          const state = peerStates.get(peerId)
           const connectedPeer = state?.connectedPeer
           if (connectedPeer && state) {
             const health = getConnectedPeerHealth(connectedPeer)
@@ -1130,7 +1135,7 @@ export const createSignalHandler = (
           if (!offer && !answer && !candidate) {
             if (
               (shouldConnectPeer && !shouldConnectPeer(peerId, 'outbound')) ||
-              (!peerStates[peerId] && atPendingCap(peerId))
+              (!peerStates.has(peerId) && atPendingCap(peerId))
             ) {
               return
             }
@@ -1200,7 +1205,7 @@ export const createSignalHandler = (
             !peerId ||
             peerId === localSelfId ||
             (shouldConnectPeer && !shouldConnectPeer(peerId, 'outbound')) ||
-            (!peerStates[peerId] && atPendingCap(peerId))
+            (!peerStates.has(peerId) && atPendingCap(peerId))
           ) {
             return
           }

@@ -40,11 +40,19 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@trystero-p2p/core": "workspace:*",
-    "ws": "^8.22.0"
+    "@trystero-p2p/core": "workspace:*"
   },
   "devDependencies": {
-    "@types/ws": "^8.18.2"
+    "@types/ws": "^8.18.2",
+    "ws": "^8.22.0"
+  },
+  "peerDependencies": {
+    "ws": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=22"

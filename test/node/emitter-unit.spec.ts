@@ -11,8 +11,8 @@ import {
 } from '../../packages/core/src/index.ts'
 import {createMediaManager} from '../../packages/core/src/media.ts'
 import createRoom from '../../packages/core/src/room.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import type {
-  PeerHandle,
   PeerJoinContext,
   PeerLeaveContext,
   Room,

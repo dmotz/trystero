@@ -8,12 +8,13 @@ import {
   type SocketClient
 } from '../../packages/core/src/index.ts'
 import type {EndpointIdentity} from '../../packages/core/src/identity.ts'
-import type {InternalRoomContext} from '../../packages/core/src/internal-types.ts'
-import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
+import type {
+  InternalRoomContext,
+  PeerHandle
+} from '../../packages/core/src/internal-types.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import type {
-  PeerHandle,
   PeerMediaContext,
   Room,
   RoomError,
@@ -27,6 +28,7 @@ import {
   createLinkedHandlePair,
   getTestEndpointByPeerId,
   makeStream,
+  makeTestPluginSlot,
   makeTrack,
   testEndpoint,
   turn,
@@ -248,7 +250,7 @@ void test('RoomKernel lifecycle hooks return Unsubscribe and support {replay, on
 
   let lateSubscribeReplay: (() => void) | null = null
 
-  const lifecyclePlugin = makeInternalPlugin(
+  const lifecyclePlugin = makeTestPluginSlot(
     'scale',
     (kernel: InternalRoomContext) => {
       const unsubAct = kernel.onPeerActivated(id => activatedLive.push(id))
@@ -495,7 +497,7 @@ void test('Discriminated RoomError union: relay quorum failure vs partial relay 
   }
 
   // 4. Mid-session peer transport fault & wire protocol fault emit 'peer-error', and kernel.emitError narrows cleanly
-  const customErrPlugin = makeInternalPlugin('scale', kernel => ({
+  const customErrPlugin = makeTestPluginSlot('scale', kernel => ({
     triggerCustomHandshakeErr: (peerId: string) =>
       kernel.emitError({
         code: 'handshake-failed',
@@ -823,50 +825,41 @@ void test('H13: terminal startup failures (identity-failed and plugin-failed) em
   )
   await replacementIdentityRoom.leave()
 
-  // 2. plugin-failed during resolveRoomId
+  // 2. plugin-failed when roles setup() throws
   const resolveErrors: RoomError[] = []
-  const badResolvePlugin = makeInternalPlugin('scale', () => ({}), {
-    resolveRoomId: async () => {
-      await wait(15)
-      throw new Error('room resolver rejected')
-    }
+  const badRolesPlugin = makeTestPluginSlot('roles', () => {
+    throw new Error('roles setup rejected')
   })
   const pluginResolveFailRoom = joinTrackedStrategy(
     {
       appId: 'h13-startup-fail-app',
-      use: [badResolvePlugin],
+      use: [badRolesPlugin],
       rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'h13-plugin-resolve-room'
   )
   pluginResolveFailRoom.onError(err => resolveErrors.push(err))
 
-  await assert.rejects(pluginResolveFailRoom.ready, /room resolver rejected/)
-  await waitFor(() => resolveErrors.length === 1, 2_000)
+  await assert.rejects(pluginResolveFailRoom.ready, /roles setup rejected/)
+  await waitFor(
+    () => resolveErrors.length === 1 && activeSubscriptions === 0,
+    2_000
+  )
   assert.equal(resolveErrors[0]!.code, 'plugin-failed')
   if (resolveErrors[0]!.code === 'plugin-failed') {
-    assert.equal(resolveErrors[0]!.plugin, 'scale')
+    assert.equal(resolveErrors[0]!.plugin, 'roles')
   }
   assert.equal(activeSubscriptions, 0)
 
-  // 3. plugin-failed when plugin setup() throws after async resolveRoomId
+  // 3. plugin-failed when scale setup() throws alongside roles({selfAsAdmin: true})
   const setupErrors: RoomError[] = []
-  const badSetupPlugin = makeInternalPlugin(
-    'scale',
-    () => {
-      throw new Error('plugin setup exploded')
-    },
-    {
-      resolveRoomId: async ({roomId}) => {
-        await wait(20)
-        return {effectiveRoomId: `${roomId}:resolved`}
-      }
-    }
-  )
+  const badSetupPlugin = makeTestPluginSlot('scale', () => {
+    throw new Error('plugin setup exploded')
+  })
   const pluginSetupFailRoom = joinTrackedStrategy(
     {
       appId: 'h13-startup-fail-app',
-      use: [badSetupPlugin],
+      use: [roles({selfAsAdmin: true}), badSetupPlugin],
       rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     },
     'h13-plugin-setup-room'
@@ -907,15 +900,12 @@ void test('H9: disconnected peers prune their PeerEntry across active and mid-ha
   const [hostId, ...churnIds] = allocTestPeerIds(11) as [string, ...string[]]
   const regMap = new Map<string, (peer: PeerHandle, id: string) => void>()
 
-  const inspectorPlugin = makeInternalPlugin('scale', kernel => ({
+  const inspectorPlugin = makeTestPluginSlot('scale', kernel => ({
     inspectEntries: (ids: readonly string[]) => ({
       allPeerIds: kernel.getAllPeerIds(),
       activePeerIds: kernel.getActivePeerIds(),
       retainedKnownUsers: ids.filter(
         id => kernel.getKnownPeerUserId(id) !== undefined
-      ),
-      retainedPubKeys: ids.filter(
-        id => kernel.getPeerPublicKey(id) !== undefined
       ),
       retainedHandles: ids.filter(
         id => kernel.getPeerHandle(id, true) !== undefined
@@ -960,11 +950,10 @@ void test('H9: disconnected peers prune their PeerEntry across active and mid-ha
       regMap.get(remoteId)!(link.peerB, hostId)
       await waitFor(() => remoteId in hostRoom.getPeers(), 2_000)
 
-      // Confirm PeerEntry holds userId and pubKey while connected, and getUsers() reflects the remote user
+      // Confirm PeerEntry holds userId while connected, and getUsers() reflects the remote user
       assert.equal(Object.keys(hostRoom.getUsers()).length, 1)
       const liveSnap = hostRoom.inspectEntries([remoteId])
       assert.deepEqual(liveSnap.retainedKnownUsers, [remoteId])
-      assert.deepEqual(liveSnap.retainedPubKeys, [remoteId])
 
       if (i % 2 === 0) {
         await remoteRoom.leave()
@@ -993,11 +982,6 @@ void test('H9: disconnected peers prune their PeerEntry across active and mid-ha
       afterChurn.retainedKnownUsers,
       [],
       'disconnected PeerEntry userId records must be pruned'
-    )
-    assert.deepEqual(
-      afterChurn.retainedPubKeys,
-      [],
-      'disconnected PeerEntry pubKey records must be pruned'
     )
     assert.deepEqual(afterChurn.retainedHandles, [])
   } finally {

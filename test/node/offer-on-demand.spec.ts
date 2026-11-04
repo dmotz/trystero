@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import {createOfferManager} from '../../packages/core/src/offer-manager.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 
 void test(
   'Trystero: strategy creates offers on demand and reclaims unused peers',

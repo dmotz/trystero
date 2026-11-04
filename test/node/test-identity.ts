@@ -4,9 +4,9 @@ import {
 } from '../../packages/core/src/identity.ts'
 import type {
   BaseRoomConfig,
-  JoinRoom,
-  JoinRoomConfig
-} from '../../packages/core/src/types.ts'
+  JoinRoom
+} from '../../packages/core/src/internal-types.ts'
+import type {JoinRoomConfig} from '../../packages/core/src/types.ts'
 
 const clusterPoolSize = 300
 const namedPoolSize = 96

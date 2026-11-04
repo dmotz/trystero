@@ -6,7 +6,10 @@ import type {
   ScalePluginApi
 } from '../../packages/core/src/index.ts'
 import {roles} from '../../packages/core/src/authority.ts'
-import {createUserIdentity} from '../../packages/core/src/identity.ts'
+import {
+  createUserIdentity,
+  jwkToCompactPub
+} from '../../packages/core/src/identity.ts'
 import {ecdsaSign} from '../../packages/core/src/crypto.ts'
 import {signRoleCertInternal} from '../../packages/core/src/signed-record.ts'
 import {
@@ -24,7 +27,11 @@ import {
   scale
 } from '../../packages/core/src/scale/index.ts'
 import createRoom from '../../packages/core/src/room.ts'
-import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  decodeBytes,
+  encodeBytes,
+  toBase64Url
+} from '../../packages/core/src/utils.ts'
 import {
   allocTestPeerIds,
   getTestEndpointByPeerId,
@@ -36,12 +43,14 @@ import {
 } from './peer-harness.ts'
 
 void test('C1 regression: gossip descriptor dumps and flushes chunk below maxActionFrameBytes / maxRoomFrameBytes at scale with role certs', async () => {
-  // 1. Direct unit test of packGossipControlFrames with 30 cert-bearing descriptors
+  // 1. Direct unit test of packGossipControlFrames with 36 cert-bearing descriptors
   const adminUser = await createUserIdentity()
+  const descPeerIds = allocTestPeerIds(36)
   const descriptors = []
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 36; i++) {
     const peerUser = await createUserIdentity()
-    const peerId = `cert-peer-${String(i).padStart(3, '0')}`
+    const peerId = descPeerIds[i]!
+    const compactPub = jwkToCompactPub(peerUser.signPubJwk)
     const cert = await signRoleCertInternal(
       adminUser.sign,
       adminUser.signPubJwk,
@@ -66,17 +75,17 @@ void test('C1 regression: gossip descriptor dumps and flushes chunk below maxAct
       peerId,
       seq: i + 1,
       neighbors: [
-        `cert-peer-${String((i + 1) % 30).padStart(3, '0')}`,
-        `cert-peer-${String((i + 2) % 30).padStart(3, '0')}`,
-        `cert-peer-${String((i + 3) % 30).padStart(3, '0')}`
+        descPeerIds[(i + 1) % 36]!,
+        descPeerIds[(i + 2) % 36]!,
+        descPeerIds[(i + 3) % 36]!
       ],
-      signPubKey: peerUser.signPubJwk,
-      encPubKey: peerUser.signPubJwk,
+      signPubKey: compactPub,
+      encPubKey: compactPub,
       userId: peerUser.userId,
-      userPubKey: peerUser.signPubJwk,
-      userProof: 'A'.repeat(88),
+      userPubKey: compactPub,
+      userProof: 'A'.repeat(86),
       cert,
-      sig: 'B'.repeat(88)
+      sig: 'B'.repeat(86)
     })
   }
 
@@ -409,15 +418,15 @@ void test('Mutual edge confirmation, multi-neighbor disconnect eviction, descrip
       peerId: malloryPid,
       seq: 50,
       neighbors: [alicePid, bobPid].sort(),
-      signPubKey: malloryId.signPubJwk,
-      encPubKey: malloryId.encPubJwk
+      signPubKey: malloryId.signPubKey,
+      encPubKey: malloryId.encPubKey
     }
     const forgedCanonical = encodeBytes(
       descriptorCanonicalPayload(forgedMalloryDesc, 'mutual-app', 'mutual-room')
     )
-    forgedMalloryDesc.sig = Buffer.from(
+    forgedMalloryDesc.sig = toBase64Url(
       await ecdsaSign(malloryId.signPrivateKey, forgedCanonical as BufferSource)
-    ).toString('base64')
+    )
     bob.handleOverlayFrame(
       malloryPid,
       new Uint8Array([

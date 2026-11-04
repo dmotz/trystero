@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import room from '../../packages/core/src/room.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import type {
   DataPayload,
   MessageActionConfig,
-  PeerHandle,
   PeerResult
 } from '../../packages/core/src/types.ts'
 import {

@@ -1,12 +1,55 @@
-export type JsonPrimitive = null | string | number | boolean
+import type {
+  BaseRelayConfig,
+  BaseRoomConfig,
+  InferPluginApi,
+  MaybePromise,
+  ResolvedIdentityPersistence,
+  UserIdentityPersistence
+} from './internal-types'
+
+type JsonPrimitive = null | string | number | boolean
 
 export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue}
 
+type NonJsonObject =
+  | ((...args: never[]) => unknown)
+  | Date
+  | RegExp
+  | Error
+  | Promise<unknown>
+  | ReadonlyMap<unknown, unknown>
+  | ReadonlySet<unknown>
+  | WeakMap<object, unknown>
+  | WeakSet<object>
+  | ArrayBuffer
+  | ArrayBufferView
+  | Blob
+
+export type JsonSerializable<T> = T extends JsonPrimitive
+  ? T
+  : T extends NonJsonObject | bigint | symbol | undefined
+    ? never
+    : T extends readonly (infer U)[]
+      ? readonly JsonSerializable<U>[]
+      : T extends object
+        ? {
+            [K in keyof T]: K extends symbol
+              ? never
+              : Exclude<T[K], undefined> extends infer V
+                ? [V] extends [never]
+                  ? undefined
+                  : JsonSerializable<V> | Extract<T[K], undefined>
+                : never
+          }
+        : never
+
 export type DataPayload = JsonValue | Blob | ArrayBuffer | ArrayBufferView
 
-export type PeerTarget = string | string[] | null
+export type DataPayloadValue<T> = T extends Blob | ArrayBuffer | ArrayBufferView
+  ? T
+  : JsonSerializable<T>
 
-export type MaybePromise<T> = T | Promise<T>
+export type PeerTarget = string | string[] | null
 
 export type ActionErrorKind =
   | 'timeout'
@@ -68,10 +111,6 @@ export type TurnServerConfig = {
 
 export type RelayConnectivity = 'online' | 'offline' | 'auto'
 
-export type BaseRelayConfig = {
-  warnOnRelayFailure?: boolean
-}
-
 export type RelayConfig = BaseRelayConfig & {
   urls?: string[]
   redundancy?: number
@@ -101,10 +140,6 @@ export type TopologySnapshot = {
   routes: Record<string, TopologyRoute>
   stats: TopologyStats
 }
-
-export type UserIdentityPersistence = 'none' | 'local'
-
-export type ResolvedIdentityPersistence = UserIdentityPersistence | 'custom'
 
 export type UserIdentity = {
   userId: string
@@ -140,6 +175,7 @@ export type RoleCertificate = {
   appId: string
   roomId: string
   roles: string[]
+  seq: number
   iat: number
   sig: string
 }
@@ -208,21 +244,6 @@ export type RoomPlugin<
 
 export type AnyRoomPlugin = RoomPlugin<string, object>
 
-export interface BaseRoomConfig {
-  appId: string
-  identity?: UserIdentityConfig
-  maxUsers?: number
-  use?: readonly AnyRoomPlugin[]
-  maxReceiveBytes?: number
-  password?: string
-  passive?: boolean
-  relayConfig?: BaseRelayConfig
-  trickleIce?: boolean
-  rtcConfig?: RTCConfiguration
-  rtcPolyfill?: typeof RTCPeerConnection
-  turnConfig?: TurnServerConfig[]
-}
-
 export type JoinRoomConfig = BaseRoomConfig & {
   relayConfig?: RelayConfig
 }
@@ -267,7 +288,7 @@ export type RequestContext = {
   roles: string[]
 }
 
-export type PeerResult<R extends DataPayload = DataPayload> =
+export type PeerResult<R = DataPayload> =
   | {peerId: string; userId: string; status: 'fulfilled'; value: R}
   | {peerId: string; userId: string; status: 'timeout'}
   | {peerId: string; userId: string; status: 'rejected'; error: Error}
@@ -288,7 +309,7 @@ export type RequestOptions = {
   signal?: AbortSignal
 }
 
-export type RequestManyOptions<R extends DataPayload = DataPayload> = {
+export type RequestManyOptions<R = DataPayload> = {
   targets: string[]
   metadata?: JsonValue
   timeoutMs?: number
@@ -297,17 +318,17 @@ export type RequestManyOptions<R extends DataPayload = DataPayload> = {
   signal?: AbortSignal
 }
 
-export type ActionMessageHandler<T extends DataPayload = DataPayload> = (
+export type ActionMessageHandler<T = DataPayload> = (
   data: T,
   context: MessageContext
 ) => unknown
 
-export type ActionRequestHandler<
-  T extends DataPayload = DataPayload,
-  R extends DataPayload = DataPayload
-> = (data: T, context: RequestContext) => R | Promise<R>
+export type ActionRequestHandler<T = DataPayload, R = DataPayload> = (
+  data: T,
+  context: RequestContext
+) => R | Promise<R>
 
-export type MessageAction<T extends DataPayload = DataPayload> = {
+export type MessageAction<T = DataPayload> = {
   send: (data: T, options?: SendOptions) => Promise<void>
   readonly onMessage: (
     handler: ActionMessageHandler<T>,
@@ -323,10 +344,7 @@ export type MessageAction<T extends DataPayload = DataPayload> = {
   ) => Unsubscribe
 }
 
-export type RequestAction<
-  T extends DataPayload = DataPayload,
-  R extends DataPayload = DataPayload
-> = {
+export type RequestAction<T = DataPayload, R = DataPayload> = {
   request: (data: T, options: RequestOptions) => Promise<R>
   requestMany: (
     data: T,
@@ -420,23 +438,50 @@ export type SelfInfo = {
   roles: string[]
 }
 
-export type Widen<T> = [JsonValue] extends [T]
-  ? T
-  : T extends string
-    ? string
-    : T extends number
-      ? number
-      : T extends boolean
-        ? boolean
-        : T extends readonly (infer U)[]
-          ? Widen<U>[]
-          : T extends object
-            ? {[K in keyof T]: Widen<T[K]>}
-            : T
+type IsUnion<T, U = T> = T extends unknown
+  ? [U] extends [T]
+    ? false
+    : true
+  : never
+
+export type Widen<T> = [T] extends [never]
+  ? never
+  : [JsonValue] extends [T]
+    ? T
+    : [IsUnion<T>] extends [true]
+      ? T
+      : [T] extends [string]
+        ? string
+        : [T] extends [number]
+          ? number
+          : [T] extends [boolean]
+            ? boolean
+            : T extends readonly (infer U)[]
+              ? number extends T['length']
+                ? T extends (infer M)[]
+                  ? Widen<M>[]
+                  : readonly Widen<U>[]
+                : T['length'] extends 0
+                  ? T extends (infer M)[]
+                    ? Widen<M>[]
+                    : readonly Widen<U>[]
+                  : {[K in keyof T]: Widen<T[K]>}
+              : T extends object
+                ? {[K in keyof T]: Widen<T[K]>}
+                : T
 
 export type BanOptions = {
   reason?: string
 }
+
+export type RoleChangeContext = {
+  userId: string
+  roles: string[]
+  previousRoles: string[]
+  local: boolean
+}
+
+export type RoleChangeHandler = (context: RoleChangeContext) => unknown
 
 export type RolesPluginApi = {
   grantRole: (
@@ -448,6 +493,10 @@ export type RolesPluginApi = {
   ban: (targetId: string, options?: BanOptions) => Promise<void>
   unban: (targetId: string) => Promise<void>
   isBanned: (targetId: string) => boolean
+  readonly onRoleChange: (
+    handler: RoleChangeHandler,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
 }
 
 export type ScalePluginApi = {
@@ -457,36 +506,38 @@ export type ScalePluginApi = {
 export type Room = {
   ready: Promise<void>
   makeAction: {
-    <T extends DataPayload = DataPayload>(
-      namespace: string,
+    <T = DataPayload>(
+      namespace: [T] extends [DataPayloadValue<T>] ? string : never,
       config?: MessageActionConfig
     ): MessageAction<T>
-    <T extends DataPayload = DataPayload, R extends DataPayload = DataPayload>(
-      namespace: string,
+    <T = DataPayload, R = DataPayload>(
+      namespace: [T, R] extends [DataPayloadValue<T>, DataPayloadValue<R>]
+        ? string
+        : never,
       config: RequestActionConfig
     ): RequestAction<T, R>
   }
   makeState: {
-    <T extends JsonValue = JsonValue>(
-      namespace: string,
+    <T = JsonValue>(
+      namespace: [T] extends [JsonSerializable<T>] ? string : never,
       initialValue?: null,
       config?: StateConfig<Widen<T> | null>
     ): SharedState<Widen<T> | null>
-    <T extends JsonValue>(
+    <T>(
       namespace: string,
-      initialValue: T,
+      initialValue: T & JsonSerializable<T>,
       config?: StateConfig<Widen<T>>
     ): SharedState<Widen<T>>
   }
   makeUserState: {
-    <T extends JsonValue = JsonValue>(
-      namespace: string,
+    <T = JsonValue>(
+      namespace: [T] extends [JsonSerializable<T>] ? string : never,
       initialValue?: null,
       config?: UserStateConfig<Widen<T> | null>
     ): UserState<Widen<T> | null>
-    <T extends JsonValue>(
+    <T>(
       namespace: string,
-      initialValue: T,
+      initialValue: T & JsonSerializable<T>,
       config?: UserStateConfig<Widen<T>>
     ): UserState<Widen<T>>
   }
@@ -494,7 +545,7 @@ export type Room = {
   leave: () => Promise<void>
   getSelf: () => Promise<SelfInfo>
   getPeers: () => Record<string, PeerInfo>
-  getUsers: () => Record<string, UserInfo>
+  getUsers: () => Readonly<Record<string, UserInfo>>
   addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
   replaceTrack: (
@@ -528,54 +579,11 @@ export type Room = {
   ) => Unsubscribe
 }
 
-export type SessionSignal = {
-  type: RTCSdpType
-  sdp: string
-}
-
-export type CandidateSignal = {
-  type: 'candidate'
-  sdp: string
-}
-
-export type Signal = SessionSignal | CandidateSignal
-
-export type PeerHandlers = {
-  data?: (data: ArrayBuffer) => void
-  connect?: () => void
-  close?: () => void
-  stream?: (stream: MediaStream) => void
-  signal?: (signal: Signal) => void
-  error?: (err: Error) => void
-}
-
-export type PeerHandle = {
-  connection: RTCPeerConnection
-  channel: RTCDataChannel | null
-  isDead: boolean
-  getOffer: () => Promise<Signal | void>
-  signal: (sdp: Signal) => Promise<Signal | void>
-  sendData: (data: Uint8Array) => void
-  destroy: () => void
-  setHandlers: (newHandlers: PeerHandlers) => void
-  addStream: (stream: MediaStream) => void
-  removeStream: (stream: MediaStream) => void
-  addTrack: (track: MediaStreamTrack, stream: MediaStream) => void
-  removeTrack: (track: MediaStreamTrack, stream?: MediaStream) => void
-  replaceTrack: (
-    oldTrack: MediaStreamTrack,
-    newTrack: MediaStreamTrack
-  ) => Promise<void> | undefined
-}
-
 type UnionToIntersection<U> = (
   U extends unknown ? (k: U) => void : never
 ) extends (k: infer I) => void
   ? I
   : never
-
-export type InferPluginApi<TPlugin> =
-  TPlugin extends RoomPlugin<string, infer TApi> ? TApi : Record<never, never>
 
 export type RoomWithPlugins<
   TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
@@ -585,14 +593,3 @@ export type RoomWithPlugins<
       ? unknown
       : UnionToIntersection<InferPluginApi<P>>
     : unknown)
-
-declare const joinRoomConfigBrand: unique symbol
-
-export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (<
-  const TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
->(
-  config: TConfig & {use?: TPlugins},
-  roomId: string
-) => RoomWithPlugins<TPlugins>) & {
-  readonly [joinRoomConfigBrand]?: TConfig
-}

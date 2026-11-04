@@ -5,7 +5,7 @@ import type {
   Room,
   ScalePluginApi
 } from '../../packages/core/src/index.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import {
   createOverlayManager,
   overlayBroadcastKind,
@@ -580,7 +580,7 @@ void test('Bug B regression: leave() + rejoin with same peerId delivers broadcas
     await waitFor(() => bobGot.length === 300, 3_000)
 
     // Alice leaves cleanly with signed leave
-    alice.announceLeave()
+    await alice.announceLeave()
     await wait(60)
     alice.destroy()
     a1.ok = false

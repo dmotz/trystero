@@ -6,7 +6,12 @@ import {
 } from '../../packages/core/src/index.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
-import {MockPeer, MockRTCPeerConnection, waitFor} from './peer-harness.ts'
+import {
+  MockPeer,
+  MockRTCPeerConnection,
+  testPeerId,
+  waitFor
+} from './peer-harness.ts'
 
 for (const channelState of ['closed', 'connecting']) {
   const title = `Trystero: issue 195 can rejoin after ${channelState} channel interrupts leave`
@@ -40,15 +45,17 @@ for (const channelState of ['closed', 'connecting']) {
     let rejoinedRoom: ReturnType<typeof joinRoom> | undefined
     let sendCount = 0
 
+    const remotePeerId = testPeerId('remote-peer')
+
     try {
       await waitFor(() => Boolean(root))
       const answer = await encrypt(
         genKey('', config.appId, 'room'),
         'answer-sdp',
-        buildSignalAad('answer', 'remote-peer', 'offer-1')
+        buildSignalAad('answer', remotePeerId, 'offer-1')
       )
       await root!.onMessage(root!.topic, {
-        peerId: 'remote-peer',
+        peerId: remotePeerId,
         offerId: 'offer-1',
         answer,
         peer
@@ -81,7 +88,7 @@ for (const channelState of ['closed', 'connecting']) {
       assert.notEqual(rejoinedRoom, room)
       assert.equal(initCount, 2)
       await room.leave()
-      assert.equal(joinRoom(config, 'room'), rejoinedRoom)
+      assert.throws(() => joinRoom(config, 'room'), /already joined/)
     } finally {
       peer.sendData = () => {}
       await room.leave().catch(() => {})

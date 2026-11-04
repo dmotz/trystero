@@ -1,8 +1,9 @@
 import {signRoomAuth} from '../crypto'
+import type {PeerHandle} from '../internal-types'
 import type {PeerDataTransport} from '../peer-transport'
 import {isValidSignalPeerId} from '../signal-handler'
 import {createTokenBucketLimiter} from '../signed-record'
-import type {PeerHandle, TopologyRoute} from '../types'
+import type {TopologyRoute} from '../types'
 import {
   createBoundedCache,
   entries,
@@ -26,6 +27,7 @@ import {
 const maxDiscoveredCandidates = 512
 const maxLocalRequiredPeers = 2_048
 export const defaultRequiredPeerIdleTtlMs = 60_000
+export const defaultQuarantineTtlMs = 30_000
 
 export type OverlayRouterDeps = {
   appId: string
@@ -33,6 +35,7 @@ export type OverlayRouterDeps = {
   maxDirectPeers: number
   unreachableGraceMs: number
   requiredPeerIdleTtlMs: number
+  quarantineTtlMs: number
   descriptors: DescriptorStore
   isDestroyed: () => boolean
   getSelfId: () => string
@@ -67,7 +70,7 @@ export type OverlayRouter = {
   ) => boolean
   resolveHealthyNextHopId: (
     destPeerId: string,
-    excludePeerId?: string
+    excludePeerIds?: string | ReadonlySet<string>
   ) => string | undefined
   getRoute: (peerId: string) => TopologyRoute | undefined
   getRoutesCopy: () => Record<string, TopologyRoute>
@@ -86,6 +89,9 @@ export type OverlayRouter = {
   ensureOriginVirtualPeer: (origin: string, fromPeerId: string) => boolean
   recomputeTopologyAndRoutes: () => void
   evictVirtualPeerNow: (peerId: string, reason: Error) => void
+  quarantinePeer: (peerId: string) => void
+  clearQuarantined: (peerId: string) => void
+  isPeerQuarantined: (peerId: string) => boolean
   purgeConnectionPolicyPeer: (peerId: string) => void
   purgePeerRoutingState: (peerId: string) => void
   refreshPasswordSalt: () => void
@@ -100,6 +106,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     maxDirectPeers,
     unreachableGraceMs,
     requiredPeerIdleTtlMs,
+    quarantineTtlMs,
     descriptors,
     isDestroyed,
     getSelfId,
@@ -121,6 +128,9 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
   const everConfirmedNeighbors = new Map<string, Set<string>>()
   const unreachableTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const discoveredCandidates = createBoundedCache<string, true>(
+    maxDiscoveredCandidates
+  )
+  const quarantinedPeers = createBoundedCache<string, number>(
     maxDiscoveredCandidates
   )
   const localRequiredPeers = new Map<string, number>()
@@ -170,11 +180,42 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       .catch(noOp)
   }
 
+  const isPeerQuarantined = (peerId: string): boolean => {
+    const expiresAt = quarantinedPeers.get(peerId)
+    if (expiresAt === undefined) {
+      return false
+    }
+    if (Date.now() > expiresAt) {
+      quarantinedPeers.delete(peerId)
+      topologyVersion++
+      return false
+    }
+    return true
+  }
+
+  const quarantinePeer = (peerId: string): void => {
+    if (
+      quarantineTtlMs > 0 &&
+      isValidSignalPeerId(peerId) &&
+      peerId !== getSelfId()
+    ) {
+      quarantinedPeers.set(peerId, Date.now() + quarantineTtlMs)
+      topologyVersion++
+    }
+  }
+
+  const clearQuarantined = (peerId: string): void => {
+    if (quarantinedPeers.delete(peerId)) {
+      topologyVersion++
+    }
+  }
+
   const isAllowedTargetPeer = (peerId: string): boolean =>
     !isDestroyed() &&
     isValidSignalPeerId(peerId) &&
     peerId !== getSelfId() &&
-    !isPeerBanned(peerId)
+    !isPeerBanned(peerId) &&
+    !isPeerQuarantined(peerId)
 
   const pruneExpiredRequiredPeers = (now: number = Date.now()): void => {
     let changed = false
@@ -427,21 +468,56 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
 
   const resolveHealthyNextHopId = (
     destPeerId: string,
-    excludePeerId?: string
+    excludePeerIds?: string | ReadonlySet<string>
   ): string | undefined => {
-    if (
-      destPeerId !== excludePeerId &&
-      isPeerUsable(getDirectPeer(destPeerId))
-    ) {
+    const isExcluded = (id: string): boolean =>
+      excludePeerIds === undefined
+        ? false
+        : typeof excludePeerIds === 'string'
+          ? id === excludePeerIds
+          : excludePeerIds.has(id)
+
+    if (!isExcluded(destPeerId) && isPeerUsable(getDirectPeer(destPeerId))) {
       return destPeerId
     }
     const route = routes[destPeerId]
     if (
       route &&
-      route.nextHop !== excludePeerId &&
+      !isExcluded(route.nextHop) &&
       isPeerUsable(getDirectPeer(route.nextHop))
     ) {
       return route.nextHop
+    }
+    const usableDirects: string[] = []
+    for (const id of getDirectPeerIds()) {
+      if (!isExcluded(id) && isPeerUsable(getDirectPeer(id))) {
+        usableDirects.push(id)
+      }
+    }
+    if (!usableDirects.length) {
+      return undefined
+    }
+    const adjacency = descriptors.getAdjacency()
+    const maxHops = currentMaxHops()
+    const alt = computeShortestPathRoutes(
+      getSelfId(),
+      adjacency,
+      usableDirects,
+      maxHops,
+      excludePeerIds
+    )[destPeerId]
+    if (alt) {
+      return alt.nextHop
+    }
+    if (excludePeerIds !== undefined) {
+      return computeShortestPathRoutes(
+        getSelfId(),
+        adjacency,
+        usableDirects,
+        maxHops,
+        excludePeerIds,
+        true
+      )[destPeerId]?.nextHop
     }
     return undefined
   }
@@ -464,7 +540,11 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     if (isDirectPeer(origin) || virtualTransports.has(origin)) {
       return true
     }
-    if (capacityRejectedPeers.has(origin)) {
+    if (
+      capacityRejectedPeers.has(origin) ||
+      isPeerBanned(origin) ||
+      isPeerQuarantined(origin)
+    ) {
       return false
     }
     descriptors.addKnownPeer(origin)
@@ -523,7 +603,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     )
 
     for (const peerId of keys(routes)) {
-      if (peerId === selfId) {
+      if (peerId === selfId || isPeerQuarantined(peerId)) {
         continue
       }
       hadRoutePeers.add(peerId)
@@ -710,11 +790,15 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     ensureOriginVirtualPeer,
     recomputeTopologyAndRoutes,
     evictVirtualPeerNow,
+    quarantinePeer,
+    clearQuarantined,
+    isPeerQuarantined,
     purgeConnectionPolicyPeer,
     purgePeerRoutingState,
     refreshPasswordSalt,
     resetForRoomIdChange: () => {
       capacityRejectedPeers.clear()
+      quarantinedPeers.clear()
       localRequiredPeers.clear()
       mediaPinnedPeers.clear()
       hasCompletedInitialBootstrap = false
@@ -726,6 +810,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       unreachableTimers.clear()
       virtualTransports.clear()
       capacityRejectedPeers.clear()
+      quarantinedPeers.clear()
       hadRoutePeers.clear()
       everConfirmedNeighbors.clear()
       discoveredCandidates.clear()

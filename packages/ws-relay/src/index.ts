@@ -11,79 +11,17 @@ import {
   scale,
   setRelayConnectivity,
   toJson,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
   type BaseRoomConfig,
-  type DataPayload,
   type JoinRoom,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
   type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
   type SocketClient,
-  type StateChangeContext,
-  type StateConfig,
-  type StrategyMessage,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  type StrategyMessage
 } from '@trystero-p2p/core'
 import {parseServerMessage, type WsRelayClientMessage} from './protocol'
 
 const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
-  client => client.socket
+  client => client.socket,
+  client => client.close?.()
 )
 const msgHandlers =
   /*@__PURE__*/ createRelayScopedStore<
@@ -121,11 +59,11 @@ const unsubscribe = (topic: string): WsRelayClientMessage<StrategyMessage> => ({
 })
 
 export const joinRoom: JoinRoom<WsRelayRoomConfig> =
-  /*@__PURE__*/ createTopicStrategy({
+  /*@__PURE__*/ createTopicStrategy<SocketClient, WsRelayRoomConfig>({
     init: config =>
       config.relayConfig.urls.map(url => {
-        const client = relayManager.register(url, () =>
-          makeSocket(
+        const client = relayManager.register(url, () => {
+          const created = makeSocket(
             url,
             data => {
               const msg = parseServerMessage(data)
@@ -135,21 +73,22 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> =
               }
 
               msgHandlers
-                .forRelay(client)
+                .forRelay(created)
                 [msg.topic]?.forEach(handler => handler(msg.topic, msg.payload))
             },
             () => {
-              Object.keys(msgHandlers.forKey(url)).forEach(topic =>
-                client.send(toJson(subscribe(topic)))
+              Object.keys(msgHandlers.forRelay(created)).forEach(topic =>
+                created.send(toJson(subscribe(topic)))
               )
-              Object.entries(announcementMessages.forKey(url)).forEach(
-                ([topic, msg]) => client.send(toJson(publish(topic, msg)))
+              Object.entries(announcementMessages.forRelay(created)).forEach(
+                ([topic, msg]) => created.send(toJson(publish(topic, msg)))
               )
             }
           )
-        )
+          return created
+        })
 
-        return client.ready
+        return relayManager.lease(client, client.ready)
       }),
 
     subscribeTopic: (client, topic, onMessage) => {
@@ -202,69 +141,6 @@ export {
   importUserIdentity,
   roles,
   scale,
-  setRelayConnectivity,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  setRelayConnectivity
 }
+export type * from '@trystero-p2p/core/types'

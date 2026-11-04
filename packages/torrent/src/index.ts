@@ -16,83 +16,18 @@ import {
   setRelayConnectivity,
   toJson,
   unrefTimer,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
-  type DataPayload,
   type JoinRoom,
   type JoinRoomConfig,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
   type OfferRecord,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type SocketClient,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  type SocketClient
 } from '@trystero-p2p/core'
 
-const {entries, keys} = Object
-
 const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
-  client => client.socket
+  client => client.socket,
+  client => client.close?.()
 )
-const topicToInfoHash: Record<string, string> = {}
-const infoHashToTopic: Record<string, string> = {}
+const topicToInfoHash = new Map<string, string>()
+const infoHashToTopic = new Map<string, string>()
 type TopicState = {
   announce: () => void | Promise<void>
   announceMs: number
@@ -101,15 +36,14 @@ type TopicState = {
   token: symbol
 }
 
-const handledSignals: Record<string, number> = {}
+const handledSignals = new Map<string, number>()
 const topicStates = /*@__PURE__*/ createRelayScopedStore<TopicState>()
-const roomOutstandingOffers: Record<
+const roomOutstandingOffers = new Map<
   string,
-  Record<string, OfferRecord & {createdAt: number}>
-> = {}
-const roomOfferGenerationPromises: Record<string, Promise<void> | undefined> =
-  {}
-const roomSubscriberCounts: Record<string, number> = {}
+  Map<string, OfferRecord & {createdAt: number}>
+>()
+const roomOfferGenerationPromises = new Map<string, Promise<void>>()
+const roomSubscriberCounts = new Map<string, number>()
 const trackerAction = 'announce'
 const hashLimit = 20
 const offersPerAnnounce = 1
@@ -140,13 +74,14 @@ type TrackerMessage = {
 }
 
 const getInfoHash = async (topic: string): Promise<string> => {
-  if (topicToInfoHash[topic]) {
-    return topicToInfoHash[topic]
+  const existing = topicToInfoHash.get(topic)
+  if (existing) {
+    return existing
   }
 
   const hash = (await hashTopic(topic)).slice(0, hashLimit)
-  topicToInfoHash[topic] = hash
-  infoHashToTopic[hash] = topic
+  topicToInfoHash.set(topic, hash)
+  infoHashToTopic.set(hash, topic)
 
   return hash
 }
@@ -173,12 +108,18 @@ const warn = (url: string, msg: string, didFail = false): void =>
 
 const getRoomOutstandingOffers = (
   rootTopic: string
-): Record<string, OfferRecord & {createdAt: number}> =>
-  (roomOutstandingOffers[rootTopic] ??= {})
+): Map<string, OfferRecord & {createdAt: number}> => {
+  let offers = roomOutstandingOffers.get(rootTopic)
+  if (!offers) {
+    offers = new Map()
+    roomOutstandingOffers.set(rootTopic, offers)
+  }
+  return offers
+}
 
 const deleteRoomOfferBookkeeping = (rootTopic: string): void => {
-  delete roomOutstandingOffers[rootTopic]
-  delete roomOfferGenerationPromises[rootTopic]
+  roomOutstandingOffers.delete(rootTopic)
+  roomOfferGenerationPromises.delete(rootTopic)
 }
 
 const takeOutstandingOffer = (
@@ -186,17 +127,17 @@ const takeOutstandingOffer = (
   offerId: string,
   action: 'claim' | 'reclaim'
 ): OfferRecord | undefined => {
-  const outstandingOffers = roomOutstandingOffers[rootTopic]
-  const offer = outstandingOffers?.[offerId]
+  const outstandingOffers = roomOutstandingOffers.get(rootTopic)
+  const offer = outstandingOffers?.get(offerId)
 
-  if (!offer) {
+  if (!offer || !outstandingOffers) {
     return undefined
   }
 
-  delete outstandingOffers[offerId]
+  outstandingOffers.delete(offerId)
   offer[action]?.()
 
-  if (!keys(outstandingOffers).length && !roomSubscriberCounts[rootTopic]) {
+  if (outstandingOffers.size === 0 && !roomSubscriberCounts.get(rootTopic)) {
     deleteRoomOfferBookkeeping(rootTopic)
   }
 
@@ -204,7 +145,7 @@ const takeOutstandingOffer = (
 }
 
 const reclaimAllOutstandingOffers = (rootTopic: string): void => {
-  keys(getRoomOutstandingOffers(rootTopic)).forEach(offerId =>
+  ;[...getRoomOutstandingOffers(rootTopic).keys()].forEach(offerId =>
     takeOutstandingOffer(rootTopic, offerId, 'reclaim')
   )
   deleteRoomOfferBookkeeping(rootTopic)
@@ -213,79 +154,90 @@ const reclaimAllOutstandingOffers = (rootTopic: string): void => {
 const pruneOutstandingOffers = (rootTopic: string): void => {
   const now = Date.now()
 
-  entries(getRoomOutstandingOffers(rootTopic)).forEach(([offerId, offer]) => {
+  for (const [offerId, offer] of getRoomOutstandingOffers(rootTopic)) {
     if (now - offer.createdAt > offerRetentionMs) {
       takeOutstandingOffer(rootTopic, offerId, 'reclaim')
     }
-  })
+  }
 }
 
 const ensureOutstandingOffers = async (
   rootTopic: string,
   getOffers: (n: number) => Promise<OfferRecord[]>
-): Promise<Record<string, OfferRecord & {createdAt: number}>> => {
-  while (roomOfferGenerationPromises[rootTopic]) {
-    await roomOfferGenerationPromises[rootTopic]
+): Promise<Map<string, OfferRecord & {createdAt: number}>> => {
+  while (roomOfferGenerationPromises.get(rootTopic)) {
+    await roomOfferGenerationPromises.get(rootTopic)
   }
 
   const nextPromise = (async () => {
     pruneOutstandingOffers(rootTopic)
 
     const outstandingOffers = getRoomOutstandingOffers(rootTopic)
-    const outstandingCount = keys(outstandingOffers).length
-    const missingOffers = Math.max(0, offersPerAnnounce - outstandingCount)
+    const missingOffers = Math.max(
+      0,
+      offersPerAnnounce - outstandingOffers.size
+    )
 
     if (missingOffers > 0) {
       ;(await getOffers(missingOffers)).forEach(peerAndOffer => {
-        outstandingOffers[peerAndOffer.offerId] = {
+        outstandingOffers.set(peerAndOffer.offerId, {
           ...peerAndOffer,
           createdAt: Date.now()
-        }
+        })
       })
     }
   })().finally(() => {
-    if (roomOfferGenerationPromises[rootTopic] === nextPromise) {
-      delete roomOfferGenerationPromises[rootTopic]
+    if (roomOfferGenerationPromises.get(rootTopic) === nextPromise) {
+      roomOfferGenerationPromises.delete(rootTopic)
     }
   })
 
-  roomOfferGenerationPromises[rootTopic] = nextPromise
+  roomOfferGenerationPromises.set(rootTopic, nextPromise)
   await nextPromise
 
   return getRoomOutstandingOffers(rootTopic)
 }
 
 export const joinRoom: JoinRoom<TorrentRoomConfig> =
-  /*@__PURE__*/ createStrategy({
+  /*@__PURE__*/ createStrategy<SocketClient, TorrentRoomConfig>({
     defaultConfig: {trickleIce: false},
     init: config =>
       getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
-        const client = relayManager.register(rawUrl, () =>
-          makeSocket(
+        const client = relayManager.register(rawUrl, () => {
+          const created = makeSocket(
             rawUrl,
             rawData => {
-              const data = fromJson<TrackerMessage>(rawData)
+              const parsed = fromJson<unknown>(rawData)
+              if (
+                !parsed ||
+                typeof parsed !== 'object' ||
+                Array.isArray(parsed)
+              ) {
+                return
+              }
+              const data = parsed as TrackerMessage
               const errMsg = data['failure reason']
               const warnMsg = data['warning message']
               const {interval} = data
-              const topic = data.info_hash
-                ? infoHashToTopic[data.info_hash]
-                : undefined
+              const topic =
+                typeof data.info_hash === 'string'
+                  ? infoHashToTopic.get(data.info_hash)
+                  : undefined
 
               if (errMsg) {
                 if (config.relayConfig?.warnOnRelayFailure !== false) {
-                  warn(client.url, errMsg, true)
+                  warn(created.url, errMsg, true)
                 }
 
                 return
               }
 
               if (warnMsg && config.relayConfig?.warnOnRelayFailure !== false) {
-                warn(client.url, warnMsg)
+                warn(created.url, warnMsg)
               }
 
               const state = topic
-                ? topicStates.forKey(rawUrl)[topic]
+                ? topicStates.forRelay(created)[topic]
                 : undefined
 
               if (interval && state) {
@@ -303,7 +255,7 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> =
                 const signalType = data.offer ? 'offer' : 'answer'
                 const signalKey = `${topic}:${signalType}:${data.offer_id}:${data.peer_id ?? ''}`
                 const nowMs = Date.now()
-                const lastHandledMs = handledSignals[signalKey]
+                const lastHandledMs = handledSignals.get(signalKey)
 
                 if (
                   typeof lastHandledMs === 'number' &&
@@ -312,25 +264,26 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> =
                   return
                 }
 
-                handledSignals[signalKey] = nowMs
+                handledSignals.set(signalKey, nowMs)
 
-                entries(handledSignals).forEach(([key, handledAtMs]) => {
+                for (const [key, handledAtMs] of handledSignals) {
                   if (nowMs - handledAtMs > signalDedupeWindowMs * 6) {
-                    delete handledSignals[key]
+                    handledSignals.delete(key)
                   }
-                })
+                }
 
                 state?.handler(data)
               }
             },
             () =>
-              Object.values(topicStates.forKey(rawUrl)).forEach(
+              Object.values(topicStates.forRelay(created)).forEach(
                 state => void state.announce()
               )
           )
-        )
+          return created
+        })
 
-        return client.ready
+        return relayManager.lease(client, client.ready)
       }),
 
     subscribe: (client, rootTopic, _, onMessage, getOffers, context) => {
@@ -338,8 +291,10 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> =
       const subscriptionToken = Symbol(rootTopic)
       const isPassive = Boolean(context?.config.passive)
 
-      roomSubscriberCounts[rootTopic] =
-        (roomSubscriberCounts[rootTopic] ?? 0) + 1
+      roomSubscriberCounts.set(
+        rootTopic,
+        (roomSubscriberCounts.get(rootTopic) ?? 0) + 1
+      )
 
       let passiveAnnounceTimeout: ReturnType<typeof setTimeout> | undefined
       const peerId = context?.peerId ?? ''
@@ -358,10 +313,7 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> =
             return
           }
 
-          let outstandingOffers: Record<
-            string,
-            OfferRecord & {createdAt: number}
-          >
+          let outstandingOffers: Map<string, OfferRecord & {createdAt: number}>
 
           try {
             outstandingOffers = await ensureOutstandingOffers(
@@ -380,10 +332,12 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> =
             return
           }
 
-          const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
-            offer_id: id,
-            offer: {type: 'offer', sdp: offer}
-          }))
+          const offers = [...outstandingOffers.entries()].map(
+            ([id, {offer}]) => ({
+              offer_id: id,
+              offer: {type: 'offer', sdp: offer}
+            })
+          )
 
           void send(client, rootTopic, peerId, {
             numwant: requestedPeers,
@@ -459,18 +413,19 @@ export const joinRoom: JoinRoom<TorrentRoomConfig> =
 
       return () => {
         clearTimeout(passiveAnnounceTimeout)
-        roomSubscriberCounts[rootTopic] = Math.max(
+        const nextCount = Math.max(
           0,
-          (roomSubscriberCounts[rootTopic] ?? 1) - 1
+          (roomSubscriberCounts.get(rootTopic) ?? 1) - 1
         )
-
-        if (!roomSubscriberCounts[rootTopic]) {
-          delete roomSubscriberCounts[rootTopic]
+        if (nextCount > 0) {
+          roomSubscriberCounts.set(rootTopic, nextCount)
+        } else {
+          roomSubscriberCounts.delete(rootTopic)
           reclaimAllOutstandingOffers(rootTopic)
-          const hash = topicToInfoHash[rootTopic]
+          const hash = topicToInfoHash.get(rootTopic)
           if (hash !== undefined) {
-            delete topicToInfoHash[rootTopic]
-            delete infoHashToTopic[hash]
+            topicToInfoHash.delete(rootTopic)
+            infoHashToTopic.delete(hash)
           }
         }
 
@@ -499,73 +454,9 @@ export {
   importUserIdentity,
   roles,
   scale,
-  setRelayConnectivity,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
-  type DataPayload,
-  type JoinRoomConfig,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  setRelayConnectivity
 }
+export type * from '@trystero-p2p/core/types'
 
 export const defaultRelayUrls: string[] = [
   'wss://open.ftorrent.com',

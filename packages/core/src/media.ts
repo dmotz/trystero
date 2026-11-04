@@ -1,9 +1,12 @@
 import {maxQueuedDataFrames} from './data-limits'
-import type {MediaIdentityCache, TargetPeers} from './internal-types'
+import type {
+  MediaIdentityCache,
+  PeerHandle,
+  TargetPeers
+} from './internal-types'
 import type {
   AddMediaOptions,
   JsonValue,
-  PeerHandle,
   PeerMediaContext,
   ReplayListenerOptions,
   SendOptions,

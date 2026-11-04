@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import type {Room, ScalePluginApi} from '../../packages/core/src/index.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import {ecdsaSign} from '../../packages/core/src/crypto.ts'
+import {jwkToCompactPub} from '../../packages/core/src/identity.ts'
 import {
   buildOverlaySignedBytes,
   canonicalBroadcastHeader,
@@ -14,10 +15,11 @@ import {
   packOverlayControl,
   scale
 } from '../../packages/core/src/scale/index.ts'
-import createRoom, {
+import {encodeBytes, toBase64Url} from '../../packages/core/src/utils.ts'
+import {
+  createTrackedRoom as createRoom,
   getRoomSignalingBridge
-} from '../../packages/core/src/room.ts'
-import {encodeBytes, toBase64} from '../../packages/core/src/utils.ts'
+} from './overlay-harness.ts'
 import {
   encodeInternalAction,
   getTestEndpointByPeerId,
@@ -194,19 +196,19 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
       peerId: malloryPid,
       seq: 50,
       neighbors: [bobPid, ...malloryFakeNeighbors],
-      signPubKey: malloryId.signPubJwk,
-      encPubKey: malloryId.encPubJwk,
+      signPubKey: malloryId.signPubKey,
+      encPubKey: malloryId.encPubKey,
       sig: ''
     }
     const malloryDescCanonical = encodeBytes(
       descriptorCanonicalPayload(malloryDesc, appId, roomId)
     )
-    malloryDesc.sig = Buffer.from(
+    malloryDesc.sig = toBase64Url(
       await ecdsaSign(
         malloryId.signPrivateKey,
         malloryDescCanonical as BufferSource
       )
-    ).toString('base64')
+    )
 
     const gossipWithFreshDescAndDown = new Uint8Array([
       overlayFrameVersion,
@@ -250,9 +252,9 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
       neighbors: Array.from({length: maxDescriptorNeighbors + 1}, (_, i) =>
         testPeerId(`excess-neighbor-${i}`)
       ),
-      signPubKey: malloryId.signPubJwk,
-      encPubKey: malloryId.encPubJwk,
-      sig: 'AA=='
+      signPubKey: malloryId.signPubKey,
+      encPubKey: malloryId.encPubKey,
+      sig: 'AAAA'
     }
     const sigFailBeforeExcess = bob.getSnapshot().stats.signatureFailures
     bob.handleOverlayFrame(
@@ -279,9 +281,10 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
         o: unknownOriginPid,
         d: bobPid,
         q: 1,
+        t: Date.now(),
         m: `${unknownOriginPid}:msg-1`,
-        iv: Buffer.from(new Uint8Array(12)).toString('base64'),
-        s: Buffer.from(new Uint8Array(64)).toString('base64')
+        iv: toBase64Url(new Uint8Array(12)),
+        s: toBase64Url(new Uint8Array(64))
       })
     )
     const fakeUnicastFrame = new Uint8Array(
@@ -307,10 +310,10 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
       peerId: unknownOriginPid,
       seq: 1,
       neighbors: [alicePid],
-      signPubKey: unknownOriginEp.signPubJwk,
+      signPubKey: jwkToCompactPub(unknownOriginEp.signPubJwk),
       sig: ''
     }
-    unknownOriginDesc.sig = toBase64(
+    unknownOriginDesc.sig = toBase64Url(
       await unknownOriginEp.sign(
         encodeBytes(
           descriptorCanonicalPayload(unknownOriginDesc, appId, roomId)
@@ -376,7 +379,7 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     // 5. Capture a valid broadcast and stale leave from Alice; after Alice leaves, replaying her broadcast must NOT resurrect her as a virtual peer
     const aliceId = await alice.getLocalCryptoIdentity()
     const staleLeaveSeq = 1
-    const staleLeaveSig = Buffer.from(
+    const staleLeaveSig = toBase64Url(
       await ecdsaSign(
         aliceId.signPrivateKey,
         buildOverlaySignedBytes(
@@ -384,7 +387,7 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
           new Uint8Array()
         ) as BufferSource
       )
-    ).toString('base64')
+    )
     const staleLeaveFrame = new Uint8Array([
       overlayFrameVersion,
       1,
@@ -403,19 +406,19 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
       peerId: alicePid,
       seq: 100,
       neighbors: [relayPid],
-      signPubKey: aliceId.signPubJwk,
-      encPubKey: aliceId.encPubJwk,
+      signPubKey: aliceId.signPubKey,
+      encPubKey: aliceId.encPubKey,
       sig: ''
     }
     const aliceNewDescCanonical = encodeBytes(
       descriptorCanonicalPayload(aliceNewDesc, appId, roomId)
     )
-    aliceNewDesc.sig = Buffer.from(
+    aliceNewDesc.sig = toBase64Url(
       await ecdsaSign(
         aliceId.signPrivateKey,
         aliceNewDescCanonical as BufferSource
       )
-    ).toString('base64')
+    )
     bob.handleOverlayFrame(
       relayPid,
       new Uint8Array([
@@ -437,7 +440,7 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     )
 
     // Now Alice leaves with a fresh seq = 101; replaying a valid signed broadcast from Alice with an unseen msgId must NOT resurrect Alice
-    const freshLeaveSig = Buffer.from(
+    const freshLeaveSig = toBase64Url(
       await ecdsaSign(
         aliceId.signPrivateKey,
         buildOverlaySignedBytes(
@@ -445,7 +448,7 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
           new Uint8Array()
         ) as BufferSource
       )
-    ).toString('base64')
+    )
     bob.handleOverlayFrame(
       relayPid,
       new Uint8Array([
@@ -470,7 +473,7 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
     const ghostMsgId = `${alicePid}:ghost-broadcast-after-leave`
     const ghostTs = Date.now()
     const ghostPayload = new Uint8Array([1, 2, 3, 4])
-    const ghostSig = Buffer.from(
+    const ghostSig = toBase64Url(
       await ecdsaSign(
         aliceId.signPrivateKey,
         buildOverlaySignedBytes(
@@ -485,7 +488,7 @@ void test('Overlay & room hardening: fake neighbor roster inflation, unknown-ori
           ghostPayload
         ) as BufferSource
       )
-    ).toString('base64')
+    )
     const ghostHeaderBytes = encodeBytes(
       JSON.stringify({
         o: alicePid,

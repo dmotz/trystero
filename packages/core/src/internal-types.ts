@@ -1,29 +1,108 @@
 import type {EndpointIdentity} from './identity'
+import type {Hlc} from './signed-record'
 import type {PeerDataTransport} from './peer-transport'
 import type {
   ActionProgressHandler,
-  BaseRoomConfig,
+  AnyRoomPlugin,
   DataPayload,
   JoinRoomConfig,
   JsonValue,
   ListenerOptions,
-  MaybePromise,
-  PeerHandle,
   PeerTarget,
   ReplayListenerOptions,
   RoleCertificate,
+  RolesPluginApi,
   Room,
   RoomError,
+  RoomPlugin,
+  RoomWithPlugins,
+  ScalePluginApi,
   SelfInfo,
   SendOptions,
-  Signal,
   TopologyRoute,
   TopologySnapshot,
+  TurnServerConfig,
   Unsubscribe,
-  UserIdentity
+  UserIdentity,
+  UserIdentityConfig
 } from './types'
 
 export type {PeerDataTransport}
+
+export type MaybePromise<T> = T | Promise<T>
+
+export type BaseRelayConfig = {
+  warnOnRelayFailure?: boolean
+}
+
+export type UserIdentityPersistence = 'none' | 'local'
+
+export type ResolvedIdentityPersistence = UserIdentityPersistence | 'custom'
+
+export interface BaseRoomConfig {
+  appId: string
+  identity?: UserIdentityConfig
+  maxUsers?: number
+  use?: readonly AnyRoomPlugin[]
+  maxReceiveBytes?: number
+  password?: string
+  passive?: boolean
+  relayConfig?: BaseRelayConfig
+  trickleIce?: boolean
+  rtcConfig?: RTCConfiguration
+  rtcPolyfill?: typeof RTCPeerConnection
+  turnConfig?: TurnServerConfig[]
+}
+
+export type SessionSignal = {
+  type: RTCSdpType
+  sdp: string
+}
+
+export type CandidateSignal = {
+  type: 'candidate'
+  sdp: string
+}
+
+export type Signal = SessionSignal | CandidateSignal
+
+export type PeerHandlers = {
+  data?: (data: ArrayBuffer) => void
+  connect?: () => void
+  close?: () => void
+  stream?: (stream: MediaStream) => void
+  signal?: (signal: Signal) => void
+  error?: (err: Error) => void
+}
+
+export type PeerHandle = {
+  connection: RTCPeerConnection
+  channel: RTCDataChannel | null
+  isDead: boolean
+  getOffer: () => Promise<Signal | void>
+  signal: (sdp: Signal) => Promise<Signal | void>
+  sendData: (data: Uint8Array) => void
+  destroy: () => void
+  setHandlers: (newHandlers: PeerHandlers) => void
+  addStream: (stream: MediaStream) => void
+  removeStream: (stream: MediaStream) => void
+  addTrack: (track: MediaStreamTrack, stream: MediaStream) => void
+  removeTrack: (track: MediaStreamTrack, stream?: MediaStream) => void
+  replaceTrack: (
+    oldTrack: MediaStreamTrack,
+    newTrack: MediaStreamTrack
+  ) => Promise<void> | undefined
+}
+
+export type InferPluginApi<TPlugin> =
+  TPlugin extends RoomPlugin<string, infer TApi> ? TApi : Record<never, never>
+
+export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = <
+  const TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
+>(
+  config: TConfig & {use?: TPlugins},
+  roomId: string
+) => RoomWithPlugins<TPlugins>
 
 export type TargetPeers = PeerTarget | undefined
 
@@ -81,7 +160,7 @@ export type RoleRevocationRecord = {
   role?: string
   seq: number
   ts: number
-  signerPubKey: JsonWebKey
+  signerPubKey: string
   sig: string
 }
 
@@ -95,7 +174,7 @@ export type PeerModerationRecord = {
   reason?: string
   seq: number
   ts: number
-  signerPubKey: JsonWebKey
+  signerPubKey: string
   sig: string
 }
 
@@ -104,7 +183,7 @@ type AuthoritativeStateRecordBase = {
   appId: string
   roomId: string
   ns: string
-  hlc: number
+  hlc: Hlc
   peerId: string
   userId: string
   pub: string
@@ -130,6 +209,7 @@ export type AuthoritativeStateRecord<T = JsonValue> =
   | AuthoritativeStateTombstoneRecord
 
 export type KernelRolesProvider = {
+  isAuthorityResolved: () => boolean
   getEffectiveRoomId: () => string
   getPeerRoles: (peerOrUserId?: string) => string[]
   isPeerBanned: (peerOrUserId: string) => boolean
@@ -185,9 +265,10 @@ export type KernelScaleProvider = {
   ) => boolean
   getTargetNeighbors: () => Set<string>
   setOnTargetsChanged: (cb: (targetPeerIds: string[]) => void) => void
-  announceLeave: () => void
+  announceLeave: () => Promise<void>
   destroy: () => void
-  setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
+  getPeerUserId: (peerId: string) => string | undefined
+  setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey | string) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
   markPeerBanned: (peerId: string) => void
   unmarkPeerBanned: (peerId: string) => void
@@ -195,13 +276,34 @@ export type KernelScaleProvider = {
   registerActionAuthority: (actionType: string, roles: string[]) => void
 }
 
+export type RolesPluginSlot = {
+  kind: 'roles'
+  selfAsAdmin: boolean
+  setup: (
+    context: InternalRoomContext,
+    effectiveRoomIdP?: Promise<string>
+  ) => {
+    provider: KernelRolesProvider
+    api: RolesPluginApi
+  }
+}
+
+export type ScalePluginSlot = {
+  kind: 'scale'
+  setup: (context: InternalRoomContext) => {
+    provider: KernelScaleProvider
+    api: ScalePluginApi
+  }
+}
+
+export type InternalPluginSlot = RolesPluginSlot | ScalePluginSlot
+
 export type InternalRoomContext = {
   readonly selfId: string
   readonly appId: string
   readonly initialRoomId: string
   readonly password: string
   readonly maxUsers?: number | undefined
-  readonly effectiveRoomIdP?: Promise<string> | undefined
   getRoomId: () => string
   setEffectiveRoomId: (roomId: string) => void
   getLocalEndpointIdentity: () => Promise<EndpointIdentity>
@@ -209,9 +311,7 @@ export type InternalRoomContext = {
   getPeerUserId: (peerId: string) => string
   getKnownPeerUserId: (peerId: string) => string | undefined
   getUserPeerIds: (userId: string) => string[]
-  getPeerPublicKey: (peerId: string) => JsonWebKey | undefined
   setPeerUserId: (peerId: string, userId: string) => void
-  setPeerPublicKey: (peerId: string, pubKey: JsonWebKey) => void
   getActivePeerIds: () => string[]
   getDirectActivePeerIds: () => string[]
   getAllPeerIds: () => string[]
@@ -236,13 +336,12 @@ export type InternalRoomContext = {
     options?: Partial<ActionOptions>
   ) => InternalAction<T>
   deliverRawData: (originPeerId: string, data: ArrayBuffer) => void
-  registerRolesProvider: (provider: KernelRolesProvider) => void
-  registerScaleProvider: (provider: KernelScaleProvider) => void
   getRolesProvider: () => KernelRolesProvider | null
   getScaleProvider: () => KernelScaleProvider | null
   activateVirtualPeer: (peerId: string, transport: PeerDataTransport) => boolean
   deactivateVirtualPeer: (peerId: string, reason?: Error) => void
   purgeBannedUserState: (userId: string) => void
+  onRolesChanged: () => void
   readonly onPeerActivated: (
     listener: (peerId: string, peer: PeerHandle) => unknown,
     options?: ReplayListenerOptions
@@ -415,7 +514,7 @@ export type SignalContext = {
   appId: string
   getRoomId: () => string
   config: BaseRoomConfig
-  peerStates: Record<string, PeerState>
+  peerStates: Map<string, PeerState>
   getRootTopicPlaintext: () => string
   rootTopicP: Promise<string>
   selfTopicP: Promise<string>

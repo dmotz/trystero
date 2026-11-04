@@ -278,6 +278,17 @@ test('Trystero: ws-relay: self-certifying roles, makeUserState flush before onUs
         room.onError((err: {code: string; reason?: string}) => {
           window['memberErrors'].push({code: err.code, reason: err.reason})
         })
+        window['memberRoleChanges'] = []
+        room.onRoleChange(
+          (ev: {
+            userId: string
+            roles: readonly string[]
+            previousRoles: readonly string[]
+            local: boolean
+          }) => {
+            window['memberRoleChanges'].push(ev)
+          }
+        )
         window['memberJoinSnapshot'] = {}
         room.onUserJoin(({userId}: {userId: string}) => {
           window['memberJoinSnapshot'][userId] = profile.get(userId)
@@ -365,6 +376,17 @@ test('Trystero: ws-relay: self-certifying roles, makeUserState flush before onUs
         timeout: 10_000
       })
       .toContain('mod')
+
+    await expect
+      .poll(() => memberPage.evaluate(() => window['memberRoleChanges']), {
+        timeout: 10_000
+      })
+      .toContainEqual({
+        userId: memberInfo.userId,
+        roles: ['mod'],
+        previousRoles: [],
+        local: false
+      })
 
     await memberPage.evaluate(async () => {
       await window['memberModAction'].send({alert: 'all-clear'})

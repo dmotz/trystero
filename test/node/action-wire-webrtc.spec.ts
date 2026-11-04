@@ -3,6 +3,7 @@ import test from './test.ts'
 import {waitFor} from './peer-harness.ts'
 import {RTCPeerConnection} from 'werift'
 import {createActionManager} from '../../packages/core/src/actions.ts'
+import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
 
 void test(
   'action proposals and binary transfers work over a local WebRTC data channel',
@@ -40,7 +41,7 @@ void test(
         left.clearPeer(id, error)
         void sender.close()
       },
-      getPeer: () => toReceiver as never,
+      getTransport: () => createDirectPeerTransport(toReceiver as never),
       getPeerIds: () => ['receiver'],
       canReceiveFromPeer: () => true
     })
@@ -49,7 +50,7 @@ void test(
         right.clearPeer(id, error)
         void receiver.close()
       },
-      getPeer: () => toSender as never,
+      getTransport: () => createDirectPeerTransport(toSender as never),
       getPeerIds: () => ['sender'],
       canReceiveFromPeer: () => true
     })

@@ -8,7 +8,10 @@ import {
   validatePeerModerationShape,
   validateRoleRevocationShape
 } from '../../packages/core/src/authority.ts'
-import {createUserIdentity} from '../../packages/core/src/identity.ts'
+import {
+  createUserIdentity,
+  jwkToCompactPub
+} from '../../packages/core/src/identity.ts'
 import type {
   PeerModerationRecord,
   RoleRevocationRecord
@@ -16,9 +19,7 @@ import type {
 import {scale} from '../../packages/core/src/scale/index.ts'
 import {
   signRoleCertInternal,
-  signWith,
-  toCleanJwk,
-  verifyRoleCertificate
+  signWith
 } from '../../packages/core/src/signed-record.ts'
 import {
   createStateManager,
@@ -49,7 +50,7 @@ const signRevocation = async (
     ...(params.role !== undefined ? {role: params.role} : {}),
     seq: params.seq,
     ts: params.ts ?? Date.now(),
-    signerPubKey: toCleanJwk(signer.signPubJwk)
+    signerPubKey: jwkToCompactPub(signer.signPubJwk)
   }
   return {
     ...unsigned,
@@ -79,7 +80,7 @@ const signModeration = async (
     ...(params.reason !== undefined ? {reason: params.reason} : {}),
     seq: params.seq,
     ts: params.ts ?? Date.now(),
-    signerPubKey: toCleanJwk(signer.signPubJwk)
+    signerPubKey: jwkToCompactPub(signer.signPubJwk)
   }
   return {
     ...unsigned,
@@ -220,17 +221,6 @@ void test('1-tier root-admin authority: non-root role holders cannot grantRole, 
       scope.roomId,
       ['admin', 'moderator'],
       Date.now() + 1_000
-    )
-    assert.equal(
-      (
-        await verifyRoleCertificate(
-          forgedAdminForNonRoot,
-          scope.appId,
-          scope.roomId,
-          new Set([root.userId])
-        )
-      ).valid,
-      false
     )
     assert.equal(
       await authority.verifyAndApplyCert(forgedAdminForNonRoot),
@@ -462,7 +452,7 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
         k: 's',
         ...scope,
         ns: 'cfg',
-        hlc: 100,
+        hlc: [100, 0],
         peerId: moderator.peerId,
         userId: moderator.userId,
         pub: 'bad',
@@ -473,17 +463,10 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
       false
     )
     assert.equal(
-      (
-        await verifyRoleCertificate(
-          {
-            ...speakerCert,
-            roles: []
-          },
-          scope.appId,
-          scope.roomId,
-          new Set([root.userId])
-        )
-      ).valid,
+      await authority.verifyAndApplyCert({
+        ...speakerCert,
+        roles: []
+      }),
       false
     )
 
@@ -495,7 +478,8 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
       scope.appId,
       scope.roomId,
       ['moderator'],
-      Date.now() + 5_000
+      Date.now() + 5_000,
+      2
     )
     const olderCert = await signRoleCertInternal(
       root.sign,
@@ -504,7 +488,8 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
       scope.appId,
       scope.roomId,
       ['helper'],
-      Date.now() - 5_000
+      Date.now() - 5_000,
+      1
     )
     assert.equal(await authority.verifyAndApplyCert(newerCert), true)
     assert.equal(
@@ -520,7 +505,7 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
       {
         ...scope,
         ns: 'cfg',
-        hlc: newerCert.iat + 10,
+        hlc: [newerCert.iat + 10, 0],
         peerId: moderator.peerId,
         userId: moderator.userId,
         val: {step: 1},
@@ -530,7 +515,7 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
     assert(!stateRec1.del)
     const infStateRec = {
       ...stateRec1,
-      hlc: Number.POSITIVE_INFINITY
+      hlc: [Number.POSITIVE_INFINITY, 0] as const
     }
     assert.equal(
       await stateManager.verifyAndApplyStateRecord(infStateRec),
@@ -545,7 +530,7 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
       {
         ...scope,
         ns: 'cfg',
-        hlc: newerCert.iat - 1,
+        hlc: [newerCert.iat - 1, 0],
         peerId: moderator.peerId,
         userId: moderator.userId,
         val: {step: 2},
@@ -560,7 +545,7 @@ void test('inline action cert spoofing, malformed records, stale cert deduplicat
     assert.equal(
       await stateManager.verifyAndApplyStateRecord({
         ...stateRec1,
-        hlc: stateRec1.hlc + 1,
+        hlc: [stateRec1.hlc[0] + 1, 0],
         val: {step: 2}
       }),
       false,

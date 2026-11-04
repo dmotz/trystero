@@ -561,12 +561,13 @@ void test(
       await wait(8_000)
       await firstRoom.leave()
 
-      const socket = MockWebSocket.sockets[0]!
-      const previousCount = announcementCount(socket)
       const retryRoom = joinTestRoom(url)
 
       try {
-        await waitFor(() => announcementCount(socket) > previousCount)
+        await waitFor(() => {
+          const retrySocket = MockWebSocket.sockets.at(-1)
+          return Boolean(retrySocket && announcementCount(retrySocket) > 0)
+        })
       } finally {
         await retryRoom.leave().catch(() => {})
       }

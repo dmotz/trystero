@@ -8,8 +8,45 @@ import {
 
 export type {WsRelayClientMessage, WsRelayServerMessage}
 
-export type WsRelayServerOptions = WebSocket.ServerOptions & {
+export type WsAddressInfo = {
+  address: string
+  family: string
+  port: number
+}
+
+export interface WsClientLike {
+  readonly readyState: number
+  send: (data: string) => void
+  close: (code?: number, data?: string) => void
+  terminate: () => void
+}
+
+export interface WsServerLike {
+  readonly clients: ReadonlySet<WsClientLike>
+  address: () => WsAddressInfo | string | null
+  close: (cb?: (err?: Error) => void) => void
+  handleUpgrade: (
+    request: object,
+    socket: object,
+    head: Uint8Array,
+    cb: (client: WsClientLike, request: object) => void
+  ) => void
+  on: (event: string, listener: (...args: unknown[]) => void) => this
+  once: (event: string, listener: (...args: unknown[]) => void) => this
+  off: (event: string, listener: (...args: unknown[]) => void) => this
+}
+
+export type WsRelayServerOptions = {
+  host?: string
   port?: number
+  backlog?: number
+  server?: object
+  noServer?: boolean
+  path?: string
+  clientTracking?: boolean
+  perMessageDeflate?: boolean | Record<string, unknown>
+  maxPayload?: number
+  skipUTF8Validation?: boolean
   onError?: (err: Error) => void
   maxTopicLength?: number
   maxSubscriptionsPerSocket?: number
@@ -19,9 +56,9 @@ export type WsRelayServerOptions = WebSocket.ServerOptions & {
 }
 
 export type WsRelayServer = {
-  wss: WebSocketServer
+  wss: WsServerLike
   ready: Promise<void>
-  address: () => WebSocket.AddressInfo | string | null
+  address: () => WsAddressInfo | string | null
   close: () => Promise<void>
   publish: (topic: string, payload: JsonValue) => void
   getSubscriberCount: (topic?: string) => number
@@ -66,6 +103,12 @@ export const createWsRelayServer = (
     maxBurstMessages = Math.max(256, maxMessagesPerSecond * 2),
     ...wsOptions
   } = options
+  if (!(maxMessagesPerSecond > 0)) {
+    throw new RangeError('maxMessagesPerSecond must be greater than 0')
+  }
+  if (!(maxBurstMessages > 0)) {
+    throw new RangeError('maxBurstMessages must be greater than 0')
+  }
   let resolveReady = (): void => {}
   let rejectReady = (_err: Error): void => {}
   let didSettleReady = false
@@ -91,9 +134,12 @@ export const createWsRelayServer = (
   }
   const wss = new WebSocketServer(
     {
-      port: wsOptions.server ? undefined : (wsOptions.port ?? defaultPort),
+      port:
+        wsOptions.server || wsOptions.noServer
+          ? undefined
+          : (wsOptions.port ?? defaultPort),
       maxPayload: 256 * 1024,
-      ...wsOptions
+      ...(wsOptions as WebSocket.ServerOptions)
     },
     resolveReadyOnce
   )
@@ -107,8 +153,8 @@ export const createWsRelayServer = (
   }
 
   const consumeRateToken = (socket: WebSocket): boolean => {
-    if (maxMessagesPerSecond <= 0 || maxBurstMessages <= 0) {
-      return false
+    if (maxMessagesPerSecond === Infinity || maxBurstMessages === Infinity) {
+      return true
     }
     const now = Date.now()
     let bucket = socketRateBuckets.get(socket)
@@ -245,7 +291,7 @@ export const createWsRelayServer = (
   wss.on('error', reportError)
 
   return {
-    wss,
+    wss: wss as unknown as WsServerLike,
     ready,
     address: () => wss.address(),
     close: () =>

@@ -13,7 +13,11 @@ import {
   packOverlayControl,
   unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
-import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  decodeBytes,
+  encodeBytes,
+  toBase64Url
+} from '../../packages/core/src/utils.ts'
 import {createOverlayCluster} from './overlay-harness.ts'
 import {
   getTestEndpointByPeerId,
@@ -476,12 +480,12 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
         appId,
         roomId
       )
-      const sig = Buffer.from(
+      const sig = toBase64Url(
         await ecdsaSign(
           carolId.signPrivateKey,
           buildOverlaySignedBytes(canonical, payload) as BufferSource
         )
-      ).toString('base64')
+      )
       const pkt = packOverlayBinary(
         overlayBroadcastKind,
         4,
@@ -523,12 +527,12 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
         appId,
         roomId
       )
-      const sig = Buffer.from(
+      const sig = toBase64Url(
         await ecdsaSign(
           aliceId.signPrivateKey,
           buildOverlaySignedBytes(canonical, payload) as BufferSource
         )
-      ).toString('base64')
+      )
       return packOverlayBinary(
         overlayBroadcastKind,
         4,
@@ -566,25 +570,25 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
       onDeliverData: (_from, data) =>
         otherRoomDelivered.push(decodeBytes(new Uint8Array(data)))
     })
-    otherRoomBob.setPeerSignPublicKey(alicePid, aliceId.signPubJwk)
+    otherRoomBob.setPeerSignPublicKey(alicePid, aliceId.signPubKey)
 
     // 5a. Replay Alice's valid descriptor from room-A into room-B
     const aliceDescRoomA = {
       peerId: alicePid,
       seq: 20,
       neighbors: [bobPid],
-      signPubKey: aliceId.signPubJwk,
-      encPubKey: aliceId.encPubJwk,
+      signPubKey: aliceId.signPubKey,
+      encPubKey: aliceId.encPubKey,
       sig: ''
     }
-    aliceDescRoomA.sig = Buffer.from(
+    aliceDescRoomA.sig = toBase64Url(
       await ecdsaSign(
         aliceId.signPrivateKey,
         encodeBytes(
           descriptorCanonicalPayload(aliceDescRoomA, appId, roomId)
         ) as BufferSource
       )
-    ).toString('base64')
+    )
 
     let failCount = otherRoomBob.getSnapshot().stats.signatureFailures
     otherRoomBob.handleOverlayFrame(
@@ -633,7 +637,7 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
     )
 
     // 5d. Replay Alice's valid leave from room-A into room-B
-    const leaveSigRoomA = Buffer.from(
+    const leaveSigRoomA = toBase64Url(
       await ecdsaSign(
         aliceId.signPrivateKey,
         buildOverlaySignedBytes(
@@ -641,7 +645,7 @@ void test('Solution (b): per-origin monotonic sequence counter with non-flushabl
           new Uint8Array()
         ) as BufferSource
       )
-    ).toString('base64')
+    )
     failCount = otherRoomBob.getSnapshot().stats.signatureFailures
     otherRoomBob.handleOverlayFrame(
       alicePid,

@@ -6,18 +6,20 @@ import {
   moderationCanonicalPayload,
   revocationCanonicalPayload
 } from '../../packages/core/src/authority.ts'
-import {createUserIdentity} from '../../packages/core/src/identity.ts'
+import {
+  createUserIdentity,
+  jwkToCompactPub
+} from '../../packages/core/src/identity.ts'
 import type {
   PeerModerationRecord,
   RoleRevocationRecord
 } from '../../packages/core/src/internal-types.ts'
+import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
 import {
   defaultMaxClockSkewMs,
   maxObservedClockDragMs,
   signRoleCertInternal,
-  signWith,
-  toCleanJwk,
-  verifyRoleCertificate
+  signWith
 } from '../../packages/core/src/signed-record.ts'
 import {
   createStateManager,
@@ -50,7 +52,7 @@ const makeSignedRevocation = async (
     ...(params.role !== undefined ? {role: params.role} : {}),
     seq: params.seq,
     ts: params.ts,
-    signerPubKey: toCleanJwk(signer.signPubJwk)
+    signerPubKey: jwkToCompactPub(signer.signPubJwk)
   }
   return {
     ...unsigned,
@@ -80,7 +82,7 @@ const makeSignedModeration = async (
     ...(params.reason !== undefined ? {reason: params.reason} : {}),
     seq: params.seq,
     ts: params.ts,
-    signerPubKey: toCleanJwk(signer.signPubJwk)
+    signerPubKey: jwkToCompactPub(signer.signPubJwk)
   }
   return {
     ...unsigned,
@@ -184,7 +186,7 @@ void test('clock skew hardening and 1-tier root-admin authority: reject future-d
     const futureState = await signStateRecord(rootB.sign, rootB.signPubJwk, {
       ...scope,
       ns: 'clock-test',
-      hlc: Date.now() + defaultMaxClockSkewMs + 60_000,
+      hlc: [Date.now() + defaultMaxClockSkewMs + 60_000, 0],
       peerId: coRootPeerId,
       userId: rootB.userId,
       val: 'future'
@@ -223,9 +225,30 @@ void test('clock skew hardening and 1-tier root-admin authority: reject future-d
       'player'
     )
     assert.ok(
-      regrantedCert.iat > skewedRevocation.ts,
-      're-granted cert iat must supersede skewed revocation ts'
+      regrantedCert.iat > skewedRevocation.ts &&
+        regrantedCert.seq > skewedRevocation.seq,
+      're-granted cert iat and seq must supersede skewed revocation'
     )
+    assert.deepEqual(authority.getPeerRoles(targetPeerId), ['player'])
+
+    // Even when a revocation is near the max skew ceiling (+59.5s), re-granting succeeds via monotonic seq without exceeding clockSkewMs
+    const ceilingRevocation = await makeSignedRevocation(rootB, {
+      ...scope,
+      targetUserId: target.userId,
+      role: 'player',
+      seq: 10,
+      ts: Date.now() + defaultMaxClockSkewMs - 500
+    })
+    assert.equal(
+      await authority.verifyAndApplyRevocation(ceilingRevocation),
+      true
+    )
+    const ceilingRegrant = await authority.issueRoleCertificate(
+      targetPeerId,
+      'player'
+    )
+    assert.equal(ceilingRegrant.iat, ceilingRevocation.ts)
+    assert.ok(ceilingRegrant.seq > ceilingRevocation.seq)
     assert.deepEqual(authority.getPeerRoles(targetPeerId), ['player'])
 
     // 3. 1-tier authority: non-root role holders ('moderator') cannot sign RoleCertificates
@@ -241,18 +264,10 @@ void test('clock skew hardening and 1-tier root-admin authority: reject future-d
     )
     assert.equal(validateRoleCertificateShape(nonRootCert), true)
     assert.equal(
-      (
-        await verifyRoleCertificate(
-          nonRootCert,
-          scope.appId,
-          scope.roomId,
-          new Set([rootA.userId, rootB.userId])
-        )
-      ).valid,
+      await authority.verifyAndApplyCert(nonRootCert),
       false,
-      'verifyRoleCertificate must reject certificates signed by non-root issuers'
+      'authority must reject certificates signed by non-root issuers'
     )
-    assert.equal(await authority.verifyAndApplyCert(nonRootCert), false)
   } finally {
     stateManager.destroy()
   }
@@ -367,7 +382,7 @@ void test('Q5: role-gated makeAction preserves synchronous ordered delivery in m
 
   const rootMgr = createActionManager({
     onPeerError: (_id, err) => syncPeerErrors.push(err),
-    getPeer: () => rootToRecv as never,
+    getTransport: () => createDirectPeerTransport(rootToRecv as never),
     getPeerIds: () => [receiverPeerId],
     canReceiveFromPeer: () => true,
     getLocalActionCert: rootAuth.getLocalActionCert,
@@ -377,7 +392,7 @@ void test('Q5: role-gated makeAction preserves synchronous ordered delivery in m
   })
   const modMgr = createActionManager({
     onPeerError: (_id, err) => syncPeerErrors.push(err),
-    getPeer: () => modToRecv as never,
+    getTransport: () => createDirectPeerTransport(modToRecv as never),
     getPeerIds: () => [receiverPeerId],
     canReceiveFromPeer: () => true,
     getLocalActionCert: modAuth.getLocalActionCert,
@@ -387,7 +402,7 @@ void test('Q5: role-gated makeAction preserves synchronous ordered delivery in m
   })
   const guestMgr = createActionManager({
     onPeerError: (_id, err) => syncPeerErrors.push(err),
-    getPeer: () => guestToRecv as never,
+    getTransport: () => createDirectPeerTransport(guestToRecv as never),
     getPeerIds: () => [receiverPeerId],
     canReceiveFromPeer: () => true,
     getLocalActionCert: guestAuth.getLocalActionCert,
@@ -403,7 +418,7 @@ void test('Q5: role-gated makeAction preserves synchronous ordered delivery in m
   }
   const recvMgr = createActionManager({
     onPeerError: (_id, err) => syncPeerErrors.push(err),
-    getPeer: id => recvPeers[id] as never,
+    getTransport: id => createDirectPeerTransport(recvPeers[id] as never),
     getPeerIds: () => [rootPeerId, modPeerId, guestPeerId],
     canReceiveFromPeer: () => true,
     getLocalActionCert: receiverAuth.getLocalActionCert,
@@ -534,7 +549,7 @@ void test('Q5: role-gated makeAction preserves synchronous ordered delivery in m
   }
   const leftMgr = createActionManager({
     onPeerError: (_id, err) => peerErrors.push(err),
-    getPeer: () => leftPeer as never,
+    getTransport: () => createDirectPeerTransport(leftPeer as never),
     getPeerIds: () => [receiverPeerId],
     canReceiveFromPeer: () => true,
     getLocalActionCert: rootAuth.getLocalActionCert,
@@ -544,7 +559,7 @@ void test('Q5: role-gated makeAction preserves synchronous ordered delivery in m
   })
   const rightMgr = createActionManager({
     onPeerError: (_id, err) => peerErrors.push(err),
-    getPeer: () => rightPeer as never,
+    getTransport: () => createDirectPeerTransport(rightPeer as never),
     getPeerIds: () => [rootPeerId],
     canReceiveFromPeer: () => true,
     getLocalActionCert: receiverAuth.getLocalActionCert,

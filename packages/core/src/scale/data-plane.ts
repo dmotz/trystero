@@ -1,20 +1,18 @@
 import {actionWireVersion, inspectActionWireHeader} from '../action-wire'
 import {derivePairwiseAesKey} from '../crypto'
-import {canonicalizePubJwk, pubJwkToUncompressedBytes} from '../identity'
+import {pubJwkToUncompressedBytes} from '../identity'
+import type {MaybePromise, PeerHandle} from '../internal-types'
 import {
   waitForBufferedAmountLow,
   type PeerDataTransport
 } from '../peer-transport'
+import {toBase64Url} from '../primitives'
 import {isValidSignalPeerId} from '../signal-handler'
 import {defaultMaxClockSkewMs} from '../signed-record'
-import type {
-  MaybePromise,
-  PeerHandle,
-  RoleCertificate,
-  TopologyStats
-} from '../types'
+import type {RoleCertificate, TopologyStats} from '../types'
 import {
   authMetaKey,
+  base64UrlRe,
   createBoundedCache,
   genId,
   isObj,
@@ -22,7 +20,6 @@ import {
   isStr,
   noOp,
   peerDisconnectedErr,
-  toBase64,
   validateRoleCertificateShape
 } from '../utils'
 import {
@@ -32,6 +29,7 @@ import {
   decryptUnicastPayload,
   encryptUnicastPayload,
   getPeerBufferedBytes,
+  isPeerUsable,
   isValidOverlayMsgId,
   overlayBroadcastKind,
   overlayUnicastKind,
@@ -90,7 +88,8 @@ export type OverlayDataPlane = {
   sendUnicast: (targetPeerId: string, frame: Uint8Array) => void
   handleOverlayBinary: (
     fromPeerId: string,
-    frame: UnpackedOverlayFrame
+    frame: UnpackedOverlayFrame,
+    isReplay?: boolean
   ) => Promise<void>
   flushBufferedForOrigin: (origin: string) => void
   replayEarlyFramesForOrigin: (origin: string) => void
@@ -139,6 +138,10 @@ export const createOverlayDataPlane = (
     string,
     Array<[fromPeerId: string, frame: UnpackedOverlayFrame]>
   >(maxBufferedEarlyOrigins)
+  const forwardedUnicastEdges = createBoundedCache<
+    string,
+    {inbound: Set<string>; outbound: Set<string>}
+  >(4_096)
 
   const failSig = (): false => {
     stats.signatureFailures++
@@ -162,7 +165,7 @@ export const createOverlayDataPlane = (
       return null
     }
     const curRoomId = getRoomId()
-    const cacheKey = `${curRoomId}\0${remotePeerId}\0${canonicalizePubJwk(remoteKey)}`
+    const cacheKey = `${curRoomId}\0${remotePeerId}\0${remoteKey}`
     const prevKey = pairwiseKeyIdByPeer.get(remotePeerId)
     if (prevKey && prevKey !== cacheKey) {
       derivedPairwiseKeys.delete(prevKey)
@@ -202,18 +205,18 @@ export const createOverlayDataPlane = (
 
   const verifyPacketSig = async (
     originPeerId: string,
-    signPubJwk: JsonWebKey,
+    signPubKey: string,
     canonicalHeader: string,
     payload: Uint8Array,
     sig: string | undefined
   ): Promise<boolean> => {
-    if (!sig || !descriptors.isPinnedKeyMatch(originPeerId, signPubJwk)) {
+    if (!sig || !descriptors.isPinnedKeyMatch(originPeerId, signPubKey)) {
       return failSig()
     }
     const ok = await verifyBase64Sig(
       sig,
       buildOverlaySignedBytes(canonicalHeader, payload),
-      signPubJwk
+      signPubKey
     )
     return ok ? true : failSig()
   }
@@ -289,6 +292,7 @@ export const createOverlayDataPlane = (
         }
 
         const latestKeyP = getPairwiseKey(targetPeerId) ?? pairwiseKeyP
+        const ts = Date.now()
         let payloadToSend: Uint8Array
         let ivB64: string
         let canonical: string
@@ -296,13 +300,14 @@ export const createOverlayDataPlane = (
         try {
           const aesKey = await latestKeyP
           const iv = crypto.getRandomValues(new Uint8Array(12))
-          ivB64 = toBase64(iv)
+          ivB64 = toBase64Url(iv)
           canonical = canonicalUnicastHeader(
             curSelfId,
             targetPeerId,
             msgId,
             ivB64,
             pktSeq,
+            ts,
             appId,
             curRoomId
           )
@@ -327,6 +332,7 @@ export const createOverlayDataPlane = (
             o: curSelfId,
             d: targetPeerId,
             q: pktSeq,
+            t: ts,
             m: msgId,
             iv: ivB64,
             s: sig
@@ -584,7 +590,8 @@ export const createOverlayDataPlane = (
 
   const handleOverlayBinary = async (
     fromPeerId: string,
-    frame: UnpackedOverlayFrame
+    frame: UnpackedOverlayFrame,
+    isReplay = false
   ): Promise<void> => {
     if (isDestroyed()) {
       return
@@ -618,13 +625,23 @@ export const createOverlayDataPlane = (
       return
     }
 
-    if (seq.originReplay.has(origin, pktSeq) || seq.seenMsgIds.has(msgId)) {
+    const isTransitUnicast =
+      kind === overlayUnicastKind && header['d'] !== curSelfId
+    if (isTransitUnicast) {
+      if (forwardedUnicastEdges.get(msgId)?.inbound.has(fromPeerId)) {
+        stats.duplicatesDropped++
+        return
+      }
+    } else if (
+      seq.originReplay.has(origin, pktSeq) ||
+      seq.seenMsgIds.has(msgId)
+    ) {
       stats.duplicatesDropped++
       return
     }
 
-    const signPubJwk = descriptors.getSignPubKey(origin)
-    if (!signPubJwk) {
+    const signPubKey = descriptors.getSignPubKey(origin)
+    if (!signPubKey || (!isReplay && pendingEarlyFrames.has(origin))) {
       bufferEarlyUnverifiedFrame(origin, fromPeerId, frame)
       return
     }
@@ -653,7 +670,7 @@ export const createOverlayDataPlane = (
 
       const valid = await verifyPacketSig(
         origin,
-        signPubJwk,
+        signPubKey,
         canonicalBroadcastHeader(origin, msgId, pktSeq, ts, appId, curRoomId),
         payload,
         sig
@@ -726,12 +743,22 @@ export const createOverlayDataPlane = (
     if (kind === overlayUnicastKind) {
       const dest = isStr(header['d']) ? header['d'] : ''
       const ivB64 = isStr(header['iv']) ? header['iv'] : undefined
+      const ts = header['t']
 
       if (!isValidSignalPeerId(dest) || descriptors.hasLeft(dest)) {
         return
       }
-      if (!ivB64 || isPeerBanned(dest)) {
+      if (
+        !ivB64 ||
+        ivB64.length !== 16 ||
+        !base64UrlRe.test(ivB64) ||
+        !isPosSafeInt(ts) ||
+        isPeerBanned(dest)
+      ) {
         failSig()
+        return
+      }
+      if (Math.abs(Date.now() - ts) > defaultMaxClockSkewMs) {
         return
       }
 
@@ -741,6 +768,7 @@ export const createOverlayDataPlane = (
         msgId,
         ivB64,
         pktSeq,
+        ts,
         appId,
         curRoomId
       )
@@ -750,32 +778,60 @@ export const createOverlayDataPlane = (
           ttl <= 1 ||
           !(await verifyPacketSig(
             origin,
-            signPubJwk,
+            signPubKey,
             canonical,
             payload,
             sig
           )) ||
           isDestroyed() ||
           descriptors.hasLeft(origin) ||
-          descriptors.hasLeft(dest) ||
-          !commitPacketReplay()
+          descriptors.hasLeft(dest)
         ) {
           return
         }
+        let edgeState = forwardedUnicastEdges.get(msgId)
+        if (edgeState?.inbound.has(fromPeerId)) {
+          stats.duplicatesDropped++
+          return
+        }
+        if (!edgeState) {
+          edgeState = {inbound: new Set(), outbound: new Set()}
+          forwardedUnicastEdges.set(msgId, edgeState)
+        }
+        edgeState.inbound.add(fromPeerId)
+        if (edgeState.outbound.size >= 4) {
+          return
+        }
+        descriptors.touchOriginActivity(origin)
+
+        const exclude = new Set<string>(edgeState.outbound)
+        for (const inId of edgeState.inbound) {
+          exclude.add(inId)
+        }
+        let hop = router.resolveHealthyNextHopId(dest, exclude)
         if (
-          routeUnicastPacket(
-            dest,
-            packOverlayBinary(overlayUnicastKind, ttl - 1, header, payload),
-            fromPeerId
-          )
+          !hop &&
+          !edgeState.outbound.has(fromPeerId) &&
+          isPeerUsable(getDirectPeer(fromPeerId))
         ) {
-          stats.messagesForwarded++
+          hop = fromPeerId
+        }
+        if (hop) {
+          edgeState.outbound.add(hop)
+          if (
+            sendToDirectNeighbor(
+              hop,
+              packOverlayBinary(overlayUnicastKind, ttl - 1, header, payload)
+            )
+          ) {
+            stats.messagesForwarded++
+          }
         }
         return
       }
 
       if (
-        !(await verifyPacketSig(origin, signPubJwk, canonical, payload, sig)) ||
+        !(await verifyPacketSig(origin, signPubKey, canonical, payload, sig)) ||
         isDestroyed() ||
         descriptors.hasLeft(origin)
       ) {
@@ -832,8 +888,8 @@ export const createOverlayDataPlane = (
       }
       pendingEarlyFrames.delete(origin)
       for (const [fromPeerId, rawFrame] of early) {
-        seq.enqueueOriginTask(origin, () =>
-          handleOverlayBinary(fromPeerId, rawFrame)
+        seq.enqueuePeerTask(fromPeerId, () =>
+          handleOverlayBinary(fromPeerId, rawFrame, true)
         )
       }
     },
@@ -848,6 +904,7 @@ export const createOverlayDataPlane = (
       pairwiseKeyIdByPeer.clear()
       pendingVerifiedBroadcasts.clear()
       pendingEarlyFrames.clear()
+      forwardedUnicastEdges.clear()
     },
     destroy: () => {
       derivedPairwiseKeys.clear()
@@ -856,6 +913,7 @@ export const createOverlayDataPlane = (
       outboundQueueDepth.clear()
       pendingVerifiedBroadcasts.clear()
       pendingEarlyFrames.clear()
+      forwardedUnicastEdges.clear()
     }
   }
 }

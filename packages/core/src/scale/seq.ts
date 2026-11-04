@@ -6,6 +6,7 @@ import {
 import {createBoundedCache, createBoundedSet, noOp} from '../utils'
 
 const maxTrackedOrigins = 2_048
+const maxQueuedTasksPerPeer = 8_192
 
 const lastLocalSeqByRoomPeer = /*@__PURE__*/ createBoundedCache<
   string,
@@ -27,8 +28,7 @@ export type OverlaySequencer = {
   peekPktSeq: () => number
   originReplay: SlidingReplayWindow
   seenMsgIds: ReturnType<typeof createBoundedSet<string>>
-  hasOriginQueue: (originId: string) => boolean
-  enqueueOriginTask: (originId: string, fn: () => void | Promise<void>) => void
+  enqueuePeerTask: (peerId: string, fn: () => void | Promise<void>) => void
   clear: () => void
 }
 
@@ -66,14 +66,8 @@ export const createOverlaySequencer = (
     deps.isPinnedOrigin
   )
   const seenMsgIds = createBoundedSet<string>(4_096)
-  const originQueues = new Map<string, Promise<void>>()
-
-  const resolveQueueKey = (originId: string): string => {
-    const key = `o:${originId}`
-    return originQueues.has(key) || originQueues.size < maxTrackedOrigins
-      ? key
-      : `overflow:${hash32(key) & 63}`
-  }
+  const peerQueues = new Map<string, Promise<void>>()
+  const peerQueueDepths = new Map<string, number>()
 
   return {
     syncSeqFloor: id => saveSeqs(id, true),
@@ -94,21 +88,35 @@ export const createOverlaySequencer = (
     peekPktSeq: () => pktSeq,
     originReplay,
     seenMsgIds,
-    hasOriginQueue: originId => originQueues.has(`o:${originId}`),
-    enqueueOriginTask: (originId, fn) => {
-      const qKey = resolveQueueKey(originId)
-      const next = (originQueues.get(qKey) ?? Promise.resolve())
+    enqueuePeerTask: (peerId, fn) => {
+      const qKey =
+        peerQueues.has(peerId) || peerQueues.size < maxTrackedOrigins
+          ? peerId
+          : `overflow:${hash32(peerId) & 63}`
+      const depth = peerQueueDepths.get(qKey) ?? 0
+      if (depth >= maxQueuedTasksPerPeer) {
+        return
+      }
+      peerQueueDepths.set(qKey, depth + 1)
+      const next = (peerQueues.get(qKey) ?? Promise.resolve())
         .then(fn)
         .catch(noOp)
         .finally(() => {
-          if (originQueues.get(qKey) === next) {
-            originQueues.delete(qKey)
+          const nextDepth = (peerQueueDepths.get(qKey) ?? 1) - 1
+          if (nextDepth <= 0) {
+            peerQueueDepths.delete(qKey)
+          } else {
+            peerQueueDepths.set(qKey, nextDepth)
+          }
+          if (peerQueues.get(qKey) === next) {
+            peerQueues.delete(qKey)
           }
         })
-      originQueues.set(qKey, next)
+      peerQueues.set(qKey, next)
     },
     clear: () => {
-      originQueues.clear()
+      peerQueues.clear()
+      peerQueueDepths.clear()
       originReplay.clear()
       seenMsgIds.clear()
     }

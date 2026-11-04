@@ -24,7 +24,11 @@ import {
   maxPendingPeerConnections
 } from '../../packages/core/src/signal-handler.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
-import type {PeerHandle, Room, Signal} from '../../packages/core/src/types.ts'
+import type {
+  PeerHandle,
+  Signal
+} from '../../packages/core/src/internal-types.ts'
+import type {Room} from '../../packages/core/src/types.ts'
 import {linkHandles} from './overlay-harness.ts'
 import {
   MockRTCPeerConnection,
@@ -42,7 +46,7 @@ const encoder = new TextEncoder()
 void test('S3: identity or plugin resolution failure reports onError with zero unhandled rejections in Node', async () => {
   const script = `
     import {createTopicStrategy, roles} from './packages/core/src/index.ts'
-    import {makeInternalPlugin} from './packages/core/src/plugin.ts'
+    import {pluginSlotSymbol} from './packages/core/src/primitives.ts'
 
     let unhandled = 0
     process.on('unhandledRejection', () => { unhandled++ })
@@ -73,9 +77,13 @@ void test('S3: identity or plugin resolution failure reports onError with zero u
     )
     room1.onError(d => joinErrors.push(d))
 
-    const badPlugin = makeInternalPlugin('scale', () => ({}), {
-      resolveRoomId: async () => { throw new Error('boom-plugin') }
-    })
+    const badPlugin = {
+      name: 'scale',
+      [pluginSlotSymbol]: {
+        kind: 'scale',
+        setup: () => { throw new Error('boom-plugin') }
+      }
+    }
     const room2 = joinRoom(
       {
         appId: 's3-app',
@@ -364,7 +372,7 @@ void test('S15: undecryptable offers allocate 0 RTCPeerConnections and announce 
     }
   }
 
-  const peerStates: Record<string, unknown> = {}
+  const peerStates = new Map<string, unknown>()
   const selfId = '0'.repeat(20)
   const receive = createSignalHandler({
     appId: 's15-app',

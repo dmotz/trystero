@@ -64,13 +64,21 @@ export const registerActionsAndMediaTests = (
           expect(peer1Data).toEqual([eagerPayload, selfId1])
           expect(peer2Data).toEqual([eagerPayload, selfId2])
 
-          const isRoomIdentical = await page.evaluate(
-            ([roomId, config]: [string, StrategyConfig]) =>
-              window.trystero.joinRoom(config, roomId) === window[roomId],
+          const duplicateJoinThrew = await page.evaluate(
+            ([roomId, config]: [string, StrategyConfig]) => {
+              try {
+                window.trystero.joinRoom(config, roomId)
+                return false
+              } catch (err) {
+                return (
+                  err instanceof Error && /already joined/i.test(err.message)
+                )
+              }
+            },
             [roomNs, roomConfig] satisfies [string, StrategyConfig]
           )
 
-          expect(isRoomIdentical).toBe(true)
+          expect(duplicateJoinThrew).toBe(true)
 
           await verifyMediaMetadata({page, page2, roomNs, peer1Id, peer2Id})
 

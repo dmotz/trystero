@@ -4,6 +4,7 @@ import type {Room, ScalePluginApi} from '../../packages/core/src/index.ts'
 import {ecdsaSign, signRoomAuth} from '../../packages/core/src/crypto.ts'
 import {
   createUserIdentity,
+  jwkToCompactPub,
   signUserEndpointProof
 } from '../../packages/core/src/identity.ts'
 import {
@@ -20,16 +21,17 @@ import {
   scale,
   unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
-import createRoom, {
-  getRoomSignalingBridge
-} from '../../packages/core/src/room.ts'
 import {createSignalHandler} from '../../packages/core/src/signal-handler.ts'
 import {
   decodeBytes,
   encodeBytes,
-  toBase64
+  toBase64Url
 } from '../../packages/core/src/utils.ts'
-import {createOverlayCluster} from './overlay-harness.ts'
+import {
+  createOverlayCluster,
+  createTrackedRoom as createRoom,
+  getRoomSignalingBridge
+} from './overlay-harness.ts'
 import {
   getTestEndpointByPeerId,
   LinkedPeer,
@@ -166,19 +168,21 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
     aliceId,
     999
   )
+  const mallorySignPubKey = jwkToCompactPub(mallorySignJwk)
+  const malloryEncPubKey = jwkToCompactPub(malloryEncJwk)
   const hijackCanonical = descriptorCanonicalPayload(
     {
       peerId: aliceId,
       seq: 999,
       neighbors: [relayId],
-      signPubKey: mallorySignJwk,
-      encPubKey: malloryEncJwk,
+      signPubKey: mallorySignPubKey,
+      encPubKey: malloryEncPubKey,
       roomAuth: validRoomAuthForHijack
     },
     'adv-app',
     'adv-room'
   )
-  const hijackSigB64 = toBase64(
+  const hijackSigB64 = toBase64Url(
     await ecdsaSign(
       mallorySignPair.privateKey,
       encodeBytes(hijackCanonical) as BufferSource
@@ -195,8 +199,8 @@ void test('Adversarial peer attacks: TOFU key-hijack attempt, forged leave/down 
           peerId: aliceId,
           seq: 999,
           neighbors: [relayId],
-          signPubKey: mallorySignJwk,
-          encPubKey: malloryEncJwk,
+          signPubKey: mallorySignPubKey,
+          encPubKey: malloryEncPubKey,
           roomAuth: validRoomAuthForHijack,
           sig: hijackSigB64
         }
@@ -465,7 +469,7 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     appId: 'sig-app',
     getRoomId: () => 'sig-room',
     config: {appId: 'sig-app'},
-    peerStates: {},
+    peerStates: new Map(),
     getRootTopicPlaintext: () => 'root-topic',
     rootTopicP: Promise.resolve('root-topic'),
     selfTopicP: Promise.resolve('self-topic'),
@@ -517,7 +521,7 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
   // 1c. Invalid offerId (> 64 chars or invalid chars) is dropped at ingress
   await handleSignal(
     JSON.stringify({
-      peerId: 'valid-peer-1',
+      peerId: testPeerId('valid-peer-1'),
       offerId: 'o'.repeat(80),
       offer: 'v=0'
     })
@@ -525,14 +529,14 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
   // 1d. Oversized SDP (> 64 KiB) or oversized candidate (> 4 KiB) is dropped at ingress
   await handleSignal(
     JSON.stringify({
-      peerId: 'valid-peer-2',
+      peerId: testPeerId('valid-peer-2'),
       offerId: 'offer-1',
       offer: 'v='.repeat(40_000)
     })
   )
   await handleSignal(
     JSON.stringify({
-      peerId: 'valid-peer-3',
+      peerId: testPeerId('valid-peer-3'),
       offerId: 'offer-2',
       candidate: 'c'.repeat(5_000)
     })
@@ -551,7 +555,7 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
   // 1e. Unsolicited ICE candidate from an unknown peer is dropped BEFORE calling toPlain decryption
   await handleSignal(
     JSON.stringify({
-      peerId: 'unsolicited-cand-peer',
+      peerId: testPeerId('unsolicited-cand-peer'),
       offerId: 'offer-unsolicited',
       candidate: 'candidate:1 1 UDP 2122252543 192.0.2.1 5000 typ host'
     }),
@@ -590,8 +594,10 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
       'unverified public-topic announcements must never enter roomPeerIds'
     )
     assert.deepEqual(
-      [...(victimBridge.getScaleProvider()?.getTargetNeighbors() ?? [])].sort(),
-      cluster.peerIds.slice(1).sort(),
+      [...(victimBridge.getScaleProvider()?.getTargetNeighbors() ?? [])].sort(
+        (a, b) => a.localeCompare(b)
+      ),
+      cluster.peerIds.slice(1).sort((a, b) => a.localeCompare(b)),
       'unverified public-topic announcements must not displace converged target neighbors'
     )
   } finally {
@@ -694,13 +700,14 @@ void test("C1 regression: gossip descriptors cannot overwrite or spoof a direct 
 
     // Attack 1: Mallory's endpoint signs a high-seq gossip descriptor claiming a DIFFERENT userId
     // (even with a valid userProof from impersonatedUser!).
+    const mallorySignPub = jwkToCompactPub(malloryEp.signPubJwk)
     const spoofedWithProof: Record<string, unknown> = {
       peerId: malloryId,
       seq: 500,
       neighbors: [aliceId, relayId].sort(),
-      signPubKey: malloryEp.signPubJwk,
+      signPubKey: mallorySignPub,
       userId: impersonatedUser.userId,
-      userPubKey: impersonatedUser.signPubJwk,
+      userPubKey: jwkToCompactPub(impersonatedUser.signPubJwk),
       userProof: await signUserEndpointProof(impersonatedUser, {
         appId,
         roomId,
@@ -709,7 +716,7 @@ void test("C1 regression: gossip descriptors cannot overwrite or spoof a direct 
         seq: 500
       })
     }
-    spoofedWithProof['sig'] = toBase64(
+    spoofedWithProof['sig'] = toBase64Url(
       await malloryEp.sign(
         encodeBytes(
           descriptorCanonicalPayload(spoofedWithProof as any, appId, roomId)
@@ -723,10 +730,10 @@ void test("C1 regression: gossip descriptors cannot overwrite or spoof a direct 
       peerId: malloryId,
       seq: 501,
       neighbors: [aliceId, relayId].sort(),
-      signPubKey: malloryEp.signPubJwk,
+      signPubKey: mallorySignPub,
       userId: aliceUser.userId
     }
-    spoofedNoProof['sig'] = toBase64(
+    spoofedNoProof['sig'] = toBase64Url(
       await malloryEp.sign(
         encodeBytes(
           descriptorCanonicalPayload(spoofedNoProof as any, appId, roomId)
@@ -738,9 +745,9 @@ void test("C1 regression: gossip descriptors cannot overwrite or spoof a direct 
       peerId: malloryId,
       seq: 502,
       neighbors: [aliceId, relayId].sort(),
-      signPubKey: malloryEp.signPubJwk
+      signPubKey: mallorySignPub
     }
-    omittedIdentityDesc['sig'] = toBase64(
+    omittedIdentityDesc['sig'] = toBase64Url(
       await malloryEp.sign(
         encodeBytes(
           descriptorCanonicalPayload(omittedIdentityDesc as any, appId, roomId)

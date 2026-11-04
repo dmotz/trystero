@@ -21,86 +21,25 @@ import {
   libName,
   roles,
   scale,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
   type BaseRelayConfig,
   type BaseRoomConfig,
-  type DataPayload,
   type JoinRoom,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type StrategyMessage,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  type StrategyMessage
 } from '@trystero-p2p/core'
 
 const presencePath = '_'
+const validPeerIdRe = /^[0-9A-Za-z]{20}$/
 const defaultRootPath = `__${libName.toLowerCase()}__`
-const dbs: Record<string, ReturnType<typeof getDatabase>> = {}
+const dbs = new Map<string, ReturnType<typeof getDatabase>>()
 const appDbs = /*@__PURE__*/ new WeakMap<
   FirebaseApp,
   ReturnType<typeof getDatabase>
 >()
 const warnFlags = /*@__PURE__*/ new WeakMap<DatabaseReference, boolean>()
-const presenceRefs: Record<string, DatabaseReference> = {}
-const presenceMessages: Record<string, Record<string, unknown>> = {}
-const presenceCleanups: Record<string, () => void> = {}
-const subscriptionTokens: Record<string, symbol> = {}
+const presenceRefs = new Map<string, DatabaseReference>()
+const presenceMessages = new Map<string, Record<string, unknown>>()
+const presenceCleanups = new Map<string, () => void>()
+const subscriptionTokens = new Map<string, symbol>()
 
 export type FirebaseRelayConfig = BaseRelayConfig & {
   firebaseApp?: FirebaseApp
@@ -125,13 +64,16 @@ const initDb = (config: FirebaseRoomConfig): ReturnType<typeof getDatabase> => {
     }
     return db
   }
-  return (dbs[config.appId] ??= getDatabase(
-    initializeApp({databaseURL: config.appId})
-  ))
+  let db = dbs.get(config.appId)
+  if (!db) {
+    db = getDatabase(initializeApp({databaseURL: config.appId}))
+    dbs.set(config.appId, db)
+  }
+  return db
 }
 
 export const joinRoom: JoinRoom<FirebaseRoomConfig> =
-  /*@__PURE__*/ createTopicStrategy({
+  /*@__PURE__*/ createTopicStrategy<DatabaseReference, FirebaseRoomConfig>({
     reannounceOnDisconnect: false,
 
     init: config => {
@@ -147,7 +89,11 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
       const {rootTopic, selfTopic, kind} = context
       const roomRef = child(rootRef, rootTopic)
       const key = roomKey(rootTopic, selfTopic)
-      const subscriptionToken = (subscriptionTokens[key] ??= Symbol(key))
+      let subscriptionToken = subscriptionTokens.get(key)
+      if (!subscriptionToken) {
+        subscriptionToken = Symbol(key)
+        subscriptionTokens.set(key, subscriptionToken)
+      }
       const unsubFns: Array<() => void> = []
       const onListenerError = (err: Error): void => {
         if (warnFlags.get(rootRef) !== false) {
@@ -157,14 +103,18 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
 
       if (kind === 'self') {
         const selfRef = child(roomRef, selfTopic)
-        const peerSignals: Record<string, Record<string, boolean>> = {}
+        const peerSignals = new Map<string, Set<string>>()
 
         const selfCleanup = onChildAdded(
           selfRef,
           data => {
             const peerId = data.key
 
-            if (!peerId || peerId === presencePath) {
+            if (
+              !peerId ||
+              peerId === presencePath ||
+              !validPeerIdRe.test(peerId)
+            ) {
               return
             }
 
@@ -172,14 +122,18 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
               onChildAdded(
                 data.ref,
                 nestedData => {
-                  peerSignals[peerId] ??= {}
+                  let seen = peerSignals.get(peerId)
+                  if (!seen) {
+                    seen = new Set()
+                    peerSignals.set(peerId, seen)
+                  }
 
-                  if (nestedData.key && nestedData.key in peerSignals[peerId]) {
+                  if (nestedData.key && seen.has(nestedData.key)) {
                     return
                   }
 
                   if (nestedData.key) {
-                    peerSignals[peerId][nestedData.key] = true
+                    seen.add(nestedData.key)
                   }
 
                   void onMessage(topic, nestedData.val() as StrategyMessage)
@@ -196,7 +150,7 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
           selfCleanup()
           unsubFns.forEach(unsub => unsub())
 
-          if (subscriptionTokens[key] === subscriptionToken) {
+          if (subscriptionTokens.get(key) === subscriptionToken) {
             void remove(selfRef).catch(() => {})
           }
         }
@@ -225,19 +179,20 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
       const cleanup = (): void => {
         unsubFns.forEach(unsub => unsub())
 
-        if (subscriptionTokens[key] !== subscriptionToken) {
+        if (subscriptionTokens.get(key) !== subscriptionToken) {
           return
         }
 
-        if (presenceRefs[key]) {
-          presenceCleanups[key]?.()
-          void remove(presenceRefs[key]).catch(() => {})
-          delete presenceRefs[key]
-          delete presenceMessages[key]
-          delete presenceCleanups[key]
+        const presenceRef = presenceRefs.get(key)
+        if (presenceRef) {
+          presenceCleanups.get(key)?.()
+          void remove(presenceRef).catch(() => {})
+          presenceRefs.delete(key)
+          presenceMessages.delete(key)
+          presenceCleanups.delete(key)
         }
 
-        delete subscriptionTokens[key]
+        subscriptionTokens.delete(key)
       }
 
       return new Promise<() => void>((resolve, reject) => {
@@ -297,26 +252,31 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
       }
 
       if (kind === 'announce') {
-        presenceMessages[key] = {
+        const payload = {
           [presencePath]:
             typeof msg === 'string'
               ? fromJson<Record<string, unknown>>(msg)
               : msg
         }
+        presenceMessages.set(key, payload)
 
-        const presenceRef =
-          presenceRefs[key] ?? (presenceRefs[key] = push(roomRef))
+        let presenceRef = presenceRefs.get(key)
+        if (!presenceRef) {
+          presenceRef = push(roomRef)
+          presenceRefs.set(key, presenceRef)
+        }
 
-        if (!presenceCleanups[key]) {
+        if (!presenceCleanups.has(key)) {
           let didConnect = false
+          const activeRef = presenceRef
 
-          void onDisconnect(presenceRef)
+          void onDisconnect(activeRef)
             .remove()
             .catch(() => {})
-          void set(presenceRef, presenceMessages[key]).catch(onWriteError)
-          presenceCleanups[key] = onValue(
-            child(rootRef.root, '.info/connected'),
-            snapshot => {
+          void set(activeRef, payload).catch(onWriteError)
+          presenceCleanups.set(
+            key,
+            onValue(child(rootRef.root, '.info/connected'), snapshot => {
               if (snapshot.val() !== true) {
                 return
               }
@@ -328,17 +288,16 @@ export const joinRoom: JoinRoom<FirebaseRoomConfig> =
                 return
               }
 
-              void onDisconnect(presenceRef)
+              void onDisconnect(activeRef)
                 .remove()
                 .then(() => {
-                  if (presenceRefs[key] === presenceRef) {
-                    void set(presenceRef, presenceMessages[key]).catch(
-                      onWriteError
-                    )
+                  const latest = presenceMessages.get(key)
+                  if (presenceRefs.get(key) === activeRef && latest) {
+                    void set(activeRef, latest).catch(onWriteError)
                   }
                 })
                 .catch(() => {})
-            }
+            })
           )
         }
 
@@ -364,67 +323,4 @@ export {
   scale
 }
 
-export type {
-  ActionError,
-  ActionErrorKind,
-  ActionMessageHandler,
-  ActionProgressContext,
-  ActionProgressHandler,
-  ActionReceiveContext,
-  ActionReceiveHandler,
-  ActionRequestHandler,
-  AddMediaOptions,
-  BanOptions,
-  DataPayload,
-  JsonValue,
-  ListenerOptions,
-  MessageAction,
-  MessageActionConfig,
-  MessageContext,
-  PeerInfo,
-  PeerJoinContext,
-  PeerLeaveContext,
-  PeerMediaContext,
-  PeerResult,
-  PeerTarget,
-  RemoveMediaOptions,
-  ReplaceTrackOptions,
-  ReplayListenerOptions,
-  RequestAction,
-  RequestActionConfig,
-  RequestContext,
-  RequestManyOptions,
-  RequestOptions,
-  RoleCertificate,
-  RolesConfig,
-  RolesPluginApi,
-  Room,
-  RoomError,
-  RoomErrorBase,
-  RoomErrorCode,
-  RoomErrorHandler,
-  RoomPlugin,
-  RoomWithPlugins,
-  ScaleConfig,
-  ScalePluginApi,
-  SelfInfo,
-  SendOptions,
-  SharedState,
-  StateChangeContext,
-  StateConfig,
-  TopologyRoute,
-  TopologySnapshot,
-  TopologyStats,
-  TurnServerConfig,
-  Unsubscribe,
-  UserIdentity,
-  UserIdentityConfig,
-  UserIdentityLoader,
-  UserIdentityLoaderContext,
-  UserInfo,
-  UserJoinContext,
-  UserLeaveContext,
-  UserState,
-  UserStateChangeContext,
-  UserStateConfig
-}
+export type * from '@trystero-p2p/core/types'

@@ -12,6 +12,7 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const coreTypesSourcePath = resolve('packages/core/src/types.ts')
 const empty = resolve('scripts/empty.ts')
 const packageDepsConfig = {
   deps: {
@@ -26,16 +27,6 @@ const browserBundleDepsConfig = {
   }
 }
 
-const dropDevLabelStatements = testBuild
-  ? {}
-  : {
-      inputOptions: {
-        transform: {
-          dropLabels: ['DEV']
-        }
-      }
-    }
-
 export default [
   {
     workspace: {
@@ -48,8 +39,7 @@ export default [
     minify: false,
     ...packageDepsConfig,
     publint: ci,
-    attw: ci,
-    ...dropDevLabelStatements
+    attw: ci
   },
   {
     workspace: {
@@ -65,8 +55,7 @@ export default [
     minify: false,
     ...packageDepsConfig,
     publint: ci,
-    attw: ci,
-    ...dropDevLabelStatements
+    attw: ci
   },
   {
     workspace: {
@@ -80,8 +69,7 @@ export default [
     minify: false,
     ...packageDepsConfig,
     publint: ci,
-    attw: ci,
-    ...dropDevLabelStatements
+    attw: ci
   },
   ...(testBuild
     ? strategyNames.map((name, index) => ({
@@ -97,6 +85,7 @@ export default [
         minify: false,
         ...browserBundleDepsConfig,
         alias: {
+          '@trystero-p2p/core/types': coreTypesSourcePath,
           '@trystero-p2p/core': coreSourcePath,
           crypto: empty,
           'node:crypto': empty

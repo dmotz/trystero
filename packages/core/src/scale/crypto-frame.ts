@@ -1,19 +1,21 @@
 import {ecdsaSign, signRoomAuth} from '../crypto'
 import {maxActionFrameBytes, maxOverlayHeaderBytes} from '../data-limits'
 import {
-  canonicalizePubJwk,
+  jwkToCompactPub,
   signUserEndpointProof,
   verifyWithP256
 } from '../identity'
-import type {PeerHandle, RoleCertificate, UserIdentity} from '../types'
+import type {PeerHandle} from '../internal-types'
+import {fromBase64Url, toBase64Url} from '../primitives'
+import {canonTag} from '../signed-record'
+import type {RoleCertificate, UserIdentity} from '../types'
 import {
+  base64UrlRe,
   decodeBytes,
   encodeBytes,
-  fromBase64,
   fromJson,
   isObj,
-  libId,
-  toBase64,
+  mkErr,
   toJson
 } from '../utils'
 
@@ -28,10 +30,10 @@ export type PeerDescriptor = {
   seq: number
   pktSeq?: number
   neighbors: string[]
-  signPubKey?: JsonWebKey
-  encPubKey?: JsonWebKey
+  signPubKey?: string
+  encPubKey?: string
   userId?: string
-  userPubKey?: JsonWebKey
+  userPubKey?: string
   userProof?: string
   cert?: RoleCertificate
   roomAuth?: string
@@ -61,11 +63,9 @@ export type BroadcastEnvelopeHeader = {
 export type CryptoIdentity = {
   peerId: string
   signPrivateKey: CryptoKey
-  signPublicKey: CryptoKey
-  signPubJwk: JsonWebKey
+  signPubKey: string
   encPrivateKey: CryptoKey
-  encPublicKey: CryptoKey
-  encPubJwk: JsonWebKey
+  encPubKey: string
 }
 
 export const isPeerUsable = (
@@ -190,13 +190,6 @@ export const isValidOverlayMsgId = (msgId: string): boolean => {
   return true
 }
 
-const ovTag = (
-  kind: string,
-  appId: string,
-  roomId: string,
-  ...rest: unknown[]
-): string => toJson([`${libId}-${kind}`, appId, roomId, ...rest])
-
 export const canonicalBroadcastHeader = (
   origin: string,
   msgId: string,
@@ -204,7 +197,7 @@ export const canonicalBroadcastHeader = (
   ts: number,
   appId: string,
   roomId: string
-): string => ovTag('broadcast-v3', appId, roomId, origin, seq, ts, msgId)
+): string => canonTag('broadcast-v4', [appId, roomId, origin, seq, ts, msgId])
 
 export const canonicalUnicastHeader = (
   origin: string,
@@ -212,16 +205,18 @@ export const canonicalUnicastHeader = (
   msgId: string,
   ivB64: string,
   seq: number,
+  ts: number,
   appId: string,
   roomId: string
-): string => ovTag('unicast-v3', appId, roomId, origin, dest, seq, msgId, ivB64)
+): string =>
+  canonTag('unicast-v4', [appId, roomId, origin, dest, seq, ts, msgId, ivB64])
 
 export const canonicalLeaveHeader = (
   leavingId: string,
   seq: number,
   appId: string,
   roomId: string
-): string => ovTag('leave-v3', appId, roomId, leavingId, seq)
+): string => canonTag('leave-v4', [appId, roomId, leavingId, seq])
 
 export const buildOverlaySignedBytes = (
   canonicalHeader: string,
@@ -242,34 +237,30 @@ export const descriptorCanonicalPayload = (
   appId: string,
   roomId: string
 ): string =>
-  ovTag(
-    'desc-v3',
+  canonTag('desc-v4', [
     appId,
     roomId,
     d.peerId,
     d.seq,
     d.pktSeq ?? 0,
     d.neighbors,
-    d.signPubKey ? canonicalizePubJwk(d.signPubKey) : null,
-    d.encPubKey ? canonicalizePubJwk(d.encPubKey) : null,
+    d.signPubKey ?? null,
+    d.encPubKey ?? null,
     d.roomAuth ?? null,
     d.cert?.sig ?? null,
-    ...(d.userId
-      ? [
-          d.userId,
-          d.userPubKey ? canonicalizePubJwk(d.userPubKey) : null,
-          d.userProof ?? null
-        ]
-      : [])
-  )
+    ...(d.userId ? [d.userId, d.userPubKey ?? null, d.userProof ?? null] : [])
+  ])
 
 export const verifyBase64Sig = (
   sig: string,
   signedBytes: Uint8Array,
-  pubJwk: JsonWebKey
+  pubKey: JsonWebKey | string
 ): boolean | Promise<boolean> => {
+  if (!sig || !base64UrlRe.test(sig)) {
+    return false
+  }
   try {
-    return verifyWithP256(fromBase64(sig), signedBytes, pubJwk)
+    return verifyWithP256(fromBase64Url(sig), signedBytes, pubKey)
   } catch {
     return false
   }
@@ -281,7 +272,7 @@ export const signOverlayPayload = async (
   payload: Uint8Array
 ): Promise<string> => {
   const combined = buildOverlaySignedBytes(canonicalHeader, payload)
-  return toBase64(await ecdsaSign(signPrivateKey, combined as BufferSource))
+  return toBase64Url(await ecdsaSign(signPrivateKey, combined as BufferSource))
 }
 
 export const signPeerDescriptor = async (
@@ -303,19 +294,19 @@ export const signPeerDescriptor = async (
   }
   if (userIdentity) {
     descriptor.userId = userIdentity.userId
-    descriptor.userPubKey = userIdentity.signPubJwk
+    descriptor.userPubKey = jwkToCompactPub(userIdentity.signPubJwk)
     descriptor.userProof = await signUserEndpointProof(userIdentity, {
       appId,
       roomId,
       peerId: descriptor.peerId,
-      peerPubJwk: id.signPubJwk,
+      peerPubJwk: id.signPubKey,
       seq: descriptor.seq
     })
   }
   const canonicalBytes = encodeBytes(
     descriptorCanonicalPayload(descriptor, appId, roomId)
   )
-  descriptor.sig = toBase64(
+  descriptor.sig = toBase64Url(
     await ecdsaSign(id.signPrivateKey, canonicalBytes as BufferSource)
   )
   return descriptor
@@ -349,11 +340,19 @@ export const decryptUnicastPayload = async (
   ivB64: string,
   canonicalHeader: string,
   ciphertext: Uint8Array
-): Promise<Uint8Array> =>
-  new Uint8Array(
+): Promise<Uint8Array> => {
+  if (ivB64.length !== 16 || !base64UrlRe.test(ivB64)) {
+    throw mkErr('invalid unicast iv')
+  }
+  const iv = fromBase64Url(ivB64)
+  if (iv.byteLength !== 12) {
+    throw mkErr('invalid unicast iv')
+  }
+  return new Uint8Array(
     await crypto.subtle.decrypt(
-      aesGcmParams(fromBase64(ivB64), canonicalHeader),
+      aesGcmParams(iv, canonicalHeader),
       aesKey,
       ciphertext as BufferSource
     )
   )
+}

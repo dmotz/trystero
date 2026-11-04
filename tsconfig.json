@@ -1,21 +1,7 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "composite": false,
-    "declaration": false,
-    "noEmit": true,
-    "types": ["node"],
-    "paths": {
-      "@trystero-p2p/core": ["./packages/core/src/index.ts"],
-      "@trystero-p2p/firebase": ["./packages/firebase/src/index.ts"],
-      "@trystero-p2p/mqtt": ["./packages/mqtt/src/index.ts"],
-      "@trystero-p2p/nostr": ["./packages/nostr/src/index.ts"],
-      "@trystero-p2p/supabase": ["./packages/supabase/src/index.ts"],
-      "@trystero-p2p/torrent": ["./packages/torrent/src/index.ts"],
-      "@trystero-p2p/ws-relay": ["./packages/ws-relay/src/index.ts"],
-      "@trystero-p2p/ws-relay/server": ["./packages/ws-relay/src/server.ts"],
-      "trystero": ["./packages/trystero/src/index.ts"]
-    }
+    "types": ["node"]
   },
   "include": ["playwright.config.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }

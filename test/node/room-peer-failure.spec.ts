@@ -7,10 +7,11 @@ import {
   internalActionPrefix,
   linkPeers,
   testEndpoint,
+  testPeerId,
   waitFor
 } from './peer-harness.ts'
 import createRoom from '../../packages/core/src/room.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 
 const metadataAction = (type: string, key: string) => {
   const payload = new TextEncoder().encode(JSON.stringify({k: key}))
@@ -197,14 +198,7 @@ void test('room peer errors and handshake failures notify the remote peer to exi
       {
         endpointIdentity: epA,
         appId: 'exit-app',
-        roomId: `exit-${label}`,
-        ...(rejectHandshake
-          ? {
-              onPeerHandshake: async () => {
-                throw new Error('rejected handshake')
-              }
-            }
-          : {})
+        roomId: `exit-${label}`
       }
     )
     const roomB = createRoom(
@@ -215,7 +209,21 @@ void test('room peer errors and handshake failures notify the remote peer to exi
       () => {},
       {endpointIdentity: epB, appId: 'exit-app', roomId: `exit-${label}`}
     )
-    connectA(peerA as unknown as PeerHandle, epB.peerId)
+    let remoteIdForA = epB.peerId
+    if (rejectHandshake) {
+      for (let idx = 0; ; idx++) {
+        const candidate = testPeerId(`${label}-impersonated-${idx}`)
+        if (
+          candidate !== epB.peerId &&
+          candidate !== epA.peerId &&
+          epA.peerId < candidate === epA.peerId < epB.peerId
+        ) {
+          remoteIdForA = candidate
+          break
+        }
+      }
+    }
+    connectA(peerA as unknown as PeerHandle, remoteIdForA)
     connectB(peerB as unknown as PeerHandle, epA.peerId)
     return {roomA, roomB, peerA, peerB, epA, epB}
   }

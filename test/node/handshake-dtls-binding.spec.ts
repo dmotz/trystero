@@ -121,7 +121,7 @@ void test(
       const usersAtBob = roomBob.getUsers()
       assert.ok(usersAtBob[aliceIdentity.userId])
       assert.equal(usersAtBob[bobIdentity.userId], undefined)
-      assert.deepEqual(usersAtBob[aliceIdentity.userId]!.peerIds.sort(), [
+      assert.deepEqual([...usersAtBob[aliceIdentity.userId]!.peerIds].sort(), [
         alice1PeerId,
         alice2PeerId
       ])

@@ -212,8 +212,10 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
   const counter = room.makeState('counter', 0)
   await counter.set(1)
   await counter.set(n => n + 1)
-  // @ts-expect-error widened number state must reject string
-  void counter.set('not-a-number').catch(() => {})
+  if (false as boolean) {
+    // @ts-expect-error widened number state must reject string
+    void counter.set('not-a-number').catch(() => {})
+  }
   assert.equal(counter.get(), 2)
 
   const label = room.makeState('label', 'initial')
@@ -285,8 +287,12 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     )
   }
 
-  const distCore = await import('../../packages/core/dist/index.mjs')
-  assert.equal(typeof distCore.clearUserIdentity, 'function')
+  const distCoreUrl = new URL(
+    '../../packages/core/dist/index.mjs',
+    import.meta.url
+  ).href
+  const distCore = (await import(distCoreUrl)) as Record<string, unknown>
+  assert.equal(typeof distCore['clearUserIdentity'], 'function')
   assert.equal('createAdminRoom' in distCore, false)
   for (const pkg of [
     'trystero',
@@ -297,10 +303,14 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     'supabase',
     'ws-relay'
   ]) {
-    const mod = await import(`../../packages/${pkg}/dist/index.mjs`)
+    const pkgUrl = new URL(
+      `../../packages/${pkg}/dist/index.mjs`,
+      import.meta.url
+    ).href
+    const mod = (await import(pkgUrl)) as Record<string, unknown>
     assert.equal(
-      mod.clearUserIdentity,
-      distCore.clearUserIdentity,
+      mod['clearUserIdentity'],
+      distCore['clearUserIdentity'],
       `packages/${pkg} must re-export clearUserIdentity`
     )
     assert.equal(
@@ -345,7 +355,19 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     {stdio: 'pipe'}
   )
 
+  const coreTypesDts = readFileSync(
+    resolve(process.cwd(), 'packages/core/dist/types.d.mts'),
+    'utf8'
+  )
+
   const collectDtsExportedNames = (dts: string, out = new Set<string>()) => {
+    if (
+      /^export\s+(?:type\s+)?\*\s+from\s+['"]@trystero-p2p\/core\/types['"]/m.test(
+        dts
+      )
+    ) {
+      collectDtsExportedNames(coreTypesDts, out)
+    }
     for (const m of dts.matchAll(
       /^export (?:type|interface|declare const) (\w+)\b/gm
     )) {
@@ -445,6 +467,8 @@ void test('makeState widens primitive literals, isPassive is removed, and core e
     for (const kept of [
       'ActionError',
       'BanOptions',
+      'RoleChangeContext',
+      'RoleChangeHandler',
       'Room',
       'RoomError',
       'RoomErrorCode',

@@ -6,7 +6,8 @@ import {
 } from '../../packages/core/src/media.ts'
 import initPeer from '../../packages/core/src/peer.ts'
 import createRoom from '../../packages/core/src/room.ts'
-import type {PeerHandle, Room} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
+import type {Room} from '../../packages/core/src/types.ts'
 import {
   LinkedMediaPeer,
   MockPeer,

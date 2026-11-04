@@ -1,4 +1,4 @@
-import type {PeerHandle} from './types'
+import type {PeerHandle} from './internal-types'
 import {noOp, resetTimer, unrefTimer} from './utils'
 
 export type PeerDataTransport = {
@@ -71,9 +71,11 @@ export const waitForBufferedAmountLow = (
 export const destroyAfterFlush = (
   peer: PeerHandle,
   graceMs = 40,
-  capMs = 150
+  capMs = 150,
+  onDone?: () => void
 ): (() => void) => {
   if (peer.isDead) {
+    onDone?.()
     return noOp
   }
   peer.setHandlers({
@@ -85,6 +87,7 @@ export const destroyAfterFlush = (
   const channel = peer.channel
   if (!channel || channel.readyState !== 'open') {
     peer.destroy()
+    onDone?.()
     return noOp
   }
 
@@ -107,6 +110,7 @@ export const destroyAfterFlush = (
     resetTimer(graceTimer)
     resetTimer(capTimer)
     peer.destroy()
+    onDone?.()
   }
 
   const maybeFinish = (): void => {

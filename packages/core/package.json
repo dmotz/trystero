@@ -41,6 +41,9 @@
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
+    "./types": {
+      "types": "./dist/types.d.mts"
+    },
     "./package.json": "./package.json"
   },
   "engines": {

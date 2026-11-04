@@ -40,9 +40,9 @@
   authority plugin out of their bundle.
 - Added `room.ready` (resolving once the local endpoint identity is initialized
   and any configured `use` plugins have attached their methods to `room`),
-  `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`, `room.ban()`,
-  `room.unban()`, `room.isBanned()` (on rooms configured with `roles()`), and
-  `room.getSelf()` (returning
+  `room.grantRole()`, `room.revokeRole()`, `room.getRoles()`,
+  `room.onRoleChange()`, `room.ban()`, `room.unban()`, `room.isBanned()` (on
+  rooms configured with `roles()`), and `room.getSelf()` (returning
   `{peerId, userId, identityPersistence, roomId, baseRoomId, isAdmin, roles}`).
 - Actions now accept a `roles` option (`makeAction(name, {roles})`) to restrict
   sending or requesting to `'admin'` or specific custom roles, with the sender's
@@ -55,11 +55,13 @@
   1-hop peers and evicted after `onUserLeave`) and
   `room.makeState(namespace, initialValue?, config?)` (open to room members by
   default, or fail-closed to `roles: ['admin']` when `roles()` is loaded unless
-  `roles: '*'` or custom roles are specified), with optional custom
-  `validate(next, context)` rules and `onChange` matching React's
+  `roles: '*'` or custom roles are specified), with synchronous optimistic local
+  `.set()` / `.clear()` updates (coalesced over a 40 ms wire window), optional
+  custom `validate(next, context)` rules, and `onChange` matching React's
   `useSyncExternalStore` contract out of the box. Existing peers automatically
-  sync the latest signed state to late joiners even after the original writer
-  has left, and `room.ban()` purges state and roles held by the banned user.
+  sync the latest signed state and role/moderation records via cursor-paged
+  anti-entropy even after the original writer has left, and `room.ban()` purges
+  state and roles held by the banned user.
 - 🚪 **Room size limits (`maxUsers`)** - added `maxUsers` to room config for a
   best-effort, advisory per-peer cap on the number of unique users (`userId`s)
   in a peer's room view (including the local user). When a peer's view is at
@@ -67,11 +69,12 @@
   link during handshake before triggering `onPeerJoin` on existing members and
   receive `{code: 'room-full'}` via `room.onError()`.
 - 🪪 **Self-certifying peer & user identities (`peerId` + `userId`)** - every
-  peer now has both a lazily generated self-certifying 20-character Base62
-  endpoint `peerId` (derived from its ECDSA P-256 public key and verified with
-  DTLS fingerprint binding during the direct WebRTC handshake, plus signed
-  descriptors across multi-hop overlays) and a 22-character Base62 `userId`
-  (derived from its ECDSA P-256 public key).
+  peer now has both a lazily generated domain-separated 20-character Base62
+  endpoint `peerId` (`trystero:pid:v1:`, derived from its ECDSA P-256 public key
+  and verified with DTLS fingerprint binding during the direct WebRTC handshake,
+  plus signed descriptors across multi-hop overlays) and a domain-separated
+  22-character Base62 `userId` (`trystero:uid:v1:`, derived from its ECDSA P-256
+  public key).
 - Added `identity` to room config (`'local'` default in browsers stored in
   IndexedDB as a non-extractable `CryptoKey` across tabs and future visits,
   `'none'` for ephemeral runtime, or a custom `UserIdentity` / loader function),
@@ -90,17 +93,26 @@
   settles with `'fulfilled' | 'timeout' | 'rejected' | 'disconnected'` per
   target, throwing an `Error` inside `onRequest` forwards its `message` to the
   caller's rejected `ActionError`, and explicit-target `send(data, {target})`
-  rejects when a targeted peer or user is not connected.
+  validates all targets up front and rejects when a targeted peer or user is not
+  connected.
 - 🔐 **Signaling & relay hardening** - room `password` keys now use WebCrypto
-  `PBKDF2-SHA256` (`600,000` iterations) with AES-256-GCM context AAD; WebSocket
+  `PBKDF2-SHA256` (`600,000` iterations) with `HKDF-SHA256` subkeys and
+  AES-256-GCM context AAD; shared WebSocket relays (`ws-relay`, `nostr`,
+  `torrent`) and MQTT clients are reference-counted across active rooms and
+  close automatically once the last active room calls `room.leave()`; WebSocket
   relay topics/frames avoid double JSON serialization and enforce stricter frame
   and rate limits.
 - 📦 **Tree-shaking & `"sideEffects": false`** - enabled `"sideEffects": false`
   across all packages and removed prebuilt `.min.js` release bundles and the
   experimental `@trystero-p2p/ipfs` package in favor of tree-shaking bundlers
-  and ESM CDNs.
+  (while retaining single-entry ESM CDN compatibility).
 
 ### ⚠️ Breaking changes
+
+The wire protocol has changed significantly (domain-separated self-certifying
+`peerId`/`userId` handshakes, compact P-256 keys, tuple HLC state records, and
+v2 action envelopes) and is **not compatible with `0.26.x` peers**. Upgrade all
+peers communicating in the same room together.
 
 The top-level synchronous `selfId` export has been removed so that endpoint
 identities are generated lazily on first `joinRoom()` call via WebCrypto
@@ -122,22 +134,24 @@ subscription API (`on*(handler, options?) => Unsubscribe`) instead of property
 assignment (`room.on* = fn`) or config-object callbacks:
 
 - `room.onUserJoin`, `room.onUserLeave`, `room.onPeerJoin`, `room.onPeerLeave`,
-  `room.onPeerStream`, `room.onError`, `action.onMessage`,
+  `room.onPeerStream`, `room.onRoleChange`, `room.onError`, `action.onMessage`,
   `action.onReceiveProgress`, `state.onChange`, and `userState.onChange` support
   multiple independent listeners, return an idempotent `Unsubscribe`
   (`() => void`) function, and accept `{once?: boolean, signal?: AbortSignal}`
   options.
-- `onUserJoin`, `onPeerJoin`, `onPeerStream`, `state.onChange`, and
-  `userState.onChange` are strictly live-only by default; pass `{replay: true}`
-  to synchronously emit currently active users, peers, streams, or published
-  state to a late subscriber.
-- `joinRoom(config, roomId)` now takes 2 arguments; the 3rd `{onJoinError}`
-  callbacks object and `JoinError` have been replaced by
-  `room.onError(fn, options?)`, which emits a discriminated `RoomError` union
-  (`{code, message, appId, roomId, cause?, ...}`) covering `'room-full'`,
-  `'banned'` (including mid-session admin bans and optional `reason`),
-  `'decrypt-failed'`, `'peer-connect-failed'`, `'relay-failed'` (when all
-  configured relays fail initial bootstrap), `'identity-failed'`,
+- `onUserJoin`, `onPeerJoin`, `onPeerStream`, `onRoleChange`, `state.onChange`,
+  and `userState.onChange` are strictly live-only by default; pass
+  `{replay: true}` to synchronously emit currently active users, peers, streams,
+  roles, or published state to a late subscriber.
+- `joinRoom(config, roomId)` now takes 2 arguments, and calling `joinRoom` while
+  a room with the same `(appId, roomId)` is already active now throws an error
+  instead of returning the existing room instance (call `room.leave()` before
+  rejoining). The 3rd `{onJoinError}` callbacks object and `JoinError` have been
+  replaced by `room.onError(fn, options?)`, which emits a discriminated
+  `RoomError` union (`{code, message, appId, roomId, cause?, ...}`) covering
+  `'room-full'`, `'banned'` (including mid-session admin bans and optional
+  `reason`), `'decrypt-failed'`, `'peer-connect-failed'`, `'relay-failed'` (when
+  all configured relays fail initial bootstrap), `'identity-failed'`,
   `'plugin-failed'`, `'handshake-failed'`, and `'peer-error'`.
 - `room.makeAction(namespace, config?)` accepts declarative config only (`kind`
   and `roles`); register handlers via `action.onMessage(fn)`,
@@ -211,6 +225,11 @@ Deprecated `trystero/<strategy>` subpath exports and `@trystero-p2p/ipfs` have
 been removed; `trystero` is now solely a convenience wrapper for
 `@trystero-p2p/nostr`. Import strategies directly from
 `@trystero-p2p/<strategy>` (or `'trystero'` for Nostr).
+
+In `@trystero-p2p/ws-relay`, `ws` is now an optional `peerDependency` (required
+only when importing `@trystero-p2p/ws-relay/server` on Node), and
+`createWsRelayServer` throws a `RangeError` if `maxMessagesPerSecond <= 0` or
+`maxBurstMessages <= 0` (pass `Infinity` to disable rate limiting).
 
 `relayConfig.manualReconnection`, `pauseRelayReconnection()`, and
 `resumeRelayReconnection()` have been replaced by a single process-wide

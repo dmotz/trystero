@@ -13,6 +13,10 @@ import {
   loadOrCreateIdbIdentity,
   type StoredIdbIdentityRecord
 } from './identity-idb'
+import type {
+  ResolvedIdentityPersistence,
+  UserIdentityPersistence
+} from './internal-types'
 import {
   base62Alphabet,
   bytesMatch,
@@ -30,12 +34,7 @@ import {
   toJson,
   userIdLength
 } from './primitives'
-import type {
-  ResolvedIdentityPersistence,
-  UserIdentity,
-  UserIdentityConfig,
-  UserIdentityPersistence
-} from './types'
+import type {UserIdentity, UserIdentityConfig} from './types'
 import {invalidP256KeyErr, noOp, requiredErr, userIdRegex, warn} from './utils'
 
 const base62Radix = 62n
@@ -72,28 +71,41 @@ const encodeBase62 = (bytes: Uint8Array, length: number): string => {
 }
 
 export const pubJwkToUncompressedBytes = (
-  jwk: JsonWebKey
+  pubKeyOrJwk: JsonWebKey | string
 ): Uint8Array | null => {
-  if (
-    !jwk ||
-    jwk.d !== undefined ||
-    (jwk.kty && jwk.kty !== 'EC') ||
-    (jwk.crv && jwk.crv !== 'P-256') ||
-    typeof jwk.x !== 'string' ||
-    typeof jwk.y !== 'string' ||
-    !jwk.x ||
-    !jwk.y
-  ) {
-    return null
+  let x: string | undefined
+  let y: string | undefined
+  if (typeof pubKeyOrJwk === 'string') {
+    if (pubKeyOrJwk.length !== 87 || pubKeyOrJwk[43] !== '.') {
+      return null
+    }
+    x = pubKeyOrJwk.slice(0, 43)
+    y = pubKeyOrJwk.slice(44)
+  } else {
+    if (
+      !pubKeyOrJwk ||
+      typeof pubKeyOrJwk !== 'object' ||
+      pubKeyOrJwk.d !== undefined ||
+      (pubKeyOrJwk.kty && pubKeyOrJwk.kty !== 'EC') ||
+      (pubKeyOrJwk.crv && pubKeyOrJwk.crv !== 'P-256') ||
+      typeof pubKeyOrJwk.x !== 'string' ||
+      typeof pubKeyOrJwk.y !== 'string' ||
+      !pubKeyOrJwk.x ||
+      !pubKeyOrJwk.y
+    ) {
+      return null
+    }
+    x = pubKeyOrJwk.x
+    y = pubKeyOrJwk.y
   }
   try {
-    const xBytes = fromBase64Url(jwk.x)
-    const yBytes = fromBase64Url(jwk.y)
+    const xBytes = fromBase64Url(x)
+    const yBytes = fromBase64Url(y)
     if (
       xBytes.byteLength !== 32 ||
       yBytes.byteLength !== 32 ||
-      toBase64Url(xBytes) !== jwk.x ||
-      toBase64Url(yBytes) !== jwk.y
+      toBase64Url(xBytes) !== x ||
+      toBase64Url(yBytes) !== y
     ) {
       return null
     }
@@ -114,35 +126,43 @@ const makeP256Jwk = (
   kty = 'EC'
 ): JsonWebKey => ({crv, kty, x, y})
 
-export const canonicalizePubJwk = (jwk: JsonWebKey): string =>
-  toJson(
-    makeP256Jwk(jwk.x ?? '', jwk.y ?? '', jwk.crv ?? 'P-256', jwk.kty ?? 'EC')
-  )
-
-export const jwkToCompactPub = (jwk: JsonWebKey): string => {
-  if (!pubJwkToUncompressedBytes(jwk) || !jwk.x || !jwk.y) {
-    throw invalidP256KeyErr
+export const toCompactPub = (
+  pubKeyOrJwk: JsonWebKey | string
+): string | null => {
+  if (typeof pubKeyOrJwk === 'object' && pubKeyOrJwk !== null) {
+    const byRef = cleanJwkRecordCache.get(pubKeyOrJwk)
+    if (byRef) {
+      return byRef.compactPub
+    }
   }
-  return `${jwk.x}.${jwk.y}`
-}
-
-export const compactPubToJwk = (pub: string): JsonWebKey | null => {
-  if (typeof pub !== 'string' || pub.length !== 87 || pub[43] !== '.') {
+  if (!pubJwkToUncompressedBytes(pubKeyOrJwk)) {
     return null
   }
-  const jwk = makeP256Jwk(pub.slice(0, 43), pub.slice(44))
-  return pubJwkToUncompressedBytes(jwk) ? jwk : null
+  return typeof pubKeyOrJwk === 'string'
+    ? pubKeyOrJwk
+    : `${pubKeyOrJwk.x!}.${pubKeyOrJwk.y!}`
 }
 
-export type VerifiedPubKeyRecord = readonly [
-  canonicalJwk: string,
-  compactPub: string,
-  cleanJwk: JsonWebKey,
-  verifyKey: CryptoKey,
-  digest: Uint8Array,
-  peerId: string,
-  userId: string
-]
+export const jwkToCompactPub = (pubKeyOrJwk: JsonWebKey | string): string => {
+  const compact = toCompactPub(pubKeyOrJwk)
+  if (!compact) {
+    throw invalidP256KeyErr
+  }
+  return compact
+}
+
+export const compactPubToJwk = (pub: string): JsonWebKey | null =>
+  typeof pub === 'string' && pubJwkToUncompressedBytes(pub)
+    ? makeP256Jwk(pub.slice(0, 43), pub.slice(44))
+    : null
+
+export type VerifiedPubKeyRecord = {
+  readonly compactPub: string
+  readonly cleanJwk: JsonWebKey
+  readonly verifyKey: CryptoKey
+  readonly peerId: string
+  readonly userId: string
+}
 
 const resolvedPubKeyCache = /*@__PURE__*/ createBoundedCache<
   string,
@@ -166,11 +186,8 @@ const getCachedPubKeyRecord = (
       return byRef
     }
   }
-  const jwk =
-    typeof pubKeyOrJwk === 'string' ? compactPubToJwk(pubKeyOrJwk) : pubKeyOrJwk
-  return jwk && typeof jwk.x === 'string' && typeof jwk.y === 'string'
-    ? resolvedPubKeyCache.get(canonicalizePubJwk(jwk))
-    : undefined
+  const compactPub = toCompactPub(pubKeyOrJwk)
+  return compactPub ? resolvedPubKeyCache.get(compactPub) : undefined
 }
 
 export const getVerifiedPubKeyRecord = (
@@ -183,25 +200,27 @@ export const getVerifiedPubKeyRecord = (
       return Promise.resolve(byRef)
     }
   }
-  const jwk =
-    typeof pubKeyOrJwk === 'string' ? compactPubToJwk(pubKeyOrJwk) : pubKeyOrJwk
-  const uncompressed = jwk ? pubJwkToUncompressedBytes(jwk) : null
-  if (!jwk || !uncompressed) {
+  const uncompressed = pubJwkToUncompressedBytes(pubKeyOrJwk)
+  if (!uncompressed) {
     return Promise.resolve(null)
   }
-  const canonicalJwk = canonicalizePubJwk(jwk)
-  const existing = resolvedPubKeyCache.get(canonicalJwk)
+  const x =
+    typeof pubKeyOrJwk === 'string' ? pubKeyOrJwk.slice(0, 43) : pubKeyOrJwk.x!
+  const y =
+    typeof pubKeyOrJwk === 'string' ? pubKeyOrJwk.slice(44) : pubKeyOrJwk.y!
+  const compactPub = `${x}.${y}`
+  const existing = resolvedPubKeyCache.get(compactPub)
   if (existing) {
     return Promise.resolve(existing)
   }
-  const inflight = pendingPubKeyCache.get(canonicalJwk)
+  const inflight = pendingPubKeyCache.get(compactPub)
   if (inflight) {
     return inflight
   }
 
   const p = (async (): Promise<VerifiedPubKeyRecord | null> => {
     try {
-      const [verifyKey, digest] = await Promise.all([
+      const [verifyKey, peerDigest, userDigest] = await Promise.all([
         preimportedVerifyKey
           ? Promise.resolve(preimportedVerifyKey)
           : crypto.subtle.importKey(
@@ -211,50 +230,49 @@ export const getVerifiedPubKeyRecord = (
               false,
               ['verify']
             ),
-        sha256(canonicalJwk)
+        sha256(`${domainTag('pid', 1)}:${compactPub}`),
+        sha256(`${domainTag('uid', 1)}:${compactPub}`)
       ])
-      const cleanJwk = Object.freeze(makeP256Jwk(jwk.x!, jwk.y!))
-      const record: VerifiedPubKeyRecord = [
-        canonicalJwk,
-        `${jwk.x!}.${jwk.y!}`,
+      const cleanJwk = Object.freeze(makeP256Jwk(x, y))
+      const record: VerifiedPubKeyRecord = {
+        compactPub,
         cleanJwk,
         verifyKey,
-        digest,
-        encodeBase62(digest, peerIdLength),
-        encodeBase62(digest, userIdLength)
-      ]
+        peerId: encodeBase62(peerDigest, peerIdLength),
+        userId: encodeBase62(userDigest, userIdLength)
+      }
       cleanJwkRecordCache.set(cleanJwk, record)
-      resolvedPubKeyCache.set(canonicalJwk, record)
+      resolvedPubKeyCache.set(compactPub, record)
       return record
     } catch {
       return null
     } finally {
-      pendingPubKeyCache.delete(canonicalJwk)
+      pendingPubKeyCache.delete(compactPub)
     }
   })()
 
-  pendingPubKeyCache.set(canonicalJwk, p)
+  pendingPubKeyCache.set(compactPub, p)
   return p
 }
 
 const deriveId = async (
   pubKeyOrJwk: JsonWebKey | string,
-  idx: 5 | 6
+  field: 'peerId' | 'userId'
 ): Promise<string> => {
   const rec = await getVerifiedPubKeyRecord(pubKeyOrJwk)
   if (!rec) {
     throw invalidP256KeyErr
   }
-  return rec[idx]
+  return rec[field]
 }
 
 export const derivePeerId = (
   pubKeyOrJwk: JsonWebKey | string
-): Promise<string> => deriveId(pubKeyOrJwk, 5)
+): Promise<string> => deriveId(pubKeyOrJwk, 'peerId')
 
 export const deriveUserId = (
   pubKeyOrJwk: JsonWebKey | string
-): Promise<string> => deriveId(pubKeyOrJwk, 6)
+): Promise<string> => deriveId(pubKeyOrJwk, 'userId')
 
 export const isValidUserId = (id: string): boolean =>
   typeof id === 'string' && userIdRegex.test(id)
@@ -314,7 +332,7 @@ export const verifyWithP256 = (
   const cachedRec = getCachedPubKeyRecord(pubKeyOrJwk)
   if (cachedRec && payload.byteLength <= maxCachedSigPayloadBytes) {
     const cached = verifiedSigPayloads.get(
-      `${cachedRec[1]}:${toBase64Url(sigBytes)}`
+      `${cachedRec.compactPub}:${toBase64Url(sigBytes)}`
     )
     if (cached) {
       return bytesMatch(cached, payload)
@@ -339,7 +357,7 @@ const verifyWithP256Async = async (
     }
     try {
       return await ecdsaVerify(
-        rec[3],
+        rec.verifyKey,
         sigBytes as BufferSource,
         payload as BufferSource
       )
@@ -348,7 +366,7 @@ const verifyWithP256Async = async (
     }
   }
 
-  const cacheKey = `${rec[1]}:${toBase64Url(sigBytes)}`
+  const cacheKey = `${rec.compactPub}:${toBase64Url(sigBytes)}`
   const cached = verifiedSigPayloads.get(cacheKey)
   if (cached) {
     return bytesMatch(cached, payload)
@@ -363,7 +381,7 @@ const verifyWithP256Async = async (
 
   const snapshot = payload.slice()
   const promise = ecdsaVerify(
-    rec[3],
+    rec.verifyKey,
     sigBytes as BufferSource,
     snapshot as BufferSource
   )
@@ -391,13 +409,13 @@ const verifyWithP256Async = async (
 const verifyIdKey = (
   id: string,
   pubKeyOrJwk: JsonWebKey | string,
-  idx: 5 | 6
+  field: 'peerId' | 'userId'
 ): boolean | Promise<boolean> => {
   const cached = getCachedPubKeyRecord(pubKeyOrJwk)
   return cached
-    ? cached[idx] === id
+    ? cached[field] === id
     : getVerifiedPubKeyRecord(pubKeyOrJwk).then(rec =>
-        Boolean(rec && rec[idx] === id)
+        Boolean(rec && rec[field] === id)
       )
 }
 
@@ -406,13 +424,13 @@ export const verifyPeerIdKey = (
   pubKeyOrJwk: JsonWebKey | string
 ): boolean | Promise<boolean> =>
   Boolean(peerId && typeof peerId === 'string') &&
-  verifyIdKey(peerId, pubKeyOrJwk, 5)
+  verifyIdKey(peerId, pubKeyOrJwk, 'peerId')
 
 export const verifyUserIdKey = (
   userId: string,
   pubKeyOrJwk: JsonWebKey | string
 ): boolean | Promise<boolean> =>
-  isValidUserId(userId) && verifyIdKey(userId, pubKeyOrJwk, 6)
+  isValidUserId(userId) && verifyIdKey(userId, pubKeyOrJwk, 'userId')
 
 export type EndpointIdentity = {
   peerId: string
@@ -466,10 +484,10 @@ const slotForApp = (appId?: string, clientId = ''): string => {
 
 export const createEndpointIdentity = (): Promise<EndpointIdentity> =>
   generateP256KeyMaterial(false).then(([keyPair, , rec]) => ({
-    peerId: rec[5],
+    peerId: rec.peerId,
     signPrivateKey: keyPair.privateKey,
     signPublicKey: keyPair.publicKey,
-    signPubJwk: rec[2],
+    signPubJwk: rec.cleanJwk,
     sign: (payload: Uint8Array) =>
       ecdsaSign(keyPair.privateKey, payload as BufferSource)
   }))
@@ -501,7 +519,7 @@ const buildExtractableUserIdentity = (
   rec: VerifiedPubKeyRecord,
   secretScalarD: string
 ): UserIdentity => {
-  const cleanJwk = rec[2]
+  const {cleanJwk} = rec
   const userKey =
     userKeyPrefix +
     toBase64Url(
@@ -514,7 +532,7 @@ const buildExtractableUserIdentity = (
       )
     )
   const identity: UserIdentity = {
-    userId: rec[6],
+    userId: rec.userId,
     signPubJwk: cleanJwk,
     sign: (payload: Uint8Array) =>
       ecdsaSign(privateKey, payload as BufferSource)
@@ -533,8 +551,8 @@ const generateNonExtractableIdbRecord =
   async (): Promise<StoredIdbIdentityRecord> => {
     const [keyPair, , rec] = await generateP256KeyMaterial(false)
     return {
-      userId: rec[6],
-      signPubJwk: rec[2],
+      userId: rec.userId,
+      signPubJwk: rec.cleanJwk,
       privateKey: keyPair.privateKey
     }
   }
@@ -632,7 +650,7 @@ export const importUserIdentity = async (
     if (
       !rec ||
       !(await ecdsaVerify(
-        rec[3],
+        rec.verifyKey,
         (await ecdsaSign(
           privateKey,
           keyPairTestPayload as BufferSource
@@ -669,12 +687,13 @@ const isUserIdentityObjectStructural = (val: unknown): val is UserIdentity =>
 
 const withPersistence = (
   val: UserIdentity,
-  persistence: ResolvedIdentityPersistence
+  persistence: ResolvedIdentityPersistence,
+  cleanJwk: JsonWebKey = val.signPubJwk
 ): UserIdentity => {
   const isKnownTrusted = trustedUserIdentities.has(val)
   const wrapped: UserIdentity = {
     userId: val.userId,
-    signPubJwk: val.signPubJwk,
+    signPubJwk: cleanJwk,
     sign: isKnownTrusted
       ? val.sign
       : async (payload: Uint8Array) =>
@@ -698,13 +717,13 @@ const coerceCustomUserIdentity = async (
     throw invalidCustomIdentityErr
   }
   const rec = await getVerifiedPubKeyRecord(val.signPubJwk)
-  if (!rec || rec[6] !== val.userId) {
+  if (!rec || rec.userId !== val.userId) {
     throw userIdMismatchErr
   }
   if (!trustedUserIdentities.has(val)) {
     let rawSig: Uint8Array
     try {
-      rawSig = new Uint8Array(await val.sign(keyPairTestPayload))
+      rawSig = new Uint8Array(await val.sign(keyPairTestPayload.slice()))
     } catch (cause) {
       throw mkErr(
         `custom user identity sign() failed startup check: ${cause instanceof Error ? cause.message : String(cause)}`
@@ -714,7 +733,7 @@ const coerceCustomUserIdentity = async (
     if (
       normalizedSig.byteLength !== 64 ||
       !(await ecdsaVerify(
-        rec[3],
+        rec.verifyKey,
         normalizedSig as BufferSource,
         keyPairTestPayload as BufferSource
       ))
@@ -722,7 +741,7 @@ const coerceCustomUserIdentity = async (
       throw invalidCustomSignatureErr
     }
   }
-  return withPersistence(val, val.persistence ?? 'custom')
+  return withPersistence(val, val.persistence ?? 'custom', rec.cleanJwk)
 }
 
 const hasIndexedDB = (): boolean => {
@@ -755,7 +774,7 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   }
   if (isUserIdentityObjectStructural(raw)) {
     const cached = getCachedPubKeyRecord(raw.signPubJwk)
-    if (cached && cached[6] !== raw.userId) {
+    if (cached && cached.userId !== raw.userId) {
       throw userIdMismatchErr
     }
     return
@@ -888,16 +907,16 @@ export const userEndpointProofPayload = (params: {
   appId: string
   roomId: string
   peerId: string
-  peerPubJwk: JsonWebKey
+  peerPubJwk: JsonWebKey | string
   seq?: number
 }): Uint8Array =>
   encodeBytes(
     toJson([
-      domainTag('user-proof', 2),
+      domainTag('user-proof', 3),
       params.appId,
       params.roomId,
       params.peerId,
-      canonicalizePubJwk(params.peerPubJwk),
+      jwkToCompactPub(params.peerPubJwk),
       params.seq ?? 0
     ])
   )
@@ -908,7 +927,7 @@ export const signUserEndpointProof = async (
     appId: string
     roomId: string
     peerId: string
-    peerPubJwk: JsonWebKey
+    peerPubJwk: JsonWebKey | string
     seq?: number
   }
 ): Promise<string> =>
@@ -922,9 +941,9 @@ export const verifyUserEndpointProof = (params: {
   appId: string
   roomId: string
   peerId: string
-  peerPubJwk: JsonWebKey
+  peerPubJwk: JsonWebKey | string
   userId: string
-  userPubJwk: JsonWebKey
+  userPubJwk: JsonWebKey | string
   proof: string
   seq?: number
 }): boolean | Promise<boolean> => {

@@ -16,7 +16,6 @@ import {
   type RoomError
 } from '../../packages/core/src/index.ts'
 import type {InternalRoomContext} from '../../packages/core/src/internal-types.ts'
-import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {
@@ -34,6 +33,7 @@ import {
   BufferedPeer,
   getTestEndpointByPeerId,
   linkPeers,
+  makeTestPluginSlot,
   MockRTCPeerConnection,
   testEndpoint,
   wait,
@@ -340,26 +340,20 @@ void test('Bug 1.11: concurrent maxUsers: 2 admission across all 3 peerId orderi
   }
 })
 
-void test('Bug 1.12: sequential resolveRoomId chaining, KernelScaleProvider, and virtual peers in getActivePeerIds', async () => {
+void test('Bug 1.12: roles + scale order independence, KernelScaleProvider, and virtual peers in getActivePeerIds', async () => {
   const adminIdentity = await createUserIdentity()
   const epAdmin = testEndpoint('bug-1-12-admin')
-  const seenRoomIdsInResolvers: string[] = []
+  const seenRoomIdsInScale: string[] = []
 
-  const suffixScalePlugin = makeInternalPlugin(
-    'scale',
-    kernel => ({
+  const suffixScalePlugin = makeTestPluginSlot('scale', kernel => {
+    kernel.onRoomIdChanged(rid => seenRoomIdsInScale.push(rid))
+    return {
       inspectKernel: () => ({
         activePeers: kernel.getActivePeerIds(),
         effectiveRoomId: kernel.getRoomId()
       })
-    }),
-    {
-      resolveRoomId: async ({roomId}) => {
-        seenRoomIdsInResolvers.push(roomId)
-        return {effectiveRoomId: `${roomId}:staging`}
-      }
     }
-  )
+  })
 
   const roomAdmin = createRoom(
     () => {},
@@ -370,24 +364,20 @@ void test('Bug 1.12: sequential resolveRoomId chaining, KernelScaleProvider, and
       appId: 'bug-1-12-app',
       roomId: 'base-room',
       identity: adminIdentity,
-      // Even when passed with scale first, getConfiguredPlugins runs roles before scale
+      // Even when passed with scale first, roles setup runs before scale setup
       use: [suffixScalePlugin, roles({selfAsAdmin: true})]
     }
   )
 
   try {
     const selfInfo = await roomAdmin.getSelf()
-    assert.equal(seenRoomIdsInResolvers.length, 1)
-    assert.equal(
-      seenRoomIdsInResolvers[0],
-      `base-room~${adminIdentity.userId}`,
-      'roles resolveRoomId must run before scale resolveRoomId'
-    )
-    assert.equal(selfInfo.roomId, `${seenRoomIdsInResolvers[0]}:staging`)
+    const expectedEffectiveRoomId = `base-room~${adminIdentity.userId}`
+    assert.deepEqual(seenRoomIdsInScale, [expectedEffectiveRoomId])
+    assert.equal(selfInfo.roomId, expectedEffectiveRoomId)
     assert.equal(selfInfo.isAdmin, true)
     assert.equal(
       roomAdmin.inspectKernel().effectiveRoomId,
-      `${seenRoomIdsInResolvers[0]}:staging`
+      expectedEffectiveRoomId
     )
   } finally {
     await roomAdmin.leave()
@@ -395,7 +385,7 @@ void test('Bug 1.12: sequential resolveRoomId chaining, KernelScaleProvider, and
 
   // Verify 2-hop virtual peer appears in kernel.getActivePeerIds() and getTopology()
   let observerKernel = null as InternalRoomContext | null
-  const observerRolesPlugin = makeInternalPlugin('roles', kernel => {
+  const observerRolesPlugin = makeTestPluginSlot('roles', kernel => {
     observerKernel = kernel
     return {}
   })
@@ -852,7 +842,7 @@ void test('H10: Torrent cleans up infoHash maps and reclaims pre-allocated offer
     assert.equal(typeof infoHash, 'string')
     assert.equal(infoHash.length, 20)
 
-    // Leaving the last subscriber must reclaim outstanding offers AND delete infoHashToTopic[infoHash]
+    // Leaving the last subscriber must reclaim outstanding offers, close idle socket, AND delete infoHashToTopic[infoHash]
     await room1.leave()
     room1 = undefined
     assert.equal(
@@ -860,21 +850,27 @@ void test('H10: Torrent cleans up infoHash maps and reclaims pre-allocated offer
       createdPcs,
       'all pre-allocated torrent offer peers must be closed on leave'
     )
+    assert.equal(
+      sock.readyState,
+      3,
+      'torrent tracker socket must close when activeRooms reaches 0'
+    )
 
     // Inject a tracker offer for that info_hash while no room is subscribed.
     // Because infoHashToTopic[infoHash] was deleted on leave, this message must be ignored
     // without recording offer_id 'probe-h10' in Torrent's 4-second handledSignals dedupe cache.
+    const remotePeerH10 = 'RemotePeerH100000001'
     sock.onmessage?.({
       data: JSON.stringify({
         info_hash: infoHash,
-        peer_id: 'remote-peer-h10',
+        peer_id: remotePeerH10,
         offer_id: 'probe-h10',
         offer: {type: 'offer', sdp: 'corrupt-ciphertext'}
       })
     })
 
     // Re-join the same room immediately (within the 4s dedupe window) and deliver the exact same
-    // offer_id: it must NOT be suppressed by stale handledSignals from after room1 left.
+    // offer_id on the reopened tracker socket: it must NOT be suppressed by stale handledSignals.
     const room2Errors: RoomError[] = []
     room2 = joinTorrentRoom(
       {
@@ -887,11 +883,12 @@ void test('H10: Torrent cleans up infoHash maps and reclaims pre-allocated offer
     )
     room2.onError(err => room2Errors.push(err))
 
-    await waitFor(() => sock.sent.length >= 2, 2_000)
-    sock.onmessage?.({
+    await waitFor(() => (sockets[1]?.sent.length ?? 0) >= 1, 2_000)
+    const sock2 = sockets[1]!
+    sock2.onmessage?.({
       data: JSON.stringify({
         info_hash: infoHash,
-        peer_id: 'remote-peer-h10',
+        peer_id: remotePeerH10,
         offer_id: 'probe-h10',
         offer: {type: 'offer', sdp: 'corrupt-ciphertext'}
       })
@@ -900,7 +897,7 @@ void test('H10: Torrent cleans up infoHash maps and reclaims pre-allocated offer
     await waitFor(() => room2Errors.length === 1, 2_000)
     assert.equal(room2Errors[0]!.code, 'decrypt-failed')
     if (room2Errors[0]!.code === 'decrypt-failed') {
-      assert.equal(room2Errors[0]!.peerId, 'remote-peer-h10')
+      assert.equal(room2Errors[0]!.peerId, remotePeerH10)
     }
   } finally {
     await room1?.leave().catch(() => {})
@@ -941,11 +938,6 @@ void test('Tree-shaking: bundling defaultRelayUrls from trystero stays under 1.5
         '@trystero-p2p/torrent': resolve('packages/torrent/src/index.ts'),
         crypto: resolve('scripts/empty.ts'),
         'node:crypto': resolve('scripts/empty.ts')
-      },
-      inputOptions: {
-        transform: {
-          dropLabels: ['DEV']
-        }
       },
       outputOptions: {
         codeSplitting: false

@@ -1,16 +1,18 @@
 import {
+  compactPubToJwk,
   type EndpointIdentity,
+  jwkToCompactPub,
   verifyPeerIdKey,
   verifyUserIdKey,
   verifyWithP256
 } from './identity'
+import type {PeerHandle} from './internal-types'
 import {fromBase64Url, toBase64Url} from './primitives'
-import type {DataPayload, JsonValue, PeerHandle, UserIdentity} from './types'
+import type {DataPayload, JsonValue, UserIdentity} from './types'
 import {
   all,
   domainTag,
   encodeBytes,
-  isObj,
   isStr,
   libId,
   mkErr,
@@ -26,8 +28,9 @@ const peerIdentityErr = /*@__PURE__*/ mkErr('peer identity verification failed')
 const handshakeDisconnectErr = /*@__PURE__*/ mkErr(
   'peer disconnected during handshake'
 )
+const defaultHandshakeTimeoutMs = 10_000
 const hsStepKey = `__${libId}_id`
-const hsDomain = /*@__PURE__*/ domainTag('id-hs', 1)
+const hsDomain = /*@__PURE__*/ domainTag('id-hs', 2)
 
 type HandshakePayload = {
   data: DataPayload
@@ -120,8 +123,8 @@ const parseAndVerifyPeerIdentityClaims = async (
     msg.n.length < 16 ||
     !Array.isArray(msg.dtls) ||
     !isStr(msg.uid) ||
-    !isObj(msg.pk) ||
-    !isObj(msg.uk) ||
+    typeof msg.pk !== 'string' ||
+    typeof msg.uk !== 'string' ||
     (expectedStep === 2 &&
       (typeof msg.ps !== 'string' || typeof msg.us !== 'string'))
   ) {
@@ -137,8 +140,11 @@ const parseAndVerifyPeerIdentityClaims = async (
     throw mkErr('DTLS fingerprint mismatch')
   }
 
-  const peerPubJwk = msg.pk as JsonWebKey
-  const userPubJwk = msg.uk as JsonWebKey
+  const peerPubJwk = compactPubToJwk(msg.pk)
+  const userPubJwk = compactPubToJwk(msg.uk)
+  if (!peerPubJwk || !userPubJwk) {
+    throw peerIdentityErr
+  }
   const [peerOk, userOk] = await all([
     verifyPeerIdKey(remotePeerId, peerPubJwk),
     verifyUserIdKey(msg.uid, userPubJwk)
@@ -267,8 +273,8 @@ export const createIdentityHandshake = (deps: IdentityHandshakeDeps) => {
         n,
         dtls: localDtls,
         uid: localUser.userId,
-        pk: localEndpoint.signPubJwk as unknown as JsonValue,
-        uk: localUser.signPubJwk as unknown as JsonValue,
+        pk: jwkToCompactPub(localEndpoint.signPubJwk),
+        uk: jwkToCompactPub(localUser.signPubJwk),
         ...extra
       })
 
@@ -381,14 +387,7 @@ export const createIdentityHandshake = (deps: IdentityHandshakeDeps) => {
     return verified
   }
 
-  const compose =
-    (nextHandshake?: PeerHandshake): PeerHandshake =>
-    async (peerId, send, receive, isInitiator, peer): Promise<void> => {
-      await nextHandshake?.(peerId, send, receive, isInitiator, peer)
-      await run(peerId, send, receive, isInitiator, peer)
-    }
-
-  return {run, compose}
+  return {run}
 }
 
 type PendingPeerState = {
@@ -398,7 +397,6 @@ type PendingPeerState = {
   completedSteps: boolean
   localPassed: boolean
   remoteReady: boolean
-  acquiringAdmission: boolean
   timer: ReturnType<typeof setTimeout> | null
   messages: HandshakePayload[]
   waiters: Array<
@@ -408,9 +406,14 @@ type PendingPeerState = {
 
 export type HandshakeManagerDeps = {
   selfIdP: Promise<string>
-  onPeerHandshake?: PeerHandshake | undefined
+  onPeerHandshake: (
+    peerId: string,
+    send: HandshakeSender,
+    receive: HandshakeReceiver,
+    isInitiator: boolean,
+    peer?: PeerHandle
+  ) => Promise<unknown>
   onHandshakeError?: ((peerId: string, reason: Error) => void) | undefined
-  handshakeTimeoutMs: number
   deferResponderReady: boolean
   sendHandshakeData: (
     data: DataPayload,
@@ -422,10 +425,7 @@ export type HandshakeManagerDeps = {
     peerId: string
   ) => Promise<void>
   onLocalHandshakePassed: (peerId: string, peer: PeerHandle) => boolean
-  acquireAdmissionSlot: (
-    peerId: string,
-    peer: PeerHandle
-  ) => boolean | Promise<boolean>
+  acquireAdmissionSlot: (peerId: string, peer: PeerHandle) => boolean
   beforeSendHandshakeReady: (
     peerId: string,
     peer: PeerHandle
@@ -451,7 +451,6 @@ export const createHandshakeManager = (
     selfIdP,
     onPeerHandshake,
     onHandshakeError,
-    handshakeTimeoutMs,
     deferResponderReady,
     sendHandshakeData,
     sendHandshakeReady,
@@ -461,13 +460,13 @@ export const createHandshakeManager = (
     onActivate,
     onFailure
   } = deps
-  const peerStates: Record<string, PendingPeerState> = {}
+  const peerStates = new Map<string, PendingPeerState>()
 
   const getPending = (
     id: string,
     peer?: PeerHandle
   ): PendingPeerState | undefined => {
-    const state = peerStates[id]
+    const state = peerStates.get(id)
     return state && (!peer || state.peer === peer) && !state.active
       ? state
       : undefined
@@ -488,7 +487,7 @@ export const createHandshakeManager = (
     peer: PeerHandle,
     reason: Error
   ): void => {
-    const state = peerStates[id]
+    const state = peerStates.get(id)
     if (!state || state.peer !== peer) {
       return
     }
@@ -539,7 +538,6 @@ export const createHandshakeManager = (
     if (
       !state ||
       state.localPassed ||
-      state.acquiringAdmission ||
       !state.completedSteps ||
       !onLocalHandshakePassed(id, peer) ||
       (deferResponderReady && !state.isInitiator && !state.remoteReady)
@@ -547,49 +545,28 @@ export const createHandshakeManager = (
       return
     }
 
-    state.acquiringAdmission = true
-    const slotRes = acquireAdmissionSlot(id, peer)
-    if (typeof slotRes === 'boolean') {
-      state.acquiringAdmission = false
-      if (slotRes) {
-        sendLocalReady(id, peer)
-      }
-      return
+    if (acquireAdmissionSlot(id, peer)) {
+      sendLocalReady(id, peer)
     }
-
-    void slotRes.then(
-      admitted => {
-        const cur = getPending(id, peer)
-        if (!cur) {
-          return
-        }
-        cur.acquiringAdmission = false
-        if (admitted) {
-          sendLocalReady(id, peer)
-        }
-      },
-      err => failPeerHandshake(id, peer, toError(err, 'handshake failed'))
-    )
   }
 
   return {
     addPeer: (id, peer) => {
-      peerStates[id] = {
+      peerStates.set(id, {
         peer,
         active: false,
         isInitiator: true,
         completedSteps: false,
         localPassed: false,
         remoteReady: false,
-        acquiringAdmission: false,
         timer: null,
         messages: [],
         waiters: []
-      }
+      })
     },
 
     clearPeer: (id, error) => {
-      const state = peerStates[id]
+      const state = peerStates.get(id)
 
       if (!state) {
         return
@@ -598,11 +575,11 @@ export const createHandshakeManager = (
       state.timer = resetTimer(state.timer)
       state.messages.length = 0
       state.waiters.splice(0).forEach(([, reject]) => reject(error))
-      delete peerStates[id]
+      peerStates.delete(id)
     },
 
     canReceiveFromPeer: (id, receiveWhilePending) => {
-      const state = peerStates[id]
+      const state = peerStates.get(id)
 
       return Boolean(state && (state.active || receiveWhilePending))
     },
@@ -618,14 +595,14 @@ export const createHandshakeManager = (
           failPeerHandshake(
             id,
             peer,
-            mkErr(`handshake timed out after ${handshakeTimeoutMs}ms`)
+            mkErr(`handshake timed out after ${defaultHandshakeTimeoutMs}ms`)
           ),
-        handshakeTimeoutMs
+        defaultHandshakeTimeoutMs
       )
       unrefTimer(state.timer)
 
       const sendHandshake: HandshakeSender = async (data, metadata) => {
-        if (peerStates[id]?.peer !== peer) {
+        if (peerStates.get(id)?.peer !== peer) {
           throw handshakeDisconnectErr
         }
         await sendHandshakeData(data, id, metadata)
@@ -633,7 +610,7 @@ export const createHandshakeManager = (
 
       const receiveHandshake: HandshakeReceiver = () =>
         new Promise<HandshakePayload>((resolve, reject) => {
-          const current = peerStates[id]
+          const current = peerStates.get(id)
           if (!current || current.peer !== peer) {
             reject(handshakeDisconnectErr)
             return
@@ -646,25 +623,21 @@ export const createHandshakeManager = (
           }
         })
 
-      const runHandshake =
-        onPeerHandshake || deferResponderReady
-          ? selfIdP.then(effectiveSelfId => {
-              const isInitiator = effectiveSelfId < id
-              const current = peerStates[id]
-              if (current?.peer === peer) {
-                current.isInitiator = isInitiator
-              }
-              return onPeerHandshake?.(
-                id,
-                sendHandshake,
-                receiveHandshake,
-                isInitiator,
-                peer
-              )
-            })
-          : Promise.resolve()
-
-      void runHandshake
+      void selfIdP
+        .then(effectiveSelfId => {
+          const isInitiator = effectiveSelfId < id
+          const current = peerStates.get(id)
+          if (current?.peer === peer) {
+            current.isInitiator = isInitiator
+          }
+          return onPeerHandshake(
+            id,
+            sendHandshake,
+            receiveHandshake,
+            isInitiator,
+            peer
+          )
+        })
         .then(() => {
           const current = getPending(id, peer)
           if (current) {
@@ -710,6 +683,6 @@ export const createHandshakeManager = (
       maybeActivatePeer(id)
     },
 
-    getPeer: id => peerStates[id]?.peer
+    getPeer: id => peerStates.get(id)?.peer
   }
 }

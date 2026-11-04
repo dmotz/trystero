@@ -16,7 +16,7 @@ import {
   createDirectPeerTransport
 } from '../../packages/core/src/peer-transport.ts'
 import createRoom from '../../packages/core/src/room.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 
 const chunkSize = 16 * 1024 - 14
 

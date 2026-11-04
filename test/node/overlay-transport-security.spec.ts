@@ -4,8 +4,10 @@ import {
   createOverlayManager,
   overlayFrameVersion
 } from '../../packages/core/src/scale/index.ts'
-import type {PeerDataTransport} from '../../packages/core/src/internal-types.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {
+  PeerDataTransport,
+  PeerHandle
+} from '../../packages/core/src/internal-types.ts'
 import {
   decodeBytes,
   encodeBytes,
@@ -83,7 +85,7 @@ void test('S5: overlay rejects broadcast/unicast replays after seenMsgIds evicti
     })
     const aliceCrypto2 = await alice2.getLocalCryptoIdentity()
     assert.equal(aliceCrypto1.encPrivateKey.extractable, false)
-    assert.notDeepEqual(aliceCrypto1.encPubJwk, aliceCrypto2.encPubJwk)
+    assert.notEqual(aliceCrypto1.encPubKey, aliceCrypto2.encPubKey)
     alice2.destroy()
 
     const ar = {alive: true}
@@ -244,7 +246,7 @@ void test('S7: cross-room broadcast/leave envelopes are rejected and setRoomId e
     await waitFor(() => Boolean(victimY.getSnapshot().routes[aliceId]), 2_000)
 
     await aliceX.broadcastInline(encodeBytes('from-room-X'))
-    aliceX.announceLeave()
+    await aliceX.announceLeave()
     await waitFor(
       () => Boolean(capturedRoomXBroadcast && capturedRoomXLeave),
       2_000

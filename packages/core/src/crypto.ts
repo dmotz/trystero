@@ -128,7 +128,7 @@ export const hashTopic = async (str: string): Promise<string> => {
   return digest
 }
 
-const deriveRoomKeys = (
+const derivePasswordRoomKeys = (
   secret: string,
   appId: string,
   roomId: string
@@ -140,30 +140,6 @@ const deriveRoomKeys = (
   }
 
   const deriveP = (async (): Promise<DerivedRoomKeys> => {
-    if (!secret) {
-      const [aesRaw, hmacRaw] = await Promise.all([
-        sha256(toJson([domainTag('room-aes', 3), appId, roomId])),
-        sha256(toJson([domainTag('room-hmac', 3), appId, roomId]))
-      ])
-      const [aesKey, hmacKey] = await Promise.all([
-        crypto.subtle.importKey(
-          'raw',
-          aesRaw as BufferSource,
-          {name: algo},
-          false,
-          ['encrypt', 'decrypt']
-        ),
-        crypto.subtle.importKey(
-          'raw',
-          hmacRaw as BufferSource,
-          {name: hmacAlgo, hash: 'SHA-256'},
-          false,
-          ['sign', 'verify']
-        )
-      ])
-      return {aesKey, hmacKey}
-    }
-
     const [baseKey, salt] = await Promise.all([
       crypto.subtle.importKey(
         'raw',
@@ -237,7 +213,21 @@ export const genKey = async (
   secret: string,
   appId: string,
   roomId: string
-): Promise<CryptoKey> => (await deriveRoomKeys(secret, appId, roomId)).aesKey
+): Promise<CryptoKey> => {
+  if (!secret) {
+    const aesRaw = await sha256(
+      toJson([domainTag('room-aes', 3), appId, roomId])
+    )
+    return crypto.subtle.importKey(
+      'raw',
+      aesRaw as BufferSource,
+      {name: algo},
+      false,
+      ['encrypt', 'decrypt']
+    )
+  }
+  return (await derivePasswordRoomKeys(secret, appId, roomId)).aesKey
+}
 
 const roomAuthPayload = (
   appId: string,
@@ -254,7 +244,10 @@ export const signRoomAuth = async (
   peerId: string,
   seq: number
 ): Promise<string> => {
-  const {hmacKey} = await deriveRoomKeys(secret, appId, roomId)
+  if (!secret) {
+    throw mkErr('room password is required')
+  }
+  const {hmacKey} = await derivePasswordRoomKeys(secret, appId, roomId)
   const mac = await crypto.subtle.sign(
     hmacAlgo,
     hmacKey,
@@ -271,7 +264,7 @@ export const verifyRoomAuth = async (
   seq: number,
   token: string
 ): Promise<boolean> => {
-  if (typeof token !== 'string' || !base64UrlRe.test(token)) {
+  if (!secret || typeof token !== 'string' || !base64UrlRe.test(token)) {
     return false
   }
   try {
@@ -279,7 +272,7 @@ export const verifyRoomAuth = async (
     if (sigBytes.byteLength !== 32 || toBase64Url(sigBytes) !== token) {
       return false
     }
-    const {hmacKey} = await deriveRoomKeys(secret, appId, roomId)
+    const {hmacKey} = await derivePasswordRoomKeys(secret, appId, roomId)
     return await crypto.subtle.verify(
       hmacAlgo,
       hmacKey,

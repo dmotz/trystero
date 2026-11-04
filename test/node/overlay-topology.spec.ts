@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import type {TopologyRoute} from '../../packages/core/src/index.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import {ecdsaSign} from '../../packages/core/src/crypto.ts'
 import {
   computeShortestPathRoutes,
@@ -14,7 +14,11 @@ import {
   packOverlayControl,
   scale
 } from '../../packages/core/src/scale/index.ts'
-import {decodeBytes, encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  decodeBytes,
+  encodeBytes,
+  toBase64Url
+} from '../../packages/core/src/utils.ts'
 import {createOverlayCluster} from './overlay-harness.ts'
 import {
   getTestEndpointByPeerId,
@@ -413,15 +417,15 @@ void test('Liveness refresh on verified packets and descriptor seq-bump flood th
         peerId: alicePid,
         seq: s,
         neighbors: s % 2 === 0 ? [relayPid] : [relayPid, altNeighborPid].sort(),
-        signPubKey: aliceId.signPubJwk,
-        encPubKey: aliceId.encPubJwk
+        signPubKey: aliceId.signPubKey,
+        encPubKey: aliceId.encPubKey
       }
       const canonical = encodeBytes(
         descriptorCanonicalPayload(d, appId, roomId)
       )
-      d.sig = Buffer.from(
+      d.sig = toBase64Url(
         await ecdsaSign(aliceId.signPrivateKey, canonical as BufferSource)
-      ).toString('base64')
+      )
       floodFrames.push(packOverlayControl({t: 'gossip', descriptors: [d]}))
     }
 

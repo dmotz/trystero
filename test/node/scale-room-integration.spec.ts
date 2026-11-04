@@ -11,7 +11,7 @@ import {
   actionWireVersion,
   inspectActionWireHeader
 } from '../../packages/core/src/action-wire.ts'
-import {roles} from '../../packages/core/src/authority.ts'
+import {createRoomAuthority, roles} from '../../packages/core/src/authority.ts'
 import {
   createUserIdentity,
   exportUserIdentity,
@@ -27,11 +27,8 @@ import {
   scale,
   unpackOverlayFrame
 } from '../../packages/core/src/scale/index.ts'
-import {
-  signRoleCertInternal,
-  verifyRoleCertificate
-} from '../../packages/core/src/signed-record.ts'
-import {encodeBytes} from '../../packages/core/src/utils.ts'
+import {signRoleCertInternal} from '../../packages/core/src/signed-record.ts'
+import {encodeBytes, toBase64Url} from '../../packages/core/src/utils.ts'
 import {
   getTestEndpointByPeerId,
   LinkedPeer,
@@ -64,6 +61,14 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, RoleCertifica
   // 2. RoleCertificate validation: future-iat rejection and reserved 'admin' role rejection
   const rootId = await createUserIdentity()
   const subId = await createUserIdentity()
+  const certChecker = createRoomAuthority({
+    selfId: testPeerId('cert-checker'),
+    appId: 'test-app',
+    initialRoomId: 'test-room',
+    admin: {admins: [rootId.userId]},
+    getLocalUserIdentity: async () => subId
+  })
+  await certChecker.getAuthorityInfo()
 
   const validModCert = await signRoleCertInternal(
     rootId.sign,
@@ -74,52 +79,37 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, RoleCertifica
     ['moderator'],
     Date.now()
   )
-  const validModRes = await verifyRoleCertificate(
-    validModCert,
-    'test-app',
-    'test-room',
-    new Set([rootId.userId])
-  )
-  assert.deepEqual(validModRes, {valid: true, roles: ['moderator']})
+  assert.equal(await certChecker.verifyAndApplyCert(validModCert), true)
+  assert.deepEqual(certChecker.getPeerRoles(subId.userId), ['moderator'])
 
+  const futureSubId = await createUserIdentity()
   const futureCert = await signRoleCertInternal(
     rootId.sign,
     rootId.signPubJwk,
-    subId.userId,
+    futureSubId.userId,
     'test-app',
     'test-room',
     ['moderator'],
     Date.now() + 3_600_000 // 1 hour in the future (> 60s skew allowance)
   )
-  const futureRes = await verifyRoleCertificate(
-    futureCert,
-    'test-app',
-    'test-room',
-    new Set([rootId.userId])
-  )
   assert.equal(
-    futureRes.valid,
+    await certChecker.verifyAndApplyCert(futureCert),
     false,
     'certificate with far-future iat must be rejected'
   )
 
+  const delegatedSubId = await createUserIdentity()
   const delegatedAdminCert = await signRoleCertInternal(
     rootId.sign,
     rootId.signPubJwk,
-    subId.userId,
+    delegatedSubId.userId,
     'test-app',
     'test-room',
     ['admin'],
     Date.now()
   )
-  const delegatedAdminRes = await verifyRoleCertificate(
-    delegatedAdminCert,
-    'test-app',
-    'test-room',
-    new Set([rootId.userId])
-  )
   assert.equal(
-    delegatedAdminRes.valid,
+    await certChecker.verifyAndApplyCert(delegatedAdminCert),
     false,
     "certificate granting reserved 'admin' role to non-root user must be rejected"
   )
@@ -455,17 +445,19 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, RoleCertifica
       assert.fail('plaintext unicast must never be delivered')
   })
   const idA = await ovA.getLocalCryptoIdentity()
-  ovB.setPeerSignPublicKey(ovAId, idA.signPubJwk)
+  ovB.setPeerSignPublicKey(ovAId, idA.signPubKey)
 
   // Craft a signed unicast packet from ov-a to ov-b WITHOUT an 'iv' header field
   const rawPayload = encodeBytes('plaintext-attempt')
   const msgId = `${ovAId}:downgrade-1`
+  const ts = Date.now()
   const canonical = canonicalUnicastHeader(
     ovAId,
     ovBId,
     msgId,
     '',
     1,
+    ts,
     'unicast-app',
     'unicast-room'
   )
@@ -475,11 +467,11 @@ void test('PeerInfo in room.getPeers(), UserIdentity userId reuse, RoleCertifica
     idA.signPrivateKey,
     combined as BufferSource
   )
-  const sigB64 = Buffer.from(sigBuf).toString('base64')
+  const sigB64 = toBase64Url(new Uint8Array(sigBuf))
   const downgradePacket = packOverlayBinary(
     overlayUnicastKind,
     6,
-    {o: ovAId, d: ovBId, q: 1, m: msgId, s: sigB64},
+    {o: ovAId, d: ovBId, q: 1, m: msgId, t: ts, s: sigB64},
     rawPayload
   )
   const sigFailBefore = ovB.getSnapshot().stats.signatureFailures

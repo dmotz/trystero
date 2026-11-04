@@ -13,71 +13,9 @@ import {
   roles,
   scale,
   unrefTimer,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
   type BaseRelayConfig,
   type BaseRoomConfig,
-  type DataPayload,
-  type JoinRoom,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  type JoinRoom
 } from '@trystero-p2p/core'
 
 const {entries, keys, values} = Object
@@ -318,7 +256,7 @@ const scheduleIdleSignalSweep = (client: SupabaseClient): void => {
 }
 
 export const joinRoom: JoinRoom<SupabaseRoomConfig> =
-  /*@__PURE__*/ createTopicStrategy({
+  /*@__PURE__*/ createTopicStrategy<SupabaseClient, SupabaseRoomConfig>({
     init: getOrCreateClient,
 
     subscribeTopic: async (client, topic, onMessage, {kind}) => {
@@ -331,7 +269,13 @@ export const joinRoom: JoinRoom<SupabaseRoomConfig> =
         }
       )
 
-      await entry.ready
+      try {
+        await entry.ready
+      } catch (err) {
+        removeListener()
+        removeUnusedChannels(client)
+        throw err
+      }
 
       return () => {
         removeListener()
@@ -371,67 +315,6 @@ export {
   exportUserIdentity,
   importUserIdentity,
   roles,
-  scale,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
-  type DataPayload,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  scale
 }
+export type * from '@trystero-p2p/core/types'

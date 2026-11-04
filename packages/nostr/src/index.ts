@@ -16,73 +16,9 @@ import {
   setRelayConnectivity,
   toJson,
   unrefTimer,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
-  type DataPayload,
   type JoinRoom,
   type JoinRoomConfig,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type SocketClient,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  type SocketClient
 } from '@trystero-p2p/core'
 import {
   createEvent,
@@ -95,7 +31,11 @@ import {
 } from './protocol'
 
 const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
-  client => client.socket
+  client => client.socket,
+  client => {
+    cleanupClientBatcher(client)
+    client.close?.()
+  }
 )
 const defaultRedundancy = 5
 const maxTopicsPerSubscription = 250
@@ -122,7 +62,7 @@ type AnnouncementRecord = {
   getSigner: () => NostrSigner
 }
 
-const roomSigners: Record<string, RoomSignerState> = {}
+const roomSigners = new Map<string, RoomSignerState>()
 const relayBackoffs = /*@__PURE__*/ new WeakMap<
   SocketClient,
   RelayBackoffState
@@ -135,7 +75,7 @@ const getRoomKey = (rootTopic: string, selfTopic: string): string =>
   `${rootTopic}\0${selfTopic}`
 
 const getRoomSigner = (key: string): NostrSigner => {
-  const state = roomSigners[key]
+  const state = roomSigners.get(key)
 
   if (!state) {
     return createSigner()
@@ -184,6 +124,8 @@ const retireRelay = (client: SocketClient): boolean => {
 
   retiredRelays.add(client)
   relayBackoffs.delete(client)
+  relayManager.evict(client)
+  cleanupClientBatcher(client)
   client.close?.()
   return true
 }
@@ -203,11 +145,28 @@ type BatchState = {
   requestedAt: number
 }
 
-const batchers: Record<string, BatchState> = {}
+const batchers = /*@__PURE__*/ new WeakMap<SocketClient, BatchState>()
 
 const resolveBatchFlush = (batcher: BatchState): void => {
   batcher.flushWaiters.forEach(resolve => resolve())
   batcher.flushWaiters.clear()
+}
+
+const cleanupClientBatcher = (client: SocketClient): void => {
+  const batcher = batchers.get(client)
+  if (!batcher) {
+    return
+  }
+  if (batcher.retryTimer !== null) {
+    clearTimeout(batcher.retryTimer)
+    batcher.retryTimer = null
+  }
+  if (batcher.updateTimer !== null) {
+    clearTimeout(batcher.updateTimer)
+    batcher.updateTimer = null
+  }
+  resolveBatchFlush(batcher)
+  batchers.delete(client)
 }
 
 const batchAdd = (
@@ -215,23 +174,27 @@ const batchAdd = (
   topic: string,
   handler: TopicHandler
 ): void => {
-  const batcher = (batchers[client.url] ??= {
-    subIds: [],
-    topics: new Map(),
-    updateTimer: null,
-    flushWaiters: new Set(),
-    retryTimer: null,
-    retryMs: subscriptionRetryMs,
-    pendingEose: new Set(),
-    requestedAt: 0
-  })
+  let batcher = batchers.get(client)
+  if (!batcher) {
+    batcher = {
+      subIds: [],
+      topics: new Map(),
+      updateTimer: null,
+      flushWaiters: new Set(),
+      retryTimer: null,
+      retryMs: subscriptionRetryMs,
+      pendingEose: new Set(),
+      requestedAt: 0
+    }
+    batchers.set(client, batcher)
+  }
 
   batcher.topics.set(topic, handler)
   scheduleBatchFlush(client, batcher)
 }
 
 const batchRemove = (client: SocketClient, topic: string): void => {
-  const batcher = batchers[client.url]
+  const batcher = batchers.get(client)
 
   if (!batcher) {
     return
@@ -241,18 +204,8 @@ const batchRemove = (client: SocketClient, topic: string): void => {
   delete announcementMessages.forRelay(client)[topic]
 
   if (batcher.topics.size === 0) {
-    if (batcher.retryTimer !== null) {
-      clearTimeout(batcher.retryTimer)
-    }
-    if (batcher.updateTimer !== null) {
-      clearTimeout(batcher.updateTimer)
-      batcher.updateTimer = null
-    }
-
-    resolveBatchFlush(batcher)
-
     batcher.subIds.forEach(subId => client.send(toJson(['CLOSE', subId])))
-    delete batchers[client.url]
+    cleanupClientBatcher(client)
   } else {
     scheduleBatchFlush(client, batcher)
   }
@@ -278,7 +231,7 @@ const scheduleBatchFlush = (
 }
 
 const waitForBatchFlush = (client: SocketClient): Promise<void> => {
-  const batcher = batchers[client.url]
+  const batcher = batchers.get(client)
 
   if (!batcher || batcher.updateTimer === null) {
     return Promise.resolve()
@@ -288,7 +241,7 @@ const waitForBatchFlush = (client: SocketClient): Promise<void> => {
 }
 
 const flushBatch = (client: SocketClient): void => {
-  const batcher = batchers[client.url]
+  const batcher = batchers.get(client)
 
   if (!batcher || batcher.topics.size === 0) {
     return
@@ -331,7 +284,7 @@ const flushBatch = (client: SocketClient): void => {
 }
 
 const resubscribeOnReconnect = (client: SocketClient): void => {
-  const batcher = batchers[client.url]
+  const batcher = batchers.get(client)
 
   if (batcher && batcher.topics.size > 0 && !client.isClosed) {
     if (getRelayBackoffMs(client) > 0) {
@@ -380,7 +333,7 @@ const publishMessage = async (
       : payload,
     getSigner()
   )
-  if (isAnnouncement && !batchers[client.url]?.topics.has(topic)) {
+  if (isAnnouncement && !batchers.get(client)?.topics.has(topic)) {
     return nextAnnounce(steadyAnnounceIntervalMs)
   }
   // Feedback or disconnection can arrive while another event is being signed.
@@ -402,7 +355,7 @@ const retrySubscription = (
   client: SocketClient,
   rateLimited: boolean
 ): void => {
-  const batcher = batchers[client.url]
+  const batcher = batchers.get(client)
   if (!batcher || (batcher.retryTimer !== null && !rateLimited)) {
     return
   }
@@ -422,25 +375,26 @@ const retrySubscription = (
 }
 
 export const joinRoom: JoinRoom<NostrRoomConfig> =
-  /*@__PURE__*/ createTopicStrategy({
+  /*@__PURE__*/ createTopicStrategy<SocketClient, NostrRoomConfig>({
     init: config =>
       getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
-        const client = relayManager.register(url, () =>
-          makeSocket(
+        const client = relayManager.register(url, () => {
+          const created = makeSocket(
             url,
             data => {
-              const [msgType, subId, payload, relayMsg] =
-                fromJson<
-                  [
-                    string,
-                    string,
-                    {content: string; tags?: string[][]} | boolean | string,
-                    string
-                  ]
-                >(data)
+              const parsed = fromJson<unknown>(data)
+              if (!Array.isArray(parsed)) {
+                return
+              }
+              const [msgType, subId, payload, relayMsg] = parsed as [
+                string,
+                string,
+                {content: string; tags?: string[][]} | boolean | string,
+                string
+              ]
 
               if (msgType !== eventMsgType) {
-                const prefix = `${libName}: relay failure from ${client.url} - `
+                const prefix = `${libName}: relay failure from ${created.url} - `
                 const rejectionReason =
                   msgType === 'CLOSED' && typeof payload === 'string'
                     ? payload
@@ -460,23 +414,23 @@ export const joinRoom: JoinRoom<NostrRoomConfig> =
                 if (
                   msgType === 'OK' &&
                   payload === true &&
-                  getRelayBackoffMs(client) === 0
+                  getRelayBackoffMs(created) === 0
                 ) {
-                  relayBackoffs.delete(client)
+                  relayBackoffs.delete(created)
                 }
 
                 if (
                   (didRejectEvent || msgType === 'CLOSED') &&
                   isTerminalRejection &&
-                  !retireRelay(client)
+                  !retireRelay(created)
                 ) {
                   return
                 }
 
                 if (isRateLimited) {
-                  backoffRelay(client)
+                  backoffRelay(created)
                 } else if (msgType === 'EOSE') {
-                  const batcher = batchers[client.url]
+                  const batcher = batchers.get(created)
                   if (
                     batcher?.pendingEose.delete(subId) &&
                     batcher.pendingEose.size === 0
@@ -489,12 +443,12 @@ export const joinRoom: JoinRoom<NostrRoomConfig> =
                     // Do not wait for EOSE on the fast path. If installation was
                     // slow, announce once when all batched subscriptions are ready.
                     if (Date.now() - batcher.requestedAt >= 1_000) {
-                      replayAnnouncements(client)
+                      replayAnnouncements(created)
                     }
                   }
                 }
                 if (msgType === 'CLOSED' && !isTerminalRejection) {
-                  retrySubscription(client, Boolean(isRateLimited))
+                  retrySubscription(created, Boolean(isRateLimited))
                 }
 
                 if (
@@ -516,10 +470,12 @@ export const joinRoom: JoinRoom<NostrRoomConfig> =
                 typeof payload === 'object' &&
                 'content' in payload
               ) {
-                const batcher = batchers[client.url]
+                const batcher = batchers.get(created)
 
                 if (batcher?.subIds.includes(subId) && payload.tags) {
-                  const topicTag = payload.tags.find(t => t[0] === tag)
+                  const topicTag = payload.tags.find(
+                    t => Array.isArray(t) && t[0] === tag
+                  )
 
                   if (topicTag?.[1]) {
                     batcher.topics.get(topicTag[1])?.(
@@ -530,16 +486,22 @@ export const joinRoom: JoinRoom<NostrRoomConfig> =
                 }
               }
             },
-            () => resubscribeOnReconnect(client)
+            () => resubscribeOnReconnect(created)
           )
-        )
+          return created
+        })
 
-        return client.ready
+        return relayManager.lease(client, client.ready)
       }),
 
     subscribeTopic: (client, topic, onMessage, context) => {
       const key = getRoomKey(context.rootTopic, context.selfTopic)
-      ;(roomSigners[key] ??= {refs: 0}).refs += 1
+      let signerState = roomSigners.get(key)
+      if (!signerState) {
+        signerState = {refs: 0}
+        roomSigners.set(key, signerState)
+      }
+      signerState.refs += 1
       let didReleaseSigner = false
       const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
 
@@ -548,18 +510,18 @@ export const joinRoom: JoinRoom<NostrRoomConfig> =
       const cleanup = () => {
         if (!didReleaseSigner) {
           didReleaseSigner = true
-          const state = roomSigners[key]
+          const state = roomSigners.get(key)
 
           if (state) {
             state.refs -= 1
 
             if (state.refs <= 0) {
-              delete roomSigners[key]
+              roomSigners.delete(key)
             }
           }
         }
 
-        if (batchers[client.url]?.topics.get(topic) === handler) {
+        if (batchers.get(client)?.topics.get(topic) === handler) {
           batchRemove(client, topic)
         }
       }
@@ -601,73 +563,9 @@ export {
   importUserIdentity,
   roles,
   scale,
-  setRelayConnectivity,
-  type ActionError,
-  type ActionErrorKind,
-  type ActionMessageHandler,
-  type ActionProgressContext,
-  type ActionProgressHandler,
-  type ActionReceiveContext,
-  type ActionReceiveHandler,
-  type ActionRequestHandler,
-  type AddMediaOptions,
-  type BanOptions,
-  type DataPayload,
-  type JoinRoomConfig,
-  type JsonValue,
-  type ListenerOptions,
-  type MessageAction,
-  type MessageActionConfig,
-  type MessageContext,
-  type PeerInfo,
-  type PeerJoinContext,
-  type PeerLeaveContext,
-  type PeerMediaContext,
-  type PeerResult,
-  type PeerTarget,
-  type RelayConfig,
-  type RelayConnectivity,
-  type RemoveMediaOptions,
-  type ReplaceTrackOptions,
-  type ReplayListenerOptions,
-  type RequestAction,
-  type RequestActionConfig,
-  type RequestContext,
-  type RequestManyOptions,
-  type RequestOptions,
-  type RoleCertificate,
-  type RolesConfig,
-  type RolesPluginApi,
-  type Room,
-  type RoomError,
-  type RoomErrorBase,
-  type RoomErrorCode,
-  type RoomErrorHandler,
-  type RoomPlugin,
-  type RoomWithPlugins,
-  type ScaleConfig,
-  type ScalePluginApi,
-  type SelfInfo,
-  type SendOptions,
-  type SharedState,
-  type StateChangeContext,
-  type StateConfig,
-  type TopologyRoute,
-  type TopologySnapshot,
-  type TopologyStats,
-  type TurnServerConfig,
-  type Unsubscribe,
-  type UserIdentity,
-  type UserIdentityConfig,
-  type UserIdentityLoader,
-  type UserIdentityLoaderContext,
-  type UserInfo,
-  type UserJoinContext,
-  type UserLeaveContext,
-  type UserState,
-  type UserStateChangeContext,
-  type UserStateConfig
+  setRelayConnectivity
 }
+export type * from '@trystero-p2p/core/types'
 
 export const defaultRelayUrls: string[] = [
   'wss://0x-nostr-relay.fly.dev',

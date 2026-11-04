@@ -11,9 +11,7 @@ import {
 } from '../../packages/core/src/index.ts'
 import {actionWireVersion} from '../../packages/core/src/action-wire.ts'
 import {formatSelfCertifyingRoomId} from '../../packages/core/src/authority.ts'
-import createRoom, {
-  getRoomSignalingBridge
-} from '../../packages/core/src/room.ts'
+import {jwkToCompactPub} from '../../packages/core/src/identity.ts'
 import {
   canonicalBroadcastHeader,
   createOverlayManager,
@@ -26,8 +24,12 @@ import {
   signOverlayPayload,
   signPeerDescriptor
 } from '../../packages/core/src/scale/index.ts'
-import {encodeBytes, peerBannedErr} from '../../packages/core/src/utils.ts'
-import {createTestScaleCluster} from './overlay-harness.ts'
+import {encodeBytes} from '../../packages/core/src/utils.ts'
+import {
+  createTestScaleCluster,
+  createTrackedRoom as createRoom,
+  getRoomSignalingBridge
+} from './overlay-harness.ts'
 import {
   allocTestPeerIds,
   getTestEndpointByPeerId,
@@ -114,8 +116,8 @@ void test('Bug 1.1: broadcast addStream in 15-peer gossip room promotes all virt
           peerId: remoteSpammerId!,
           seq: 1,
           neighbors: [relayId!],
-          signPubKey: spammerIdObj.signPubJwk,
-          encPubKey: spammerIdObj.encPubJwk
+          signPubKey: spammerIdObj.signPubKey,
+          encPubKey: spammerIdObj.encPubKey
         },
         spammerIdObj,
         'spam-test',
@@ -159,28 +161,28 @@ void test('Bug 1.1: broadcast addStream in 15-peer gossip room promotes all virt
   }
 })
 
-void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge active virtual overlay peers', async () => {
+void test('Bug 1.2: room.ban and direct handshake ban rejection immediately purge active virtual overlay peers', async () => {
   const peerCount = 10
   const identities = new Map<string, UserIdentity>()
   const createdIdentities = await Promise.all(
     Array.from({length: peerCount}, () => createUserIdentity())
   )
+  const clusterIdsPreview = await createUserIdentity()
 
-  let rejectInHandshakeTarget: string | null = null
   const cluster = await createTestScaleCluster({
     peerCount,
     maxDirectPeers: 4,
-    onPeerHandshakeByRoom: ownerId => async remotePeerId => {
-      if (ownerId && remotePeerId === rejectInHandshakeTarget) {
-        throw peerBannedErr
-      }
-    }
+    adminIdentity: createdIdentities[0]!
   })
 
   try {
-    // Part A: onPeerHandshake throwing peerBannedErr when a virtual peer dials directly
+    // Part A: direct handshake rejecting a banned user claiming an active virtual peerId purges that virtual peer
     const observerId = cluster.peerIds[0]!
-    const observerRoom = cluster.rooms.get(observerId)!
+    const observerRoom = cluster.rooms.get(observerId)! as Room &
+      RolesPluginApi &
+      ScalePluginApi
+    await observerRoom.ban(clusterIdsPreview.userId)
+
     const virtualTargetId = cluster.peerIds.find(
       id =>
         id !== observerId &&
@@ -191,18 +193,46 @@ void test('Bug 1.2: room.ban and onPeerHandshake peerBannedErr immediately purge
       'target starts as active virtual peer'
     )
 
-    rejectInHandshakeTarget = virtualTargetId
-    cluster.leftByPeer.get(observerId)!.clear()
-    cluster.connectPair(observerId, virtualTargetId)
-
-    await waitFor(
-      () =>
-        !observerRoom.getPeers()[virtualTargetId] &&
-        cluster.leftByPeer.get(observerId)!.has(virtualTargetId),
-      2_000
+    let regBanned!: (peer: PeerHandle, id: string) => void
+    const bannedRoom = createRoom(
+      f => {
+        regBanned = f
+      },
+      () => {},
+      () => {},
+      {
+        endpointIdentity: getTestEndpointByPeerId(virtualTargetId),
+        appId: 'scale-reg-app',
+        roomId: cluster.roomId,
+        identity: clusterIdsPreview,
+        use: [roles(), scale({maxDirectPeers: 4})]
+      }
     )
-    assert.equal(observerRoom.getPeers()[virtualTargetId], undefined)
-    assert.ok(!observerRoom.getTopology().roomPeerIds.includes(virtualTargetId))
+    const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
+
+    try {
+      cluster.leftByPeer.get(observerId)!.clear()
+      cluster.registerCallbacks.get(observerId)!(
+        peerA as unknown as PeerHandle,
+        virtualTargetId
+      )
+      regBanned(peerB as unknown as PeerHandle, observerId)
+
+      await waitFor(
+        () =>
+          !observerRoom.getPeers()[virtualTargetId] &&
+          cluster.leftByPeer.get(observerId)!.has(virtualTargetId),
+        2_000
+      )
+      assert.equal(observerRoom.getPeers()[virtualTargetId], undefined)
+      assert.ok(
+        !observerRoom.getTopology().roomPeerIds.includes(virtualTargetId)
+      )
+    } finally {
+      await bannedRoom.leave()
+      peerA.destroy()
+      peerB.destroy()
+    }
   } finally {
     await cluster.cleanup()
   }
@@ -460,7 +490,7 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
     }
 
     // Pre-pin A's signing key on C (e.g. from role cert or prior session) WITHOUT A's PeerDescriptor/encPubKey
-    scaleC.setPeerSignPublicKey(idA, epA.signPubJwk)
+    scaleC.setPeerSignPublicKey(idA, jwkToCompactPub(epA.signPubJwk))
 
     let joinFiredOnC = false
     let receivedHelloOnC = false
@@ -540,28 +570,22 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
 
     // Now deliver A's signed PeerDescriptor (with encPubKey, userProof, and neighbor B)
     const userA = await createUserIdentity()
-    const pubEncJwk = {
-      kty: 'EC',
-      crv: 'P-256',
-      x: encJwkA.x!,
-      y: encJwkA.y!
-    }
+    const pubEncCompact = jwkToCompactPub(encJwkA)
+    const signCompactA = jwkToCompactPub(epA.signPubJwk)
     const descA = await signPeerDescriptor(
       {
         peerId: idA,
         seq: 1,
         neighbors: [idB!],
-        signPubKey: epA.signPubJwk,
-        encPubKey: pubEncJwk
+        signPubKey: signCompactA,
+        encPubKey: pubEncCompact
       },
       {
         peerId: idA,
         signPrivateKey: epA.signPrivateKey,
-        signPublicKey: epA.signPublicKey,
-        signPubJwk: epA.signPubJwk,
+        signPubKey: signCompactA,
         encPrivateKey: encKeyPairA.privateKey,
-        encPublicKey: encKeyPairA.publicKey,
-        encPubJwk: pubEncJwk
+        encPubKey: pubEncCompact
       },
       'early-bcast-app',
       'early-bcast-room',

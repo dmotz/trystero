@@ -2,19 +2,18 @@ import {createEventEmitter, initSingleHandler} from './emitter'
 import type {KernelRoomErrorInput} from './internal-types'
 import {
   base62Alphabet,
+  base64UrlRe,
   createBoundedCache,
   createBoundedSet,
   decodeBytes,
   domainTag,
   encodeBytes,
-  fromBase64,
   fromBase64Url,
   fromJson,
   hash32,
   libId,
   libName,
   mkErr,
-  toBase64,
   toBase64Url,
   toJson,
   userIdLength
@@ -22,20 +21,19 @@ import {
 import type {DataPayload, RoleCertificate} from './types'
 
 export {
+  base64UrlRe,
   createBoundedCache,
   createBoundedSet,
   createEventEmitter,
   decodeBytes,
   domainTag,
   encodeBytes,
-  fromBase64,
   fromBase64Url,
   fromJson,
   initSingleHandler,
   libId,
   libName,
   mkErr,
-  toBase64,
   toBase64Url,
   toJson
 }
@@ -280,6 +278,7 @@ export const validateRoleCertificateShape = (
   Array.isArray(c['roles']) &&
   c['roles'].length > 0 &&
   c['roles'].every(isStr) &&
+  isPosSafeInt(c['seq']) &&
   isPosSafeInt(c['iat']) &&
   isValidSig(c['sig'])
 

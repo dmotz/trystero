@@ -3,6 +3,7 @@ import test from './test.ts'
 import {
   createEndpointIdentity,
   createUserIdentity,
+  jwkToCompactPub,
   userEndpointProofPayload
 } from '../../packages/core/src/identity.ts'
 import {
@@ -15,16 +16,14 @@ import {
   packGossipControlFrames,
   scale
 } from '../../packages/core/src/scale/index.ts'
-import createRoom, {
-  getRoomSignalingBridge
-} from '../../packages/core/src/room.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
+import {encodeBytes, toBase64Url} from '../../packages/core/src/utils.ts'
 import {
-  encodeBytes,
-  toBase64,
-  toBase64Url
-} from '../../packages/core/src/utils.ts'
-import {linkHandles, makeOverlayPipe} from './overlay-harness.ts'
+  createTrackedRoom as createRoom,
+  getRoomSignalingBridge,
+  linkHandles,
+  makeOverlayPipe
+} from './overlay-harness.ts'
 import {
   allocTestPeerIds,
   getTestEndpointByPeerId,
@@ -190,12 +189,12 @@ void test('S6: Sybil descriptor flood is capped by room maxUsers before ECDSA ve
         peerId: ep.peerId,
         seq: 1,
         neighbors: [attackerId],
-        signPubKey: ep.signPubJwk,
+        signPubKey: jwkToCompactPub(ep.signPubJwk),
         userId: usr.userId,
-        userPubKey: usr.signPubJwk,
+        userPubKey: jwkToCompactPub(usr.signPubJwk),
         userProof
       }
-      desc.sig = toBase64(
+      desc.sig = toBase64Url(
         await ep.sign(
           encodeBytes(descriptorCanonicalPayload(desc, 's6-app', 's6-room'))
         )
@@ -220,12 +219,12 @@ void test('S6: Sybil descriptor flood is capped by room maxUsers before ECDSA ve
       peerId: attackerId,
       seq: 50,
       neighbors: attackerNeighbors,
-      signPubKey: attackerEp.signPubJwk,
+      signPubKey: jwkToCompactPub(attackerEp.signPubJwk),
       userId: attackerUsr.userId,
-      userPubKey: attackerUsr.signPubJwk,
+      userPubKey: jwkToCompactPub(attackerUsr.signPubJwk),
       userProof: attackerUserProof
     }
-    attackerDesc.sig = toBase64(
+    attackerDesc.sig = toBase64Url(
       await attackerEp.sign(
         encodeBytes(
           descriptorCanonicalPayload(attackerDesc, 's6-app', 's6-room')
@@ -400,12 +399,12 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
         peerId: id,
         seq: descSeq,
         neighbors: [honestIds[0]!],
-        signPubKey: ep.signPubJwk,
+        signPubKey: jwkToCompactPub(ep.signPubJwk),
         userId: u.userId,
-        userPubKey: u.signPubJwk,
+        userPubKey: jwkToCompactPub(u.signPubJwk),
         userProof
       }
-      desc.sig = toBase64(
+      desc.sig = toBase64Url(
         await ep.sign(
           encodeBytes(descriptorCanonicalPayload(desc, 'd5-app', 'd5-room'))
         )
@@ -434,12 +433,12 @@ void test('D5: peerId grinding by a single userId cannot eclipse all target slot
         peerId: ep.peerId,
         seq: 1,
         neighbors: [honestIds[1]!],
-        signPubKey: ep.signPubJwk,
+        signPubKey: jwkToCompactPub(ep.signPubJwk),
         userId: sybilOwner.userId,
-        userPubKey: sybilOwner.signPubJwk,
+        userPubKey: jwkToCompactPub(sybilOwner.signPubJwk),
         userProof
       }
-      desc.sig = toBase64(
+      desc.sig = toBase64Url(
         await ep.sign(
           encodeBytes(descriptorCanonicalPayload(desc, 'd5-app', 'd5-room'))
         )

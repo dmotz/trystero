@@ -151,17 +151,38 @@ const buildUndirectedGraph = (
   return sortedGraph
 }
 
+const isExcludedPeer = (
+  peerId: string,
+  exclude?: string | ReadonlySet<string>
+): boolean =>
+  exclude === undefined
+    ? false
+    : typeof exclude === 'string'
+      ? peerId === exclude
+      : exclude.has(peerId)
+
 export const computeShortestPathRoutes = (
   localPeerId: string,
   adjacency: Map<string, Set<string>>,
   directPeerIds: Iterable<string>,
-  maxHops: number = maxAllowedHops
+  maxHops: number = maxAllowedHops,
+  excludePeerIds?: string | ReadonlySet<string>,
+  directOnlyExclude = false
 ): Record<string, TopologyRoute> => {
   const routes: Record<string, TopologyRoute> = {}
   if (maxHops < 1) {
     return routes
   }
   const directSet = new Set(directPeerIds)
+  if (excludePeerIds !== undefined) {
+    if (typeof excludePeerIds === 'string') {
+      directSet.delete(excludePeerIds)
+    } else {
+      for (const id of excludePeerIds) {
+        directSet.delete(id)
+      }
+    }
+  }
   const graph = buildUndirectedGraph(adjacency, localPeerId, directSet)
 
   const visited = new Map<string, [nextHop: string, hops: number]>()
@@ -184,7 +205,11 @@ export const computeShortestPathRoutes = (
     }
 
     for (const neighbor of neighbors) {
-      if (neighbor === localPeerId || visited.has(neighbor)) {
+      if (
+        neighbor === localPeerId ||
+        (!directOnlyExclude && isExcludedPeer(neighbor, excludePeerIds)) ||
+        visited.has(neighbor)
+      ) {
         continue
       }
       visited.set(neighbor, [nextHop, hops + 1])

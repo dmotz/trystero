@@ -1,36 +1,45 @@
-import {getVerifiedPubKeyRecord, isValidUserId} from './identity'
+import {createAntiEntropySync} from './anti-entropy'
+import {
+  compactPubToJwk,
+  getVerifiedPubKeyRecord,
+  isValidUserId,
+  jwkToCompactPub
+} from './identity'
 import type {
   InternalRoomContext,
   KernelRolesProvider,
   PeerModerationRecord,
   RoleRevocationRecord,
+  RolesPluginSlot,
   TargetPeers
 } from './internal-types'
-import {makeInternalPlugin} from './plugin'
+import {pluginSlotSymbol} from './primitives'
 import {
   canonTag,
   createMonotonicClock,
   defaultMaxClockSkewMs,
   invalidRoles,
-  isValidJwk,
   roleCertPayload,
-  selectPullFanoutPeers,
   signRoleCertInternal,
   signWith,
-  toCleanJwk,
   verifySig
 } from './signed-record'
 import type {
   JsonValue,
+  ReplayListenerOptions,
   RoleCertificate,
+  RoleChangeContext,
+  RoleChangeHandler,
   RolesConfig,
   RolesPluginApi,
   RoomPlugin,
+  Unsubscribe,
   UserIdentity
 } from './types'
 import {
   cmpStr,
   createBoundedCache,
+  createEventEmitter,
   createWindowCounter,
   insufficientAuthPrefix,
   isObj,
@@ -38,21 +47,30 @@ import {
   isStr,
   isValidSig,
   keys,
+  lockMethods,
   mkBannedErr,
   mkErr,
   noOp,
   peerBannedErr,
-  resetTimer,
   selfCertifyingRoomRegex,
-  unrefTimer,
   validateRoleCertificateShape
 } from './utils'
 
-const maxSyncCerts = 128
-const maxSyncModerationRecords = 256
+const authSyncPageSize = 256
 const maxStoredTargets = 1_024
+export const maxStoredModerations = 4_096
 const authPullFanout = 2
 const authPullTimeoutMs = 1_500
+
+const frozenEmptyRoles: string[] = Object.freeze([] as string[]) as string[]
+
+const freezeRoles = (roles: readonly string[]): string[] =>
+  roles.length === 0
+    ? frozenEmptyRoles
+    : (Object.freeze([...roles]) as string[])
+
+const rolesEqual = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((v, i) => v === b[i])
 
 const hasStrs = (
   obj: Record<string, unknown>,
@@ -155,7 +173,8 @@ const isRootAdminRecordBase = (rec: Record<string, unknown>): boolean =>
   hasStrs(rec, ['appId', 'roomId', 'issuerUserId', 'targetUserId']) &&
   isPosSafeInt(rec['seq']) &&
   isPosSafeInt(rec['ts']) &&
-  isValidJwk(rec['signerPubKey']) &&
+  typeof rec['signerPubKey'] === 'string' &&
+  Boolean(compactPubToJwk(rec['signerPubKey'])) &&
   isValidSig(rec['sig'])
 
 export const validateRoleRevocationShape = (
@@ -172,6 +191,12 @@ export const validatePeerModerationShape = (
   isRootAdminRecordBase(rec) &&
   (rec['op'] === 'ban' || rec['op'] === 'unban') &&
   (rec['reason'] === undefined || typeof rec['reason'] === 'string')
+
+const compareCertOrder = (a: RoleCertificate, b: RoleCertificate): number =>
+  a.iat - b.iat ||
+  a.seq - b.seq ||
+  cmpStr(a.issuerPubKey, b.issuerPubKey) ||
+  cmpStr(a.sig, b.sig)
 
 const compareRevocationOrder = (
   a: RoleRevocationRecord,
@@ -195,6 +220,7 @@ const compareModerationOrder = (
 type AuthPullMessage = {
   t: 'pull'
   s?: string[]
+  c?: string
 }
 
 type AuthSyncMessage = {
@@ -202,6 +228,8 @@ type AuthSyncMessage = {
   certs?: RoleCertificate[]
   revocations?: RoleRevocationRecord[]
   moderations?: PeerModerationRecord[]
+  n?: string
+  f?: 1
 }
 
 type AuthControlMessage =
@@ -223,23 +251,23 @@ type AuthSyncBatchResult = {
   moderations: PeerModerationRecord[]
 }
 
-type RoomAuthorityPreResolvedState = readonly [
-  baseRoomId: string,
-  adminUserId: string
-]
+type SortedAuthItem =
+  | readonly [key: string, kind: 'c', item: RoleCertificate]
+  | readonly [key: string, kind: 'r', item: RoleRevocationRecord]
+  | readonly [key: string, kind: 'm', item: PeerModerationRecord]
 
 export type RoomAuthorityInit = {
-  selfId: string
+  selfId: string | (() => string)
   appId: string
   initialRoomId: string
   effectiveRoomIdP?: Promise<string>
-  getPreResolvedState?: () => RoomAuthorityPreResolvedState | undefined
   admin?: RolesConfig
   getLocalUserIdentity?: () => Promise<UserIdentity>
   isOverlayPeerBanned?: (peerId: string) => boolean
   getKnownPeerUserId?: (peerId: string) => string | undefined
   onRoomIdResolved?: (effectiveRoomId: string) => void
   onLocalRoleCertificate?: (cert: RoleCertificate | null) => void
+  onRolesChanged?: () => void
   onPeerBanned?: (
     userId: string,
     record: PeerModerationRecord,
@@ -257,6 +285,11 @@ export type RoomAuthority = Omit<
   KernelRolesProvider,
   'onPeerDescriptorCert'
 > & {
+  onRoleChange: (
+    handler: RoleChangeHandler,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+  clearRoleListeners: () => void
   verifyAndApplyCert: (
     cert: RoleCertificate,
     fromPeerId?: string
@@ -275,10 +308,12 @@ export type RoomAuthority = Omit<
     shouldAbort?: () => boolean
   ) => Promise<AuthSyncBatchResult>
   hasUnknownRecordSigs: (remoteSigs?: readonly string[]) => boolean
-  buildPullMessage: () => Promise<AuthPullMessage>
+  buildPullMessage: (cursor?: string) => Promise<AuthPullMessage>
   buildDiffSyncMessage: (
-    knownSigs?: readonly string[]
+    knownSigs?: readonly string[],
+    cursor?: string
   ) => Promise<AuthSyncMessage | null>
+  buildPushSyncMessages: () => Promise<AuthSyncMessage[]>
   rememberPeerUser: (peerId: string, userId: string) => void
   issueRoleCertificate: (
     targetId: string,
@@ -298,14 +333,18 @@ export type RoomAuthority = Omit<
 const mkSyncMsg = (
   certs: RoleCertificate[],
   revocations: RoleRevocationRecord[],
-  moderations: PeerModerationRecord[]
+  moderations: PeerModerationRecord[],
+  nextCursor?: string,
+  forwarded?: boolean
 ): AuthSyncMessage | null =>
-  certs.length || revocations.length || moderations.length
+  certs.length || revocations.length || moderations.length || nextCursor
     ? {
         t: 'sync',
         ...(certs.length ? {certs} : {}),
         ...(revocations.length ? {revocations} : {}),
-        ...(moderations.length ? {moderations} : {})
+        ...(moderations.length ? {moderations} : {}),
+        ...(nextCursor ? {n: nextCursor} : {}),
+        ...(forwarded ? {f: 1 as const} : {})
       }
     : null
 
@@ -314,13 +353,13 @@ export const createRoomAuthority = ({
   appId,
   initialRoomId,
   effectiveRoomIdP,
-  getPreResolvedState,
   admin: rawAdmin,
   getLocalUserIdentity,
   isOverlayPeerBanned,
   getKnownPeerUserId,
   onRoomIdResolved,
   onLocalRoleCertificate,
+  onRolesChanged,
   onPeerBanned,
   onPeerUnbanned,
   onSignatureFailure
@@ -336,6 +375,14 @@ export const createRoomAuthority = ({
   const moderations = new Map<string, PeerModerationRecord>()
   const verifiedCertCache = createBoundedCache<string, string[]>(512)
   const knownPeerUsers = createBoundedCache<string, string>(2048)
+  const roleSnapshotCache = new Map<string, string[]>()
+  const lastKnownRoles = new Map<string, string[]>()
+  const pendingReplayHandlers = new Set<
+    [handler: RoleChangeHandler, replayedUids: Set<string>]
+  >()
+  const [subRoleChange, emitRoleChange, clearRoleChange] = createEventEmitter<
+    [RoleChangeContext]
+  >('role change handler')
 
   const rememberPeerUser = (peerId: string, userId: string): void => {
     if (peerId && userId && peerId !== userId) {
@@ -362,13 +409,11 @@ export const createRoomAuthority = ({
   let localUser: UserIdentity | null = null
 
   const syncRoomIds = (rid: string): void => {
-    const pre = getPreResolvedState?.()
     const [base, uid] = splitSelfCertRoom(rid)
-    baseRoomId = pre?.[0] ?? base
-    const adminUid = pre?.[1] || uid
-    if (adminUid) {
-      roomAdminUserId = adminUid
-      rootUserIds.add(adminUid)
+    baseRoomId = base
+    if (uid) {
+      roomAdminUserId = uid
+      rootUserIds.add(uid)
     }
   }
   syncRoomIds(initialRoomId)
@@ -378,14 +423,33 @@ export const createRoomAuthority = ({
     false
   )
 
-  const resolveUid = (id = selfId): string =>
-    id === selfId && localUser ? localUser.userId : (lookupPeerUid(id) ?? id)
+  const getSelfId = typeof selfId === 'function' ? selfId : () => selfId
 
-  const candidateUids = (id = selfId): string[] => {
-    const set = new Set<string>([resolveUid(id), id])
-    const mapped = lookupPeerUid(id)
-    if (mapped) {
-      set.add(mapped)
+  const resolveUid = (id?: string): string => {
+    const curSelf = getSelfId()
+    const target = id ?? curSelf
+    if (!target) {
+      return localUser?.userId ?? ''
+    }
+    return target === curSelf && localUser
+      ? localUser.userId
+      : (lookupPeerUid(target) ?? target)
+  }
+
+  const candidateUids = (id?: string): string[] => {
+    const curSelf = getSelfId()
+    const target = id ?? curSelf
+    const resolved = resolveUid(target)
+    const set = new Set<string>()
+    if (resolved) {
+      set.add(resolved)
+    }
+    if (target) {
+      set.add(target)
+      const mapped = lookupPeerUid(target)
+      if (mapped) {
+        set.add(mapped)
+      }
     }
     return [...set]
   }
@@ -399,14 +463,20 @@ export const createRoomAuthority = ({
     const subUid = cert.subUserId
     const isRoot = isRootUid(subUid)
     const mod = moderations.get(subUid)
-    if (mod && !isRoot && (mod.op === 'ban' || cert.iat <= mod.ts)) {
+    if (
+      mod &&
+      !isRoot &&
+      (mod.op === 'ban' ||
+        cert.iat < mod.ts ||
+        (cert.iat === mod.ts && cert.seq <= mod.seq))
+    ) {
       return []
     }
     const revoked = new Set<string>()
     const revMap = revocationsByTarget.get(subUid)
     if (revMap) {
       for (const [roleKey, rev] of revMap) {
-        if (rev.ts >= cert.iat) {
+        if (rev.ts > cert.iat || (rev.ts === cert.iat && rev.seq >= cert.seq)) {
           if (roleKey === '*') {
             return isRoot ? ['admin'] : []
           }
@@ -418,6 +488,69 @@ export const createRoomAuthority = ({
     }
     const active = cert.roles.filter(role => !revoked.has(role))
     return isRoot && !active.includes('admin') ? ['admin', ...active] : active
+  }
+
+  const computeRolesForUid = (uid: string): string[] => {
+    if (!uid || isTargetBanned(uid)) {
+      return frozenEmptyRoles
+    }
+    const cached = roleSnapshotCache.get(uid)
+    if (cached) {
+      return cached
+    }
+    const cert = certs.get(uid)
+    const raw = cert ? effectiveRoles(cert) : isRootUid(uid) ? ['admin'] : []
+    const frozen = freezeRoles(raw)
+    if (frozen.length > 0) {
+      roleSnapshotCache.set(uid, frozen)
+    }
+    return frozen
+  }
+
+  const seedRootKnownRoles = (): string[] => {
+    const newlySeeded: string[] = []
+    for (const rootUid of rootUserIds) {
+      if (!lastKnownRoles.has(rootUid)) {
+        const roles = computeRolesForUid(rootUid)
+        if (roles.length > 0) {
+          lastKnownRoles.set(rootUid, roles)
+          newlySeeded.push(rootUid)
+        }
+      }
+    }
+    return newlySeeded
+  }
+  seedRootKnownRoles()
+
+  const reconcileRoleChanges = (local: boolean): void => {
+    roleSnapshotCache.clear()
+    const allTracked = new Set<string>([
+      ...rootUserIds,
+      ...certs.keys(),
+      ...lastKnownRoles.keys()
+    ])
+    let anyChanged = false
+    for (const uid of allTracked) {
+      const prev = lastKnownRoles.get(uid) ?? frozenEmptyRoles
+      const next = computeRolesForUid(uid)
+      if (!rolesEqual(prev, next)) {
+        anyChanged = true
+        if (next.length > 0) {
+          lastKnownRoles.set(uid, next)
+        } else {
+          lastKnownRoles.delete(uid)
+        }
+        emitRoleChange({
+          userId: uid,
+          roles: next,
+          previousRoles: prev,
+          local
+        })
+      }
+    }
+    if (anyChanged) {
+      onRolesChanged?.()
+    }
   }
 
   const syncLocalCert = (): void => {
@@ -446,22 +579,21 @@ export const createRoomAuthority = ({
     }
   }
 
-  const isCertHeaderValid = (cert: unknown): cert is RoleCertificate =>
-    validateRoleCertificateShape(cert) &&
-    cert.appId === appId &&
-    cert.roomId === effectiveRoomId &&
-    cert.iat <= Date.now() + clockSkewMs &&
-    (isRootUid(cert.subUserId)
-      ? cert.roles.includes('admin')
-      : !cert.roles.includes('admin'))
-
   const certCacheKey = (cert: RoleCertificate): string =>
     `${roleCertPayload(cert)}\u0000${cert.sig}`
 
   const verifyCertCached = async (
     cert: RoleCertificate
   ): Promise<{valid: boolean; roles: string[]}> => {
-    if (!isCertHeaderValid(cert)) {
+    if (
+      !validateRoleCertificateShape(cert) ||
+      cert.appId !== appId ||
+      cert.roomId !== effectiveRoomId ||
+      cert.iat > Date.now() + clockSkewMs ||
+      (rootUserIds.has(cert.subUserId)
+        ? !cert.roles.includes('admin')
+        : cert.roles.includes('admin'))
+    ) {
       return invalidRoles()
     }
     const cacheKey = certCacheKey(cert)
@@ -470,16 +602,16 @@ export const createRoomAuthority = ({
       return {valid: true, roles: [...cachedRoles]}
     }
     const issuer = await getVerifiedPubKeyRecord(cert.issuerPubKey)
+    if (!issuer || !rootUserIds.has(issuer.userId)) {
+      return invalidRoles()
+    }
     if (
-      !issuer ||
-      !isRootUid(issuer[6]) ||
       !(await verifySig(cert.issuerPubKey, roleCertPayload(cert), cert.sig))
     ) {
       return invalidRoles()
     }
-    const roles = [...cert.roles]
-    verifiedCertCache.set(cacheKey, [...roles])
-    return {valid: true, roles}
+    verifiedCertCache.set(cacheKey, [...cert.roles])
+    return {valid: true, roles: [...cert.roles]}
   }
 
   const verifyRootAdminRecord = async (
@@ -495,7 +627,7 @@ export const createRoomAuthority = ({
       return false
     }
     const signer = await getVerifiedPubKeyRecord(rec.signerPubKey)
-    if (!signer || signer[6] !== rec.issuerUserId) {
+    if (!signer || signer.userId !== rec.issuerUserId) {
       return false
     }
     return verifySig(rec.signerPubKey, payload, rec.sig)
@@ -506,21 +638,29 @@ export const createRoomAuthority = ({
     return uids.some(isRootUid) ? null : uids
   }
 
-  const getPeerRoles = (peerOrUserId = selfId): string[] => {
-    const uids = candidateUids(peerOrUserId)
+  const getPeerRoles = (...args: [peerOrUserId?: string]): string[] => {
+    if (args.length > 0 && !args[0]) {
+      return frozenEmptyRoles
+    }
+    let target: string
+    if (args.length === 0) {
+      target = localUser?.userId ?? getSelfId()
+      if (!target) {
+        return frozenEmptyRoles
+      }
+    } else {
+      target = args[0]!
+    }
+    const uids = candidateUids(target)
     if (uids.some(isTargetBanned)) {
-      return []
+      return frozenEmptyRoles
     }
     for (const uid of uids) {
-      const cert = certs.get(uid)
-      if (cert) {
-        return effectiveRoles(cert)
-      }
-      if (isRootUid(uid)) {
-        return ['admin']
+      if (certs.has(uid) || isRootUid(uid)) {
+        return computeRolesForUid(uid)
       }
     }
-    return []
+    return frozenEmptyRoles
   }
 
   const isPeerBanned = (peerOrUserId: string): boolean => {
@@ -562,18 +702,82 @@ export const createRoomAuthority = ({
         onRoomIdResolved?.(effectiveRoomId)
       }
       isResolved = true
+      roleSnapshotCache.clear()
+      const newlySeeded = seedRootKnownRoles()
+      if (newlySeeded.length > 0) {
+        onRolesChanged?.()
+        for (const [handler, replayed] of pendingReplayHandlers) {
+          for (const uid of newlySeeded) {
+            if (!replayed.has(uid)) {
+              replayed.add(uid)
+              const roles = computeRolesForUid(uid)
+              if (roles.length > 0) {
+                try {
+                  handler({
+                    userId: uid,
+                    roles,
+                    previousRoles: frozenEmptyRoles,
+                    local: false
+                  })
+                } catch {
+                  // ignore userland handler error during deferred replay
+                }
+              }
+            }
+          }
+        }
+      }
+      pendingReplayHandlers.clear()
       syncLocalCert()
     })())
   void ensureResolved().catch(noOp)
+
+  const onRoleChange = (
+    handler: RoleChangeHandler,
+    options?: ReplayListenerOptions
+  ): Unsubscribe => {
+    let trackedEntry: [RoleChangeHandler, Set<string>] | null = null
+    const unsub = subRoleChange(handler, options, () => {
+      const items: Array<[RoleChangeContext]> = []
+      const replayed = new Set<string>()
+      const uids = new Set<string>([...rootUserIds, ...certs.keys()])
+      for (const uid of uids) {
+        const roles = computeRolesForUid(uid)
+        if (roles.length > 0) {
+          replayed.add(uid)
+          items.push([
+            {
+              userId: uid,
+              roles,
+              previousRoles: frozenEmptyRoles,
+              local: false
+            }
+          ])
+        }
+      }
+      if (!isResolved) {
+        trackedEntry = [handler, replayed]
+        pendingReplayHandlers.add(trackedEntry)
+      }
+      return items
+    })
+    return () => {
+      if (trackedEntry) {
+        pendingReplayHandlers.delete(trackedEntry)
+      }
+      unsub()
+    }
+  }
 
   const guardApply = <T>(fn: () => Promise<T>, fallback: () => T): Promise<T> =>
     ensureResolved().then(fn).catch(fallback)
 
   const evictOldestTargetIfNeeded = <T>(
     map: Map<string, T>,
+    limit: number,
     canEvict?: (val: T) => boolean
   ): boolean => {
-    if (map.size < maxStoredTargets) {
+    if (map.size < limit) {
       return true
     }
     for (const [k, val] of map) {
@@ -589,14 +793,19 @@ export const createRoomAuthority = ({
     cert: RoleCertificate,
     fromPeerId?: string
   ): Promise<boolean> => {
-    if (!isCertHeaderValid(cert)) {
+    if (
+      !validateRoleCertificateShape(cert) ||
+      cert.appId !== appId ||
+      cert.roomId !== effectiveRoomId ||
+      cert.iat > Date.now() + clockSkewMs
+    ) {
       return failSig(fromPeerId)
     }
     const prev = certs.get(cert.subUserId)
-    if (prev && (prev.sig === cert.sig || prev.iat >= cert.iat)) {
+    if (prev && (prev.sig === cert.sig || compareCertOrder(cert, prev) <= 0)) {
       return false
     }
-    if (!prev && !evictOldestTargetIfNeeded(certs)) {
+    if (!prev && !evictOldestTargetIfNeeded(certs, maxStoredTargets)) {
       return false
     }
     if (!(await verifyCertCached(cert)).valid) {
@@ -630,7 +839,10 @@ export const createRoomAuthority = ({
     ) {
       return false
     }
-    if (!existingMap && !evictOldestTargetIfNeeded(revocationsByTarget)) {
+    if (
+      !existingMap &&
+      !evictOldestTargetIfNeeded(revocationsByTarget, maxStoredTargets)
+    ) {
       return false
     }
     if (!(await verifyRootAdminRecord(rev, revocationCanonicalPayload(rev)))) {
@@ -662,8 +874,11 @@ export const createRoomAuthority = ({
     }
     if (
       !prev &&
-      !evictOldestTargetIfNeeded(moderations, val => val.op === 'unban') &&
-      !evictOldestTargetIfNeeded(moderations)
+      !evictOldestTargetIfNeeded(
+        moderations,
+        maxStoredModerations,
+        val => val.op === 'unban'
+      )
     ) {
       return false
     }
@@ -682,16 +897,40 @@ export const createRoomAuthority = ({
     return 'updated'
   }
 
-  const verifyAndApplyCert: RoomAuthority['verifyAndApplyCert'] = (
-    cert,
-    fromPeerId
-  ) =>
+  const applyCertWithOrigin = (
+    cert: RoleCertificate,
+    local: boolean,
+    fromPeerId?: string
+  ): Promise<boolean> =>
     guardApply(
       async () => {
         if (!(await stageCertInternal(cert, fromPeerId))) {
           return false
         }
         syncLocalCert()
+        reconcileRoleChanges(local)
+        return true
+      },
+      () => failSig(fromPeerId)
+    )
+
+  const verifyAndApplyCert: RoomAuthority['verifyAndApplyCert'] = (
+    cert,
+    fromPeerId
+  ) => applyCertWithOrigin(cert, false, fromPeerId)
+
+  const applyRevocationWithOrigin = (
+    rev: RoleRevocationRecord,
+    local: boolean,
+    fromPeerId?: string
+  ): Promise<boolean> =>
+    guardApply(
+      async () => {
+        if (!(await stageRevocationInternal(rev, fromPeerId))) {
+          return false
+        }
+        syncLocalCert()
+        reconcileRoleChanges(local)
         return true
       },
       () => failSig(fromPeerId)
@@ -700,24 +939,16 @@ export const createRoomAuthority = ({
   const verifyAndApplyRevocation: RoomAuthority['verifyAndApplyRevocation'] = (
     rev,
     fromPeerId
-  ) =>
-    guardApply(
-      async () => {
-        if (!(await stageRevocationInternal(rev, fromPeerId))) {
-          return false
-        }
-        syncLocalCert()
-        return true
-      },
-      () => failSig(fromPeerId)
-    )
+  ) => applyRevocationWithOrigin(rev, false, fromPeerId)
 
   const notifyModerationTransition = (
     transition: 'ban' | 'unban' | 'updated',
     mod: PeerModerationRecord,
+    local: boolean,
     fromPeerId?: string
   ): void => {
     syncLocalCert()
+    reconcileRoleChanges(local)
     if (transition === 'ban') {
       onPeerBanned?.(mod.targetUserId, mod, fromPeerId)
     } else if (transition === 'unban') {
@@ -725,21 +956,27 @@ export const createRoomAuthority = ({
     }
   }
 
-  const verifyAndApplyModeration: RoomAuthority['verifyAndApplyModeration'] = (
-    mod,
-    fromPeerId
-  ) =>
+  const applyModerationWithOrigin = (
+    mod: PeerModerationRecord,
+    local: boolean,
+    fromPeerId?: string
+  ): Promise<boolean> =>
     guardApply(
       async () => {
         const res = await stageModerationInternal(mod, fromPeerId)
         if (!res) {
           return false
         }
-        notifyModerationTransition(res, mod, fromPeerId)
+        notifyModerationTransition(res, mod, local, fromPeerId)
         return true
       },
       () => failSig(fromPeerId)
     )
+
+  const verifyAndApplyModeration: RoomAuthority['verifyAndApplyModeration'] = (
+    mod,
+    fromPeerId
+  ) => applyModerationWithOrigin(mod, false, fromPeerId)
 
   const applySyncBatch: RoomAuthority['applySyncBatch'] = (
     batch,
@@ -758,7 +995,7 @@ export const createRoomAuthority = ({
 
         for (const cert of takeArr<RoleCertificate>(
           batch.certs,
-          maxSyncCerts
+          authSyncPageSize
         )) {
           if (shouldAbort?.()) {
             break
@@ -769,7 +1006,7 @@ export const createRoomAuthority = ({
         }
         for (const rev of takeArr<RoleRevocationRecord>(
           batch.revocations,
-          maxSyncModerationRecords
+          authSyncPageSize
         )) {
           if (shouldAbort?.()) {
             break
@@ -780,7 +1017,7 @@ export const createRoomAuthority = ({
         }
         for (const mod of takeArr<PeerModerationRecord>(
           batch.moderations,
-          maxSyncModerationRecords
+          authSyncPageSize
         )) {
           if (shouldAbort?.()) {
             break
@@ -797,6 +1034,7 @@ export const createRoomAuthority = ({
           appliedMods.length > 0
         ) {
           syncLocalCert()
+          reconcileRoleChanges(false)
           for (const [mod, res] of appliedMods) {
             if (res === 'ban') {
               onPeerBanned?.(mod.targetUserId, mod, fromPeerId)
@@ -818,17 +1056,21 @@ export const createRoomAuthority = ({
       }
     )
 
-  const collectAllRevs = (): RoleRevocationRecord[] => {
-    const out: RoleRevocationRecord[] = []
-    for (const targetMap of revocationsByTarget.values()) {
-      for (const rev of targetMap.values()) {
-        out.push(rev)
-        if (out.length >= maxSyncModerationRecords) {
-          return out
-        }
+  const getSortedAuthItems = (): SortedAuthItem[] => {
+    const items: SortedAuthItem[] = []
+    for (const [uid, cert] of certs) {
+      items.push([`c:${uid}`, 'c', cert])
+    }
+    for (const [uid, targetMap] of revocationsByTarget) {
+      for (const [roleKey, rev] of targetMap) {
+        items.push([`r:${uid}\u0000${roleKey}`, 'r', rev])
       }
     }
-    return out
+    for (const [uid, mod] of moderations) {
+      items.push([`m:${uid}`, 'm', mod])
+    }
+    items.sort((a, b) => cmpStr(a[0], b[0]))
+    return items
   }
 
   const collectKnownSig8Set = (): Set<string> => {
@@ -836,8 +1078,10 @@ export const createRoomAuthority = ({
     for (const cert of certs.values()) {
       set.add(sig8(cert))
     }
-    for (const rev of collectAllRevs()) {
-      set.add(sig8(rev))
+    for (const targetMap of revocationsByTarget.values()) {
+      for (const rev of targetMap.values()) {
+        set.add(sig8(rev))
+      }
     }
     for (const mod of moderations.values()) {
       set.add(sig8(mod))
@@ -853,34 +1097,78 @@ export const createRoomAuthority = ({
     return remoteSigs.some(sig => isStr(sig) && !localSet.has(sig))
   }
 
-  const buildPullMessage: RoomAuthority['buildPullMessage'] = async () => {
+  const buildPullMessage: RoomAuthority['buildPullMessage'] = async cursor => {
     await ensureResolved()
-    const s = [
-      ...[...certs.values()].slice(0, maxSyncCerts),
-      ...collectAllRevs(),
-      ...[...moderations.values()].slice(0, maxSyncModerationRecords)
-    ].map(sig8)
+    const items = getSortedAuthItems().filter(
+      ([k]) => cursor === undefined || cmpStr(k, cursor) > 0
+    )
+    const s = items.slice(0, authSyncPageSize).map(([, , item]) => sig8(item))
     return {
       t: 'pull' as const,
-      ...(s.length ? {s} : {})
+      ...(s.length ? {s} : {}),
+      ...(cursor !== undefined ? {c: cursor} : {})
     }
   }
 
-  const buildDiffSyncMessage: RoomAuthority['buildDiffSyncMessage'] =
-    async knownSigs => {
+  const buildDiffSyncMessage: RoomAuthority['buildDiffSyncMessage'] = async (
+    knownSigs,
+    cursor
+  ) => {
+    await ensureResolved()
+    const known = new Set(
+      Array.isArray(knownSigs) ? knownSigs.filter(isStr) : []
+    )
+    const afterCursor = getSortedAuthItems().filter(
+      ([k]) => cursor === undefined || cmpStr(k, cursor) > 0
+    )
+    const page = afterCursor.slice(0, authSyncPageSize)
+    const nextCursor =
+      afterCursor.length > authSyncPageSize
+        ? page[page.length - 1]![0]
+        : undefined
+    const outCerts: RoleCertificate[] = []
+    const outRevs: RoleRevocationRecord[] = []
+    const outMods: PeerModerationRecord[] = []
+    for (const [, kind, item] of page) {
+      if (known.has(sig8(item))) {
+        continue
+      }
+      if (kind === 'c') {
+        outCerts.push(item)
+      } else if (kind === 'r') {
+        outRevs.push(item)
+      } else {
+        outMods.push(item)
+      }
+    }
+    return mkSyncMsg(outCerts, outRevs, outMods, nextCursor)
+  }
+
+  const buildPushSyncMessages: RoomAuthority['buildPushSyncMessages'] =
+    async () => {
       await ensureResolved()
-      const known = new Set(
-        Array.isArray(knownSigs) ? knownSigs.filter(isStr) : []
-      )
-      return mkSyncMsg(
-        [...certs.values()]
-          .slice(0, maxSyncCerts)
-          .filter(x => !known.has(sig8(x))),
-        collectAllRevs().filter(x => !known.has(sig8(x))),
-        [...moderations.values()]
-          .slice(0, maxSyncModerationRecords)
-          .filter(x => !known.has(sig8(x)))
-      )
+      const items = getSortedAuthItems()
+      const msgs: AuthSyncMessage[] = []
+      for (let i = 0; i < items.length; i += authSyncPageSize) {
+        const slice = items.slice(i, i + authSyncPageSize)
+        const outCerts: RoleCertificate[] = []
+        const outRevs: RoleRevocationRecord[] = []
+        const outMods: PeerModerationRecord[] = []
+        for (const [, kind, item] of slice) {
+          if (kind === 'c') {
+            outCerts.push(item)
+          } else if (kind === 'r') {
+            outRevs.push(item)
+          } else {
+            outMods.push(item)
+          }
+        }
+        const msg = mkSyncMsg(outCerts, outRevs, outMods, undefined, true)
+        if (msg) {
+          msgs.push(msg)
+        }
+      }
+      return msgs
     }
 
   const requireLocalCertOrIntrinsicAdmin = (
@@ -888,21 +1176,21 @@ export const createRoomAuthority = ({
     forState: boolean,
     namespace: string
   ): readonly [RoleCertificate | null, string[]] => {
-    const myRoles = getPeerRoles(selfId)
+    const myRoles = getPeerRoles()
     if (!hasAnyRole(myRoles, requiredRoles)) {
       throw mkErr(
         `${insufficientAuthPrefix} ${forState ? 'to update state' : 'for action'} "${namespace}": requires [${requiredRoles.join(', ')}]`
       )
     }
     if (localCert) {
-      return [localCert, myRoles]
+      return [localCert, [...myRoles]]
     }
     if (
       localUser &&
       isRootUid(localUser.userId) &&
       requiredRoles.includes('admin')
     ) {
-      return [null, myRoles]
+      return [null, [...myRoles]]
     }
     throw mkErr(
       `missing local role certificate for ${forState ? 'state' : 'action'} "${namespace}"`
@@ -941,7 +1229,7 @@ export const createRoomAuthority = ({
         authorizePeerAction(peerId, requiredRoles, inlineCert)
       )
     }
-    const peerUid = getKnownPeerUserId?.(peerId)
+    const peerUid = lookupPeerUid(peerId)
     if (!peerUid || isTargetBanned(peerUid)) {
       return false
     }
@@ -965,7 +1253,7 @@ export const createRoomAuthority = ({
   ) => {
     await ensureResolved()
     if (!requiredRoles || requiredRoles.length === 0) {
-      const myRoles = getPeerRoles(selfId)
+      const myRoles = [...getPeerRoles()]
       const cert =
         localCert && !isTargetBanned(localCert.subUserId) && myRoles.length
           ? localCert
@@ -990,15 +1278,17 @@ export const createRoomAuthority = ({
         if (
           !(await verifyCertCached(rec.cert)).valid ||
           rec.cert.subUserId !== rec.userId ||
-          rec.hlc < rec.cert.iat
+          rec.hlc[0] < rec.cert.iat
         ) {
           failSig(fromPeerId)
           return invalidRoles()
         }
         const prev = certs.get(rec.userId)
-        if (!prev || rec.cert.iat > prev.iat) {
+        if (!prev || compareCertOrder(rec.cert, prev) > 0) {
+          clock.observe(rec.cert.iat)
           certs.set(rec.userId, rec.cert)
           syncLocalCert()
+          reconcileRoleChanges(false)
         }
         const roles = effectiveRoles(rec.cert)
         return requiredRoles?.length && !hasAnyRole(roles, requiredRoles)
@@ -1008,10 +1298,10 @@ export const createRoomAuthority = ({
       if (requiredRoles?.length) {
         const intrinsicRoles = isRootUid(rec.userId) ? ['admin'] : []
         return hasAnyRole(intrinsicRoles, requiredRoles)
-          ? {valid: true, roles: getPeerRoles(rec.userId)}
+          ? {valid: true, roles: [...getPeerRoles(rec.userId)]}
           : invalidRoles()
       }
-      return {valid: true, roles: getPeerRoles(rec.userId)}
+      return {valid: true, roles: [...getPeerRoles(rec.userId)]}
     }
 
   const requireRootSigner = async (
@@ -1025,14 +1315,26 @@ export const createRoomAuthority = ({
     return [localUser, resolveUid(targetId)]
   }
 
-  const maxRevocationTsForTarget = (targetUid: string): number => {
-    let maxTs = 0
-    for (const rev of revocationsByTarget.get(targetUid)?.values() ?? []) {
-      if (rev.ts > maxTs) {
-        maxTs = rev.ts
-      }
+  const advanceFloor = (
+    cur: readonly [ts: number, seq: number],
+    ts: number,
+    seq: number
+  ): readonly [ts: number, seq: number] =>
+    ts > cur[0] || (ts === cur[0] && seq > cur[1]) ? [ts, seq] : cur
+
+  const nextAuthorityStamp = (
+    floor: readonly [ts: number, seq: number]
+  ): readonly [ts: number, seq: number] => {
+    const safeCeiling = Math.max(floor[0], Date.now() + clockSkewMs - 2_000)
+    if (floor[0] <= 0) {
+      const ts = Math.min(clock.next(), safeCeiling)
+      return [ts, ++localModSeq]
     }
-    return maxTs
+    const desiredTs = Math.max(clock.next(), floor[0] + 1)
+    const ts = Math.min(desiredTs, safeCeiling)
+    const seq = Math.max(++localModSeq, floor[1] + 1)
+    localModSeq = seq
+    return [ts, seq]
   }
 
   const issueRoleCertificate: RoomAuthority['issueRoleCertificate'] = async (
@@ -1056,11 +1358,19 @@ export const createRoomAuthority = ({
     const mergedRoles = [
       ...new Set([...getPeerRoles(targetUserId), ...rolesToGrant])
     ]
-    const minTs = Math.max(
-      certs.get(targetUserId)?.iat ?? 0,
-      moderations.get(targetUserId)?.ts ?? 0,
-      maxRevocationTsForTarget(targetUserId)
-    )
+    let floor: readonly [number, number] = [0, 0]
+    const prevCert = certs.get(targetUserId)
+    if (prevCert) {
+      floor = advanceFloor(floor, prevCert.iat, prevCert.seq)
+    }
+    const prevMod = moderations.get(targetUserId)
+    if (prevMod) {
+      floor = advanceFloor(floor, prevMod.ts, prevMod.seq)
+    }
+    for (const rev of revocationsByTarget.get(targetUserId)?.values() ?? []) {
+      floor = advanceFloor(floor, rev.ts, rev.seq)
+    }
+    const [iat, seq] = nextAuthorityStamp(floor)
     const cert = await signRoleCertInternal(
       user.sign,
       user.signPubJwk,
@@ -1068,9 +1378,10 @@ export const createRoomAuthority = ({
       appId,
       effectiveRoomId,
       mergedRoles,
-      clock.next(minTs + 1)
+      iat,
+      seq
     )
-    if (!(await verifyAndApplyCert(cert))) {
+    if (!(await applyCertWithOrigin(cert, true))) {
       throw mkErr('failed to apply issued role certificate')
     }
     return cert
@@ -1088,11 +1399,16 @@ export const createRoomAuthority = ({
       throw rootAdminProtectErr('authority', 'revoke')
     }
     const roleKey = role ?? '*'
+    let floor: readonly [number, number] = [0, 0]
+    const prevCert = certs.get(targetUid)
+    if (prevCert) {
+      floor = advanceFloor(floor, prevCert.iat, prevCert.seq)
+    }
     const prevRev = revocationsByTarget.get(targetUid)?.get(roleKey)
-    const minTs = Math.max(
-      certs.get(targetUid)?.iat ?? 0,
-      prevRev ? prevRev.ts + 1 : 0
-    )
+    if (prevRev) {
+      floor = advanceFloor(floor, prevRev.ts, prevRev.seq)
+    }
+    const [ts, seq] = nextAuthorityStamp(floor)
     const unsigned: Omit<RoleRevocationRecord, 'sig'> = {
       v: 1,
       appId,
@@ -1100,15 +1416,15 @@ export const createRoomAuthority = ({
       issuerUserId: user.userId,
       targetUserId: targetUid,
       ...(role ? {role} : {}),
-      seq: ++localModSeq,
-      ts: clock.next(minTs),
-      signerPubKey: toCleanJwk(user.signPubJwk)
+      seq,
+      ts,
+      signerPubKey: jwkToCompactPub(user.signPubJwk)
     }
     const rev: RoleRevocationRecord = {
       ...unsigned,
       sig: await signWith(user.sign, revocationCanonicalPayload(unsigned))
     }
-    if (!(await verifyAndApplyRevocation(rev))) {
+    if (!(await applyRevocationWithOrigin(rev, true))) {
       throw mkErr('failed to apply issued role revocation')
     }
     return rev
@@ -1127,10 +1443,24 @@ export const createRoomAuthority = ({
       throw rootAdminProtectErr(op, op)
     }
     const prevMod = moderations.get(targetUid)
-    const minTs = Math.max(
-      certs.get(targetUid)?.iat ?? 0,
-      prevMod ? prevMod.ts + 1 : 0
-    )
+    if (
+      !prevMod &&
+      moderations.size >= maxStoredModerations &&
+      ![...moderations.values()].some(m => m.op === 'unban')
+    ) {
+      throw mkErr(
+        `moderation capacity reached (${maxStoredModerations} active bans)`
+      )
+    }
+    let floor: readonly [number, number] = [0, 0]
+    const prevCert = certs.get(targetUid)
+    if (prevCert) {
+      floor = advanceFloor(floor, prevCert.iat, prevCert.seq)
+    }
+    if (prevMod) {
+      floor = advanceFloor(floor, prevMod.ts, prevMod.seq)
+    }
+    const [ts, seq] = nextAuthorityStamp(floor)
     const unsigned: Omit<PeerModerationRecord, 'sig'> = {
       v: 1,
       op,
@@ -1139,27 +1469,28 @@ export const createRoomAuthority = ({
       issuerUserId: user.userId,
       targetUserId: targetUid,
       ...(op === 'ban' && options?.reason ? {reason: options.reason} : {}),
-      seq: ++localModSeq,
-      ts: clock.next(minTs),
-      signerPubKey: toCleanJwk(user.signPubJwk)
+      seq,
+      ts,
+      signerPubKey: jwkToCompactPub(user.signPubJwk)
     }
     const mod: PeerModerationRecord = {
       ...unsigned,
       sig: await signWith(user.sign, moderationCanonicalPayload(unsigned))
     }
-    if (!(await verifyAndApplyModeration(mod))) {
+    if (!(await applyModerationWithOrigin(mod, true))) {
       throw mkErr(`failed to apply issued ${op} record`)
     }
     return mod
   }
 
   return {
+    isAuthorityResolved: () => isResolved,
     getEffectiveRoomId: () => effectiveRoomId,
     getAuthorityInfo: async () => {
       await ensureResolved()
-      const roles = getPeerRoles(selfId)
+      const roles = [...getPeerRoles()]
       return {
-        userId: localUser?.userId ?? resolveUid(selfId),
+        userId: localUser?.userId ?? resolveUid(getSelfId()),
         roomId: effectiveRoomId,
         baseRoomId,
         isAdmin: roles.includes('admin'),
@@ -1173,6 +1504,11 @@ export const createRoomAuthority = ({
     authorizePeerAction,
     getStateWriteCert,
     verifyStateRecordRoles,
+    onRoleChange,
+    clearRoleListeners: () => {
+      pendingReplayHandlers.clear()
+      clearRoleChange()
+    },
     verifyAndApplyCert,
     verifyAndApplyRevocation,
     verifyAndApplyModeration,
@@ -1180,6 +1516,7 @@ export const createRoomAuthority = ({
     hasUnknownRecordSigs,
     buildPullMessage,
     buildDiffSyncMessage,
+    buildPushSyncMessages,
     rememberPeerUser,
     issueRoleCertificate,
     issueRoleRevocation,
@@ -1191,17 +1528,19 @@ export const roles = (
   config?: RolesConfig
 ): RoomPlugin<'roles', RolesPluginApi> => {
   const normalized = normalizeRolesConfig(config)
-  const setupInternal = (
+  const setup = (
     kernel: InternalRoomContext,
-    getPre?: () => RoomAuthorityPreResolvedState | undefined
-  ): RolesPluginApi => {
+    effectiveRoomIdP?: Promise<string>
+  ): {provider: KernelRolesProvider; api: RolesPluginApi} => {
     const [hitAuthFailure, , overAuthFailure] = createWindowCounter(512, 8)
-    const [hitAuthSyncQuota] = createWindowCounter(512, 24)
-    const completedSyncPeers = new Set<string>()
-    const inFlightPullTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const [hitAuthSyncQuota] = createWindowCounter(512, 96)
     const scaleProv = () => kernel.getScaleProvider()
     let destroyed = false
     let didReportSelfBan = false
+    let resolvedLocalUid: string | undefined
+    void kernel.getLocalUserIdentity().then(u => {
+      resolvedLocalUid = u.userId
+    }, noOp)
 
     const recordPeerAuthFailure = (fromPeerId?: string): void => {
       if (!fromPeerId || fromPeerId === kernel.selfId) {
@@ -1246,13 +1585,10 @@ export const roles = (
     }
 
     const authority = createRoomAuthority({
-      selfId: kernel.selfId,
+      selfId: () => kernel.selfId,
       appId: kernel.appId,
       initialRoomId: kernel.getRoomId(),
-      ...(kernel.effectiveRoomIdP
-        ? {effectiveRoomIdP: kernel.effectiveRoomIdP}
-        : {}),
-      ...(getPre ? {getPreResolvedState: getPre} : {}),
+      ...(effectiveRoomIdP ? {effectiveRoomIdP} : {}),
       admin: normalized,
       getLocalUserIdentity: kernel.getLocalUserIdentity,
       isOverlayPeerBanned: pid => scaleProv()?.isPeerBanned(pid) ?? false,
@@ -1260,10 +1596,14 @@ export const roles = (
       onRoomIdResolved: kernel.setEffectiveRoomId,
       onLocalRoleCertificate: cert =>
         scaleProv()?.setLocalRoleCertificate(cert),
+      onRolesChanged: kernel.onRolesChanged,
       onPeerBanned: (bannedUid, banRec, fromPeerId) => {
-        const localUid = kernel.getKnownPeerUserId(kernel.selfId)
+        const curSelf = kernel.selfId
+        const localUid =
+          resolvedLocalUid ??
+          (curSelf ? kernel.getKnownPeerUserId(curSelf) : undefined)
         if (
-          bannedUid === kernel.selfId ||
+          (curSelf && bannedUid === curSelf) ||
           (localUid && bannedUid === localUid)
         ) {
           if (!didReportSelfBan) {
@@ -1305,63 +1645,18 @@ export const roles = (
       kernel.getDirectActivePeerIds().includes(pid) &&
       !authority.isPeerBanned(pid)
 
-    const clearPullTimer = (peerId: string): void => {
-      resetTimer(inFlightPullTimers.get(peerId))
-      inFlightPullTimers.delete(peerId)
-    }
-
-    const fillPullFanout = (): void => {
-      if (destroyed) {
-        return
-      }
-      for (const candidate of selectPullFanoutPeers(
-        kernel.selfId,
-        kernel.getDirectActivePeerIds(),
-        authority.isPeerBanned
-      )) {
-        if (
-          completedSyncPeers.size + inFlightPullTimers.size >=
-          authPullFanout
-        ) {
-          break
-        }
-        if (
-          !completedSyncPeers.has(candidate) &&
-          !inFlightPullTimers.has(candidate)
-        ) {
-          void sendPull(candidate)
+    const antiEntropy = createAntiEntropySync({
+      fanout: authPullFanout,
+      pullTimeoutMs: authPullTimeoutMs,
+      getDirectPeers: kernel.getDirectActivePeerIds,
+      isPeerSendable: isDirectSendable,
+      sendPull: async (peerId, cursor) => {
+        const payload = await authority.buildPullMessage(cursor)
+        if (!destroyed && isDirectSendable(peerId)) {
+          await rawAuth.send(payload as unknown as JsonValue, {target: peerId})
         }
       }
-    }
-
-    const sendPull = async (peerId: string, force = false): Promise<void> => {
-      if (
-        destroyed ||
-        (!force &&
-          (completedSyncPeers.has(peerId) || inFlightPullTimers.has(peerId))) ||
-        !isDirectSendable(peerId)
-      ) {
-        return
-      }
-      clearPullTimer(peerId)
-      const timer = setTimeout(() => {
-        inFlightPullTimers.delete(peerId)
-        if (!destroyed && completedSyncPeers.size < authPullFanout) {
-          fillPullFanout()
-        }
-      }, authPullTimeoutMs)
-      unrefTimer(timer)
-      inFlightPullTimers.set(peerId, timer)
-
-      const payload = await authority.buildPullMessage()
-      if (!destroyed && isDirectSendable(peerId)) {
-        await rawAuth
-          .send(payload as unknown as JsonValue, {target: peerId})
-          .catch(() => clearPullTimer(peerId))
-      } else {
-        clearPullTimer(peerId)
-      }
-    }
+    })
 
     rawAuth.onMessage((raw, {peerId: fromPeerId}) => {
       const msg = raw as unknown as AuthControlMessage
@@ -1383,20 +1678,20 @@ export const roles = (
         Array.isArray(arr) && arr.length > max
 
       if (msg.t === 'pull') {
-        if (arrOver(msg.s, maxSyncCerts + maxSyncModerationRecords * 2)) {
+        if (
+          arrOver(msg.s, authSyncPageSize) ||
+          (msg.c !== undefined &&
+            (typeof msg.c !== 'string' || msg.c.length > 512))
+        ) {
           recordPeerAuthFailure(fromPeerId)
           return
         }
-        if (authority.hasUnknownRecordSigs(msg.s)) {
-          void sendPull(fromPeerId, true)
-        } else if (
-          completedSyncPeers.size + inFlightPullTimers.size < authPullFanout &&
-          !completedSyncPeers.has(fromPeerId) &&
-          !inFlightPullTimers.has(fromPeerId)
-        ) {
-          void sendPull(fromPeerId)
+        if (msg.c === undefined && authority.hasUnknownRecordSigs(msg.s)) {
+          antiEntropy.pullPeer(fromPeerId, true)
+        } else if (msg.c === undefined) {
+          antiEntropy.fillFanout()
         }
-        void authority.buildDiffSyncMessage(msg.s).then(diff => {
+        void authority.buildDiffSyncMessage(msg.s, msg.c).then(diff => {
           if (
             !destroyed &&
             kernel.isPeerActive(fromPeerId) &&
@@ -1407,16 +1702,17 @@ export const roles = (
         })
       } else if (msg.t === 'sync') {
         if (
-          arrOver(msg.certs, maxSyncCerts) ||
-          arrOver(msg.revocations, maxSyncModerationRecords) ||
-          arrOver(msg.moderations, maxSyncModerationRecords)
+          arrOver(msg.certs, authSyncPageSize) ||
+          arrOver(msg.revocations, authSyncPageSize) ||
+          arrOver(msg.moderations, authSyncPageSize) ||
+          (msg.n !== undefined &&
+            (typeof msg.n !== 'string' || msg.n.length > 512))
         ) {
           recordPeerAuthFailure(fromPeerId)
           return
         }
-        if (inFlightPullTimers.has(fromPeerId)) {
-          clearPullTimer(fromPeerId)
-          completedSyncPeers.add(fromPeerId)
+        if (!msg.f) {
+          antiEntropy.onSyncPage(fromPeerId, msg.n)
         }
         void authority
           .applySyncBatch(
@@ -1433,7 +1729,13 @@ export const roles = (
             () => overAuthFailure(fromPeerId)
           )
           .then(({certs, revocations, moderations}) => {
-            const fwd = mkSyncMsg(certs, revocations, moderations)
+            const fwd = mkSyncMsg(
+              certs,
+              revocations,
+              moderations,
+              undefined,
+              true
+            )
             if (!fwd || destroyed) {
               return
             }
@@ -1453,7 +1755,7 @@ export const roles = (
       }
     })
 
-    kernel.registerRolesProvider({
+    const provider: KernelRolesProvider = {
       ...authority,
       onPeerDescriptorCert: (pid, uid, cert) => {
         authority.rememberPeerUser(pid, uid)
@@ -1463,7 +1765,7 @@ export const roles = (
           void authority.verifyAndApplyCert(cert, pid)
         }
       }
-    })
+    }
 
     let syncedOfflineRecords = false
 
@@ -1474,74 +1776,75 @@ export const roles = (
         }
         if (!syncedOfflineRecords) {
           syncedOfflineRecords = true
-          void authority.buildDiffSyncMessage().then(initialSync => {
-            if (initialSync && !destroyed && isDirectSendable(pid)) {
-              void sendAuth(initialSync, pid)
+          void authority.buildPushSyncMessages().then(msgs => {
+            if (!destroyed && isDirectSendable(pid)) {
+              for (const msg of msgs) {
+                void sendAuth(msg, pid)
+              }
             }
           })
         }
-        fillPullFanout()
+        antiEntropy.onPeerJoined(pid, true, Boolean(scaleProv()))
       },
       {replay: true}
     )
 
     kernel.onPeerDeactivated(pid => {
-      clearPullTimer(pid)
-      completedSyncPeers.delete(pid)
       if (kernel.getDirectActivePeerIds().length === 0) {
         syncedOfflineRecords = false
       }
-      if (!destroyed && completedSyncPeers.size < authPullFanout) {
-        fillPullFanout()
-      }
+      antiEntropy.onPeerDisconnected(pid)
     })
 
     kernel.onLeave(() => {
       destroyed = true
-      inFlightPullTimers.forEach(resetTimer)
-      inFlightPullTimers.clear()
-      completedSyncPeers.clear()
+      antiEntropy.destroy()
+      authority.clearRoleListeners()
     })
 
-    return {
-      grantRole: async (id, role) => {
-        const cert = await authority.issueRoleCertificate(id, role)
-        await sendAuth({t: 'cert', cert})
-        return cert
-      },
-      revokeRole: async (id, role) => {
-        const revocation = await authority.issueRoleRevocation(id, role)
-        await sendAuth({t: 'revoke', revocation})
-      },
-      getRoles: authority.getPeerRoles,
-      ban: async (id, opts) => {
-        const moderation = await authority.issuePeerModeration('ban', id, opts)
-        await sendAuth({t: 'mod', moderation})
-      },
-      unban: async id => {
-        const moderation = await authority.issuePeerModeration('unban', id)
-        await sendAuth({t: 'mod', moderation})
-      },
-      isBanned: authority.isPeerBanned
-    }
+    const api = lockMethods(
+      {
+        grantRole: async (id, role) => {
+          const cert = await authority.issueRoleCertificate(id, role)
+          await sendAuth({t: 'cert', cert})
+          return cert
+        },
+        revokeRole: async (id, role) => {
+          const revocation = await authority.issueRoleRevocation(id, role)
+          await sendAuth({t: 'revoke', revocation})
+        },
+        getRoles: (...args: [targetId?: string]) =>
+          authority.getPeerRoles(...args),
+        ban: async (id, opts) => {
+          const moderation = await authority.issuePeerModeration(
+            'ban',
+            id,
+            opts
+          )
+          await sendAuth({t: 'mod', moderation})
+        },
+        unban: async id => {
+          const moderation = await authority.issuePeerModeration('unban', id)
+          await sendAuth({t: 'mod', moderation})
+        },
+        isBanned: authority.isPeerBanned,
+        onRoleChange: authority.onRoleChange
+      } satisfies RolesPluginApi,
+      ['onRoleChange']
+    )
+
+    return {provider, api}
   }
 
-  return makeInternalPlugin<
-    'roles',
-    RolesPluginApi,
-    RoomAuthorityPreResolvedState
-  >('roles', setupInternal, {
+  const plugin = {name: 'roles'} as RoomPlugin<'roles', RolesPluginApi>
+  const slot: RolesPluginSlot = {
+    kind: 'roles',
     selfAsAdmin: Boolean(normalized.selfAsAdmin),
-    resolveRoomId: async ({roomId, userIdentityP}) => {
-      const [base, uid] = splitSelfCertRoom(roomId)
-      const adminUid =
-        uid ?? (normalized.selfAsAdmin ? (await userIdentityP).userId : null)
-      return adminUid
-        ? {
-            effectiveRoomId: `${base}~${adminUid}`,
-            state: [base, adminUid] as const
-          }
-        : {effectiveRoomId: roomId}
-    }
+    setup
+  }
+  Object.defineProperty(plugin, pluginSlotSymbol, {
+    value: slot,
+    enumerable: false
   })
+  return plugin
 }

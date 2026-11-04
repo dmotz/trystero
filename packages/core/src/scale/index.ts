@@ -1,11 +1,11 @@
-import type {InternalRoomContext, KernelScaleProvider} from '../internal-types'
-import {makeInternalPlugin} from '../plugin'
 import type {
+  InternalRoomContext,
+  KernelScaleProvider,
   PeerHandle,
-  RoomPlugin,
-  ScaleConfig,
-  ScalePluginApi
-} from '../types'
+  ScalePluginSlot
+} from '../internal-types'
+import {pluginSlotSymbol} from '../primitives'
+import type {RoomPlugin, ScaleConfig, ScalePluginApi} from '../types'
 import {mkErr, noOp, peerDisconnectedErr, toError, unrefTimer} from '../utils'
 import {createOverlayManager} from './manager'
 import {normalizeTopologyConfig} from './topology'
@@ -19,7 +19,9 @@ export const scale = (
 ): RoomPlugin<'scale', ScalePluginApi> => {
   normalizeTopologyConfig(config)
 
-  const setupInternal = (kernel: InternalRoomContext): ScalePluginApi => {
+  const setup = (
+    kernel: InternalRoomContext
+  ): {provider: KernelScaleProvider; api: ScalePluginApi} => {
     const pendingMediaPeers = new Map<
       string,
       [
@@ -48,14 +50,16 @@ export const scale = (
         kernel
           .getRolesProvider()
           ?.authorizePeerAction(peerId, requiredRoles, inlineCert) ?? true,
-      onPeerDescriptorCert: (peerId, signPubKey, cert, userId) => {
-        if (userId) {
-          kernel.setPeerUserId(peerId, userId)
+      onPeerDescriptorCert: (peerId, _signPubKey, cert, userId) => {
+        if (!userId) {
+          return
         }
-        kernel.setPeerPublicKey(peerId, signPubKey)
-        if (userId) {
-          kernel.getRolesProvider()?.onPeerDescriptorCert(peerId, userId, cert)
+        const knownUid = kernel.getKnownPeerUserId(peerId)
+        if (knownUid && knownUid !== userId) {
+          return
         }
+        kernel.setPeerUserId(peerId, userId)
+        kernel.getRolesProvider()?.onPeerDescriptorCert(peerId, userId, cert)
       },
       onError: cause =>
         kernel.emitError({
@@ -154,6 +158,7 @@ export const scale = (
       setOnTargetsChanged: manager.setOnTargetsChanged,
       announceLeave: manager.announceLeave,
       destroy: manager.destroy,
+      getPeerUserId: manager.getPeerUserId,
       setPeerSignPublicKey: manager.setPeerSignPublicKey,
       setLocalRoleCertificate: manager.setLocalRoleCertificate,
       markPeerBanned: manager.markPeerBanned,
@@ -162,13 +167,24 @@ export const scale = (
       registerActionAuthority: manager.registerActionAuthority
     }
 
-    kernel.registerScaleProvider(provider)
     kernel.onRoomIdChanged(manager.setRoomId)
 
     return {
-      getTopology: manager.getSnapshot
+      provider,
+      api: {
+        getTopology: manager.getSnapshot
+      }
     }
   }
 
-  return makeInternalPlugin('scale', setupInternal)
+  const plugin = {name: 'scale'} as RoomPlugin<'scale', ScalePluginApi>
+  const slot: ScalePluginSlot = {
+    kind: 'scale',
+    setup
+  }
+  Object.defineProperty(plugin, pluginSlotSymbol, {
+    value: slot,
+    enumerable: false
+  })
+  return plugin
 }

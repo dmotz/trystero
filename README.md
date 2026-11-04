@@ -119,7 +119,7 @@ No package manager? You can also use an ESM CDN:
 ```
 
 The default Trystero package runs on the Nostr network, but you can swap in any
-other stategy by changing which package you import:
+other strategy by changing which package you import:
 
 ```js
 import {joinRoom} from '@trystero-p2p/mqtt'
@@ -179,21 +179,23 @@ room.onPeerStream(
 ```
 
 Event listeners (`onUserJoin`, `onUserLeave`, `onPeerJoin`, `onPeerLeave`,
-`onPeerStream`, `onError`, `action.onMessage`, `action.onReceiveProgress`,
-`state.onChange`, and `userState.onChange`) allow multiple independent
-subscriptions — calling `on*(fn)` twice with the same function registers two
-independent entries, each returning its own `unsubscribe()` function
-(`offJoin()`). Single-result handlers (`action.onRequest` and
-`action.onReceive`) allow one active handler at a time and also return an
-`unsubscribe()` function.
+`onPeerStream`, `onRoleChange`, `onError`, `action.onMessage`,
+`action.onReceiveProgress`, `state.onChange`, and `userState.onChange`) allow
+multiple independent subscriptions — calling `on*(fn)` twice with the same
+function registers two independent entries, each returning its own
+`unsubscribe()` function (`offJoin()`). Single-result handlers
+(`action.onRequest` and `action.onReceive`) allow one active handler at a time
+and also return an `unsubscribe()` function.
 
 All `on*` methods accept `{once, signal}` options, plus `{replay: true}` on
-`onUserJoin`, `onPeerJoin`, `onPeerStream`, `state.onChange`, and
-`userState.onChange` to synchronously emit currently active state to a late
+`onUserJoin`, `onPeerJoin`, `onPeerStream`, `onRoleChange`, `state.onChange`,
+and `userState.onChange` to synchronously emit currently active state to a late
 subscriber (when combined with `{once: true}`, the first replayed item satisfies
 `once` and unsubscribes immediately). Unlike presence, media, and state replay,
-`action.onMessage` buffers inbound messages arriving while zero listeners are
-attached and drains them in order to the first subscriber.
+`action.onMessage` buffers up to `32` inbound messages for `10` seconds per
+registered action (including role-gated actions, without consuming the room's
+concurrent transfer budget) while zero listeners are attached and drains them in
+order to the first subscriber.
 
 To disconnect and clean up all room subscriptions at once, leave the room:
 
@@ -294,8 +296,8 @@ const pic = room.makeAction('pic')
 // blobs are automatically handled, as are any form of TypedArray
 canvas.toBlob(blob => pic.send(blob))
 
-// binary data is received as raw ArrayBuffers so your handling code should
-// interpret it in a way that makes sense
+// binary data (ArrayBuffer, TypedArray, or Blob) is received as a Uint8Array
+// so your handling code can wrap or decode it directly
 pic.onMessage(
   (data, {userId}) => (imgs[userId].src = URL.createObjectURL(new Blob([data])))
 )
@@ -472,11 +474,13 @@ tab alone:
   <summary>How it works behind the scenes</summary>
 
 - **Self-certifying IDs**: Each tab generates a fresh ECDSA P-256 endpoint
-  keypair (`peerId`, a 20-character Base62 digest `sha256(pubJwk) mod 62²⁰`)
-  alongside the user's ECDSA P-256 identity keypair (`userId`, a 22-character
-  Base62 digest `sha256(pubJwk) mod 62²²`). Because `peerId` and `userId` have
-  distinct lengths (`20` vs `22`), any `target` option unambiguously recognizes
-  which one you passed.
+  keypair (`peerId`, a 20-character Base62 digest
+  `sha256("trystero:pid:v1:" || uncompressedPubKey) mod 62²⁰`) alongside the
+  user's ECDSA P-256 identity keypair (`userId`, a 22-character Base62 digest
+  `sha256("trystero:uid:v1:" || uncompressedPubKey) mod 62²²`). Domain-separated
+  prefixes guarantee a single P-256 key never shares prefix bytes between
+  `peerId` and `userId`, and distinct lengths (`20` vs `22`) let any `target`
+  option unambiguously recognize which one you passed.
 - **Connection-bound handshake**: Before any peer or user join event fires, both
   sides exchange fresh cryptographic nonces and sign a transcript binding the
   `appId`, `roomId`, both `peerId`s, both `userId`s, and the WebRTC connection's
@@ -558,9 +562,12 @@ Key behaviors of `makeUserState`:
   clobber state published from the first tab, updates sync across all of your
   tabs, and presence-scoped state stays live until your **last** open tab
   leaves.
-- **Automatic write coalescing**: Rapid synchronous or back-to-back `.set()`
-  calls (such as dragging a slider or cursor) automatically fold pending updates
-  while an ECDSA signature is in flight so bandwidth and CPU stay minimal.
+- **Synchronous optimistic local reads & 40 ms wire coalescing**: Calling
+  `.set(...)` or `.clear()` updates local `.get()` / `.getAll()` and fires local
+  `onChange` synchronously right away (deferring pre-`ready` optimistic apply
+  only on role-gated namespaces until local identity/roles resolve), while rapid
+  back-to-back writes (such as dragging a slider or cursor) coalesce ECDSA
+  signing and wire broadcasts over a 40 ms pacing window.
 - **Presence-scoped lifecycle**: A user's entry lives while they are in the
   room, remains readable _during_ `room.onUserLeave` callbacks, and is evicted
   automatically right after `onUserLeave`.
@@ -600,11 +607,13 @@ member mode**:
   outsiders cannot join.
 - **Whole-value last-writer-wins (LWW)**: Concurrent writes do not deep-merge
   object fields—every peer deterministically converges to the highest bounded
-  Hybrid Logical Clock record `(hlc, userId, peerId, sig)`. Keep per-user fields
-  in `makeUserState`, and layer a CRDT (such as Yjs or Automerge) over
-  `makeAction` if you need concurrent character- or list-level merging.
-- **Bounded clock-skew window**: Peers reject state records dated more than 60
-  seconds into the future, bounding how far a misconfigured clock or griefing
+  tuple Hybrid Logical Clock record `([wallMs, counter], userId, peerId, sig)`.
+  Keep per-user fields in `makeUserState`, and layer a CRDT (such as Yjs or
+  Automerge) over `makeAction` if you need concurrent character- or list-level
+  merging.
+- **Bounded clock-skew window**: Peers reject state records dated more than 10
+  seconds into the future (up to `cert.iat + 10s` for role-certified writes,
+  capped at 60 seconds), bounding how far a misconfigured clock or griefing
   member in an open room can pin a timestamp.
 - **Upgrade to `roles()` for untrusted/public rooms**: Whenever untrusted
   strangers can join and you need host-only state, custom writer roles, or peer
@@ -993,6 +1002,11 @@ roles (like `'moderator'` or `'dj'`), revoke those roles later, or permanently
 ban a disruptive user from the room:
 
 ```js
+// React whenever any user's verified roles change (locally or remotely)
+room.onRoleChange(({userId, roles, previousRoles, local}) => {
+  console.log(`${userId} roles: ${previousRoles} -> ${roles} (local=${local})`)
+})
+
 // Promote a user to 'moderator'
 await room.grantRole(userId, 'moderator')
 
@@ -1015,7 +1029,14 @@ Only root admins (the self-certifying room creator or `userId`s listed in
 Banned users have their granted roles cleared and their `makeUserState` /
 `makeState` records purged across peers, and receive `{code: 'banned', reason}`
 via `room.onError()` (both when kicked mid-session and if they try to rejoin
-before `room.unban()`).
+before `room.unban()`). Up to `4,096` concurrent active bans are retained per
+room (`'unban'` tombstones are evicted first at capacity, and attempting a
+4,097th active ban throws rather than silently dropping an existing ban). Note
+that in a serverless peer-to-peer room without a custom signaling gatekeeper,
+bans are enforced cooperatively by honest peers across WebRTC handshakes,
+multi-hop relays, and action/state verification—banned clients cannot interact
+with room members, though public signaling relays themselves remain
+permissionless.
 
 <details>
   <summary>How it works behind the scenes</summary>
@@ -1026,32 +1047,35 @@ before `room.unban()`).
   grant, revocation, ban, or unban is signed with the sender's private key and
   verified by every peer before being accepted.
 - **Self-certifying room IDs**: A user's 22-character Base62 `userId` is derived
-  directly from the SHA-256 digest of their P-256 public key
-  (`sha256(pubJwk) mod 62²²`, ~131 bits). When you create a room with
-  `roles({selfAsAdmin: true})`, Trystero appends your `userId` directly onto the
-  room ID (`<baseRoomId>~<userId>`). When peers connect—or when the host rejoins
-  with the same persistent identity—everyone can mathematically verify from the
-  `userId` suffix alone who owns the room.
+  directly from the domain-separated SHA-256 digest of their P-256 public key
+  (`sha256("trystero:uid:v1:" || uncompressedPubKey) mod 62²²`, ~131 bits). When
+  you create a room with `roles({selfAsAdmin: true})`, Trystero appends your
+  `userId` directly onto the room ID (`<baseRoomId>~<userId>`). When peers
+  connect—or when the host rejoins with the same persistent identity—everyone
+  can mathematically verify from the `userId` suffix alone who owns the room.
 - **Root-signed role certificates & moderation**: Calling `room.grantRole()`
   issues a signed `RoleCertificate` binding the recipient's `subUserId` to the
-  granted custom role(s). Because the certificate binds `subUserId`, a promoted
-  user retains their roles across page reloads and multiple open tabs
-  automatically. Peers verify the root admin's signature on the certificate and
-  check against signed `RoleRevocationRecord`s and `PeerModerationRecord`s
-  (`op: 'ban' | 'unban'`). Likewise, `room.ban()` bans the target `userId`
-  across all current and future tabs until a root admin calls `room.unban()`.
-  Concurrent moderation records (such as co-admins issuing bans/unbans or
-  revocations) are evaluated in a total causal order `(ts, seq, op, sig)` so all
-  peers converge to the exact same set of active roles and bans regardless of
-  message arrival or sync order.
+  granted custom role(s) and a monotonic authority `(iat, seq)` stamp. Because
+  the certificate binds `subUserId`, a promoted user retains their roles across
+  page reloads and multiple open tabs automatically. Peers verify the root
+  admin's signature on the certificate and check against signed
+  `RoleRevocationRecord`s and `PeerModerationRecord`s (`op: 'ban' | 'unban'`).
+  Likewise, `room.ban()` bans the target `userId` across all current and future
+  tabs until a root admin calls `room.unban()`. Concurrent authority and
+  moderation records are evaluated in a total causal order (`(ts, seq)` plus
+  deterministic tie-breakers) and reconciled via cursor-paged anti-entropy sync
+  so all peers converge to the exact same set of active roles and bans
+  regardless of message arrival order or clock jumps.
 - **Tamper-proof state syncing (`makeState` & `makeUserState`)**: Shared and
   per-user state updates share a unified signed envelope bound to `appId`,
-  `roomId`, `ns`, `userId`, `peerId`, a skew-bounded Hybrid Logical Clock
-  (`hlc`), and an inline `RoleCertificate` when role-gated. Concurrent updates
-  converge deterministically under `(hlc, userId, peerId, sig)`, late joiners
-  reconcile missing records via bounded 1-RTT digest pull sync, and `room.ban()`
-  immediately purges any state authored by the banned user. Records tolerate up
-  to 60 seconds of future wall-clock skew across devices.
+  `roomId`, `ns`, `userId`, `peerId`, a skew-bounded tuple Hybrid Logical Clock
+  (`[wallMs, counter]`), and an inline `RoleCertificate` when role-gated.
+  Concurrent updates converge deterministically under
+  `([wallMs, counter], userId, peerId, sig)`, late joiners reconcile missing
+  records via cursor-paged 1-RTT digest pull sync, and `room.ban()` immediately
+  purges any state authored by the banned user. State records tolerate up to 10
+  seconds of future wall-clock skew across devices (60 seconds for role
+  certificates and moderation records).
 - **Edge filtering & private signaling**: In multi-hop topologies, immediate
   neighbors (Hop-1 relays) verify role certificates, signatures, and
   `PeerModerationRecord`s before forwarding packets, stopping unauthorized
@@ -1143,9 +1167,10 @@ routes are organized, and forwarding statistics.
   heartbeats and verified data traffic with a 180 s TTL and a 1.2 s route-churn
   grace window) before using an edge. Broadcasts propagate across neighbor links
   with persistent per-origin sliding replay windows and message-ID
-  deduplication, while point-to-point messages (`target`) route along
-  backpressure-aware shortest paths with disjoint backup next-hops and signed
-  short-lived stream leases that amortize ECDSA signatures across packet bursts.
+  deduplication, while point-to-point messages (`target`) route along shortest
+  paths with end-to-end ECDH + AES-256-GCM encryption (12-byte IVs, canonical
+  header AAD, per-origin sequence replay windows, and 60-second timestamp
+  freshness bounds).
 - **Direct WebRTC promotion for media & bulk transfers**: Calling `addStream()`
   or sending a multi-chunk payload (> 16 KiB) to a multi-hop peer automatically
   establishes a direct 1-hop WebRTC connection to that peer so media and bulk
@@ -1293,8 +1318,13 @@ const room = joinRoom(
 
 ### Self-hosted WebSocket relay
 
-If you want a tiny relay that you control, use the WebSocket relay package.
-Start the relay on Node, Bun, or Deno:
+If you want a tiny relay that you control, use the WebSocket relay package. To
+run the server on Node, install the optional `ws` peer dependency alongside
+`@trystero-p2p/ws-relay` (browser clients do not need `ws`):
+
+```sh
+npm i @trystero-p2p/ws-relay ws
+```
 
 ```js
 import {createWsRelayServer} from '@trystero-p2p/ws-relay/server'
@@ -1302,7 +1332,8 @@ import {createWsRelayServer} from '@trystero-p2p/ws-relay/server'
 createWsRelayServer({port: 8080})
 ```
 
-Then in the browser:
+Then in the browser (use `ws://` for local development or `wss://` behind TLS in
+production):
 
 ```js
 import {joinRoom} from '@trystero-p2p/ws-relay'
@@ -1311,7 +1342,7 @@ const room = joinRoom(
   {
     appId: 'app-id',
     relayConfig: {
-      urls: ['wss://localhost:8080']
+      urls: ['ws://localhost:8080']
     }
   },
   'room-id'
@@ -1320,6 +1351,22 @@ const room = joinRoom(
 
 The `relayConfig.urls` config option is required for this strategy because there
 are no public default servers. You can pass multiple.
+
+`createWsRelayServer(options)` accepts standard `ws` server options (`port`,
+`server`, `noServer`, `path`, `maxPayload`, etc.) plus optional relay safety
+limits:
+
+- `maxTopicLength` - Maximum topic string length (default: `256`).
+- `maxSubscriptionsPerSocket` - Maximum topics per client socket (default:
+  `128`).
+- `maxSubscriptions` - Maximum total subscriptions across all connected sockets
+  (default: `10000`).
+- `maxMessagesPerSecond` - Per-socket publish/subscribe refill rate (default:
+  `200`; pass `Infinity` to disable; values `<= 0` throw `RangeError`).
+- `maxBurstMessages` - Per-socket token-bucket burst capacity (default:
+  `max(256, maxMessagesPerSecond * 2)`; pass `Infinity` to disable; values
+  `<= 0` throw `RangeError`).
+- `onError` - Optional `(error: Error) => void` listener for server errors.
 
 ### Write your own strategy
 
@@ -1448,8 +1495,9 @@ known ahead of time.
 ### `joinRoom(config, roomId)`
 
 Adds local user to room whereby other peers in the same namespace will open
-communication channels and send events. Calling `joinRoom()` multiple times with
-the same namespace will return the same room instance.
+communication channels and send events. Calling `joinRoom()` while a room with
+the same `(appId, roomId)` is already active throws an error—call `room.leave()`
+before rejoining the same room.
 
 - `config` - Configuration object containing the following keys:
   - `appId` - **(required)** A unique string identifying your app. When using
@@ -1502,19 +1550,24 @@ the same namespace will return the same room instance.
   - `use` - **(optional)** Array of built-in `RoomPlugin`s created with
     `roles()` and/or `scale()`. TypeScript automatically infers the extra
     methods added to the returned `Room` instance (`RoomWithPlugins`) from the
-    plugins passed in `use` (`grantRole`, `revokeRole`, `getRoles`, `ban`,
-    `unban`, and `isBanned` from `roles()`, and `getTopology` from `scale()`).
-    Including `roles()` also enables `{roles}` authorization options on
-    `makeAction`, `makeState`, and `makeUserState`. Plugin methods attach to
-    `room` when `await room.ready` (or `await room.getSelf()`) resolves.
+    plugins passed in `use` (`grantRole`, `revokeRole`, `getRoles`,
+    `onRoleChange`, `ban`, `unban`, and `isBanned` from `roles()`, and
+    `getTopology` from `scale()`). Including `roles()` also enables `{roles}`
+    authorization options on `makeAction`, `makeState`, and `makeUserState`.
+    Plugin methods are attached synchronously on `room`, while
+    `await room.ready` (or `await room.getSelf()`) resolves once local identity
+    and authority setup complete.
 
   - `relayConfig` - **(optional unless required by your chosen strategy)**
     Object containing strategy-specific relay settings:
     - `urls` - **(optional for 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT; required for 🔌
       WebSocket relay)** Custom list of URLs for the strategy to use to
       bootstrap P2P connections. These would be BitTorrent trackers, Nostr
-      relays, MQTT brokers, and WebSocket relays, respectively. They must
-      support secure WebSocket connections.
+      relays, MQTT brokers, and WebSocket relays, respectively. Use secure
+      `wss://` URLs in production (`ws://` is also supported for local
+      `ws-relay` development). Relay sockets and MQTT clients are
+      reference-counted across active rooms and close automatically when the
+      last room calls `leave()`.
 
     - `redundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
       Integer specifying how many default relay endpoints to connect to
@@ -1573,13 +1626,13 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 - ### `ready`
 
   A `Promise<void>` that resolves once the local endpoint identity is
-  initialized and any plugins passed in `config.use` have run their `setup()`
-  and attached their methods to `room`. (`await room.getSelf()` also waits for
-  `room.ready`.)
+  initialized and any plugins passed in `config.use` are ready and have attached
+  their methods to `room`. (`await room.getSelf()` also waits for `room.ready`.)
 
 - ### `leave()`
 
-  Remove local user from room and unsubscribe from room events.
+  Remove local user from room and unsubscribe from room events (closing shared
+  relay sockets or MQTT clients once the last active room on that relay leaves).
 
 - ### `getSelf()`
 
@@ -1599,11 +1652,12 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 
 - ### `getUsers()`
 
-  Returns a map of `UserInfo` objects (`{peerIds, roles}`) for the remote users
-  present in the room (excluding the local user), keyed by `userId`:
-  - `peerIds` - Array of active `peerId`s currently connected for that user
-    (e.g. when a user has multiple tabs open in the same room).
-  - `roles` - Array of verified roles currently held by that user.
+  Returns a cached, frozen (`Object.freeze`) map of `UserInfo` objects
+  (`{peerIds, roles}`) for the remote users present in the room (excluding the
+  local user), keyed by `userId`:
+  - `peerIds` - Frozen array of active `peerId`s currently connected for that
+    user (e.g. when a user has multiple tabs open in the same room).
+  - `roles` - Frozen array of verified roles currently held by that user.
 
 - ### `getPeers()`
 
@@ -1654,9 +1708,12 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 
   Returns a `SharedState<T>` object with:
   - `get()` - Returns the current state value.
-  - `set(nextOrUpdater)` - Signs and broadcasts a new state value (or functional
-    updater `(prev) => next`), coalescing rapid concurrent local calls. Rejects
-    if the local user lacks permission, exceeds `maxBytes`, or fails `validate`.
+  - `set(nextOrUpdater)` - Synchronously updates local `get()` and fires local
+    `onChange` listeners (deferring pre-`ready` optimistic apply only on
+    role-gated namespaces until local roles resolve), then signs and broadcasts
+    the new state value (or functional updater `(prev) => next`), coalescing
+    rapid concurrent local calls over a 40 ms wire window. Rejects if the local
+    user lacks permission, exceeds `maxBytes`, or fails `validate`.
   - `getMeta()` - Returns metadata about the latest update
     (`{prev, peerId, userId, roles, timestamp}`) or `null` if still at
     `initialValue`.
@@ -1691,21 +1748,27 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 
   Returns a `UserState<T>` object with:
   - `get([targetId])` - Returns the current value for `targetId` (`userId` or
-    `peerId`, or the local user if omitted), or `initialValue` if unpublished.
+    `peerId`), or the local user when called with zero arguments (`get()`);
+    passing an explicit `undefined` or an unpublished ID returns `initialValue`.
   - `getAll()` - Returns a frozen, reference-stable
     `Readonly<Record<string, T>>` keyed by `userId` for all active published
     entries (including the local user once published).
-  - `has([targetId])` - Returns `true` if `targetId` (or the local user if
-    omitted) currently has a published entry (distinguishing an explicit
-    `set(null)` from an unpublished `null` default).
-  - `set(nextOrUpdater)` - Signs and publishes the local user's value (or
-    functional updater `(prev) => next`), coalescing rapid local writes and
-    flushing initial values before `onUserJoin` fires on 1-hop peers.
-  - `clear()` - Publishes a signed tombstone removing the local user's entry
-    across peers and resetting `has()` to `false`.
+  - `has([targetId])` - Returns `true` if `targetId` (or the local user when
+    called with zero arguments `has()`) currently has a published entry
+    (distinguishing an explicit `set(null)` from an unpublished `null` default;
+    passing explicit `undefined` returns `false`).
+  - `set(nextOrUpdater)` - Synchronously updates local `get()` / `getAll()` and
+    fires local `onChange` (deferring pre-`ready` optimistic apply only on
+    role-gated namespaces), then signs and publishes the local user's value (or
+    functional updater `(prev) => next`), coalescing rapid local writes over 40
+    ms and flushing initial values before `onUserJoin` fires on 1-hop peers.
+  - `clear()` - Synchronously clears the local entry, resets `has()` to `false`,
+    and publishes a signed tombstone removing the local user's entry across
+    peers.
   - `getMeta([targetId])` - Returns `UserStateChangeContext<T>`
     (`{prev, peerId, userId, roles, timestamp, self, online, removed}`) for
-    `targetId` (or the local user if omitted), or `null` if unpublished.
+    `targetId` (or the local user when called with zero arguments `getMeta()`),
+    or `null` if unpublished or passed explicit `undefined`.
   - `onChange(callback, [options])` - Subscribes `(value, context) => void`
     (`value` is `undefined` when `context.removed === true` due to `clear()`,
     presence departure, or `ban()`) and returns an `Unsubscribe` function.
@@ -1728,9 +1791,24 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
 - ### `getRoles([targetId])`
 
   _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
-  after `await room.ready`)_ Returns the array of verified roles currently held
-  by `targetId` (`peerId` or `userId`, or by the local user if `targetId` is
-  omitted).
+  after `await room.ready`)_ Returns a cached, frozen (`Object.freeze`) array of
+  verified roles currently held by `targetId` (`peerId` or `userId`), or by the
+  local user when called with zero arguments (`room.getRoles()`); passing an
+  explicit `undefined` returns `[]`.
+
+- ### `onRoleChange(callback, [options])`
+
+  _(Added to `Room` when `roles(...)` is included in `use: [...]`; available
+  after `await room.ready`)_ Subscribes a listener called whenever a user's
+  verified role set changes (`grantRole`, `revokeRole`, `ban`, or anti-entropy
+  sync) and returns an `Unsubscribe` function. Live-only by default; pass
+  `{replay: true}` to synchronously emit currently held non-empty role sets to
+  the new listener.
+  - `callback({userId, roles, previousRoles, local})` - Called with the affected
+    `userId`, their sorted `roles` and `previousRoles` arrays, and `local: true`
+    when `userId` is the local user (`false` otherwise).
+  - `options` - **(optional)**
+    `{replay?: boolean, once?: boolean, signal?: AbortSignal}`.
 
 - ### `ban(targetId, [options])`
 
@@ -1896,7 +1974,9 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     (`{code, message, appId, roomId, cause?, ...}`). Switch on `error.code` to
     inspect structured fields:
     - `'room-full'` (`{peerId}`) - Refused during admission because the remote
-      peer's room view has reached `config.maxUsers`.
+      peer's room view has reached `config.maxUsers` (suppressed when the local
+      room is already connected to peers and its own room view is also at
+      `config.maxUsers`).
     - `'banned'` (`{peerId?, reason?}`) - Disconnected mid-session or refused
       during handshake because an admin banned the local user (`reason` contains
       `options.reason` from `room.ban()` when provided).
@@ -1912,7 +1992,7 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
       `onError`).
     - `'identity-failed'` - Loading or initializing the local `identity` failed.
     - `'plugin-failed'` (`{plugin?}`) - A room plugin failed during
-      `resolveRoomId` or `setup`.
+      initialization or runtime.
     - `'handshake-failed'` (`{peerId}`) - Peer identity/DTLS verification or
       admission handshake failed.
     - `'peer-error'` (`{peerId}`) - An active peer connection encountered an
@@ -1954,17 +2034,19 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   Message actions expose:
   - `send(data, [options])` - Sends data to users and resolves when local
     sending is complete. `options.target` accepts a `userId` (which fans out to
-    all active tabs of that user), a `peerId`, or an array of either; passing an
-    explicit `target` rejects if any targeted user or peer is not connected. To
-    cancel an in-progress send, pass an `AbortController`'s `signal` in the
+    all active tabs of that user), a `peerId`, or a non-empty array of either;
+    all targets in a list are validated up front before transmitting, rejecting
+    if any targeted user or peer is not connected (or if `target: []` is empty).
+    To cancel an in-progress send, pass an `AbortController`'s `signal` in the
     options (e.g. `send(data, {signal: controller.signal})`) and call
     `controller.abort()`. Do not mutate binary buffers (`> 16 KiB`) passed to
     `send()` until its returned `Promise` settles.
   - `onMessage(callback, [options])` - Multi-listener method subscribing
     `(data, {userId, peerId, metadata, roles}) => void | Promise<void>` for
-    received messages and returning an `Unsubscribe` function. Inbound messages
-    arriving before any listener is attached are buffered and drained in order
-    to the first subscriber.
+    received messages and returning an `Unsubscribe` function. Up to `32`
+    inbound messages per registered action (including role-gated actions) are
+    buffered for up to `10` seconds before the first listener attaches and
+    drained in order when subscribed.
   - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
     `(percent, {userId, peerId, metadata}) => void` for inbound progress and
     returning an `Unsubscribe` function.
@@ -2076,7 +2158,9 @@ Creates the experimental opt-in multi-hop scaling plugin
 Returns a promise resolving to a fresh self-certifying ECDSA P-256
 `UserIdentity` (`{userId, signPubJwk, sign, persistence}`). Use
 `exportUserIdentity(identity)` to serialize its private key material if you want
-to persist it in custom storage.
+to persist it in custom storage. Custom `UserIdentity` implementations passed to
+`config.identity` are self-tested on load and must return a 64-byte IEEE P1363
+ECDSA P-256 SHA-256 signature from `sign(payload)`.
 
 ### `importUserIdentity(input)`
 
@@ -2102,9 +2186,10 @@ connected.
 ### `getRelaySockets()`
 
 **(🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, 🔌 WebSocket relay only)** Returns an
-object of relay URL keys mapped to their WebSocket connections. This can be
-useful for determining the state of the user's connection to the relays and
-handling any connection failures.
+object of currently active relay URL keys mapped to their WebSocket connections
+(relays are closed automatically once all rooms using them call `leave()`). This
+can be useful for determining the state of the user's connection to the relays
+and handling any connection failures.
 
 Example:
 
@@ -2148,6 +2233,26 @@ strategies.
 
 For a middleground between using public relays and self-hosting, the built-in
 Supabase and Firebase strategies are a good option.
+
+### Bundle size
+
+Approximate Brotli-compressed bundle sizes when bundled with a tree-shaking
+bundler (`joinRoom` includes WebRTC signaling, encrypted actions, chunked binary
+transfers, media streams, self-certifying `peerId`/`userId` identities, and
+signed `makeState`/`makeUserState`):
+
+| Package                  | `joinRoom` | `+ roles()` | `+ scale()` | `+ roles() + scale()` |
+| ------------------------ | ---------: | ----------: | ----------: | --------------------: |
+| `@trystero-p2p/ws-relay` |   ~36.1 KB |    ~40.8 KB |    ~46.6 KB |              ~51.3 KB |
+| `@trystero-p2p/torrent`  |   ~36.8 KB |    ~41.5 KB |    ~47.2 KB |              ~52.0 KB |
+| `trystero` / `.../nostr` |   ~40.8 KB |    ~45.4 KB |    ~51.2 KB |              ~55.9 KB |
+| `@trystero-p2p/firebase` |   ~76.4 KB |    ~81.2 KB |    ~86.9 KB |              ~91.4 KB |
+| `@trystero-p2p/supabase` |   ~80.3 KB |    ~85.0 KB |    ~90.7 KB |              ~95.4 KB |
+| `@trystero-p2p/mqtt`     |  ~116.9 KB |   ~121.5 KB |   ~127.1 KB |             ~131.9 KB |
+
+Apps using a bundler only pay for `roles()` (~4.7 KB) or `scale()` (~10.5 KB)
+when imported; importing directly from a single-URL ESM CDN (such as `esm.run`)
+loads the full package entry.
 
 ---
 

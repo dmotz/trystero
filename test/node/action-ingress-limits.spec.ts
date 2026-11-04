@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createPeer from '../../packages/core/src/peer.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import {
   MockPeer,
   MockRTCPeerConnection,

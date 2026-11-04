@@ -229,7 +229,7 @@ void test(
     await waitFor(() => subscribers.length >= roomCount, 60_000)
 
     const sub0 = subscribers[0]!
-    await sub0.onMessage(sub0.rootTopic, {peerId: '~active-peer'}, () => {
+    await sub0.onMessage(sub0.rootTopic, {peerId: 'z'.repeat(20)}, () => {
       signaledRooms.add(0)
     })
 

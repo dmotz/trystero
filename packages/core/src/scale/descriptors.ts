@@ -1,13 +1,14 @@
 import {verifyRoomAuth} from '../crypto'
 import {
-  canonicalizePubJwk,
   pubJwkToUncompressedBytes,
+  toCompactPub,
   verifyPeerIdKey,
   verifyUserEndpointProof
 } from '../identity'
+import type {MaybePromise} from '../internal-types'
 import {isValidSignalPeerId} from '../signal-handler'
 import {createTokenBucketLimiter} from '../signed-record'
-import type {MaybePromise, RoleCertificate, UserIdentity} from '../types'
+import type {RoleCertificate, UserIdentity} from '../types'
 import {
   cmpStr,
   createBoundedCache,
@@ -68,7 +69,7 @@ export type DescriptorStoreDeps = {
   onPeerDescriptorCert?:
     | ((
         peerId: string,
-        signPubKey: JsonWebKey,
+        signPubKey: string,
         cert?: RoleCertificate,
         userId?: string
       ) => void)
@@ -90,9 +91,9 @@ export type DescriptorStore = {
   setLocalAdjacency: (neighbors: Iterable<string>) => void
   hasConvergedComponent: () => boolean
   hasConvergedDirectMesh: () => boolean
-  getSignPubKey: (peerId: string) => JsonWebKey | undefined
-  isPinnedKeyMatch: (peerId: string, pubJwk: JsonWebKey) => boolean
-  setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
+  getSignPubKey: (peerId: string) => string | undefined
+  isPinnedKeyMatch: (peerId: string, pubKey: JsonWebKey | string) => boolean
+  setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey | string) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
   touchOriginActivity: (originPeerId: string) => void
   publishLocalDescriptor: () => Promise<void>
@@ -141,9 +142,6 @@ export const createDescriptorStore = (
   const adjacency = new Map<string, Set<string>>()
   const initialSelf = getSelfId()
   const knownRoster = new Set<string>(initialSelf ? [initialSelf] : [])
-  const peerSignPubKeys = createBoundedCache<string, JsonWebKey>(
-    maxVerifiedDescriptors
-  )
   const pinnedSignKeys = createBoundedCache<string, string>(
     maxVerifiedDescriptors
   )
@@ -160,6 +158,7 @@ export const createDescriptorStore = (
   const pendingGossipDescriptors = new Map<string, PeerDescriptor>()
   const pendingGossipSources = new Set<string>()
   let gossipFlushScheduled = false
+  let pendingTopologyDirty = false
 
   const failSig = (): false => {
     recordSignatureFailure()
@@ -284,20 +283,25 @@ export const createDescriptorStore = (
 
   const hasValidDescriptorShape = (
     d: PeerDescriptor
-  ): d is PeerDescriptor & {signPubKey: JsonWebKey; sig: string} =>
+  ): d is PeerDescriptor & {signPubKey: string; sig: string} =>
     Boolean(
       d &&
       isValidSignalPeerId(d.peerId) &&
       isPosSafeInt(d.seq) &&
       (d.pktSeq === undefined ||
         (Number.isSafeInteger(d.pktSeq) && d.pktSeq >= 0)) &&
-      d.signPubKey &&
+      isStr(d.signPubKey) &&
+      Boolean(pubJwkToUncompressedBytes(d.signPubKey)) &&
       isStr(d.sig) &&
       Array.isArray(d.neighbors) &&
       d.neighbors.length <= maxDescriptorNeighbors &&
       d.neighbors.every(n => isValidSignalPeerId(n) && n !== d.peerId) &&
       (d.encPubKey === undefined ||
-        Boolean(pubJwkToUncompressedBytes(d.encPubKey))) &&
+        (isStr(d.encPubKey) &&
+          Boolean(pubJwkToUncompressedBytes(d.encPubKey)))) &&
+      (d.userPubKey === undefined ||
+        (isStr(d.userPubKey) &&
+          Boolean(pubJwkToUncompressedBytes(d.userPubKey)))) &&
       !isPeerBanned(d.peerId)
     )
 
@@ -306,7 +310,7 @@ export const createDescriptorStore = (
     if (!hasValidDescriptorShape(d)) {
       return failSig()
     }
-    const keyThumbprint = canonicalizePubJwk(d.signPubKey)
+    const keyThumbprint = d.signPubKey
     const pinned = pinnedSignKeys.get(d.peerId)
     if (pinned && pinned !== keyThumbprint) {
       return failSig()
@@ -358,7 +362,6 @@ export const createDescriptorStore = (
           return failSig()
         }
         pinnedSignKeys.set(d.peerId, keyThumbprint)
-        peerSignPubKeys.set(d.peerId, d.signPubKey)
         onPeerDescriptorCert?.(d.peerId, d.signPubKey, d.cert, d.userId)
         return true
       }
@@ -442,8 +445,8 @@ export const createDescriptorStore = (
         seq: descSeq,
         pktSeq,
         neighbors,
-        signPubKey: id.signPubJwk,
-        encPubKey: id.encPubJwk,
+        signPubKey: id.signPubKey,
+        encPubKey: id.encPubKey,
         ...(localRoleCert ? {cert: localRoleCert} : {})
       },
       id,
@@ -495,6 +498,8 @@ export const createDescriptorStore = (
 
   const flushPendingGossip = (): void => {
     gossipFlushScheduled = false
+    const shouldRecompute = pendingTopologyDirty
+    pendingTopologyDirty = false
     if (isDestroyed()) {
       return
     }
@@ -503,7 +508,9 @@ export const createDescriptorStore = (
       pendingGossipSources.size === 1 ? [...pendingGossipSources][0] : undefined
     pendingGossipDescriptors.clear()
     pendingGossipSources.clear()
-    onTopologyChanged()
+    if (shouldRecompute) {
+      onTopologyChanged()
+    }
     sendGossipToNeighbors(batch, excludeId)
   }
 
@@ -530,10 +537,7 @@ export const createDescriptorStore = (
 
     const encKeyRotated = Boolean(
       !latest ||
-      (latest.encPubKey &&
-        d.encPubKey &&
-        canonicalizePubJwk(latest.encPubKey) !==
-          canonicalizePubJwk(d.encPubKey))
+      (latest.encPubKey && d.encPubKey && latest.encPubKey !== d.encPubKey)
     )
 
     if (!latest && d.pktSeq && d.pktSeq > replaySeedCushionPackets) {
@@ -542,21 +546,29 @@ export const createDescriptorStore = (
 
     const selfId = getSelfId()
     const wasMarkedLeft = leftPeersSeq.has(d.peerId)
+    const prevAdj = adjacency.get(d.peerId)
     leftPeersSeq.delete(d.peerId)
     knownRoster.add(d.peerId)
     descriptors.set(d.peerId, d)
     descriptorReceivedAt.set(d.peerId, Date.now())
-    adjacency.set(
-      d.peerId,
-      new Set(
-        d.neighbors.filter(
-          n =>
-            !leftPeersSeq.has(n) &&
-            !isPeerBanned(n) &&
-            (n !== selfId || isDirectPeer(d.peerId))
-        )
+    const nextAdj = new Set(
+      d.neighbors.filter(
+        n =>
+          !leftPeersSeq.has(n) &&
+          !isPeerBanned(n) &&
+          (n !== selfId || isDirectPeer(d.peerId))
       )
     )
+    let adjChanged = !prevAdj || prevAdj.size !== nextAdj.size
+    if (!adjChanged && prevAdj) {
+      for (const n of nextAdj) {
+        if (!prevAdj.has(n)) {
+          adjChanged = true
+          break
+        }
+      }
+    }
+    adjacency.set(d.peerId, nextAdj)
     if (wasMarkedLeft && !isPeerBanned(d.peerId)) {
       for (const [otherId, otherDesc] of descriptors.entries()) {
         if (
@@ -566,8 +578,12 @@ export const createDescriptorStore = (
           otherDesc.neighbors.includes(d.peerId)
         ) {
           addMapSet(adjacency, otherId, d.peerId)
+          adjChanged = true
         }
       }
+    }
+    if (!latest || wasMarkedLeft || adjChanged || encKeyRotated) {
+      pendingTopologyDirty = true
     }
 
     onOriginDescriptorVerified(d.peerId, encKeyRotated)
@@ -580,7 +596,7 @@ export const createDescriptorStore = (
     if (!gossipFlushScheduled) {
       gossipFlushScheduled = true
       if (descriptors.size > 32 || getDiscoveredCandidateCount() > 32) {
-        unrefTimer(setTimeout(flushPendingGossip, 2))
+        unrefTimer(setTimeout(flushPendingGossip, 8))
       } else {
         queueMicrotask(flushPendingGossip)
       }
@@ -673,12 +689,19 @@ export const createDescriptorStore = (
       })
   }
 
-  const getSignPubKey = (peerId: string): JsonWebKey | undefined =>
-    peerSignPubKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey
+  const getSignPubKey = (peerId: string): string | undefined =>
+    pinnedSignKeys.get(peerId) ?? descriptors.get(peerId)?.signPubKey
 
-  const isPinnedKeyMatch = (peerId: string, pubJwk: JsonWebKey): boolean => {
+  const isPinnedKeyMatch = (
+    peerId: string,
+    pubKey: JsonWebKey | string
+  ): boolean => {
+    const compact = toCompactPub(pubKey)
+    if (!compact) {
+      return false
+    }
     const pinned = pinnedSignKeys.get(peerId)
-    return !pinned || pinned === canonicalizePubJwk(pubJwk)
+    return !pinned || pinned === compact
   }
 
   const verifyControlLeave = async (
@@ -686,8 +709,8 @@ export const createDescriptorStore = (
     leaveSeq: number,
     sig: string
   ): Promise<boolean> => {
-    const signPubJwk = getSignPubKey(leavingId)
-    if (!signPubJwk || !isPinnedKeyMatch(leavingId, signPubJwk)) {
+    const signPubKey = getSignPubKey(leavingId)
+    if (!signPubKey || !isPinnedKeyMatch(leavingId, signPubKey)) {
       return failSig()
     }
     const ok = await verifyBase64Sig(
@@ -696,19 +719,19 @@ export const createDescriptorStore = (
         canonicalLeaveHeader(leavingId, leaveSeq, appId, getRoomId()),
         emptyBytes
       ),
-      signPubJwk
+      signPubKey
     )
     return ok ? true : failSig()
   }
 
   const baseHeartbeatMs = Math.max(
     200,
-    Math.min(15_000, Math.floor(descriptorTtlMs / 3))
+    Math.min(30_000, Math.floor(descriptorTtlMs / 3))
   )
   const heartbeatIntervalMs =
     baseHeartbeatMs >= 2_000
       ? baseHeartbeatMs +
-        Math.floor(Math.random() * Math.floor(baseHeartbeatMs * 0.25))
+        Math.floor(Math.random() * Math.floor(baseHeartbeatMs * 0.5))
       : baseHeartbeatMs
   const heartbeatTimer = setInterval(() => {
     if (isDestroyed()) {
@@ -818,16 +841,16 @@ export const createDescriptorStore = (
     getSignPubKey,
     isPinnedKeyMatch,
     setPeerSignPublicKey: (peerId, pubKey) => {
-      if (!isValidSignalPeerId(peerId) || !pubKey) {
+      const compact = toCompactPub(pubKey)
+      if (!isValidSignalPeerId(peerId) || !compact) {
         return
       }
       const commitKey = (ok: boolean): void => {
         if (ok) {
-          peerSignPubKeys.set(peerId, pubKey)
-          pinnedSignKeys.set(peerId, canonicalizePubJwk(pubKey))
+          pinnedSignKeys.set(peerId, compact)
         }
       }
-      const res = verifyPeerIdKey(peerId, pubKey)
+      const res = verifyPeerIdKey(peerId, compact)
       if (typeof res === 'boolean') {
         commitKey(res)
       } else {
@@ -883,29 +906,44 @@ export const createDescriptorStore = (
         if (!isValidSignalPeerId(leavingId) || leavingId === selfId) {
           return
         }
-        seq.enqueueOriginTask(leavingId, async () => {
+        if (!isPosSafeInt(msg.seq) || !isStr(msg.sig)) {
+          failSig()
+          return
+        }
+        const existingDesc = descriptors.get(leavingId)
+        const prevLeftSeq = leftPeersSeq.get(leavingId)
+        if (
+          (existingDesc && msg.seq < existingDesc.seq) ||
+          (prevLeftSeq !== undefined && msg.seq <= prevLeftSeq)
+        ) {
+          return
+        }
+        const knownKey = getSignPubKey(leavingId)
+        if (!knownKey || !isPinnedKeyMatch(leavingId, knownKey)) {
+          failSig()
+          return
+        }
+        const leaveSeq = msg.seq
+        const leaveSig = msg.sig
+        seq.enqueuePeerTask(`ctrl:${fromPeerId}`, async () => {
           if (isDestroyed()) {
             return
           }
-          if (!isPosSafeInt(msg.seq) || !isStr(msg.sig)) {
-            failSig()
-            return
-          }
-          const existingDesc = descriptors.get(leavingId)
-          const prevLeftSeq = leftPeersSeq.get(leavingId)
+          const curDesc = descriptors.get(leavingId)
+          const curLeftSeq = leftPeersSeq.get(leavingId)
           if (
-            (existingDesc && msg.seq < existingDesc.seq) ||
-            (prevLeftSeq !== undefined && msg.seq <= prevLeftSeq)
+            (curDesc && leaveSeq < curDesc.seq) ||
+            (curLeftSeq !== undefined && leaveSeq <= curLeftSeq)
           ) {
             return
           }
-          const valid = await verifyControlLeave(leavingId, msg.seq, msg.sig)
+          const valid = await verifyControlLeave(leavingId, leaveSeq, leaveSig)
           if (!valid || isDestroyed()) {
             return
           }
           leftPeersSeq.set(
             leavingId,
-            Math.max(msg.seq, descriptors.get(leavingId)?.seq ?? 0)
+            Math.max(leaveSeq, descriptors.get(leavingId)?.seq ?? 0)
           )
           onEvictVirtualPeer(leavingId, peerLeftRoomErr)
           onTopologyChanged()
@@ -939,16 +977,9 @@ export const createDescriptorStore = (
           if (originId === selfId || isStaleOrLeftSeq(originId, desc.seq)) {
             continue
           }
-          if (!seq.hasOriginQueue(originId)) {
-            const stepRes = processDescriptorStep(fromPeerId, desc)
-            if (stepRes) {
-              seq.enqueueOriginTask(originId, () => stepRes)
-            }
-          } else {
-            seq.enqueueOriginTask(originId, () =>
-              Promise.resolve(processDescriptorStep(fromPeerId, desc))
-            )
-          }
+          seq.enqueuePeerTask(`ctrl:${fromPeerId}`, () =>
+            Promise.resolve(processDescriptorStep(fromPeerId, desc))
+          )
         }
       }
     },
@@ -969,7 +1000,6 @@ export const createDescriptorStore = (
       descriptorReceivedAt.clear()
       adjacency.clear()
       knownRoster.clear()
-      peerSignPubKeys.clear()
       pinnedSignKeys.clear()
       leftPeersSeq.clear()
       descLimiter.clear()

@@ -11,12 +11,11 @@ import {
   jwkToCompactPub,
   verifyWithP256
 } from '../../packages/core/src/identity.ts'
-import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import {roleCertPayload} from '../../packages/core/src/signed-record.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import type {
   JsonValue,
-  PeerHandle,
   RoleCertificate,
   RoomError,
   UserIdentity
@@ -28,6 +27,7 @@ import {
 } from '../../packages/core/src/utils.ts'
 import {
   createLinkedHandlePair,
+  makeTestPluginSlot,
   testEndpoint,
   testPeerId,
   wait,
@@ -161,6 +161,7 @@ void test('S2: non-root moderator or co-root admin cannot demote root admin via 
     appId: 's2-app',
     roomId: s2RoomId,
     roles: ['dj'],
+    seq: 1,
     iat: Date.now() + 5_000
   }
   const demotionSig = toBase64Url(
@@ -179,6 +180,7 @@ void test('S2: non-root moderator or co-root admin cannot demote root admin via 
     appId: 's2-app',
     roomId: s2RoomId,
     roles: ['dj'],
+    seq: 1,
     iat: Date.now() + 5_000
   }
   const modForgedCert: RoleCertificate = {
@@ -391,9 +393,11 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ro
   )
   hostRoom.onError(err => hostErrors.push(err))
 
-  const rawAuthProbe = makeInternalPlugin('roles', kernel => ({
-    sendAuth: kernel.makeInternalAction<JsonValue>('auth').send
-  }))
+  let sendAuth: ((data: JsonValue) => Promise<void>) | null = null
+  const rawAuthProbe = makeTestPluginSlot('roles', kernel => {
+    sendAuth = kernel.makeInternalAction<JsonValue>('auth').send
+    return {}
+  })
   const atkRoom = createRoom(
     f => {
       atkReg = f
@@ -424,12 +428,14 @@ void test('S13: garbage sync flood kicks abusive peer after <= 8 failures and ro
       appId: 'wrong-app',
       roomId: 's13-fixed-room',
       roles: ['moderator'],
+      seq: i + 1,
       iat: Date.now(),
       sig: 'A'.repeat(86)
     }))
-    await atkRoom
-      .sendAuth({t: 'sync', certs: garbageCerts} as unknown as JsonValue)
-      .catch(() => {})
+    await sendAuth!({
+      t: 'sync',
+      certs: garbageCerts
+    } as unknown as JsonValue).catch(() => {})
 
     await waitFor(() => !(atkEp.peerId in hostRoom.getPeers()), 2_000)
     assert.equal(atkEp.peerId in hostRoom.getPeers(), false)

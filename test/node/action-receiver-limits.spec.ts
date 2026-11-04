@@ -14,7 +14,7 @@ import {
   type PeerDataTransport,
   createDirectPeerTransport
 } from '../../packages/core/src/peer-transport.ts'
-import type {PeerHandle} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
 
 const encoder = new TextEncoder()

@@ -1,18 +1,11 @@
-import type {SocketClient} from './internal-types'
+import type {BaseRoomConfig, SocketClient} from './internal-types'
 import {
   createBoundedCache,
   mkErr,
   socketInitialFailureSymbol
 } from './primitives'
-import type {BaseRoomConfig, RelayConfig, RelayConnectivity} from './types'
-import {
-  entries,
-  fromEntries,
-  noOp,
-  shuffle,
-  strToNum,
-  unrefTimer
-} from './utils'
+import type {RelayConfig, RelayConnectivity} from './types'
+import {fromEntries, noOp, shuffle, strToNum} from './utils'
 
 const {min} = Math
 const defaultRetryMs = 3333
@@ -22,7 +15,6 @@ const socketRetryPeriods = /*@__PURE__*/ createBoundedCache<string, number>(256)
 type SocketController = [disconnect: () => void, reconnect: () => void]
 
 const socketControllers = /*@__PURE__*/ new Set<SocketController>()
-const keysByRelay = /*@__PURE__*/ new WeakMap<object, string>()
 let relayConnectivity: RelayConnectivity = 'auto'
 let isRelayOffline = false
 let stopWatchingOnline: (() => void) | null = null
@@ -181,11 +173,16 @@ export const makeSocket = (
       const period = socketRetryPeriods.get(url) ?? defaultRetryMs
       socketRetryPeriods.set(url, period)
       retryTimer = setTimeout(init, Math.random() * period)
-      unrefTimer(retryTimer)
       socketRetryPeriods.set(url, min(period * 2, maxRetryMs))
     }
 
-    socket.onmessage = e => onMessage(String(e.data))
+    socket.onmessage = e => {
+      try {
+        onMessage(String(e.data))
+      } catch {
+        // Ignore malformed frames from untrusted signaling relays
+      }
+    }
 
     socket.onopen = () => {
       if (client.isClosed || client.socket !== socket) {
@@ -250,50 +247,108 @@ export const makeSocket = (
 }
 
 export type RelayScopedStore<T, TRelay extends object> = {
-  forKey: (key: string) => Record<string, T>
   forRelay: (relay: TRelay) => Record<string, T>
 }
 
-const getRegisteredRelayKey = (relay: object): string => {
-  const key = keysByRelay.get(relay)
-  if (!key) {
-    throw mkErr('unregistered relay client')
+export const createRelayScopedStore = <
+  T,
+  TRelay extends object = SocketClient
+>(): RelayScopedStore<T, TRelay> => {
+  const store = new WeakMap<TRelay, Record<string, T>>()
+  return {
+    forRelay: relay => {
+      let map = store.get(relay)
+      if (!map) {
+        map = Object.create(null) as Record<string, T>
+        store.set(relay, map)
+      }
+      return map
+    }
   }
-  return key
 }
 
-export const createRelayScopedStore = <T, TRelay extends object = SocketClient>(
-  resolveKey: (relay: TRelay) => string = getRegisteredRelayKey
-): RelayScopedStore<T, TRelay> => {
-  const store: Record<string, Record<string, T>> = {}
-  const forKey = (key: string): Record<string, T> => (store[key] ??= {})
-  return {
-    forKey,
-    forRelay: relay => forKey(resolveKey(relay))
+const relayLeaseReleases = /*@__PURE__*/ new WeakMap<object, () => void>()
+
+export const releaseRelayLease = (leaseTarget: unknown): void => {
+  if (leaseTarget && typeof leaseTarget === 'object') {
+    const release = relayLeaseReleases.get(leaseTarget)
+    if (release) {
+      relayLeaseReleases.delete(leaseTarget)
+      release()
+    }
   }
 }
 
 export const createRelayManager = <TRelay extends object>(
-  getSocket: (relay: TRelay) => WebSocket | undefined
+  getSocket: (relay: TRelay) => WebSocket | undefined,
+  closeRelay?: (relay: TRelay) => void
 ): {
   register: (key: string, createRelay: () => TRelay) => TRelay
+  lease: (relay: TRelay, readyP: Promise<TRelay>) => Promise<TRelay>
+  evict: (relay: TRelay) => void
   getSockets: () => Record<string, WebSocket>
 } => {
-  const relays: Record<string, TRelay> = {}
+  const relays = new Map<string, TRelay>()
+  const relayKeys = new WeakMap<TRelay, string>()
+  const leaseCounts = new WeakMap<TRelay, number>()
+
+  const evict = (relay: TRelay): void => {
+    const key = relayKeys.get(relay)
+    if (key !== undefined && relays.get(key) === relay) {
+      relays.delete(key)
+    }
+    leaseCounts.delete(relay)
+  }
 
   return {
     register: (key, createRelay) => {
-      let relay = relays[key]
+      let relay = relays.get(key)
       if (!relay) {
         relay = createRelay()
-        relays[key] = relay
-        keysByRelay.set(relay, key)
+        relays.set(key, relay)
+        relayKeys.set(relay, key)
       }
       return relay
     },
+    lease: (relay, readyP) => {
+      leaseCounts.set(relay, (leaseCounts.get(relay) ?? 0) + 1)
+      const leasedP = Promise.resolve(readyP).then(r => r)
+      void leasedP.catch(noOp)
+      const getInitialFailure = (
+        readyP as Promise<TRelay> & {
+          [socketInitialFailureSymbol]?: () => Promise<Error | null>
+        }
+      )[socketInitialFailureSymbol]
+      if (typeof getInitialFailure === 'function') {
+        void Object.defineProperty(leasedP, socketInitialFailureSymbol, {
+          value: getInitialFailure,
+          enumerable: false,
+          configurable: true
+        })
+      }
+      let released = false
+      relayLeaseReleases.set(leasedP, () => {
+        if (released) {
+          return
+        }
+        released = true
+        if (!leaseCounts.has(relay)) {
+          return
+        }
+        const next = (leaseCounts.get(relay) ?? 1) - 1
+        if (next > 0) {
+          leaseCounts.set(relay, next)
+          return
+        }
+        evict(relay)
+        closeRelay?.(relay)
+      })
+      return leasedP
+    },
+    evict,
     getSockets: () =>
       fromEntries(
-        entries(relays).flatMap(([key, relay]) => {
+        [...relays.entries()].flatMap(([key, relay]) => {
           const socket = getSocket(relay)
           return socket ? [[key, socket]] : []
         })

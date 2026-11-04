@@ -8,7 +8,7 @@ import {
 } from '../../packages/core/src/index.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
-import {MockPeer} from './peer-harness.ts'
+import {higherPeerId, MockPeer, testPeerId} from './peer-harness.ts'
 
 type SdpInit = {type: string; sdp?: string}
 
@@ -205,7 +205,7 @@ for (const reannounce of [true, false]) {
         const roomKey = genKey('', appId, 'room')
 
         for (const [i, peer] of peers.entries()) {
-          const remotePeerId = `remote-${i}`
+          const remotePeerId = testPeerId(`remote-${i}`)
           const offerId = `offer-${i}`
           const answer = await encrypt(
             roomKey,
@@ -271,7 +271,7 @@ void test(
     try {
       const {peerId: selfId} = await room.getSelf()
       await waitFor(() => root !== undefined)
-      await root!.onMessage(root!.topic, {peerId: selfId + 'z'})
+      await root!.onMessage(root!.topic, {peerId: higherPeerId(selfId)})
       await waitFor(() => offers >= 1)
       await waitFor(() => offers === 2, 2500)
     } finally {
@@ -320,7 +320,7 @@ void test(
       )
 
       const root = subscriptions.find(sub => sub.kind === 'root')!
-      await root.onMessage(root.topic, {peerId: '~active-peer'})
+      await root.onMessage(root.topic, {peerId: 'z'.repeat(20)})
       await waitFor(() => published.some(msg => msg.kind === 'signal'))
       assert.equal(
         published.filter(msg => msg.kind === 'announce').length,
@@ -398,7 +398,7 @@ void test(
 
           if (selfHandler) {
             void selfHandler(context.selfTopic, {
-              peerId: 'active-peer',
+              peerId: testPeerId('active-peer'),
               offer: 'ephemeral-offer'
             })
           }

@@ -16,8 +16,10 @@ import {
   BufferedPeer,
   joinAsTestPeer,
   linkPeers,
+  lowerPeerId,
   MockPeer,
   MockRTCPeerConnection,
+  testPeerId,
   wait,
   waitFor
 } from './peer-harness.ts'
@@ -63,16 +65,18 @@ void test(
       assert.equal('isPassive' in room, false)
 
       const sub = subscribers[0]!
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-1'}, () => {})
+      const activePeer1 = testPeerId('active-peer-1')
+      const activePeer2 = testPeerId('active-peer-2')
+      await sub.onMessage(sub.rootTopic, {peerId: activePeer1}, () => {})
 
       const encryptedOffer = await encrypt(
         genKey('', appId, 'test-room'),
         JSON.stringify({type: 'offer', sdp: 'offer-sdp'}),
-        buildSignalAad('offer', 'active-peer-2', 'offer-1')
+        buildSignalAad('offer', activePeer2, 'offer-1')
       )
       await sub.onMessage(
         sub.selfTopic,
-        {peerId: 'active-peer-2', offerId: 'offer-1', offer: encryptedOffer},
+        {peerId: activePeer2, offerId: 'offer-1', offer: encryptedOffer},
         () => {}
       )
 
@@ -159,7 +163,7 @@ void test(
 
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: '~active-peer'},
+        {peerId: 'z'.repeat(20)},
         (_topic, signal) => {
           signalPayloads.push(signal)
         }
@@ -210,7 +214,7 @@ void test(
 
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: '!active-peer'},
+        {peerId: lowerPeerId(selfId)},
         (_topic, signal) => {
           signalPayloads.push(signal)
         }
@@ -260,8 +264,9 @@ void test(
         signalsSent++
       }
 
+      const activePeer = testPeerId('active-peer')
       await sub.onMessage(sub.rootTopic, {}, onSignal)
-      await sub.onMessage('wrong-topic', {peerId: 'active-peer'}, onSignal)
+      await sub.onMessage('wrong-topic', {peerId: activePeer}, onSignal)
       await sub.onMessage('not json', 'not-json', onSignal)
       await sub.onMessage(
         sub.rootTopic,
@@ -270,7 +275,7 @@ void test(
       )
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: 'active-peer', offer: {sdp: 'not-a-string'}},
+        {peerId: activePeer, offer: {sdp: 'not-a-string'}},
         onSignal
       )
       await wait(200)
@@ -381,51 +386,60 @@ void test('Trystero: prunePeerStates deletes only completely idle peer states', 
     offerPeer: MockPeer | null
     offerRelays: Array<{timeout: ReturnType<typeof setTimeout>}>
   }
-  const peerStates: Record<string, TestPeerState> = {
-    idle: {
-      answeringPeer: null,
-      connectedPeer: null,
-      lastExchangeAt: 100,
-      offerId: null,
-      offerInitPromise: null,
-      offerPeer: null,
-      offerRelays: []
-    },
-    connected: {
-      answeringPeer: null,
-      connectedPeer: new MockPeer(),
-      lastExchangeAt: 100,
-      offerId: null,
-      offerInitPromise: null,
-      offerPeer: null,
-      offerRelays: []
-    },
-    retrying: {
-      answeringPeer: null,
-      connectedPeer: null,
-      lastExchangeAt: 100,
-      offerId: 'offer-1',
-      offerInitPromise: null,
-      offerPeer: new MockPeer(),
-      offerRelays: [{timeout: setTimeout(() => {}, 1000)}]
-    }
-  }
+  const peerStates = new Map<string, TestPeerState>([
+    [
+      'idle',
+      {
+        answeringPeer: null,
+        connectedPeer: null,
+        lastExchangeAt: 100,
+        offerId: null,
+        offerInitPromise: null,
+        offerPeer: null,
+        offerRelays: []
+      }
+    ],
+    [
+      'connected',
+      {
+        answeringPeer: null,
+        connectedPeer: new MockPeer(),
+        lastExchangeAt: 100,
+        offerId: null,
+        offerInitPromise: null,
+        offerPeer: null,
+        offerRelays: []
+      }
+    ],
+    [
+      'retrying',
+      {
+        answeringPeer: null,
+        connectedPeer: null,
+        lastExchangeAt: 100,
+        offerId: 'offer-1',
+        offerInitPromise: null,
+        offerPeer: new MockPeer(),
+        offerRelays: [{timeout: setTimeout(() => {}, 1000)}]
+      }
+    ]
+  ])
 
   try {
-    prunePeerStates(peerStates as unknown as Record<string, PeerState>)
-    assert.equal('idle' in peerStates, false)
-    assert.equal('connected' in peerStates, true)
-    assert.equal('retrying' in peerStates, true)
+    prunePeerStates(peerStates as unknown as Map<string, PeerState>)
+    assert.equal(peerStates.has('idle'), false)
+    assert.equal(peerStates.has('connected'), true)
+    assert.equal(peerStates.has('retrying'), true)
 
-    peerStates['connected']!.connectedPeer = null
-    clearTimeout(peerStates['retrying']!.offerRelays[0]!.timeout)
-    peerStates['retrying']!.offerRelays = []
-    peerStates['retrying']!.offerPeer = null
+    peerStates.get('connected')!.connectedPeer = null
+    clearTimeout(peerStates.get('retrying')!.offerRelays[0]!.timeout)
+    peerStates.get('retrying')!.offerRelays = []
+    peerStates.get('retrying')!.offerPeer = null
 
-    prunePeerStates(peerStates as unknown as Record<string, PeerState>)
-    assert.deepEqual(peerStates, {})
+    prunePeerStates(peerStates as unknown as Map<string, PeerState>)
+    assert.equal(peerStates.size, 0)
   } finally {
-    clearTimeout(peerStates['retrying']?.offerRelays[0]?.timeout)
+    clearTimeout(peerStates.get('retrying')?.offerRelays[0]?.timeout)
   }
 })
 

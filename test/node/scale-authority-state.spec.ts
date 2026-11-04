@@ -171,12 +171,18 @@ void test('Authoritative state (room.makeState): monotonic updates, custom valid
   // Verify compareStateRecords deterministic ordering
   assert.equal(
     compareStateRecords(
-      {hlc: 200, userId: 'a', peerId: 'p1', sig: '11'} as Parameters<
-        typeof compareStateRecords
-      >[0],
-      {hlc: 100, userId: 'b', peerId: 'p2', sig: '22'} as Parameters<
-        typeof compareStateRecords
-      >[1]
+      {
+        hlc: [200, 0],
+        userId: 'a',
+        peerId: 'p1',
+        sig: '11'
+      } as unknown as Parameters<typeof compareStateRecords>[0],
+      {
+        hlc: [100, 0],
+        userId: 'b',
+        peerId: 'p2',
+        sig: '22'
+      } as unknown as Parameters<typeof compareStateRecords>[1]
     ) > 0,
     true
   )

@@ -7,22 +7,27 @@ import {
   resetOfferState
 } from '../../packages/core/src/signal-handler.ts'
 import type {
+  BaseRoomConfig,
   OfferCheckoutFn,
   OfferRecord,
+  PeerHandle,
+  PeerHandlers,
   PeerState,
+  Signal,
   SignalContext,
   StrategyOnMessage
 } from '../../packages/core/src/internal-types.ts'
-import type {
-  BaseRoomConfig,
-  PeerHandle,
-  PeerHandlers,
-  Signal
-} from '../../packages/core/src/types.ts'
 import initPeer from '../../packages/core/src/peer.ts'
 import {createOfferManager} from '../../packages/core/src/offer-manager.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
-import {MockRTCPeerConnection, wait, waitFor} from './peer-harness.ts'
+import {
+  higherPeerId,
+  lowerPeerId,
+  MockRTCPeerConnection,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 const selfId = 'K'.repeat(20)
 
@@ -80,7 +85,7 @@ const fixture = (t: TestContext) => {
     appId: 'recovery-test',
     getRoomId: () => 'room',
     config: {appId: 'recovery-test'},
-    peerStates: {},
+    peerStates: new Map(),
     getRootTopicPlaintext: () => 'root',
     rootTopicP: Promise.resolve('root'),
     selfTopicP: Promise.resolve('self'),
@@ -127,7 +132,7 @@ const fixture = (t: TestContext) => {
 
 void test('unanswered offers retry without discovery traffic and stop after two retries', async t => {
   const f = fixture(t)
-  await f.receive({peerId: selfId + 'z'})
+  await f.receive({peerId: higherPeerId(selfId)})
   assert.equal(f.messages.filter(msg => msg.offer).length, 1)
   for (let i = 0; i < 3; i++) {
     t.mock.timers.tick(4800)
@@ -143,13 +148,13 @@ void test('unanswered offers retry without discovery traffic and stop after two 
 
 void test('offer retries stop after an answer or room leave', async t => {
   const f = fixture(t)
-  const peerId = selfId + 'z'
+  const peerId = higherPeerId(selfId)
   await f.receive({peerId})
   await f.receive({peerId, offerId: f.messages[0]!.offerId, answer: 'answer'})
   t.mock.timers.tick(5000)
   await settle()
   assert.equal(f.messages.length, 1)
-  await f.receive({peerId: peerId + 'z'})
+  await f.receive({peerId: higherPeerId(peerId)})
   f.leave()
   t.mock.timers.tick(5000)
   await settle()
@@ -158,26 +163,26 @@ void test('offer retries stop after an answer or room leave', async t => {
 
 void test('a pending outgoing offer is discarded after its state resets', async t => {
   const f = fixture(t)
-  const peerId = selfId + 'z'
+  const peerId = higherPeerId(selfId)
   const outgoingPeer = f.ctx.initPeer()
   let resolveOffer: ((records: OfferRecord[]) => void) | undefined
   f.ctx.checkoutOffers = () => new Promise(resolve => (resolveOffer = resolve))
 
   const pendingAnnouncement = f.receive({peerId})
   await settle()
-  resetOfferState(f.ctx.peerStates[peerId]!)
+  resetOfferState(f.ctx.peerStates.get(peerId)!)
   resolveOffer!([
     {peer: outgoingPeer, offer: 'outgoing-offer', offerId: 'out-1'}
   ])
   await pendingAnnouncement
 
   assert.equal(outgoingPeer.isDead, true)
-  assert.equal(f.ctx.peerStates[peerId]!.offerPeer, null)
+  assert.equal(f.ctx.peerStates.get(peerId)!.offerPeer, null)
 })
 
 void test('offer candidates gathered before signaling handlers attach are published after the offer', async t => {
   const f = fixture(t)
-  const peerId = selfId + 'z'
+  const peerId = higherPeerId(selfId)
   let offerPeer: PeerHandle | undefined
   let releaseEncryption: ((value: string) => void) | undefined
   let offerReady: (() => void) | undefined
@@ -238,14 +243,14 @@ void test('offer candidates gathered before signaling handlers attach are publis
     assert.ok(candidates.every(message => message.offerId === offer!.offerId))
   } finally {
     f.leave()
-    resetOfferState(f.ctx.peerStates[peerId]!)
+    resetOfferState(f.ctx.peerStates.get(peerId)!)
     manager.destroy()
   }
 })
 
 void test('first topic retry is prompt but later retries retain their spacing', async t => {
   const f = fixture(t)
-  await f.receive({peerId: selfId + 'z'})
+  await f.receive({peerId: higherPeerId(selfId)})
   t.mock.timers.tick(1999)
   await settle()
   assert.equal(f.messages.filter(msg => msg.offer).length, 1)
@@ -263,7 +268,7 @@ void test('first topic retry is prompt but later retries retain their spacing', 
 void test('numeric relay pacing is not shortened by the prompt topic retry', async t => {
   const f = fixture(t)
   f.ctx.announceIntervals[0] = 10000
-  await f.receive({peerId: selfId + 'z'})
+  await f.receive({peerId: higherPeerId(selfId)})
   t.mock.timers.tick(2000)
   await settle()
   assert.equal(f.messages.filter(msg => msg.offer).length, 1)
@@ -274,27 +279,31 @@ void test('numeric relay pacing is not shortened by the prompt topic retry', asy
 
 void test('a pending retry prevents prunePeerStates from deleting the peer state until retries finish', async t => {
   const f = fixture(t)
-  const peerId = selfId + 'z'
+  const peerId = higherPeerId(selfId)
   await f.receive({peerId})
   t.mock.timers.tick(4800)
   await settle()
   prunePeerStates(f.ctx.peerStates)
-  assert.equal(peerId in f.ctx.peerStates, true)
+  assert.equal(f.ctx.peerStates.has(peerId), true)
   assert.equal(f.messages.filter(msg => msg.offer).length, 2)
 
-  resetOfferState(f.ctx.peerStates[peerId]!)
+  resetOfferState(f.ctx.peerStates.get(peerId)!)
   prunePeerStates(f.ctx.peerStates)
-  assert.equal(peerId in f.ctx.peerStates, false)
+  assert.equal(f.ctx.peerStates.has(peerId), false)
 })
 
 void test('a matching repeated offer replays its answer and candidates, not a new peer', async t => {
   const f = fixture(t)
-  const offer = {peerId: selfId + 'z', offer: 'offer', offerId: 'exchange'}
+  const offer = {
+    peerId: higherPeerId(selfId),
+    offer: 'offer',
+    offerId: 'exchange'
+  }
   await f.receive(offer)
   await settle()
   const initial = [...f.messages]
   assert.equal(initial.filter(msg => msg.answer).length, 1)
-  const answeringPeer = f.ctx.peerStates[offer.peerId]!.answeringPeer
+  const answeringPeer = f.ctx.peerStates.get(offer.peerId)!.answeringPeer
   await f.receive(offer)
   assert.deepEqual(
     f.messages,
@@ -320,7 +329,7 @@ void test('a matching repeated offer replays its answer and candidates, not a ne
   assert.deepEqual(f.messages, initial)
   await f.receive(offer)
   assert.deepEqual(f.messages, [...initial, ...initial])
-  assert.equal(f.ctx.peerStates[offer.peerId]!.answeringPeer, answeringPeer)
+  assert.equal(f.ctx.peerStates.get(offer.peerId)!.answeringPeer, answeringPeer)
 })
 
 void test('stray candidates do not retain peer states or offer IDs', async t => {
@@ -328,17 +337,17 @@ void test('stray candidates do not retain peer states or offer IDs', async t => 
 
   for (let i = 0; i < 50; i++) {
     await f.receive({
-      peerId: `unknown-${i}`,
+      peerId: testPeerId(`unknown-${i}`),
       offerId: `offer-${i}`,
       candidate: 'candidate'
     })
   }
 
-  assert.equal(Object.keys(f.ctx.peerStates).length, 0)
+  assert.equal(f.ctx.peerStates.size, 0)
 
-  const peerId = selfId + 'z'
+  const peerId = higherPeerId(selfId)
   await f.receive({peerId})
-  const state = f.ctx.peerStates[peerId]!
+  const state = f.ctx.peerStates.get(peerId)!
 
   for (let i = 0; i < 50; i++) {
     await f.receive({peerId, offerId: `wrong-${i}`, candidate: 'candidate'})
@@ -359,14 +368,14 @@ void test('stray candidates do not retain peer states or offer IDs', async t => 
   })
   assert.deepEqual(received, [{type: 'candidate', sdp: 'candidate'}])
 
-  const incomingId = 'incoming-peer'
+  const incomingId = testPeerId('incoming-peer')
   await f.receive({
     peerId: incomingId,
     offerId: 'incoming-offer',
     offer: 'offer'
   })
   const incoming: Signal[] = []
-  f.ctx.peerStates[incomingId]!.answeringPeer!.signal = (async (
+  f.ctx.peerStates.get(incomingId)!.answeringPeer!.signal = (async (
     signal: Signal
   ) => incoming.push(signal)) as unknown as PeerHandle['signal']
 
@@ -385,47 +394,46 @@ void test('stray candidates do not retain peer states or offer IDs', async t => 
 
 void test('pre-allocated offer answers tie-break deterministically against active answering peers', async t => {
   const f = fixture(t)
-  const higherPeerId = `${selfId}z`
-  const lowerPeerId =
-    String.fromCharCode(selfId.charCodeAt(0) - 1) + selfId.slice(1)
+  const higherId = higherPeerId(selfId)
+  const lowerId = lowerPeerId(selfId)
 
   // When selfId < peerId (leader), receiving an answer for our pre-allocated
   // offer supersedes the in-flight answeringPeer.
   await f.receive({
-    peerId: higherPeerId,
+    peerId: higherId,
     offerId: 'remote-offer-1',
     offer: 'offer'
   })
-  const leaderAnsweringPeer = f.ctx.peerStates[higherPeerId]!.answeringPeer
+  const leaderAnsweringPeer = f.ctx.peerStates.get(higherId)!.answeringPeer
   assert.ok(leaderAnsweringPeer)
   assert.equal(leaderAnsweringPeer.isDead, false)
 
   const leaderOfferPeer = f.ctx.initPeer()
   await f.receive({
-    peerId: higherPeerId,
+    peerId: higherId,
     offerId: 'local-offer-1',
     answer: 'answer',
     peer: leaderOfferPeer
   })
   assert.equal(leaderAnsweringPeer.isDead, true)
   assert.equal(leaderOfferPeer.isDead, false)
-  assert.equal(f.ctx.peerStates[higherPeerId]!.offerPeer, leaderOfferPeer)
-  assert.equal(f.ctx.peerStates[higherPeerId]!.answeringPeer, null)
+  assert.equal(f.ctx.peerStates.get(higherId)!.offerPeer, leaderOfferPeer)
+  assert.equal(f.ctx.peerStates.get(higherId)!.answeringPeer, null)
 
   // When selfId > peerId (follower), the existing answeringPeer wins and the
   // redundant pre-allocated offer peer is destroyed.
   await f.receive({
-    peerId: lowerPeerId,
+    peerId: lowerId,
     offerId: 'remote-offer-2',
     offer: 'offer'
   })
-  const followerAnsweringPeer = f.ctx.peerStates[lowerPeerId]!.answeringPeer
+  const followerAnsweringPeer = f.ctx.peerStates.get(lowerId)!.answeringPeer
   assert.ok(followerAnsweringPeer)
   assert.equal(followerAnsweringPeer.isDead, false)
 
   const followerOfferPeer = f.ctx.initPeer()
   await f.receive({
-    peerId: lowerPeerId,
+    peerId: lowerId,
     offerId: 'local-offer-2',
     answer: 'answer',
     peer: followerOfferPeer
@@ -433,14 +441,14 @@ void test('pre-allocated offer answers tie-break deterministically against activ
   assert.equal(followerAnsweringPeer.isDead, false)
   assert.equal(followerOfferPeer.isDead, true)
   assert.equal(
-    f.ctx.peerStates[lowerPeerId]!.answeringPeer,
+    f.ctx.peerStates.get(lowerId)!.answeringPeer,
     followerAnsweringPeer
   )
 })
 
 void test('untrusted serialized or non-handle peer fields and array payloads are ignored', async t => {
   const f = fixture(t)
-  const peerId = `${selfId}z`
+  const peerId = higherPeerId(selfId)
   let claimed = 0
   f.ctx.claimLeasedOffer = () => {
     claimed++
@@ -463,13 +471,13 @@ void test('untrusted serialized or non-handle peer fields and array payloads are
   await f.receive([{peerId, answer: 'answer'}])
 
   assert.equal(claimed, 0)
-  assert.equal(Object.keys(f.ctx.peerStates).length, 0)
+  assert.equal(f.ctx.peerStates.size, 0)
 })
 
 void test('H4: malformed, non-object, primitive, array, and corrupt relay packets are safely ignored without breaking subsequent signaling', async t => {
   const f = fixture(t)
-  const validOutPeerId = `${selfId}z`
-  const validInPeerId = `${selfId}y`
+  const validOutPeerId = higherPeerId(selfId)
+  const validInPeerId = lowerPeerId(selfId)
 
   const malformedPayloads: unknown[] = [
     null,
@@ -514,7 +522,7 @@ void test('H4: malformed, non-object, primitive, array, and corrupt relay packet
   }
 
   assert.equal(
-    Object.keys(f.ctx.peerStates).length,
+    f.ctx.peerStates.size,
     0,
     'malformed relay packets must not allocate peerStates'
   )
@@ -607,14 +615,14 @@ void test(
 
       await appASub.onMessage(
         appBSub.rootTopic,
-        {peerId: 'peer-from-app-b'},
+        {peerId: testPeerId('peer-from-app-b')},
         () => {
           crossSignalCount += 1
         }
       )
       await appBSub.onMessage(
         appASub.rootTopic,
-        {peerId: 'peer-from-app-a'},
+        {peerId: testPeerId('peer-from-app-a')},
         () => {
           crossSignalCount += 1
         }
@@ -659,16 +667,14 @@ void test(
 
     try {
       const {peerId: selfId} = await room.getSelf()
-      const lowerPeerId = `!${selfId}`
+      const lowerId = lowerPeerId(selfId)
       await waitFor(() => subscribers.length >= 1)
       const sub = subscribers[0]!
 
       const signalCalls: {topic: string; signal: string}[] = []
 
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: lowerPeerId},
-        (topic, signal) => signalCalls.push({topic, signal})
+      await sub.onMessage(sub.rootTopic, {peerId: lowerId}, (topic, signal) =>
+        signalCalls.push({topic, signal})
       )
 
       await wait(50)
@@ -714,7 +720,7 @@ void test(
 
     try {
       const {peerId: selfId} = await room.getSelf()
-      const higherPeerId = `~${selfId}`
+      const higherId = higherPeerId(selfId)
       await waitFor(() => subscribers.length >= 1)
       const sub = subscribers[0]!
 
@@ -722,7 +728,7 @@ void test(
 
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: higherPeerId},
+        {peerId: higherId},
         (_topic, signal) => {
           const parsed = JSON.parse(signal) as SentSignalMessage
 

@@ -156,7 +156,7 @@ const runRelayReuseTests = (
   })
 
   void test(
-    `Trystero: ${strategy} reuses relay sockets across join/leave cycles`,
+    `Trystero: ${strategy} shares relay sockets across concurrent rooms and closes on last leave`,
     {timeout: 10_000},
     async () => {
       const realWebSocket = globalThis.WebSocket
@@ -165,27 +165,51 @@ const runRelayReuseTests = (
       AutoOpenWebSocket.sockets.length = 0
 
       const config = makeConfig('cycles')
+      let roomA: Room | undefined
+      let roomB: Room | undefined
+      let roomC: Room | undefined
 
       try {
-        for (let cycle = 0; cycle < 5; cycle += 1) {
-          const room = joinRoom(config, 'room')
+        roomA = joinRoom(config, 'room-a')
+        roomB = joinRoom(config, 'room-b')
 
-          await waitFor(() => AutoOpenWebSocket.sockets.length >= 1)
+        await waitFor(() => AutoOpenWebSocket.sockets.length >= 1)
 
-          assert.equal(
-            AutoOpenWebSocket.sockets.length,
-            1,
-            `${strategy} cycle ${cycle}: expected the same relay socket to be reused`
-          )
-          assert.equal(
-            openSockets().length,
-            1,
-            `${strategy} cycle ${cycle}: expected the relay socket to stay open`
-          )
+        assert.equal(
+          AutoOpenWebSocket.sockets.length,
+          1,
+          `${strategy}: expected concurrent rooms to share a single relay socket`
+        )
+        assert.equal(openSockets().length, 1)
 
-          await room.leave().catch(() => {})
-        }
+        await roomA.leave()
+        assert.equal(
+          openSockets().length,
+          1,
+          `${strategy}: socket stays open while activeRooms >= 1`
+        )
+
+        await roomB.leave()
+        assert.equal(
+          openSockets().length,
+          0,
+          `${strategy}: socket closes when activeRooms reaches 0`
+        )
+
+        roomC = joinRoom(config, 'room-c')
+        await waitFor(() => AutoOpenWebSocket.sockets.length >= 2)
+        assert.equal(AutoOpenWebSocket.sockets.length, 2)
+        assert.equal(
+          openSockets().length,
+          1,
+          `${strategy}: socket reopens cleanly on subsequent joinRoom`
+        )
+        await roomC.leave()
+        assert.equal(openSockets().length, 0)
       } finally {
+        await roomA?.leave().catch(() => {})
+        await roomB?.leave().catch(() => {})
+        await roomC?.leave().catch(() => {})
         globalThis.WebSocket = realWebSocket
       }
     }

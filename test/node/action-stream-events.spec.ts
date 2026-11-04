@@ -9,16 +9,18 @@ import {
 import {createActionManager} from '../../packages/core/src/actions.ts'
 import {initSingleHandler} from '../../packages/core/src/emitter.ts'
 import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
-import {makeInternalPlugin} from '../../packages/core/src/plugin.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 import {joinRoom as joinSupabaseRoom} from '../../packages/supabase/src/index.ts'
 import {joinRoom as joinTorrentRoom} from '../../packages/torrent/src/index.ts'
-import type {PeerHandle, RoomError} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
+import type {RoomError} from '../../packages/core/src/types.ts'
 import {
   MockRTCPeerConnection,
   linkedActions,
+  makeTestPluginSlot,
   testEndpoint,
+  testPeerId,
   waitFor
 } from './peer-harness.ts'
 
@@ -138,15 +140,18 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     )
   }
 
-  // 2. Cached room instance returned by a 2nd joinRoom() call still supports room.onError
+  // 2. Duplicate active joinRoom() throws, while active room supports multiple room.onError listeners
   const cfg = {
     appId: 'cached-join-err-app',
     password: 'correct-password',
     rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
   }
   const room1 = joinCustom(cfg, 'cached-room')
-  const room2 = joinCustom(cfg, 'cached-room')
-  assert.equal(room1, room2)
+  assert.throws(
+    () => joinCustom(cfg, 'cached-room'),
+    /already joined room "cached-room"/
+  )
+  const remotePeerId = testPeerId('remote-peer')
 
   try {
     await room1.getSelf()
@@ -154,13 +159,13 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     const errors1: RoomError[] = []
     const errors2: RoomError[] = []
     room1.onError(err => errors1.push(err))
-    room2.onError(err => errors2.push(err))
+    room1.onError(err => errors2.push(err))
 
     assert.ok(storedSubscriber)
     await storedSubscriber(
       storedRootTopic,
       {
-        peerId: 'remote-peer',
+        peerId: remotePeerId,
         offerId: 'bad-offer-1',
         offer: 'corrupted-ciphertext'
       },
@@ -172,7 +177,7 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     assert.equal(errors1[0]!.code, 'decrypt-failed')
     if (errors1[0]!.code === 'decrypt-failed') {
       assert.equal(errors1[0]!.stage, 'offer')
-      assert.equal(errors1[0]!.peerId, 'remote-peer')
+      assert.equal(errors1[0]!.peerId, remotePeerId)
     }
     assert.match(errors1[0]!.message, /incorrect password/)
 
@@ -311,7 +316,7 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     /duplicate plugin "roles" in use\[\]/
   )
 
-  const throwingInternalPlugin = makeInternalPlugin('scale', () => {
+  const throwingInternalPlugin = makeTestPluginSlot('scale', () => {
     throw new Error('plugin-setup-boom')
   })
   const badPluginErrors: RoomError[] = []
@@ -323,7 +328,7 @@ void test('Fast-fail guardrails: 3-arg joinRoom, handler-in-config makeAction, n
     },
     'plugin-guard-room'
   )
-  badPluginRoom.onError(err => badPluginErrors.push(err))
+  badPluginRoom.onError((err: RoomError) => badPluginErrors.push(err))
   await waitFor(() => badPluginErrors.length === 1)
   assert.equal(badPluginErrors[0]!.code, 'plugin-failed')
   if (badPluginErrors[0]!.code === 'plugin-failed') {

@@ -69,7 +69,6 @@ const idbWriteTx = <T>(
         resolve(result)
       }
     }
-    tx.onerror = () => fail(tx.error)
     tx.onabort = () => fail(tx.error)
     run(tx.objectStore(idbStoreName), val => {
       result = val

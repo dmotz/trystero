@@ -1,9 +1,11 @@
-import {createEndpointIdentity, type EndpointIdentity} from '../identity'
+import {
+  createEndpointIdentity,
+  jwkToCompactPub,
+  type EndpointIdentity
+} from '../identity'
+import type {MaybePromise, PeerHandle} from '../internal-types'
 import type {PeerDataTransport} from '../peer-transport'
-import {toCleanJwk} from '../signed-record'
 import type {
-  MaybePromise,
-  PeerHandle,
   RoleCertificate,
   ScaleConfig,
   TopologyRoute,
@@ -37,6 +39,7 @@ import {createOverlayDataPlane} from './data-plane'
 import {createDescriptorStore} from './descriptors'
 import {
   createOverlayRouter,
+  defaultQuarantineTtlMs,
   defaultRequiredPeerIdleTtlMs,
   type OverlayRouter
 } from './routing'
@@ -59,6 +62,7 @@ export type OverlayManagerDeps = {
   descriptorTtlMs?: number
   unreachableGraceMs?: number
   requiredPeerIdleTtlMs?: number
+  quarantineTtlMs?: number
   maxUsers?: number
   getLocalEndpointIdentity?: () => MaybePromise<EndpointIdentity>
   getLocalUserIdentity?: () => MaybePromise<UserIdentity>
@@ -72,7 +76,7 @@ export type OverlayManagerDeps = {
   ) => MaybePromise<boolean>
   onPeerDescriptorCert?: (
     peerId: string,
-    signPubKey: JsonWebKey,
+    signPubKey: string,
     cert?: RoleCertificate,
     userId?: string
   ) => void
@@ -106,12 +110,13 @@ export type OverlayManager = {
   ) => boolean
   getTargetNeighbors: () => Set<string>
   setOnTargetsChanged: (cb: (targetPeerIds: string[]) => void) => void
-  announceLeave: () => void
+  announceLeave: () => Promise<void>
   destroy: () => void
   getSnapshot: () => TopologySnapshot
   getLocalCryptoIdentity: () => Promise<CryptoIdentity>
-  getPeerSignPublicKey: (peerId: string) => JsonWebKey | undefined
-  setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey) => void
+  getPeerUserId: (peerId: string) => string | undefined
+  getPeerSignPublicKey: (peerId: string) => string | undefined
+  setPeerSignPublicKey: (peerId: string, pubKey: JsonWebKey | string) => void
   setLocalRoleCertificate: (cert: RoleCertificate | null) => void
   markPeerBanned: (peerId: string) => void
   unmarkPeerBanned: (peerId: string) => void
@@ -129,6 +134,7 @@ export const createOverlayManager = ({
   descriptorTtlMs = defaultDescriptorTtlMs,
   unreachableGraceMs = defaultUnreachableGraceMs,
   requiredPeerIdleTtlMs = defaultRequiredPeerIdleTtlMs,
+  quarantineTtlMs = defaultQuarantineTtlMs,
   maxUsers,
   getLocalEndpointIdentity,
   getLocalUserIdentity,
@@ -210,6 +216,16 @@ export const createOverlayManager = ({
     seq.syncSeqFloor(selfId)
   }
 
+  if (getLocalEndpointIdentity) {
+    void Promise.resolve(getLocalEndpointIdentity())
+      .then(ep => {
+        if (ep?.peerId) {
+          syncSelfIdFromIdentity(ep.peerId)
+        }
+      })
+      .catch(noOp)
+  }
+
   let localCryptoIdentityP: Promise<CryptoIdentity> | null = null
   const loadLocalCryptoIdentity = (): Promise<CryptoIdentity> =>
     (localCryptoIdentityP ??= (async () => {
@@ -230,11 +246,9 @@ export const createOverlayManager = ({
       const res: CryptoIdentity = {
         peerId: endpointId.peerId,
         signPrivateKey: endpointId.signPrivateKey,
-        signPublicKey: endpointId.signPublicKey,
-        signPubJwk: endpointId.signPubJwk,
+        signPubKey: jwkToCompactPub(endpointId.signPubJwk),
         encPrivateKey: encPair.privateKey,
-        encPublicKey: encPair.publicKey,
-        encPubJwk: toCleanJwk(rawEncPubJwk)
+        encPubKey: jwkToCompactPub(rawEncPubJwk)
       }
       if (!isDestroyed && directPeers.size > 0) {
         void descriptors.publishLocalDescriptor().catch(noOp)
@@ -244,6 +258,9 @@ export const createOverlayManager = ({
       localCryptoIdentityP = null
       throw err
     }))
+
+  const isOverlayPeerBlocked = (id: string): boolean =>
+    bannedPeers.has(id) || Boolean(router?.isPeerQuarantined(id))
 
   const descriptors = createDescriptorStore({
     appId,
@@ -264,7 +281,7 @@ export const createOverlayManager = ({
     getDiscoveredCandidateCount: () => router.getDiscoveredCandidateCount(),
     computeEffectiveTargets: () => router.computeEffectiveTargets(),
     sendToDirectNeighbor,
-    isPeerBanned: id => bannedPeers.has(id),
+    isPeerBanned: isOverlayPeerBlocked,
     recordSignatureFailure: () => {
       stats.signatureFailures++
     },
@@ -300,7 +317,7 @@ export const createOverlayManager = ({
     getDirectPeerCount: () => directPeers.size,
     hasUsableDirectPeer,
     sendToDirectNeighbor,
-    isPeerBanned: id => bannedPeers.has(id),
+    isPeerBanned: isOverlayPeerBlocked,
     getActionRequiredRoles: type => actionAuthorities.get(type),
     authorizePeerAction,
     onDeliverData
@@ -312,6 +329,7 @@ export const createOverlayManager = ({
     maxDirectPeers: config.maxDirectPeers,
     unreachableGraceMs,
     requiredPeerIdleTtlMs,
+    quarantineTtlMs,
     descriptors,
     isDestroyed: () => isDestroyed,
     getSelfId: () => selfId,
@@ -369,12 +387,7 @@ export const createOverlayManager = ({
       if (!parsed) {
         return
       }
-      const rawOrigin = parsed[2]['o']
-      const origin =
-        typeof rawOrigin === 'string' && rawOrigin.length > 0
-          ? rawOrigin
-          : fromPeerId
-      seq.enqueueOriginTask(origin, () =>
+      seq.enqueuePeerTask(fromPeerId, () =>
         dataPlane.handleOverlayBinary(fromPeerId, parsed)
       )
     }
@@ -403,6 +416,7 @@ export const createOverlayManager = ({
       return true
     },
     addDirectPeer: (peerId, peer) => {
+      router.clearQuarantined(peerId)
       if (!router.isAllowedTargetPeer(peerId)) {
         return
       }
@@ -432,20 +446,29 @@ export const createOverlayManager = ({
         if (!current) {
           pendingFramesByPeer.delete(peerId)
           const existingVTransport = router.getVirtualTransport(peerId)
-          if (existingVTransport && router.getRoute(peerId)) {
-            onVirtualPeerJoin(peerId, existingVTransport)
-          } else if (!existingVTransport) {
+          if (peer) {
+            if (existingVTransport && router.getRoute(peerId)) {
+              onVirtualPeerJoin(peerId, existingVTransport)
+            } else if (!existingVTransport) {
+              if (!descriptors.hasDescriptor(peerId)) {
+                purgePeerFromGraph(peerId)
+              }
+              router.recomputeTopologyAndRoutes()
+            }
+          } else {
             const desc = descriptors.getDescriptor(peerId)
             if (reason === peerLeftRoomErr) {
               descriptors.markLeft(peerId, desc?.seq ?? 0)
-              purgePeerFromGraph(peerId)
-              router.recomputeTopologyAndRoutes()
-            } else if (!desc) {
-              purgePeerFromGraph(peerId)
-              router.recomputeTopologyAndRoutes()
-            } else {
-              router.recomputeTopologyAndRoutes()
+            } else if (
+              reason &&
+              reason !== peerBannedErr &&
+              reason !== peerDisconnectedErr
+            ) {
+              router.quarantinePeer(peerId)
             }
+            dataPlane.purgePeerDataState(peerId)
+            router.evictVirtualPeerNow(peerId, reason ?? peerDisconnectedErr)
+            router.recomputeTopologyAndRoutes()
           }
         }
         return
@@ -479,35 +502,34 @@ export const createOverlayManager = ({
     shouldConnectPeer: router.shouldConnectPeer,
     getTargetNeighbors: router.getTargetNeighbors,
     setOnTargetsChanged: router.setOnTargetsChanged,
-    announceLeave: () => {
+    announceLeave: async () => {
       if (isDestroyed || !directPeers.size) {
         return
       }
       const leaveSeq = seq.nextDescSeq()
-      void loadLocalCryptoIdentity()
-        .then(id => {
-          syncSelfIdFromIdentity(id.peerId)
-          return signOverlayPayload(
-            id.signPrivateKey,
-            canonicalLeaveHeader(selfId, leaveSeq, appId, roomId),
-            emptyBytes
-          )
+      try {
+        const id = await loadLocalCryptoIdentity()
+        syncSelfIdFromIdentity(id.peerId)
+        const sig = await signOverlayPayload(
+          id.signPrivateKey,
+          canonicalLeaveHeader(selfId, leaveSeq, appId, roomId),
+          emptyBytes
+        )
+        if (isDestroyed) {
+          return
+        }
+        const packet = packOverlayControl({
+          t: 'leave',
+          peerId: selfId,
+          seq: leaveSeq,
+          sig
         })
-        .then(sig => {
-          if (isDestroyed) {
-            return
-          }
-          const packet = packOverlayControl({
-            t: 'leave',
-            peerId: selfId,
-            seq: leaveSeq,
-            sig
-          })
-          for (const neighborId of directPeers.keys()) {
-            sendToDirectNeighbor(neighborId, packet)
-          }
-        })
-        .catch(noOp)
+        for (const neighborId of directPeers.keys()) {
+          sendToDirectNeighbor(neighborId, packet)
+        }
+      } catch {
+        // Ignore leave signature failure during teardown
+      }
     },
     destroy: () => {
       isDestroyed = true
@@ -533,6 +555,7 @@ export const createOverlayManager = ({
       }
     },
     getLocalCryptoIdentity: loadLocalCryptoIdentity,
+    getPeerUserId: peerId => descriptors.getDescriptor(peerId)?.userId,
     getPeerSignPublicKey: descriptors.getSignPubKey,
     setPeerSignPublicKey: descriptors.setPeerSignPublicKey,
     setLocalRoleCertificate: descriptors.setLocalRoleCertificate,

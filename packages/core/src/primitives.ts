@@ -9,11 +9,8 @@ export const domainTag = (name: string, version: number): string =>
 
 export const socketInitialFailureSymbol: unique symbol =
   /*@__PURE__*/ Symbol.for(`${libId}.socketInitialFailure`) as never
-export const internalPluginSymbol: unique symbol = /*@__PURE__*/ Symbol.for(
-  `${libId}.internalPlugin`
-) as never
-export const signalingBridgeSymbol: unique symbol = /*@__PURE__*/ Symbol.for(
-  `${libId}.signalingBridge`
+export const pluginSlotSymbol: unique symbol = /*@__PURE__*/ Symbol.for(
+  `${libId}.slot`
 ) as never
 
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
@@ -33,7 +30,7 @@ export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
 export const decodeBytes = (buf: ArrayBufferLike | ArrayBufferView): string =>
   decoder.decode(buf)
 
-export const toBase64 = (bytes: Uint8Array): string => {
+const toBase64 = (bytes: Uint8Array): string => {
   let bin = ''
   for (let i = 0; i < bytes.byteLength; i++) {
     bin += String.fromCharCode(bytes[i]!)
@@ -41,7 +38,7 @@ export const toBase64 = (bytes: Uint8Array): string => {
   return btoa(bin)
 }
 
-export const fromBase64 = (b64: string): Uint8Array => {
+const fromBase64 = (b64: string): Uint8Array => {
   const bin = atob(b64)
   const out = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) {

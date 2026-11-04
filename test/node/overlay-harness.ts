@@ -11,10 +11,39 @@ import {
   roles
 } from '../../packages/core/src/authority.ts'
 import {maxRoomFrameBytes} from '../../packages/core/src/data-limits.ts'
-import createRoom, {
-  getRoomSignalingBridge,
-  type RoomOptions
+import {
+  createRoomWithBridge,
+  type RoomOptions,
+  type RoomSignalingBridge
 } from '../../packages/core/src/room.ts'
+import type {
+  AnyRoomPlugin,
+  RoomWithPlugins
+} from '../../packages/core/src/types.ts'
+
+const roomBridges = new WeakMap<Room, RoomSignalingBridge>()
+
+export const createTrackedRoom = <
+  const TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
+>(
+  onPeer: (f: (peer: PeerHandle, id: string) => void) => void,
+  onPeerLeave: (id: string, shouldReannounce?: boolean) => void,
+  onSelfLeave: () => void,
+  roomOptions: RoomOptions & {use?: TPlugins} = {}
+): RoomWithPlugins<TPlugins> => {
+  const [room, bridge] = createRoomWithBridge(
+    onPeer,
+    onPeerLeave,
+    onSelfLeave,
+    roomOptions
+  )
+  roomBridges.set(room, bridge)
+  return room
+}
+
+export const getRoomSignalingBridge = (
+  room: Room
+): RoomSignalingBridge | undefined => roomBridges.get(room)
 import {
   scale,
   type OverlayManager
@@ -224,7 +253,7 @@ export const createOverlayCluster = async ({
     joinedByPeer.set(id, joined)
     leftByPeer.set(id, left)
 
-    const room = createRoom(
+    const room = createTrackedRoom(
       f => registerCallbacks.set(id, f),
       peerId => {
         for (const [k, pair] of directLinks.entries()) {
@@ -334,7 +363,7 @@ export const createOverlayCluster = async ({
       }
       return true
     }, 25_000)
-    await wait(30)
+    await wait(120)
   }
 
   const dropPeer = (id: string) => {
@@ -417,8 +446,8 @@ export type ClusterPeerOptions = {
   media?: boolean
   delayMs?: number
   adminId?: string
+  adminIdentity?: UserIdentity
   identities?: Map<string, UserIdentity>
-  onPeerHandshakeByRoom?: (ownerId: string) => RoomOptions['onPeerHandshake']
 }
 
 export const createTestScaleCluster = async ({
@@ -427,11 +456,12 @@ export const createTestScaleCluster = async ({
   media = false,
   delayMs = 1,
   adminId,
-  identities,
-  onPeerHandshakeByRoom
+  adminIdentity: explicitAdminIdentity,
+  identities
 }: ClusterPeerOptions) => {
   const peerIds = allocTestPeerIds(peerCount)
-  const adminIdentity = adminId ? identities?.get(adminId) : undefined
+  const adminIdentity =
+    explicitAdminIdentity ?? (adminId ? identities?.get(adminId) : undefined)
   const roomId = adminIdentity
     ? formatSelfCertifyingRoomId(
         `scale-reg-${++nextRegClusterSeq}`,
@@ -544,14 +574,15 @@ export const createTestScaleCluster = async ({
     const left = new Set<string>()
     joinedByPeer.set(id, joined)
     leftByPeer.set(id, left)
-    const userIdentity = identities?.get(id)
-    const onPeerHandshake = onPeerHandshakeByRoom?.(id)
+    const userIdentity =
+      identities?.get(id) ??
+      (id === peerIds[0] && adminIdentity ? adminIdentity : undefined)
 
     const plugins = adminIdentity
       ? [roles(), scale({maxDirectPeers})]
       : [scale({maxDirectPeers})]
 
-    const room = createRoom(
+    const room = createTrackedRoom(
       f => registerCallbacks.set(id, f),
       peerId => {
         const k = linkKey(id, peerId)
@@ -568,7 +599,6 @@ export const createTestScaleCluster = async ({
         appId: 'scale-reg-app',
         roomId,
         ...(userIdentity ? {identity: userIdentity} : {clientId: id}),
-        ...(onPeerHandshake ? {onPeerHandshake} : {}),
         use: plugins
       }
     )
@@ -656,8 +686,10 @@ export const createTestScaleCluster = async ({
   }
 
   return {
+    roomId,
     peerIds,
     rooms,
+    registerCallbacks,
     directLinks,
     joinedByPeer,
     leftByPeer,

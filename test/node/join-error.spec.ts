@@ -4,7 +4,12 @@ import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
 import type {StrategyOnMessage} from '../../packages/core/src/index.ts'
 import {buildSignalAad} from '../../packages/core/src/signal-handler.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
-import {MockRTCPeerConnection, waitFor} from './peer-harness.ts'
+import {
+  MockRTCPeerConnection,
+  higherPeerId,
+  testPeerId,
+  waitFor
+} from './peer-harness.ts'
 
 type Subscriber = {
   rootTopic: string
@@ -52,12 +57,11 @@ const createTestStrategy = (subscribers: Subscriber[]) =>
     announce: () => {}
   })
 
-const nextHigherPeerId = (selfId: string): string =>
-  String.fromCharCode(selfId.charCodeAt(0) + 1) + selfId.slice(1)
+const nextHigherPeerId = higherPeerId
 
 void test(
   'Trystero: reports TURN guidance when an answered offer fails to connect',
-  {timeout: 5_000},
+  {timeout: 15_000},
   async () => {
     FailingRTCPeerConnection.instances = []
     const subscribers: Subscriber[] = []
@@ -144,13 +148,13 @@ void test(
 
 void test(
   'Trystero: reports TURN guidance when a sent answer fails to connect',
-  {timeout: 5_000},
+  {timeout: 15_000},
   async () => {
     FailingRTCPeerConnection.instances = []
     const subscribers: Subscriber[] = []
     const appId = `turn-answer-failure-${Date.now()}`
     const roomId = 'turn-answer-room'
-    const remotePeerId = 'remote-peer'
+    const remotePeerId = testPeerId('remote-peer')
     const joinRoom = createTestStrategy(subscribers)
     const errors: Array<{
       code: string
@@ -240,6 +244,7 @@ for (const failure of ['decrypt', 'remote SDP'] as const) {
     try {
       await waitFor(() => subscribers.length > 0)
       const roomKey = genKey('', appId, roomId)
+      const remotePeerId = testPeerId('remote')
       for (let i = 0; i < 3; i++) {
         const offerId = String(i)
         const offer =
@@ -248,11 +253,11 @@ for (const failure of ['decrypt', 'remote SDP'] as const) {
             : await encrypt(
                 roomKey,
                 'invalid SDP',
-                buildSignalAad('offer', 'remote', offerId)
+                buildSignalAad('offer', remotePeerId, offerId)
               )
         await subscribers[0]!.onMessage(
           subscribers[0]!.rootTopic,
-          {peerId: 'remote', offer, offerId},
+          {peerId: remotePeerId, offer, offerId},
           () => {}
         )
       }

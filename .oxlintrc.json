@@ -16,7 +16,6 @@
     "no-else-return": "error",
     "no-extra-label": "error",
     "no-lonely-if": "error",
-    "no-unused-labels": "off",
     "no-self-compare": "error",
     "no-template-curly-in-string": "error",
     "no-throw-literal": "error",

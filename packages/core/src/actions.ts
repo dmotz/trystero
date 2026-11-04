@@ -12,7 +12,6 @@ import type {
   PeerDataTransport,
   TargetPeers
 } from './internal-types'
-import {createDirectPeerTransport} from './peer-transport'
 import type {
   ActionError,
   ActionMessageHandler,
@@ -27,7 +26,6 @@ import type {
   MessageAction,
   MessageActionConfig,
   MessageContext,
-  PeerHandle,
   PeerResult,
   RequestAction,
   RequestActionConfig,
@@ -172,11 +170,10 @@ const sameSortedRoles = (a: readonly string[], b: readonly string[]): boolean =>
 export type ActionManagerDeps = {
   onPeerError: (peerId: string, error: Error) => void
   maxReceiveBytes?: number
-  getTransport?: (
+  getTransport: (
     id: string,
     includePending: boolean
   ) => PeerDataTransport | undefined
-  getPeer?: (id: string, includePending: boolean) => PeerHandle | undefined
   getPeerIds: (includePending: boolean) => string[]
   canReceiveFromPeer: (id: string, receiveWhilePending: boolean) => boolean
   broadcastInline?: (
@@ -224,29 +221,7 @@ export const createActionManager = (
   clearPeer: (id: string, error: Error) => void
   clearListeners: () => void
 } => {
-  const peerTransportCache = new WeakMap<PeerHandle, PeerDataTransport>()
-  const resolveTransport = (
-    peerId: string,
-    includePending: boolean
-  ): PeerDataTransport | undefined => {
-    if (deps.getTransport) {
-      return deps.getTransport(peerId, includePending)
-    }
-    const peer = deps.getPeer?.(peerId, includePending)
-    if (!peer) {
-      return undefined
-    }
-    let cached = peerTransportCache.get(peer)
-    if (!cached) {
-      cached = createDirectPeerTransport(peer, () => {
-        const cur =
-          deps.getPeer?.(peerId, true) ?? deps.getPeer?.(peerId, false)
-        return Boolean(cur && !cur.isDead)
-      })
-      peerTransportCache.set(peer, cached)
-    }
-    return cached
-  }
+  const resolveTransport = deps.getTransport
 
   const userIdOf = (peerId: string): string =>
     deps.getPeerUserId ? deps.getPeerUserId(peerId) : peerId
@@ -500,10 +475,7 @@ export const createActionManager = (
     }
   })
 
-  const makeActionCore = <
-    T extends DataPayload = DataPayload,
-    R extends DataPayload = DataPayload
-  >(
+  const makeActionCore = <T = DataPayload, R = DataPayload>(
     type: string,
     config: MessageActionConfig | RequestActionConfig | undefined,
     internal: boolean
@@ -528,9 +500,6 @@ export const createActionManager = (
     const kind: PublicActionKind = config?.kind ?? 'message'
     const requiredRoles = normalizeRequiredRoles(config?.roles)
     const hasRoleGuard = requiredRoles.length > 0
-    if (hasRoleGuard) {
-      deps.registerActionAuthority?.(type, requiredRoles)
-    }
 
     const existing = publicActions[type]
     if (existing) {
@@ -542,6 +511,10 @@ export const createActionManager = (
         throw actionRedefinedErr(type)
       }
       return existing.action as MessageAction<T> | RequestAction<T, R>
+    }
+
+    if (hasRoleGuard) {
+      deps.registerActionAuthority?.(type, requiredRoles)
     }
 
     const rawAction = makeWireAction<T>(type)
@@ -587,7 +560,8 @@ export const createActionManager = (
     })
 
     const syncReceiveGate = (): void => {
-      if (!getReceiveGate() && !hasRoleGuard) {
+      const hasUserGate = Boolean(getReceiveGate())
+      if (!hasUserGate && !hasRoleGuard) {
         rawAction.onReceive(null)
         return
       }
@@ -615,7 +589,7 @@ export const createActionManager = (
         return typeof authRes === 'boolean'
           ? afterAuth(authRes)
           : authRes.then(afterAuth, () => false)
-      })
+      }, !hasUserGate)
     }
 
     const [setReceiveGate, getReceiveGate, clearReceiveGate] =
@@ -651,7 +625,7 @@ export const createActionManager = (
 
     if (kind === 'message') {
       const receiveMessage = (
-        payload: DataPayload,
+        payload: T,
         peerId: string,
         metadata?: JsonValue
       ): void => {
@@ -663,7 +637,7 @@ export const createActionManager = (
           return
         }
         const [, userMeta] = extractAuthMetadata(metadata)
-        emitMessage(payload as T, buildPeerContext(peerId, userMeta))
+        emitMessage(payload, buildPeerContext(peerId, userMeta))
       }
 
       const [subMessage, emitMessage, clearMessage] = createEventEmitter<
@@ -721,7 +695,7 @@ export const createActionManager = (
     })
 
     const receiveRequest = (
-      payload: DataPayload,
+      payload: T,
       peerId: string,
       metadata?: JsonValue
     ): void => {
@@ -760,7 +734,7 @@ export const createActionManager = (
         if (!handler) {
           throw mkErr('no active request handler')
         }
-        const response = await handler(payload as T, {
+        const response = await handler(payload, {
           ...buildPeerContext(peerId, userMeta),
           signal: controller.signal
         })
@@ -772,7 +746,10 @@ export const createActionManager = (
 
       void runHandler()
         .then(
-          response => responseAction.send(response, peerId, {r: parsed[0]}),
+          response =>
+            responseAction.send(response as DataPayload, peerId, {
+              r: parsed[0]
+            }),
           error =>
             responseAction.send(null, peerId, {
               r: parsed[0],

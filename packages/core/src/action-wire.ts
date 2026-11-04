@@ -102,7 +102,7 @@ export type WireActionOptions = {
   receiveScope?: ReceiveScopeResolver
 }
 
-export type WireAction<T extends DataPayload = DataPayload> = {
+export type WireAction<T = DataPayload> = {
   send: (
     data: T,
     targets?: TargetPeers,
@@ -116,7 +116,7 @@ export type WireAction<T extends DataPayload = DataPayload> = {
   onProgress: (
     handler: (percent: number, peerId: string, metadata?: JsonValue) => void
   ) => void
-  onReceive: (handler: WireReceiveHandler | null) => void
+  onReceive: (handler: WireReceiveHandler | null, guardOnly?: boolean) => void
   onReject: (handler: WireRejectHandler) => void
 }
 
@@ -128,6 +128,7 @@ type ReceiveRegistration = {
     | null
   onProgress: (percent: number, peerId: string, metadata?: JsonValue) => void
   receiveGate: WireReceiveHandler | null
+  guardOnly: boolean
   onReject: WireRejectHandler | null
 }
 
@@ -332,7 +333,7 @@ export const createActionWireManager = ({
   checkAborted = throwIfAborted,
   maxReceiveBytes = defaultMaxReceiveBytes
 }: ActionWireManagerDeps): {
-  makeWireAction: <T extends DataPayload = DataPayload>(
+  makeWireAction: <T = DataPayload>(
     type: string,
     options?: WireActionOptions
   ) => WireAction<T>
@@ -817,11 +818,19 @@ export const createActionWireManager = ({
     type: string,
     registration: ReceiveRegistration
   ): void => {
-    if (!registration.receiver && !registration.receiveGate) {
+    const isFlushable = (): boolean =>
+      Boolean(
+        registration.receiver ||
+        (registration.receiveGate && !registration.guardOnly)
+      )
+    if (!isFlushable()) {
       return
     }
     const now = Date.now()
     for (const [peerId, byType] of preListenerQueues) {
+      if (!isFlushable()) {
+        break
+      }
       const ring = byType.get(type)
       if (!ring) {
         continue
@@ -830,7 +839,21 @@ export const createActionWireManager = ({
       if (byType.size === 0) {
         preListenerQueues.delete(peerId)
       }
-      for (const entry of ring) {
+      for (let i = 0; i < ring.length; i++) {
+        if (!isFlushable()) {
+          const rest = ring.slice(i)
+          if (rest.length > 0) {
+            let curByType = preListenerQueues.get(peerId)
+            if (!curByType) {
+              curByType = new Map()
+              preListenerQueues.set(peerId, curByType)
+            }
+            const existing = curByType.get(type)
+            curByType.set(type, existing ? [...rest, ...existing] : rest)
+          }
+          break
+        }
+        const entry = ring[i]!
         if (now - entry.receivedAt > pendingDataTimeoutMs) {
           continue
         }
@@ -839,7 +862,6 @@ export const createActionWireManager = ({
           continue
         }
         if (
-          registration.receiver &&
           !registration.receiveGate &&
           !peers.get(peerId)?.inlineQueues.has(type)
         ) {
@@ -1192,7 +1214,7 @@ export const createActionWireManager = ({
     }
   }
 
-  const makeWireAction = <T extends DataPayload = DataPayload>(
+  const makeWireAction = <T = DataPayload>(
     type: string,
     options: WireActionOptions = {}
   ): WireAction<T> => {
@@ -1222,6 +1244,7 @@ export const createActionWireManager = ({
       ...(receiveScope ? {receiveScope} : {}),
       receiver: null,
       receiveGate: null,
+      guardOnly: false,
       onReject: null,
       onProgress: noOp
     }
@@ -1233,8 +1256,9 @@ export const createActionWireManager = ({
         flushPreListenerType(type, registration)
         drain()
       },
-      onReceive: handler => {
+      onReceive: (handler, guardOnly = false) => {
         registration.receiveGate = handler
+        registration.guardOnly = Boolean(handler && guardOnly)
         flushPreListenerType(type, registration)
         drain()
       },
@@ -1303,10 +1327,15 @@ export const createActionWireManager = ({
           : getPeerIds(sendToPending)
         const uniqueIds = [...new Set(rawIds)]
         if (isExplicitTarget && uniqueIds.length === 0) {
-          throw makeActionError('disconnected', noActivePeerMsg(''))
+          throw makeActionError(
+            'disconnected',
+            'target peer list must not be empty'
+          )
         }
 
-        const pendingPromises: Promise<void>[] = []
+        const resolvedTargets: Array<
+          [peerId: string, transport: PeerDataTransport]
+        > = []
         for (const peerId of uniqueIds) {
           const transport = resolveTransport(peerId, sendToPending)
           if (!transport || !transport.isOpen) {
@@ -1315,6 +1344,15 @@ export const createActionWireManager = ({
             }
             continue
           }
+          resolvedTargets.push([peerId, transport])
+        }
+
+        const pendingPromises: Promise<void>[] = []
+        const pushPending = (p: Promise<void>): void => {
+          void p.catch(noOp)
+          pendingPromises.push(p)
+        }
+        for (const [peerId, transport] of resolvedTargets) {
           if (isSmall) {
             checkAborted(signal)
             const drainRes = transport.waitForDrain(signal)
@@ -1326,7 +1364,7 @@ export const createActionWireManager = ({
               }
               progressCb?.(1, peerId, metadata)
             } else {
-              pendingPromises.push(
+              pushPending(
                 (async () => {
                   await sendFrameToTransport(
                     transport,
@@ -1344,7 +1382,7 @@ export const createActionWireManager = ({
               )
             }
           } else {
-            pendingPromises.push(
+            pushPending(
               sendBulkToPeer(
                 peerId,
                 transport,
@@ -1474,7 +1512,11 @@ export const createActionWireManager = ({
         return
       }
 
-      if (!registration.receiver && !hasGate && !scope) {
+      if (
+        !registration.receiver &&
+        !scope &&
+        (!hasGate || registration.guardOnly)
+      ) {
         bufferPreListenerInline(message, dataSlice)
         return
       }

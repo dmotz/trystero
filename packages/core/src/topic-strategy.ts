@@ -1,26 +1,18 @@
 import type {
+  BaseRoomConfig,
+  JoinRoom,
   StrategyContext,
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext
 } from './internal-types'
 import createStrategy from './strategy'
-import type {BaseRoomConfig, JoinRoom, JoinRoomConfig} from './types'
+import type {JoinRoomConfig} from './types'
 import {mkErr, noOp} from './utils'
 
 const defaultSteadyAnnounceIntervalMs = 60_000
 const topicMissingErr = (what: string): Error =>
   mkErr(`topic strategy missing ${what}`)
-
-const requireContext = <TConfig extends BaseRoomConfig>(
-  context?: StrategyContext<TConfig>
-): StrategyContext<TConfig> => {
-  if (!context) {
-    throw topicMissingErr('room context')
-  }
-
-  return context
-}
 
 const requirePeerId = <TConfig extends BaseRoomConfig>(
   context: StrategyContext<TConfig>
@@ -74,9 +66,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       selfTopic,
       onMessage,
       _getOffers,
-      rawContext
+      context
     ) => {
-      const context = requireContext(rawContext)
       const signalPeer = (peerTopic: string, signal: string): void => {
         try {
           void Promise.resolve(
@@ -109,12 +100,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         makeTopicContext(context, 'self', rootTopic, selfTopic)
       )
 
-      const rootCleanup = await subscribeTopic(
-        relay,
-        rootTopic,
-        forwardMessage,
-        makeTopicContext(context, 'root', rootTopic, selfTopic)
-      )
+      let rootCleanup: () => void
+      try {
+        rootCleanup = await subscribeTopic(
+          relay,
+          rootTopic,
+          forwardMessage,
+          makeTopicContext(context, 'root', rootTopic, selfTopic)
+        )
+      } catch (err) {
+        didCleanup = true
+        selfCleanup()
+        throw err
+      }
 
       return () => {
         didCleanup = true
@@ -123,8 +121,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
     },
 
-    announce: async (relay, rootTopic, selfTopic, rawContext) => {
-      const context = requireContext(rawContext)
+    announce: async (relay, rootTopic, selfTopic, context) => {
       const result = await publishTopic(
         relay,
         rootTopic,

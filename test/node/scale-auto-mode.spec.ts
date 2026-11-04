@@ -12,7 +12,8 @@ import {
 } from '../../packages/core/src/scale/index.ts'
 import {defaultRequiredPeerIdleTtlMs} from '../../packages/core/src/scale/routing.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
-import type {PeerHandle, UserIdentity} from '../../packages/core/src/types.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
+import type {UserIdentity} from '../../packages/core/src/types.ts'
 import {
   createOverlayCluster,
   createTestScaleCluster
@@ -24,6 +25,7 @@ import {
   LinkedPeer,
   MockRTCPeerConnection,
   testPeerId,
+  wait,
   waitFor
 } from './peer-harness.ts'
 
@@ -122,6 +124,25 @@ void test('Unified scale(): full-mesh fast path below maxDirectPeers bypasses ov
       chatSenders.set(id, msg => action.send(msg))
     }
 
+    // Ensure initial signed descriptor gossip has converged on originRoom so canBroadcastDirectMesh() is active
+    const settleAction = originRoom.makeAction<string>('mesh-settle')
+    for (const id of smallCluster.peerIds.slice(1)) {
+      smallCluster.rooms
+        .get(id)!
+        .makeAction<string>('mesh-settle')
+        .onMessage(() => {})
+    }
+    const settleDeadline = Date.now() + 3_000
+    while (Date.now() < settleDeadline) {
+      const before = originRoom.getTopology().stats.messagesSent
+      await settleAction.send('probe')
+      if (originRoom.getTopology().stats.messagesSent === before) {
+        break
+      }
+      await wait(20)
+    }
+    await wait(20)
+
     const outboundFramesFromOrigin: Uint8Array[] = []
     for (const [key, pair] of smallCluster.directLinks.entries()) {
       const endpoint =
@@ -133,7 +154,9 @@ void test('Unified scale(): full-mesh fast path below maxDirectPeers bypasses ov
       if (endpoint && key.includes(originId)) {
         const origSend = endpoint.sendData.bind(endpoint)
         endpoint.sendData = (data: Uint8Array) => {
-          outboundFramesFromOrigin.push(data.slice())
+          if (unpackOverlayFrame(data) === null) {
+            outboundFramesFromOrigin.push(data.slice())
+          }
           origSend(data)
         }
       }

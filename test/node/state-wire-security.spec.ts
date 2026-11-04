@@ -119,7 +119,7 @@ void test('S10: AuthoritativeStateRecord binds userId in signature and validates
   }
 })
 
-void test('D7: 60s fixed clock skew tolerance rejects far-future records, bounds clock drag, and causal HLC supersedes pre-rejoin state', async () => {
+void test('D7: 10s state future skew tolerance rejects far-future records, bounds clock drag, and causal HLC supersedes pre-rejoin state', async () => {
   assert.throws(
     () => roles({maxClockSkewMs: 300_000} as never),
     /Unknown roles config option "maxClockSkewMs"/
@@ -168,7 +168,7 @@ void test('D7: 60s fixed clock skew tolerance rejects far-future records, bounds
                   (data as {t?: string}).t === 'rec'
                 ) {
                   const wire = (
-                    data as {
+                    data as unknown as {
                       r: Omit<AuthoritativeStateRecord, 'appId' | 'roomId'>
                     }
                   ).r
@@ -229,10 +229,10 @@ void test('D7: 60s fixed clock skew tolerance rejects far-future records, bounds
       appId: 'd7-app',
       roomId: d7RoomId,
       ns: 'clock',
-      hlc: Date.now() + 30_000,
+      hlc: [Date.now() + 8_000, 0],
       peerId: adminS1PeerId,
       userId: adminUser.userId,
-      val: 'within-60s-ok',
+      val: 'within-10s-ok',
       cert: adminCert
     }
   )
@@ -243,10 +243,10 @@ void test('D7: 60s fixed clock skew tolerance rejects far-future records, bounds
       appId: 'd7-app',
       roomId: d7RoomId,
       ns: 'clock',
-      hlc: Date.now() + 180_000,
+      hlc: [Date.now() + 30_000, 0],
       peerId: adminS1PeerId,
       userId: adminUser.userId,
-      val: 'beyond-60s-rejected',
+      val: 'beyond-10s-rejected',
       cert: adminCert
     }
   )
@@ -261,12 +261,12 @@ void test('D7: 60s fixed clock skew tolerance rejects far-future records, bounds
       true
     )
 
-    // Clock drag from observing a +30s record is bounded by maxObservedClockDragMs (5_000ms)
+    // Clock drag from observing a +8s record is bounded by maxObservedClockDragMs (5_000ms)
     await guestOpen.set('guest-local-write')
     assert.equal(guestPublished.length, 1)
     assert.ok(
-      guestPublished[0]!.hlc <= Date.now() + maxObservedClockDragMs + 1_000,
-      `expected local clock drag bounded by ${maxObservedClockDragMs}ms, got +${guestPublished[0]!.hlc - Date.now()}ms`
+      guestPublished[0]!.hlc[0] <= Date.now() + maxObservedClockDragMs + 1_000,
+      `expected local clock drag bounded by ${maxObservedClockDragMs}ms, got +${guestPublished[0]!.hlc[0] - Date.now()}ms`
     )
 
     // Session 1 performs 5 updates, then admin reloads/rejoins as Session 2 (higher HLC!)

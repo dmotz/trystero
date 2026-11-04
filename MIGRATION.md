@@ -5,9 +5,15 @@ user identities**, **multi-tab user presence**, **cryptographic room authority &
 state**, and **scalable multi-hop topologies** to every signaling strategy out
 of the box.
 
-While this release introduces a few breaking changes to callback signatures, it
-unlocks capabilities that previously required complex application-level
-boilerplate—and eliminates subtle security and topology footguns.
+While this release introduces breaking API and wire-protocol changes, it unlocks
+capabilities that previously required complex application-level boilerplate—and
+eliminates subtle security and topology footguns.
+
+> **Wire-protocol compatibility:** Trystero **0.27.0** uses a new authenticated
+> wire protocol (domain-separated self-certifying `peerId`/`userId` handshakes,
+> compact P-256 keys, tuple HLC state records, and v2 action envelopes) and is
+> **not wire-compatible with `0.26.x` peers**. Upgrade all peers communicating
+> in the same room together.
 
 ---
 
@@ -28,8 +34,8 @@ boilerplate—and eliminates subtle security and topology footguns.
    capacity limits (`config.maxUsers`), per-user state (`room.makeUserState`),
    shared room state (`room.makeState`), opt-in cryptographic admin ownership
    (`roles(...)`), and role-based access control (`grantRole`, `revokeRole`,
-   `ban`, `unban`) are now built into the core protocol (`roles()` is
-   tree-shaken when not imported).
+   `onRoleChange`, `ban`, `unban`) are now built into the core protocol
+   (`roles()` is tree-shaken when not imported).
 4. **Scalable Multi-Hop Topologies**: Rooms are no longer restricted to
    full-mesh WebRTC (`O(N²)` connections). By opting in with `scale()`
    (`scale({maxDirectPeers?: number})`, default `6`), small rooms naturally form
@@ -37,9 +43,10 @@ boilerplate—and eliminates subtle security and topology footguns.
    end-to-end cryptographic sender verification—and apps that don't import
    `scale()` pay zero bundle overhead.
 5. **Prebuilt `.min.js` Bundles Removed**: Prebuilt `dist/trystero-*.min.js`
-   release bundles have been removed in favor of tree-shaking bundlers (or ESM
-   CDNs like `esm.run`) so optional plugins like `roles()` and `scale()` are
-   only bundled when imported.
+   release bundles have been removed in favor of tree-shaking bundlers so
+   optional plugins like `roles()` and `scale()` are only bundled when imported
+   (single-URL ESM CDNs like `esm.run` still work without a build step and load
+   the full package entry).
 6. **IPFS Strategy Removed**: The experimental IPFS strategy
    (`@trystero-p2p/ipfs`) has been removed because it was not a good fit for
    Trystero's purposes (huge bundle size, very slow connection time, few relays,
@@ -96,18 +103,23 @@ method subscriptions (`on*(fn, options?) => unsubscribe`) instead of property
 assignment (`room.on* = fn`) or config-object callbacks:
 
 - **Multi-listener subscriptions**: `room.onUserJoin`, `room.onUserLeave`,
-  `room.onPeerJoin`, `room.onPeerLeave`, `room.onPeerStream`, `room.onError`,
-  `action.onMessage`, `action.onReceiveProgress`, and `state.onChange` allow
+  `room.onPeerJoin`, `room.onPeerLeave`, `room.onPeerStream`,
+  `room.onRoleChange` (with `roles()`), `room.onError`, `action.onMessage`,
+  `action.onReceiveProgress`, `state.onChange`, and `userState.onChange` allow
   multiple independent listeners and return an idempotent `Unsubscribe` function
   (`() => void`).
 - **Live-only by default, explicit `{replay: true}`**: `onUserJoin`,
-  `onPeerJoin`, `onPeerStream`, and `state.onChange` no longer replay existing
-  state implicitly on registration; pass `{replay: true}` when a late subscriber
-  wants active users/peers/streams/state replayed synchronously. All `on*`
-  methods also accept `{once?: boolean, signal?: AbortSignal}`.
-- **`joinRoom(config, roomId)` takes 2 arguments & structured `room.onError`**:
-  The 3rd `{onJoinError}` callbacks argument and unstructured `JoinError`
-  (`{error, appId, roomId, peerId}`) have been replaced by
+  `onPeerJoin`, `onPeerStream`, `onRoleChange`, `state.onChange`, and
+  `userState.onChange` no longer replay existing state implicitly on
+  registration; pass `{replay: true}` when a late subscriber wants active
+  users/peers/streams/roles/state replayed synchronously. All `on*` methods also
+  accept `{once?: boolean, signal?: AbortSignal}`.
+- **`joinRoom(config, roomId)` takes 2 arguments, rejects duplicate active
+  rooms, & structured `room.onError`**: Calling `joinRoom(config, roomId)` while
+  a room with the same `(appId, roomId)` is already active now throws an error
+  instead of returning the existing room instance (call `room.leave()` before
+  rejoining). The 3rd `{onJoinError}` callbacks argument and unstructured
+  `JoinError` (`{error, appId, roomId, peerId}`) have been replaced by
   `room.onError(fn, options?)`, which receives a discriminated `RoomError` union
   keyed on `err.code` (`'room-full'`, `'banned'`, `'decrypt-failed'`,
   `'peer-connect-failed'`, `'relay-failed'`, `'identity-failed'`,
@@ -122,7 +134,9 @@ assignment (`room.on* = fn`) or config-object callbacks:
 - **`StateChangeContext<T>` (`makeState`) & new `makeUserState`**:
   `room.makeState(namespace, initialValue?, config?)` and
   `room.makeUserState(namespace, initialValue?, config?)` are now synchronous
-  core `Room` methods (`initialValue` defaults to `null`). Without `roles()`,
+  core `Room` methods (`initialValue` defaults to `null`), and `.set()` /
+  `.clear()` apply optimistically to local `get()` / `onChange` synchronously
+  while coalescing wire signing and broadcasts over 40 ms. Without `roles()`,
   `makeState` is open to any room member; when `roles()` is in `use`,
   `makeState` defaults to `roles: ['admin']` (pass `roles: '*'` to opt a
   namespace back into open member writes). `state.onChange((value, ctx) => ...)`
@@ -319,7 +333,7 @@ const peers = room.getPeers() // { [peerId]: { userId, connection, direct, hops,
 
 ---
 
-### 5. Relay Connectivity Control (`setRelayConnectivity`)
+### 5. Relay Connectivity Control, Lifecycle & `ws-relay` Packaging
 
 `relayConfig.manualReconnection`, `pauseRelayReconnection()`, and
 `resumeRelayReconnection()` have been replaced by a single process-wide
@@ -332,6 +346,17 @@ watcher; `'auto'` re-attaches it:
 - `resumeRelayReconnection()` → `setRelayConnectivity('online')`
 - `manualReconnection: true` alone (ignoring browser `online`/`offline` events)
   → call `setRelayConnectivity('online')` once at startup
+
+Shared WebSocket relays (`ws-relay`, `nostr`, `torrent`) and MQTT clients now
+reference-count active rooms: sockets remain open (with ref'd reconnect timers
+for always-on Node peers) while at least one room is active, and close
+automatically once the last active room calls `room.leave()` (re-opening
+transparently on a subsequent `joinRoom()`).
+
+In `@trystero-p2p/ws-relay`, `ws` is now an optional `peerDependency` required
+only when importing `@trystero-p2p/ws-relay/server` on Node (`npm i ws`), and
+`createWsRelayServer` throws a `RangeError` if `maxMessagesPerSecond <= 0` or
+`maxBurstMessages <= 0` (pass `Infinity` to disable rate limiting).
 
 ---
 
@@ -459,8 +484,13 @@ tableState.onChange((value, {prev, userId}) => {
 
 await room.ready
 
-// Inspect current roles when updating your UI
+// Inspect current roles or subscribe to live role grants/revocations
 const myRoles = room.getRoles()
+room.onRoleChange(({userId, roles, local}) => {
+  if (local) {
+    console.log('My roles updated:', roles)
+  }
+})
 ```
 
 ---
@@ -482,7 +512,7 @@ import {
   createUserIdentity,
   exportUserIdentity,
   importUserIdentity
-} from '@trystero-p2p/nostr'
+} from 'trystero'
 
 const room = joinRoom(
   {
@@ -505,10 +535,11 @@ const room = joinRoom(
 #### B. Server-Side Admin
 
 Create a user identity with `await createUserIdentity()` and store its exported
-`userKey` (`exportUserIdentity(identity)`) securely on your backend. Restore it
-with `const serverIdentity = await importUserIdentity(savedUserKey)` and pass
-`identity: serverIdentity` when the backend joins the room with an RTC polyfill.
-Guests can trust its `userId` on a fixed room name using
+`trystero_uk_...` key string
+(`const savedUserKey = exportUserIdentity(identity)`) securely on your backend.
+Restore it with `const serverIdentity = await importUserIdentity(savedUserKey)`
+and pass `identity: serverIdentity` when the backend joins the room with an RTC
+polyfill. Guests can trust its `userId` on a fixed room name using
 `use: [roles({admins: [serverIdentity.userId]})]`, or use a self-certifying room
 ID (`` `${baseRoomId}~${serverIdentity.userId}` ``) along with `use: [roles()]`.
 

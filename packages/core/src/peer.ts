@@ -15,7 +15,12 @@ import {
   unrefTimer,
   warn
 } from './utils'
-import type {BaseRoomConfig, PeerHandle, PeerHandlers, Signal} from './types'
+import type {
+  BaseRoomConfig,
+  PeerHandle,
+  PeerHandlers,
+  Signal
+} from './internal-types'
 
 const iceTimeout = 15_000
 const iceCandidateSettleMs = 150

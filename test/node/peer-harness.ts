@@ -1,9 +1,20 @@
 import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
+import type {
+  InternalRoomContext,
+  KernelRolesProvider,
+  KernelScaleProvider,
+  PeerHandle
+} from '../../packages/core/src/internal-types.ts'
+import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
+import {
+  base62Alphabet,
+  pluginSlotSymbol
+} from '../../packages/core/src/primitives.ts'
 import createRoom from '../../packages/core/src/room.ts'
 import type {
-  PeerHandle,
   Room,
+  RoomPlugin,
   UserIdentity
 } from '../../packages/core/src/types.ts'
 import {internalActionPrefix} from '../../packages/core/src/utils.ts'
@@ -549,7 +560,7 @@ export const linkedActions = (maxReceiveBytes?: number) => {
       disconnected = true
       left.clearPeer(id, error)
     },
-    getPeer: () => toRight as never,
+    getTransport: () => createDirectPeerTransport(toRight as never),
     getPeerIds: () => ['right'],
     canReceiveFromPeer: () => !disconnected
   })
@@ -558,7 +569,7 @@ export const linkedActions = (maxReceiveBytes?: number) => {
       disconnected = true
       right.clearPeer(id, error)
     },
-    getPeer: () => toLeft as never,
+    getTransport: () => createDirectPeerTransport(toLeft as never),
     getPeerIds: () => ['left'],
     canReceiveFromPeer: () => !disconnected,
     ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes})
@@ -719,3 +730,146 @@ export const connectVerifiedPeers = (
   regMap.get(idB)!(link.peerB, idA)
   return link
 }
+
+export const higherPeerId = (selfId: string): string => {
+  for (let i = 0; i < selfId.length; i++) {
+    const idx = base62Alphabet.indexOf(selfId[i]!)
+    if (idx >= 0 && idx < base62Alphabet.length - 1) {
+      return selfId.slice(0, i) + base62Alphabet[idx + 1]! + selfId.slice(i + 1)
+    }
+  }
+  throw new Error(`cannot compute peerId higher than ${selfId}`)
+}
+
+export const lowerPeerId = (selfId: string): string => {
+  for (let i = 0; i < selfId.length; i++) {
+    const idx = base62Alphabet.indexOf(selfId[i]!)
+    if (idx > 0) {
+      return selfId.slice(0, i) + base62Alphabet[idx - 1]! + selfId.slice(i + 1)
+    }
+  }
+  throw new Error(`cannot compute peerId lower than ${selfId}`)
+}
+
+export const makeTestPluginSlot = <
+  TName extends 'roles' | 'scale',
+  TApi extends Record<string, unknown> = Record<string, never>
+>(
+  kind: TName,
+  setupApi: (
+    kernel: InternalRoomContext,
+    effectiveRoomIdP?: Promise<string>
+  ) => TApi,
+  options: {
+    selfAsAdmin?: boolean
+    provider?: Partial<KernelRolesProvider & KernelScaleProvider>
+  } = {}
+): RoomPlugin<TName, TApi> =>
+  ({
+    name: kind,
+    [pluginSlotSymbol]:
+      kind === 'roles'
+        ? {
+            kind: 'roles' as const,
+            selfAsAdmin: Boolean(options.selfAsAdmin),
+            setup: (
+              kernel: InternalRoomContext,
+              effectiveRoomIdP?: Promise<string>
+            ) => ({
+              provider: {
+                isAuthorityResolved: () => true,
+                getEffectiveRoomId: () => kernel.getRoomId(),
+                getPeerRoles: () => [],
+                isPeerBanned: () => false,
+                getBanReason: () => undefined,
+                getLocalActionCert: async () => null,
+                authorizePeerAction: () => true,
+                getStateWriteCert: async () => ({cert: null, roles: []}),
+                verifyStateRecordRoles: async () => ({valid: true, roles: []}),
+                onPeerDescriptorCert: () => {},
+                getAuthorityInfo: async () => ({
+                  userId: (await kernel.getLocalUserIdentity()).userId,
+                  roomId: kernel.getRoomId(),
+                  baseRoomId: kernel.initialRoomId,
+                  isAdmin: false,
+                  roles: []
+                }),
+                ...(options.provider as Partial<KernelRolesProvider>)
+              },
+              api: {
+                grantRole: async () => {},
+                revokeRole: async () => {},
+                getRoles: () => [],
+                onRoleChange: () => () => {},
+                ban: async () => {},
+                unban: async () => {},
+                isBanned: () => false,
+                ...setupApi(kernel, effectiveRoomIdP)
+              } as never
+            })
+          }
+        : {
+            kind: 'scale' as const,
+            setup: (kernel: InternalRoomContext) => ({
+              provider: {
+                isDirectPeer: () => false,
+                isVirtualPeer: () => false,
+                getRoute: () => undefined,
+                getSnapshot: () => ({
+                  peerId: kernel.selfId,
+                  directPeerIds: kernel.getDirectActivePeerIds(),
+                  roomPeerIds: kernel.getActivePeerIds(),
+                  routes: {},
+                  stats: {
+                    messagesSent: 0,
+                    messagesRelayed: 0,
+                    messagesReceived: 0,
+                    duplicatesDropped: 0,
+                    signatureFailures: 0,
+                    directMediaConnections: 0
+                  }
+                }),
+                handleFrame: () => false,
+                addDirectPeer: () => {},
+                removeDirectPeer: () => {},
+                prepareMediaPeer: async () => {
+                  throw new Error('peer disconnected')
+                },
+                setPeerMediaPinned: () => {},
+                broadcastInline: () => false,
+                requireDirectPeer: () => {},
+                notePeerDiscovered: () => false,
+                shouldConnectPeer: () => true,
+                getTargetNeighbors: () => new Set<string>(),
+                setOnTargetsChanged: () => {},
+                announceLeave: async () => {},
+                destroy: () => {},
+                getPeerUserId: () => undefined,
+                setPeerSignPublicKey: () => {},
+                setLocalRoleCertificate: () => {},
+                markPeerBanned: () => {},
+                unmarkPeerBanned: () => {},
+                isPeerBanned: () => false,
+                registerActionAuthority: () => {},
+                ...(options.provider as Partial<KernelScaleProvider>)
+              },
+              api: {
+                getTopology: () => ({
+                  peerId: kernel.selfId,
+                  directPeerIds: kernel.getDirectActivePeerIds(),
+                  roomPeerIds: kernel.getActivePeerIds(),
+                  routes: {},
+                  stats: {
+                    messagesSent: 0,
+                    messagesRelayed: 0,
+                    messagesReceived: 0,
+                    duplicatesDropped: 0,
+                    signatureFailures: 0,
+                    directMediaConnections: 0
+                  }
+                }),
+                ...setupApi(kernel)
+              } as never
+            })
+          }
+  }) as unknown as RoomPlugin<TName, TApi>
