@@ -21,7 +21,8 @@ import {
   computeShortestPathRoutes,
   computeTargetNeighbors,
   defaultMinConnections,
-  deriveMaxHops
+  deriveMaxHops,
+  isExcludedPeer
 } from './topology'
 
 const maxDiscoveredCandidates = 512
@@ -88,6 +89,7 @@ export type OverlayRouter = {
   clearCapacityRejected: (peerId?: string) => void
   ensureOriginVirtualPeer: (origin: string, fromPeerId: string) => boolean
   recomputeTopologyAndRoutes: () => void
+  deactivateVirtualPeerNow: (peerId: string, reason: Error) => void
   evictVirtualPeerNow: (peerId: string, reason: Error) => void
   quarantinePeer: (peerId: string) => void
   clearQuarantined: (peerId: string) => void
@@ -470,27 +472,26 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     destPeerId: string,
     excludePeerIds?: string | ReadonlySet<string>
   ): string | undefined => {
-    const isExcluded = (id: string): boolean =>
-      excludePeerIds === undefined
-        ? false
-        : typeof excludePeerIds === 'string'
-          ? id === excludePeerIds
-          : excludePeerIds.has(id)
-
-    if (!isExcluded(destPeerId) && isPeerUsable(getDirectPeer(destPeerId))) {
+    if (
+      !isExcludedPeer(destPeerId, excludePeerIds) &&
+      isPeerUsable(getDirectPeer(destPeerId))
+    ) {
       return destPeerId
     }
     const route = routes[destPeerId]
     if (
       route &&
-      !isExcluded(route.nextHop) &&
+      !isExcludedPeer(route.nextHop, excludePeerIds) &&
       isPeerUsable(getDirectPeer(route.nextHop))
     ) {
       return route.nextHop
     }
     const usableDirects: string[] = []
     for (const id of getDirectPeerIds()) {
-      if (!isExcluded(id) && isPeerUsable(getDirectPeer(id))) {
+      if (
+        !isExcludedPeer(id, excludePeerIds) &&
+        isPeerUsable(getDirectPeer(id))
+      ) {
         usableDirects.push(id)
       }
     }
@@ -789,6 +790,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     },
     ensureOriginVirtualPeer,
     recomputeTopologyAndRoutes,
+    deactivateVirtualPeerNow,
     evictVirtualPeerNow,
     quarantinePeer,
     clearQuarantined,

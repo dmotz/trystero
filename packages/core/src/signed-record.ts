@@ -210,17 +210,21 @@ export const createMonotonicClock = (initial = 0): MonotonicClock => {
 }
 
 export const roleCertPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
-  canonTag('role-cert', [
-    cert.v,
-    cert.certId,
-    cert.issuerPubKey,
-    cert.subUserId,
-    cert.appId,
-    cert.roomId,
-    [...cert.roles].sort(),
-    cert.seq,
-    cert.iat
-  ])
+  canonTag(
+    'role-cert',
+    [
+      cert.v,
+      cert.certId,
+      cert.issuerPubKey,
+      cert.subUserId,
+      cert.appId,
+      cert.roomId,
+      [...cert.roles].sort(),
+      cert.seq,
+      cert.iat
+    ],
+    2
+  )
 
 export const invalidRoles = (): {valid: false; roles: string[]} => ({
   valid: false,

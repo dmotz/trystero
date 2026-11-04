@@ -1,5 +1,4 @@
 import {createActionManager} from './actions'
-import {formatSelfCertifyingRoomId} from './authority'
 import {
   createHandshakeManager,
   createIdentityHandshake,
@@ -15,9 +14,6 @@ import {
   validateIdentityConfig
 } from './identity'
 import type {
-  ActionOptions,
-  InternalAction,
-  InternalMessageContext,
   InternalPluginSlot,
   InternalRoomContext,
   KernelRolesProvider,
@@ -58,6 +54,7 @@ import {
   createEventEmitter,
   createWindowCounter,
   entries,
+  formatSelfCertifyingRoomId,
   fromEntries,
   isBrowser,
   isPosSafeInt,
@@ -65,6 +62,7 @@ import {
   logErr,
   mkBannedErr,
   mkErr,
+  mkViolationErr,
   noOp,
   peerBannedErr,
   peerBannedMsg,
@@ -224,7 +222,6 @@ export const createRoomWithBridge = <
     identity
   )
   const hasRolesPlugin = Boolean(rolesSlot)
-  const hasScalePlugin = Boolean(scaleSlot)
 
   const effectiveClientId =
     clientId ??
@@ -242,14 +239,11 @@ export const createRoomWithBridge = <
   let effectiveRoomId = initialRoomId
   let rolesProvider: KernelRolesProvider | null = null
   let scaleProvider: KernelScaleProvider | null = null
-  let scaleTargetsChangedCallback: ((targetPeerIds: string[]) => void) | null =
-    null
   let cachedUsersSnapshot: Readonly<Record<string, UserInfo>> | null = null
   const invalidateUsersSnapshot = (): void => {
     cachedUsersSnapshot = null
   }
   const pendingFlushDestroys = new Set<() => void>()
-  const pendingActionAuthorities = new Map<string, string[]>()
   const cleanups: Array<() => void> = []
 
   const mkEv = <T extends unknown[]>(name: string) => {
@@ -612,7 +606,7 @@ export const createRoomWithBridge = <
       completed = true
       pendingFlushDestroys.delete(finish)
     })
-    if (!completed && finish !== noOp) {
+    if (!completed) {
       pendingFlushDestroys.add(finish)
     }
   }
@@ -682,13 +676,8 @@ export const createRoomWithBridge = <
         ? scaleProvider.broadcastInline(frame, onProgress, signal)
         : false,
     registerActionAuthority: (namespace, roles) => {
-      if (!rolesProvider && !hasRolesPlugin) {
+      if (!rolesProvider) {
         throw requiresRolesErr('action role gating')
-      }
-      if (roles.length > 0) {
-        pendingActionAuthorities.set(namespace, [...roles])
-      } else {
-        pendingActionAuthorities.delete(namespace)
       }
       scaleProvider?.registerActionAuthority(namespace, roles)
     },
@@ -704,6 +693,11 @@ export const createRoomWithBridge = <
     getPeerUserId,
     resolveSendTarget,
     resolveRequestTarget,
+    onUnknownType: type => {
+      if (type === '@_state') {
+        ensureStateManager()
+      }
+    },
     ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes})
   })
 
@@ -717,24 +711,14 @@ export const createRoomWithBridge = <
   } = actionManager
 
   const awaitSelfState = async () => {
-    const [, user] = await all([
-      localEndpointP,
-      resolvedUserIdentityP,
-      roomReadyP
-    ])
-    return [user, await rolesProvider?.getAuthorityInfo()] as const
+    await roomReadyP
+    return [
+      await resolvedUserIdentityP,
+      await rolesProvider?.getAuthorityInfo()
+    ] as const
   }
 
   const [hitStatePenalty, resetStatePenalty] = createWindowCounter(512, 8)
-  const rawStateControlAction = makeInternalAction<DataPayload>('state')
-  let stateControlHandler:
-    | ((data: DataPayload, context: InternalMessageContext) => unknown)
-    | null = null
-
-  rawStateControlAction.onMessage((data, context) => {
-    ensureStateManager()
-    return stateControlHandler?.(data, context)
-  })
 
   const ensureStateManager = (): StateManager =>
     (stateMgr ??= createStateManager({
@@ -767,47 +751,20 @@ export const createRoomWithBridge = <
       isPeerBanned: peerOrUserId =>
         Boolean(peerOrUserId && isPeerBanned(peerOrUserId)),
       getPeerRoles: peerOrUserId => getPeerRoles(peerOrUserId),
-      makeInternalAction: <T extends DataPayload = DataPayload>(
-        namespace: string,
-        options?: Partial<ActionOptions>
-      ): InternalAction<T> =>
-        namespace === 'state'
-          ? ({
-              send: rawStateControlAction.send as InternalAction<T>['send'],
-              onReceiveProgress: rawStateControlAction.onReceiveProgress,
-              onReceive: rawStateControlAction.onReceive,
-              onMessage: (handler, listenerOpts) => {
-                if (listenerOpts?.signal?.aborted) {
-                  return noOp
-                }
-                stateControlHandler =
-                  handler as unknown as typeof stateControlHandler
-                const unsub = () => {
-                  if (stateControlHandler === (handler as unknown)) {
-                    stateControlHandler = null
-                  }
-                }
-                listenerOpts?.signal?.addEventListener('abort', unsub, {
-                  once: true
-                })
-                return unsub
-              }
-            } satisfies InternalAction<T>)
-          : makeInternalAction<T>(namespace, options),
+      makeInternalAction,
       onInvalidRecord: fromPeerId => {
         if (!fromPeerId || fromPeerId === localSelfId) {
           return
         }
         if (hitStatePenalty(fromPeerId)) {
           resetStatePenalty(fromPeerId)
-          onPeerError(fromPeerId, mkErr('excessive invalid state records'))
+          onPeerError(
+            fromPeerId,
+            mkViolationErr('excessive invalid state records')
+          )
         }
       }
     }))
-
-  if (hasScalePlugin) {
-    ensureStateManager()
-  }
 
   const removePeerEntry = (
     id: string
@@ -844,8 +801,11 @@ export const createRoomWithBridge = <
   }
 
   const exitPeer = (id: string, peer?: PeerHandle, reason?: Error): void => {
-    const err = toError(reason, peerDisconnectedMsg)
-    const banned = reason === peerBannedErr || err === peerBannedErr
+    const err =
+      reason === undefined
+        ? peerDisconnectedErr
+        : toError(reason, peerDisconnectedMsg)
+    const banned = err === peerBannedErr
     const currentDirect = getDirectPeer(id, true)
 
     if (peer) {
@@ -919,9 +879,6 @@ export const createRoomWithBridge = <
         hs.clearPeer(id, roomLeftErr)
       }
       emitLeave()
-      if (scaleProvider) {
-        await scaleProvider.announceLeave()
-      }
       const leaveTargets = scaleProvider ? getDirectPeerIds(false) : undefined
       const hasOpenPeers =
         peerEntries.size > 0 && (!leaveTargets || leaveTargets.length > 0)
@@ -933,6 +890,11 @@ export const createRoomWithBridge = <
             signal: controller.signal
           })
           .catch(noOp)
+      }
+      if (scaleProvider) {
+        await scaleProvider.announceLeave()
+      }
+      if (hasOpenPeers) {
         await new Promise<void>(res => {
           setTimeout(res, leaveFlushGraceMs)
         })
@@ -1187,11 +1149,8 @@ export const createRoomWithBridge = <
     getAllPeerIds: () => getPeerIds(true),
     isPeerActive,
     getPeerHandle: getDirectPeer,
-    resolveSendTarget,
-    resolveRequestTarget,
     kickPeer: (peerId, reason) => kickPeer(peerId, undefined, reason),
     emitError: emitRoomError,
-    makeAction,
     makeInternalAction,
     deliverRawData: (originPeerId, data) => {
       if (isPeerBanned(originPeerId)) {
@@ -1257,60 +1216,6 @@ export const createRoomWithBridge = <
     onRoomIdChanged: subRoomIdChanged,
     onLeave: subLeave
   }
-
-  let rolesApi: RolesPluginApi | undefined
-  let scaleApi: ScalePluginApi | undefined
-  let pluginSetupError: unknown
-  let hasSetupError = false
-
-  if (rolesSlot) {
-    try {
-      const res = rolesSlot.setup(internalKernel, effectiveRoomIdP)
-      rolesProvider = res.provider
-      rolesApi = res.api
-    } catch (err) {
-      hasSetupError = true
-      pluginSetupError = err
-      failSetup({
-        code: 'plugin-failed',
-        plugin: 'roles',
-        message: toErrorMessage(err, 'roles setup failed'),
-        cause: err
-      })
-    }
-  }
-
-  if (scaleSlot && !hasSetupError) {
-    try {
-      const res = scaleSlot.setup(internalKernel)
-      scaleProvider = res.provider
-      scaleApi = res.api
-      if (scaleTargetsChangedCallback) {
-        scaleProvider.setOnTargetsChanged(scaleTargetsChangedCallback)
-      }
-      for (const [ns, roles] of pendingActionAuthorities) {
-        scaleProvider.registerActionAuthority(ns, roles)
-      }
-    } catch (err) {
-      hasSetupError = true
-      pluginSetupError = err
-      failSetup({
-        code: 'plugin-failed',
-        plugin: 'scale',
-        message: toErrorMessage(err, 'scale setup failed'),
-        cause: err
-      })
-    }
-  }
-
-  const roomReadyP = hasSetupError
-    ? Promise.reject(pluginSetupError)
-    : all([
-        localEndpointP,
-        resolvedUserIdentityP,
-        ...(effectiveRoomIdP ? [effectiveRoomIdP] : [])
-      ]).then(noOp)
-  void roomReadyP.catch(noOp)
 
   const identityHandshake = createIdentityHandshake({
     endpointIdentityP: localEndpointP,
@@ -1412,6 +1317,58 @@ export const createRoomWithBridge = <
     }
   })
 
+  let rolesApi: RolesPluginApi | undefined
+  let scaleApi: ScalePluginApi | undefined
+  let pluginSetupError: unknown
+  let hasSetupError = false
+
+  if (rolesSlot) {
+    try {
+      const res = rolesSlot.setup(internalKernel, effectiveRoomIdP)
+      rolesProvider = res.provider
+      rolesApi = res.api
+    } catch (err) {
+      hasSetupError = true
+      pluginSetupError = err
+      failSetup({
+        code: 'plugin-failed',
+        plugin: 'roles',
+        message: toErrorMessage(err, 'roles setup failed'),
+        cause: err
+      })
+    }
+  }
+
+  if (scaleSlot && !hasSetupError) {
+    try {
+      const res = scaleSlot.setup(internalKernel)
+      scaleProvider = res.provider
+      scaleApi = res.api
+    } catch (err) {
+      hasSetupError = true
+      pluginSetupError = err
+      failSetup({
+        code: 'plugin-failed',
+        plugin: 'scale',
+        message: toErrorMessage(err, 'scale setup failed'),
+        cause: err
+      })
+    }
+  }
+
+  const roomReadyP = hasSetupError
+    ? Promise.reject(pluginSetupError)
+    : all([
+        localEndpointP,
+        resolvedUserIdentityP,
+        ...(effectiveRoomIdP ? [effectiveRoomIdP] : [])
+      ]).then(noOp)
+  void roomReadyP.catch(noOp)
+
+  if (scaleProvider && !hasSetupError) {
+    ensureStateManager()
+  }
+
   const processHandshakeReady = (
     data: HandshakeReadyPayload,
     id: string
@@ -1425,13 +1382,11 @@ export const createRoomWithBridge = <
       }
       if (data.err === roomFullMsg) {
         hs.clearPeer(id, roomFullErr)
-        if (!(getPeerIds(false).length > 0 && isFullForPeer(id))) {
-          emitRoomError({
-            code: 'room-full',
-            peerId: id,
-            message: roomFullMsg
-          })
-        }
+        emitRoomError({
+          code: 'room-full',
+          peerId: id,
+          message: roomFullMsg
+        })
         exitPeer(id, getDirectPeer(id, true), roomFullErr)
         return
       }
@@ -1718,7 +1673,6 @@ export const createRoomWithBridge = <
     hasSetupFailed: () => didReportSetupError,
     getScaleProvider: () => scaleProvider,
     setOnScaleTargetsChanged: cb => {
-      scaleTargetsChangedCallback = cb
       scaleProvider?.setOnTargetsChanged(cb)
     },
     canConnectPeer,

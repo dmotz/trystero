@@ -254,11 +254,7 @@ export const detachConnectedPeer = (
   }
 }
 
-export const clearConnectedPeer = (
-  state: PeerState,
-  _peerId: string,
-  _reason: string
-): void => {
+export const clearConnectedPeer = (state: PeerState): void => {
   if (!state.connectedPeer) {
     return
   }
@@ -604,11 +600,20 @@ export const createSignalHandler = (
       return
     }
 
-    const [peerTopic, offerInfo, localSelfId] = await all([
-      peerTopicOf(peerId),
-      ensureOffer(state, peerId),
-      getSelfId()
-    ])
+    let peerTopic: string
+    let offerInfo: Awaited<ReturnType<typeof ensureOffer>>
+    let localSelfId: string
+    try {
+      ;[peerTopic, offerInfo, localSelfId] = await all([
+        peerTopicOf(peerId),
+        ensureOffer(state, peerId),
+        getSelfId()
+      ])
+    } catch (err) {
+      clearOfferRelayIfPlaceholder(state, relayId)
+      prunePeerStates(peerStates)
+      throw err
+    }
 
     if (!offerInfo) {
       clearOfferRelayIfPlaceholder(state, relayId)
@@ -1115,7 +1120,7 @@ export const createSignalHandler = (
               return
             }
             if (health === 'stale') {
-              clearConnectedPeer(state, peerId, 'message-from-stale-peer')
+              clearConnectedPeer(state)
             } else {
               const nowMs = Date.now()
               if (
@@ -1124,11 +1129,7 @@ export const createSignalHandler = (
               ) {
                 return
               }
-              clearConnectedPeer(
-                state,
-                peerId,
-                'message-from-prolonged-disconnect'
-              )
+              clearConnectedPeer(state)
             }
           }
 

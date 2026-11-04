@@ -60,8 +60,13 @@ void test('Default local identity with IndexedDB: stores non-extractable CryptoK
                   }
                   queueMicrotask(() => {
                     if (idbStore.has(key)) {
+                      const err = new Error('ConstraintError')
+                      addReq.error = err
                       addReq.onerror?.()
-                      queueMicrotask(() => tx.onerror?.())
+                      queueMicrotask(() => {
+                        tx.error = err
+                        tx.onabort?.()
+                      })
                     } else {
                       idbStore.set(key, val)
                       addReq.onsuccess?.()

@@ -17,6 +17,7 @@ import {
   all,
   decodeBytes,
   fromJson,
+  isProtocolViolation,
   noOp,
   peerBannedErr,
   peerDisconnectedErr,
@@ -259,8 +260,7 @@ export const createOverlayManager = ({
       throw err
     }))
 
-  const isOverlayPeerBlocked = (id: string): boolean =>
-    bannedPeers.has(id) || Boolean(router?.isPeerQuarantined(id))
+  const isPeerBanned = (id: string): boolean => bannedPeers.has(id)
 
   const descriptors = createDescriptorStore({
     appId,
@@ -276,12 +276,13 @@ export const createOverlayManager = ({
     loadLocalCryptoIdentity,
     syncSelfIdFromIdentity,
     isDirectPeer: id => directPeers.has(id),
+    isVirtualPeer: id => router.isVirtualPeer(id),
     getDirectPeerIds: () => directPeers.keys(),
     getDirectPeerCount: () => directPeers.size,
     getDiscoveredCandidateCount: () => router.getDiscoveredCandidateCount(),
     computeEffectiveTargets: () => router.computeEffectiveTargets(),
     sendToDirectNeighbor,
-    isPeerBanned: isOverlayPeerBlocked,
+    isPeerBanned,
     recordSignatureFailure: () => {
       stats.signatureFailures++
     },
@@ -317,7 +318,7 @@ export const createOverlayManager = ({
     getDirectPeerCount: () => directPeers.size,
     hasUsableDirectPeer,
     sendToDirectNeighbor,
-    isPeerBanned: isOverlayPeerBlocked,
+    isPeerBanned,
     getActionRequiredRoles: type => actionAuthorities.get(type),
     authorizePeerAction,
     onDeliverData
@@ -457,18 +458,26 @@ export const createOverlayManager = ({
             }
           } else {
             const desc = descriptors.getDescriptor(peerId)
-            if (reason === peerLeftRoomErr) {
-              descriptors.markLeft(peerId, desc?.seq ?? 0)
-            } else if (
-              reason &&
-              reason !== peerBannedErr &&
-              reason !== peerDisconnectedErr
-            ) {
-              router.quarantinePeer(peerId)
+            if (reason === peerLeftRoomErr || reason === peerBannedErr) {
+              if (reason === peerLeftRoomErr) {
+                descriptors.markLeft(peerId, desc?.seq ?? 0)
+              }
+              dataPlane.purgePeerDataState(peerId)
+              router.evictVirtualPeerNow(peerId, reason)
+              router.recomputeTopologyAndRoutes()
+            } else {
+              const violation = isProtocolViolation(reason)
+              if (violation) {
+                router.quarantinePeer(peerId)
+              }
+              router.deactivateVirtualPeerNow(
+                peerId,
+                reason ?? peerDisconnectedErr
+              )
+              if (violation) {
+                router.recomputeTopologyAndRoutes()
+              }
             }
-            dataPlane.purgePeerDataState(peerId)
-            router.evictVirtualPeerNow(peerId, reason ?? peerDisconnectedErr)
-            router.recomputeTopologyAndRoutes()
           }
         }
         return

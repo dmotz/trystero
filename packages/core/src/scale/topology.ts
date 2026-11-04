@@ -151,7 +151,7 @@ const buildUndirectedGraph = (
   return sortedGraph
 }
 
-const isExcludedPeer = (
+export const isExcludedPeer = (
   peerId: string,
   exclude?: string | ReadonlySet<string>
 ): boolean =>

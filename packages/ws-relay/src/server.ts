@@ -47,6 +47,18 @@ export type WsRelayServerOptions = {
   perMessageDeflate?: boolean | Record<string, unknown>
   maxPayload?: number
   skipUTF8Validation?: boolean
+  handleProtocols?: (protocols: Set<string>, request: object) => string | false
+  verifyClient?:
+    | ((info: {origin: string; secure: boolean; req: object}) => boolean)
+    | ((
+        info: {origin: string; secure: boolean; req: object},
+        cb: (
+          res: boolean,
+          code?: number,
+          message?: string,
+          headers?: Record<string, string | string[]>
+        ) => void
+      ) => void)
   onError?: (err: Error) => void
   maxTopicLength?: number
   maxSubscriptionsPerSocket?: number

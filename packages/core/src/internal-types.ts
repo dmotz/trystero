@@ -12,7 +12,6 @@ import type {
   ReplayListenerOptions,
   RoleCertificate,
   RolesPluginApi,
-  Room,
   RoomError,
   RoomPlugin,
   RoomWithPlugins,
@@ -320,17 +319,8 @@ export type InternalRoomContext = {
     peerId: string,
     includePending?: boolean
   ) => PeerHandle | undefined
-  resolveSendTarget: (
-    targets: TargetPeers,
-    includePending?: boolean
-  ) => TargetPeers
-  resolveRequestTarget: (
-    target: string,
-    includePending?: boolean
-  ) => string | undefined
   kickPeer: (peerId: string, reason?: Error) => void
   emitError: (error: KernelRoomErrorInput) => void
-  makeAction: Room['makeAction']
   makeInternalAction: <T extends DataPayload = DataPayload>(
     namespace: string,
     options?: Partial<ActionOptions>

@@ -4,6 +4,10 @@ const defaultFanout = 2
 const defaultPullTimeoutMs = 1_500
 const defaultPeriodicIntervalMs = 15_000
 const defaultMaxPages = 32
+const timeoutCooldownMs = 10_000
+
+export const isValidSyncCursor = (c: unknown): c is string | undefined =>
+  c === undefined || (typeof c === 'string' && c.length <= 512)
 
 const hashWithSeed = (value: string, seed: number): number => {
   let h = (0x811c9dc5 ^ seed) >>> 0
@@ -26,10 +30,9 @@ export type AntiEntropySyncOptions = {
 }
 
 export type AntiEntropySync = {
-  fillFanout: () => void
   pullPeer: (peerId: string, force?: boolean) => void
-  onSyncPage: (fromPeerId: string, nextCursor?: string) => boolean
-  onPeerJoined: (peerId: string, isDirect: boolean, forcePull?: boolean) => void
+  onSyncPage: (fromPeerId: string, nextCursor?: string) => void
+  onPeerJoined: (peerId: string, forcePull?: boolean) => void
   onPeerDisconnected: (peerId: string) => void
   scheduleRepull: () => void
   isPullInFlight: (peerId: string) => boolean
@@ -48,6 +51,7 @@ export const createAntiEntropySync = ({
 }: AntiEntropySyncOptions): AntiEntropySync => {
   const seed = crypto.getRandomValues(new Uint32Array(1))[0]!
   const completedPeers = new Set<string>()
+  const cooldownUntil = new Map<string, number>()
   const inFlightPulls = new Map<
     string,
     {timer: ReturnType<typeof setTimeout>; pages: number}
@@ -64,12 +68,28 @@ export const createAntiEntropySync = ({
     }
   }
 
-  const selectRankedPeers = (): string[] =>
-    getDirectPeers()
-      .filter(isPeerSendable)
+  const isCoolingDown = (peerId: string, now: number): boolean => {
+    const exp = cooldownUntil.get(peerId)
+    if (exp === undefined) {
+      return false
+    }
+    if (now >= exp) {
+      cooldownUntil.delete(peerId)
+      return false
+    }
+    return true
+  }
+
+  const selectRankedPeers = (skipCooldown = true): string[] => {
+    const now = Date.now()
+    return getDirectPeers()
+      .filter(
+        id => isPeerSendable(id) && (!skipCooldown || !isCoolingDown(id, now))
+      )
       .map(id => [id, hashWithSeed(id, seed)] as const)
       .sort((a, b) => a[1] - b[1] || cmpStr(a[0], b[0]))
       .map(([id]) => id)
+  }
 
   const startPull = (peerId: string, cursor?: string, pages = 0): void => {
     if (
@@ -84,6 +104,7 @@ export const createAntiEntropySync = ({
     clearPullTimer(peerId)
     const timer = setTimeout(() => {
       inFlightPulls.delete(peerId)
+      cooldownUntil.set(peerId, Date.now() + timeoutCooldownMs)
       if (!destroyed && completedPeers.size < fanout) {
         fillFanout()
       }
@@ -114,36 +135,34 @@ export const createAntiEntropySync = ({
     if (
       destroyed ||
       !canSync() ||
-      (!force && (completedPeers.has(peerId) || inFlightPulls.has(peerId))) ||
-      (force && inFlightPulls.has(peerId))
+      inFlightPulls.has(peerId) ||
+      (!force && completedPeers.has(peerId))
     ) {
       return
     }
+    cooldownUntil.delete(peerId)
     startPull(peerId)
   }
 
-  const onSyncPage = (fromPeerId: string, nextCursor?: string): boolean => {
+  const onSyncPage = (fromPeerId: string, nextCursor?: string): void => {
     const pull = inFlightPulls.get(fromPeerId)
     if (!pull) {
-      return false
+      return
     }
+    cooldownUntil.delete(fromPeerId)
     if (nextCursor && pull.pages < maxPages) {
       startPull(fromPeerId, nextCursor, pull.pages)
-      return true
+      return
     }
     clearPullTimer(fromPeerId)
     completedPeers.add(fromPeerId)
-    return true
   }
 
-  const onPeerJoined = (
-    peerId: string,
-    isDirect: boolean,
-    forcePull = false
-  ): void => {
-    if (destroyed || !isDirect) {
+  const onPeerJoined = (peerId: string, forcePull = false): void => {
+    if (destroyed) {
       return
     }
+    cooldownUntil.delete(peerId)
     completedPeers.delete(peerId)
     if (forcePull) {
       pullPeer(peerId, true)
@@ -153,6 +172,7 @@ export const createAntiEntropySync = ({
 
   const onPeerDisconnected = (peerId: string): void => {
     clearPullTimer(peerId)
+    cooldownUntil.delete(peerId)
     completedPeers.delete(peerId)
     if (!destroyed && completedPeers.size < fanout) {
       fillFanout()
@@ -179,7 +199,10 @@ export const createAntiEntropySync = ({
           if (destroyed || !canSync() || inFlightPulls.size > 0) {
             return
           }
-          const ranked = selectRankedPeers()
+          let ranked = selectRankedPeers()
+          if (ranked.length === 0) {
+            ranked = selectRankedPeers(false)
+          }
           if (ranked.length === 0) {
             return
           }
@@ -196,11 +219,11 @@ export const createAntiEntropySync = ({
     }
     inFlightPulls.forEach(pull => resetTimer(pull.timer))
     inFlightPulls.clear()
+    cooldownUntil.clear()
     completedPeers.clear()
   }
 
   return {
-    fillFanout,
     pullPeer,
     onSyncPage,
     onPeerJoined,

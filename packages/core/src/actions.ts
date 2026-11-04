@@ -201,6 +201,7 @@ export type ActionManagerDeps = {
     target: string,
     includePending?: boolean
   ) => string | undefined
+  onUnknownType?: (type: string) => void
 }
 
 export const createActionManager = (
@@ -246,6 +247,7 @@ export const createActionManager = (
     canReceiveFromPeer: deps.canReceiveFromPeer,
     onPeerError: deps.onPeerError,
     ...(deps.broadcastInline ? {broadcastInline: deps.broadcastInline} : {}),
+    ...(deps.onUnknownType ? {onUnknownType: deps.onUnknownType} : {}),
     ...(deps.maxReceiveBytes === undefined
       ? {}
       : {maxReceiveBytes: deps.maxReceiveBytes})
@@ -589,7 +591,7 @@ export const createActionManager = (
         return typeof authRes === 'boolean'
           ? afterAuth(authRes)
           : authRes.then(afterAuth, () => false)
-      }, !hasUserGate)
+      })
     }
 
     const [setReceiveGate, getReceiveGate, clearReceiveGate] =

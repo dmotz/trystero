@@ -1,4 +1,4 @@
-import {createAntiEntropySync} from './anti-entropy'
+import {createAntiEntropySync, isValidSyncCursor} from './anti-entropy'
 import {
   compactPubToJwk,
   getVerifiedPubKeyRecord,
@@ -81,8 +81,6 @@ const maxPullPages = 16
 const maxSyncChunkBytes: number = 180 * 1024
 const maxHandshakeStateBytes: number = 60 * 1024
 const handshakeStateDeadlineMs = 400
-const syncPullFanout = 2
-const syncPullTimeoutMs = 1_500
 const offlineStagingTtlMs = 5_000
 const maxFlushRetries = 8
 const tombstoneBytes = 32
@@ -518,6 +516,7 @@ export const createStateManager = ({
     512
   )
   const [hitSyncQuota] = createWindowCounter(512, 96)
+  const [hitFwdSyncQuota] = createWindowCounter(512, 96)
   const stagedHandshake = new Map<string, StagedUserItem[]>()
   const sentHandshakeSigs = new Map<string, Set<string>>()
   const pendingOfflineUserRecs = createBoundedCache<
@@ -591,7 +590,7 @@ export const createStateManager = ({
       if (slot.kind !== 'u' || slot === target) {
         continue
       }
-      if (slot.optimistic) {
+      if (slot.optimistic && uid === getLocalUserId()) {
         count++
         bytes += slot.optimistic.bytes
         continue
@@ -739,11 +738,16 @@ export const createStateManager = ({
       return 'invalid'
     }
     const now = Date.now()
+    const existingWall =
+      slots
+        .get(`${rec.k}:${rec.ns}`)
+        ?.entries.get(rec.k === 's' ? '' : rec.userId)?.rec.hlc[0] ?? 0
     const maxFutureWall = Math.min(
       now + defaultMaxClockSkewMs,
       Math.max(
         now + stateMaxFutureSkewMs,
-        rec.cert ? rec.cert.iat + stateMaxFutureSkewMs : 0
+        rec.cert ? rec.cert.iat + stateMaxFutureSkewMs : 0,
+        existingWall ? existingWall + 1_000 : 0
       )
     )
     if (rec.hlc[0] > maxFutureWall || (rec.cert && rec.hlc[0] < rec.cert.iat)) {
@@ -794,6 +798,15 @@ export const createStateManager = ({
       now - prev.seenAt < offlineStagingTtlMs &&
       compareStateRecords(rec, prev.rec) <= 0
     ) {
+      return
+    }
+    let totalBytes = bytes
+    for (const [ns, entry] of byNs) {
+      if (ns !== slot.namespace) {
+        totalBytes += entry.bytes
+      }
+    }
+    if (totalBytes > maxUserStateBytesPerUser) {
       return
     }
     byNs.set(slot.namespace, {
@@ -1125,8 +1138,6 @@ export const createStateManager = ({
     isDirectPeer(peerId) && !isPeerBanned(peerId)
 
   const antiEntropy = createAntiEntropySync({
-    fanout: syncPullFanout,
-    pullTimeoutMs: syncPullTimeoutMs,
     maxPages: maxPullPages,
     canSync: () => Boolean(stateAction) && slots.size > 0,
     getDirectPeers: getDirectPeerIds,
@@ -1189,10 +1200,7 @@ export const createStateManager = ({
         if (hitSyncQuota(fromPeerId) || !isObj(msg.d)) {
           return
         }
-        if (
-          msg.c !== undefined &&
-          (typeof msg.c !== 'string' || msg.c.length > 512)
-        ) {
+        if (!isValidSyncCursor(msg.c)) {
           onInvalidRecord?.(fromPeerId)
           return
         }
@@ -1290,7 +1298,7 @@ export const createStateManager = ({
 
       if (msg.t === 'sync') {
         if (
-          hitSyncQuota(fromPeerId) ||
+          (msg.f ? hitFwdSyncQuota : hitSyncQuota)(fromPeerId) ||
           !isObj(msg.p) ||
           !Array.isArray(msg.r)
         ) {
@@ -1298,8 +1306,7 @@ export const createStateManager = ({
         }
         if (
           msg.r.length > maxSyncRecordsPerBatch ||
-          (msg.n !== undefined &&
-            (typeof msg.n !== 'string' || msg.n.length > 512))
+          !isValidSyncCursor(msg.n)
         ) {
           onInvalidRecord?.(fromPeerId)
           return
@@ -1399,12 +1406,18 @@ export const createStateManager = ({
   }
 
   const waitForSlotPace = (slot: Slot): Promise<void> | void => {
-    if (slot.skipNextPace || slot.lastBroadcastAt <= 0 || destroyed) {
+    if (
+      slot.skipNextPace ||
+      !Number.isFinite(slot.lastBroadcastAt) ||
+      destroyed
+    ) {
       slot.skipNextPace = false
       return
     }
-    const waitMs =
-      minSlotBroadcastIntervalMs - (Date.now() - slot.lastBroadcastAt)
+    const waitMs = Math.min(
+      minSlotBroadcastIntervalMs,
+      minSlotBroadcastIntervalMs - (performance.now() - slot.lastBroadcastAt)
+    )
     if (waitMs <= 0) {
       return
     }
@@ -1604,18 +1617,19 @@ export const createStateManager = ({
                 defaultMaxClockSkewMs,
                 Math.max(
                   stateMaxFutureSkewMs,
-                  authCert ? authCert.iat - Date.now() + 1_000 : 0
+                  authCert ? authCert.iat - Date.now() + 1_000 : 0,
+                  curRaw ? curRaw.rec.hlc[0] - Date.now() + 1_000 : 0
                 )
               )
 
-              const nextHlcVal = clock.nextHlc(
-                slot.namespace,
-                minHlcVal,
-                allowedSkewMs
-              )
-              slot.inFlightHlc = nextHlcVal
               let rec: AuthoritativeStateRecord
               try {
+                const nextHlcVal = clock.nextHlc(
+                  slot.namespace,
+                  minHlcVal,
+                  allowedSkewMs
+                )
+                slot.inFlightHlc = nextHlcVal
                 rec = await signStateRecord(
                   readyUser.sign,
                   readyUser.signPubJwk,
@@ -1668,6 +1682,7 @@ export const createStateManager = ({
                   remainingOps = accepted
                   continue
                 }
+                rollbackOptimisticIfIdle(slot, uid)
                 for (const op of accepted) {
                   op.resolve()
                 }
@@ -1696,7 +1711,7 @@ export const createStateManager = ({
                   wasCurrentOptimistic || wasStaleOptimistic
                 )
               ) {
-                slot.lastBroadcastAt = Date.now()
+                slot.lastBroadcastAt = performance.now()
                 broadcastLiveRecord(rec)
               }
               for (const op of accepted) {
@@ -1748,7 +1763,10 @@ export const createStateManager = ({
       return 'noop'
     }
     const localUid = getLocalUserId()
-    if (localUid && isPeerBanned(localUid)) {
+    if (!localUid) {
+      return 'defer'
+    }
+    if (isPeerBanned(localUid)) {
       return mkErr(
         `${insufficientAuthPrefix} to update state "${slot.namespace}"`
       )
@@ -1764,7 +1782,7 @@ export const createStateManager = ({
             `${insufficientAuthPrefix} to update state "${slot.namespace}": requires [${slot.requiredRoles.join(', ')}]`
           )
     }
-    if (!localUid || !rp.isAuthorityResolved()) {
+    if (!rp.isAuthorityResolved()) {
       return 'defer'
     }
     const held = rp.getPeerRoles(localUid)
@@ -1936,7 +1954,7 @@ export const createStateManager = ({
     flushPromise: null,
     stepPromise: null,
     inFlightHlc: null,
-    lastBroadcastAt: 0,
+    lastBroadcastAt: -Infinity,
     skipNextPace: false,
     wakePace: null
   })
@@ -2456,7 +2474,7 @@ export const createStateManager = ({
 
     if (isDirect && stateAction && slots.size > 0) {
       sendLocalRecordsToPeer(peerId, alreadySent)
-      antiEntropy.onPeerJoined(peerId, true, isScaleActive())
+      antiEntropy.onPeerJoined(peerId, isScaleActive())
     }
   }
 

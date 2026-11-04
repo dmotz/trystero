@@ -8,21 +8,9 @@ import type {
 } from './internal-types'
 import createStrategy from './strategy'
 import type {JoinRoomConfig} from './types'
-import {mkErr, noOp} from './utils'
+import {noOp} from './utils'
 
 const defaultSteadyAnnounceIntervalMs = 60_000
-const topicMissingErr = (what: string): Error =>
-  mkErr(`topic strategy missing ${what}`)
-
-const requirePeerId = <TConfig extends BaseRoomConfig>(
-  context: StrategyContext<TConfig>
-): string => {
-  if (!context.peerId) {
-    throw topicMissingErr('resolved peerId')
-  }
-
-  return context.peerId
-}
 
 const makeTopicContext = <
   TConfig extends BaseRoomConfig,
@@ -45,7 +33,7 @@ const makeTopicContext = <
   roomId: context.roomId,
   rootTopic,
   selfTopic,
-  peerId: requirePeerId(context)
+  peerId: context.peerId
 })
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
@@ -126,7 +114,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         relay,
         rootTopic,
         {
-          peerId: requirePeerId(context)
+          peerId: context.peerId
         },
         makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )

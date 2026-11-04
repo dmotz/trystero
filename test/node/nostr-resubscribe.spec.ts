@@ -157,6 +157,22 @@ void test(
     const isReqFrame = (frame: unknown): frame is string =>
       typeof frame === 'string' && frame.startsWith('["REQ"')
 
+    const waitForSocketFrame = async (
+      socket: ControlledSocket,
+      predicate: (frame: string) => boolean,
+      timeoutMs = 5_000
+    ): Promise<void> => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        drainTimers()
+        if (socket.sent.some(predicate)) {
+          return
+        }
+        await tick(10)
+      }
+      drainTimers()
+    }
+
     let room: ReturnType<typeof joinRoom> | undefined
     try {
       room = joinRoom(
@@ -176,9 +192,7 @@ void test(
       const first = sockets[0]!
       first.open()
       // Let the subscribe chain resolve and queue the batched flushBatch.
-      await tick(50)
-      drainTimers()
-      await tick(50)
+      await waitForSocketFrame(first, isReqFrame)
 
       const reqOnFirst = first.sent.filter(isReqFrame)
       assert.ok(
@@ -194,7 +208,7 @@ void test(
         'expected a reconnect to be scheduled after the socket closed'
       )
       drainTimers()
-      await tick(50)
+      await tick(20)
 
       assert.equal(
         sockets.length,
@@ -204,9 +218,7 @@ void test(
 
       const second = sockets[1]!
       second.open()
-      await tick(50)
-      drainTimers()
-      await tick(50)
+      await waitForSocketFrame(second, frame => frame.startsWith('["EVENT"'))
 
       const reqOnSecond = second.sent.filter(isReqFrame)
       assert.ok(

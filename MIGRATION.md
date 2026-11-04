@@ -11,7 +11,7 @@ eliminates subtle security and topology footguns.
 
 > **Wire-protocol compatibility:** Trystero **0.27.0** uses a new authenticated
 > wire protocol (domain-separated self-certifying `peerId`/`userId` handshakes,
-> compact P-256 keys, tuple HLC state records, and v2 action envelopes) and is
+> compact P-256 keys, tuple HLC state records, and v3 action wire frames) and is
 > **not wire-compatible with `0.26.x` peers**. Upgrade all peers communicating
 > in the same room together.
 

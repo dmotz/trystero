@@ -144,6 +144,7 @@ export type TopologySnapshot = {
 export type UserIdentity = {
   userId: string
   signPubJwk: JsonWebKey
+  /** Signs `payload` with ECDSA P-256 SHA-256, returning a 64-byte IEEE P1363 (`r || s`) signature. */
   sign: (payload: Uint8Array) => MaybePromise<Uint8Array>
   persistence?: ResolvedIdentityPersistence
 }

@@ -221,6 +221,19 @@ export const strToNum = (
   limit: number = Number.MAX_SAFE_INTEGER
 ): number => hash32(str) % limit
 
+const protocolViolations = /*@__PURE__*/ new WeakSet<Error>()
+
+export const markProtocolViolation = (err: Error): Error => {
+  protocolViolations.add(err)
+  return err
+}
+
+export const isProtocolViolation = (err: unknown): boolean =>
+  err instanceof Error && protocolViolations.has(err)
+
+export const mkViolationErr = (msg: string): Error =>
+  markProtocolViolation(mkErr(msg))
+
 export const userIdRegex: RegExp = /*@__PURE__*/ new RegExp(
   `^[0-9A-Za-z]{${userIdLength}}$`
 )
@@ -228,6 +241,18 @@ export const userIdRegex: RegExp = /*@__PURE__*/ new RegExp(
 export const selfCertifyingRoomRegex: RegExp = /*@__PURE__*/ new RegExp(
   `^(.+)~([0-9A-Za-z]{${userIdLength}})$`
 )
+
+export const splitSelfCertRoom = (
+  roomId: string
+): readonly [base: string, uid: string | null] => {
+  const match = selfCertifyingRoomRegex.exec(roomId)
+  return match?.[1] && match[2] ? [match[1], match[2]] : [roomId, null]
+}
+
+export const formatSelfCertifyingRoomId = (
+  base: string,
+  userId: string
+): string => `${splitSelfCertRoom(base)[0]}~${userId}`
 
 export const toPayloadSource = (
   data: DataPayload

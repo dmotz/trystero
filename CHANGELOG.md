@@ -105,14 +105,19 @@
 - 📦 **Tree-shaking & `"sideEffects": false`** - enabled `"sideEffects": false`
   across all packages and removed prebuilt `.min.js` release bundles and the
   experimental `@trystero-p2p/ipfs` package in favor of tree-shaking bundlers
-  (while retaining single-entry ESM CDN compatibility).
+  (while retaining single-entry ESM CDN compatibility). Because core now ships
+  built-in self-certifying identity handshakes, multi-tab presence, and signed
+  `makeState` / `makeUserState`, the base `joinRoom`-only bundle increases from
+  `0.26.0` to ~41 KB Brotli (~46 KB gzip) for lightweight strategies, while
+  `roles()` and `scale()` remain opt-in and tree-shake out when unused.
+  TypeScript consumers now require **TypeScript >= 5.0**.
 
 ### ⚠️ Breaking changes
 
 The wire protocol has changed significantly (domain-separated self-certifying
 `peerId`/`userId` handshakes, compact P-256 keys, tuple HLC state records, and
-v2 action envelopes) and is **not compatible with `0.26.x` peers**. Upgrade all
-peers communicating in the same room together.
+v3 action wire frames) and is **not compatible with `0.26.x` peers**. Upgrade
+all peers communicating in the same room together.
 
 The top-level synchronous `selfId` export has been removed so that endpoint
 identities are generated lazily on first `joinRoom()` call via WebCrypto

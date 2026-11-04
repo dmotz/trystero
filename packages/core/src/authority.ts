@@ -1,4 +1,4 @@
-import {createAntiEntropySync} from './anti-entropy'
+import {createAntiEntropySync, isValidSyncCursor} from './anti-entropy'
 import {
   compactPubToJwk,
   getVerifiedPubKeyRecord,
@@ -41,6 +41,7 @@ import {
   createBoundedCache,
   createEventEmitter,
   createWindowCounter,
+  formatSelfCertifyingRoomId,
   insufficientAuthPrefix,
   isObj,
   isPosSafeInt,
@@ -50,17 +51,18 @@ import {
   lockMethods,
   mkBannedErr,
   mkErr,
+  mkViolationErr,
   noOp,
   peerBannedErr,
-  selfCertifyingRoomRegex,
+  splitSelfCertRoom,
   validateRoleCertificateShape
 } from './utils'
 
+export {formatSelfCertifyingRoomId}
+
 const authSyncPageSize = 256
 const maxStoredTargets = 1_024
-export const maxStoredModerations = 4_096
-const authPullFanout = 2
-const authPullTimeoutMs = 1_500
+const maxStoredModerations = 4_096
 
 const frozenEmptyRoles: string[] = Object.freeze([] as string[]) as string[]
 
@@ -87,24 +89,12 @@ const sig8 = (item: {sig: string}): string => item.sig.slice(0, 8)
 const rootAdminProtectErr = (scope: string, verb: string): Error =>
   mkErr(`${scope}: cannot ${verb} a root admin`)
 
-const splitSelfCertRoom = (
-  roomId: string
-): readonly [base: string, uid: string | null] => {
-  const match = selfCertifyingRoomRegex.exec(roomId)
-  return match?.[1] && match[2] ? [match[1], match[2]] : [roomId, null]
-}
-
 export const parseSelfCertifyingRoomId = (
   roomId: string
 ): {baseRoomId: string; userId: string | null} => {
   const [baseRoomId, userId] = splitSelfCertRoom(roomId)
   return {baseRoomId, userId}
 }
-
-export const formatSelfCertifyingRoomId = (
-  base: string,
-  userId: string
-): string => `${splitSelfCertRoom(base)[0]}~${userId}`
 
 const normalizeRolesConfig = (config?: RolesConfig): RolesConfig => {
   if (!isObj(config)) {
@@ -805,11 +795,15 @@ export const createRoomAuthority = ({
     if (prev && (prev.sig === cert.sig || compareCertOrder(cert, prev) <= 0)) {
       return false
     }
-    if (!prev && !evictOldestTargetIfNeeded(certs, maxStoredTargets)) {
-      return false
-    }
     if (!(await verifyCertCached(cert)).valid) {
       return failSig(fromPeerId)
+    }
+    const cur = certs.get(cert.subUserId)
+    if (cur && (cur.sig === cert.sig || compareCertOrder(cert, cur) <= 0)) {
+      return false
+    }
+    if (!cur && !evictOldestTargetIfNeeded(certs, maxStoredTargets)) {
+      return false
     }
     clock.observe(cert.iat)
     certs.set(cert.subUserId, cert)
@@ -831,29 +825,29 @@ export const createRoomAuthority = ({
       return failSig(fromPeerId)
     }
     const roleKey = rev.role ?? '*'
-    const existingMap = revocationsByTarget.get(rev.targetUserId)
-    const prev = existingMap?.get(roleKey)
+    const prev = revocationsByTarget.get(rev.targetUserId)?.get(roleKey)
     if (
       prev &&
       (prev.sig === rev.sig || compareRevocationOrder(rev, prev) <= 0)
     ) {
       return false
     }
-    if (
-      !existingMap &&
-      !evictOldestTargetIfNeeded(revocationsByTarget, maxStoredTargets)
-    ) {
-      return false
-    }
     if (!(await verifyRootAdminRecord(rev, revocationCanonicalPayload(rev)))) {
       return failSig(fromPeerId)
     }
-    clock.observe(rev.ts)
     let targetMap = revocationsByTarget.get(rev.targetUserId)
+    const cur = targetMap?.get(roleKey)
+    if (cur && (cur.sig === rev.sig || compareRevocationOrder(rev, cur) <= 0)) {
+      return false
+    }
     if (!targetMap) {
+      if (!evictOldestTargetIfNeeded(revocationsByTarget, maxStoredTargets)) {
+        return false
+      }
       targetMap = new Map()
       revocationsByTarget.set(rev.targetUserId, targetMap)
     }
+    clock.observe(rev.ts)
     targetMap.set(roleKey, rev)
     return true
   }
@@ -872,8 +866,15 @@ export const createRoomAuthority = ({
     ) {
       return false
     }
+    if (!(await verifyRootAdminRecord(mod, moderationCanonicalPayload(mod)))) {
+      return failSig(fromPeerId)
+    }
+    const cur = moderations.get(mod.targetUserId)
+    if (cur && (cur.sig === mod.sig || compareModerationOrder(mod, cur) <= 0)) {
+      return false
+    }
     if (
-      !prev &&
+      !cur &&
       !evictOldestTargetIfNeeded(
         moderations,
         maxStoredModerations,
@@ -882,11 +883,8 @@ export const createRoomAuthority = ({
     ) {
       return false
     }
-    if (!(await verifyRootAdminRecord(mod, moderationCanonicalPayload(mod)))) {
-      return failSig(fromPeerId)
-    }
     clock.observe(mod.ts)
-    const wasBanned = prev?.op === 'ban'
+    const wasBanned = cur?.op === 'ban'
     moderations.set(mod.targetUserId, mod)
     if (!wasBanned && mod.op === 'ban') {
       return 'ban'
@@ -1534,6 +1532,7 @@ export const roles = (
   ): {provider: KernelRolesProvider; api: RolesPluginApi} => {
     const [hitAuthFailure, , overAuthFailure] = createWindowCounter(512, 8)
     const [hitAuthSyncQuota] = createWindowCounter(512, 96)
+    const [hitAuthFwdSyncQuota] = createWindowCounter(512, 96)
     const scaleProv = () => kernel.getScaleProvider()
     let destroyed = false
     let didReportSelfBan = false
@@ -1547,7 +1546,7 @@ export const roles = (
         return
       }
       if (hitAuthFailure(fromPeerId)) {
-        const err = mkErr('excessive invalid authority records')
+        const err = mkViolationErr('excessive invalid authority records')
         kernel.emitError({
           code: 'peer-error',
           peerId: fromPeerId,
@@ -1614,7 +1613,8 @@ export const roles = (
         }
         kernel.purgeBannedUserState(bannedUid)
         scaleProv()?.markPeerBanned(bannedUid)
-        const toKick = new Set<string>(kernel.getUserPeerIds(bannedUid))
+        const userPeers = new Set<string>(kernel.getUserPeerIds(bannedUid))
+        const toKick = new Set<string>(userPeers)
         for (const pid of kernel.getAllPeerIds()) {
           if (authority.isPeerBanned(pid)) {
             toKick.add(pid)
@@ -1624,7 +1624,12 @@ export const roles = (
         if (activeKickTargets.length > 0) {
           void sendAuth({t: 'mod', moderation: banRec}, activeKickTargets)
         }
-        toKick.forEach(pid => banKick(pid, bannedUid))
+        toKick.forEach(pid =>
+          banKick(
+            pid,
+            userPeers.has(pid) ? bannedUid : kernel.getKnownPeerUserId(pid)
+          )
+        )
       },
       onPeerUnbanned: unbannedUid => {
         scaleProv()?.unmarkPeerBanned(unbannedUid)
@@ -1646,8 +1651,6 @@ export const roles = (
       !authority.isPeerBanned(pid)
 
     const antiEntropy = createAntiEntropySync({
-      fanout: authPullFanout,
-      pullTimeoutMs: authPullTimeoutMs,
       getDirectPeers: kernel.getDirectActivePeerIds,
       isPeerSendable: isDirectSendable,
       sendPull: async (peerId, cursor) => {
@@ -1669,8 +1672,9 @@ export const roles = (
         return
       }
       if (
-        (msg.t === 'pull' || msg.t === 'sync') &&
-        hitAuthSyncQuota(fromPeerId)
+        (msg.t === 'pull' && hitAuthSyncQuota(fromPeerId)) ||
+        (msg.t === 'sync' &&
+          (msg.f ? hitAuthFwdSyncQuota : hitAuthSyncQuota)(fromPeerId))
       ) {
         return
       }
@@ -1678,18 +1682,12 @@ export const roles = (
         Array.isArray(arr) && arr.length > max
 
       if (msg.t === 'pull') {
-        if (
-          arrOver(msg.s, authSyncPageSize) ||
-          (msg.c !== undefined &&
-            (typeof msg.c !== 'string' || msg.c.length > 512))
-        ) {
+        if (arrOver(msg.s, authSyncPageSize) || !isValidSyncCursor(msg.c)) {
           recordPeerAuthFailure(fromPeerId)
           return
         }
         if (msg.c === undefined && authority.hasUnknownRecordSigs(msg.s)) {
           antiEntropy.pullPeer(fromPeerId, true)
-        } else if (msg.c === undefined) {
-          antiEntropy.fillFanout()
         }
         void authority.buildDiffSyncMessage(msg.s, msg.c).then(diff => {
           if (
@@ -1705,8 +1703,7 @@ export const roles = (
           arrOver(msg.certs, authSyncPageSize) ||
           arrOver(msg.revocations, authSyncPageSize) ||
           arrOver(msg.moderations, authSyncPageSize) ||
-          (msg.n !== undefined &&
-            (typeof msg.n !== 'string' || msg.n.length > 512))
+          !isValidSyncCursor(msg.n)
         ) {
           recordPeerAuthFailure(fromPeerId)
           return
@@ -1784,7 +1781,7 @@ export const roles = (
             }
           })
         }
-        antiEntropy.onPeerJoined(pid, true, Boolean(scaleProv()))
+        antiEntropy.onPeerJoined(pid, Boolean(scaleProv()))
       },
       {replay: true}
     )

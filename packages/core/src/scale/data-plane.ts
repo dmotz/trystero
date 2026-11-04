@@ -138,6 +138,10 @@ export const createOverlayDataPlane = (
     string,
     Array<[fromPeerId: string, frame: UnpackedOverlayFrame]>
   >(maxBufferedEarlyOrigins)
+  const replayingEarlyOrigins = new Set<string>()
+  // Tracks per-message inbound/outbound neighbor hops for transit unicasts (bounded
+  // to <= 4 outbound attempts) so packets reroute around newly dead hops during the
+  // <= 1.2s window before topology recomputation without looping on a single edge.
   const forwardedUnicastEdges = createBoundedCache<
     string,
     {inbound: Set<string>; outbound: Set<string>}
@@ -831,6 +835,7 @@ export const createOverlayDataPlane = (
       }
 
       if (
+        router.isPeerQuarantined(origin) ||
         !(await verifyPacketSig(origin, signPubKey, canonical, payload, sig)) ||
         isDestroyed() ||
         descriptors.hasLeft(origin)
@@ -884,26 +889,44 @@ export const createOverlayDataPlane = (
     replayEarlyFramesForOrigin: origin => {
       const early = pendingEarlyFrames.get(origin)
       if (!early || !early.length) {
+        pendingEarlyFrames.delete(origin)
         return
       }
-      pendingEarlyFrames.delete(origin)
-      for (const [fromPeerId, rawFrame] of early) {
-        seq.enqueuePeerTask(fromPeerId, () =>
-          handleOverlayBinary(fromPeerId, rawFrame, true)
-        )
+      if (replayingEarlyOrigins.has(origin)) {
+        return
       }
+      replayingEarlyOrigins.add(origin)
+      const drainNext = (): void => {
+        const cur = pendingEarlyFrames.get(origin)
+        const item = cur?.shift()
+        if (!item) {
+          pendingEarlyFrames.delete(origin)
+          replayingEarlyOrigins.delete(origin)
+          return
+        }
+        seq.enqueuePeerTask(item[0], async () => {
+          try {
+            await handleOverlayBinary(item[0], item[1], true)
+          } finally {
+            drainNext()
+          }
+        })
+      }
+      drainNext()
     },
     invalidatePairwiseKey,
     purgePeerDataState: peerId => {
       invalidatePairwiseKey(peerId)
       pendingVerifiedBroadcasts.delete(peerId)
       pendingEarlyFrames.delete(peerId)
+      replayingEarlyOrigins.delete(peerId)
     },
     resetRoomCryptoState: () => {
       derivedPairwiseKeys.clear()
       pairwiseKeyIdByPeer.clear()
       pendingVerifiedBroadcasts.clear()
       pendingEarlyFrames.clear()
+      replayingEarlyOrigins.clear()
       forwardedUnicastEdges.clear()
     },
     destroy: () => {
@@ -913,6 +936,7 @@ export const createOverlayDataPlane = (
       outboundQueueDepth.clear()
       pendingVerifiedBroadcasts.clear()
       pendingEarlyFrames.clear()
+      replayingEarlyOrigins.clear()
       forwardedUnicastEdges.clear()
     }
   }

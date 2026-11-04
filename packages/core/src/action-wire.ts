@@ -22,6 +22,7 @@ import {
   logActionHandlerErr,
   logErr,
   mkErr,
+  mkViolationErr,
   noActivePeerMsg,
   noOp,
   operationAbortedMsg,
@@ -116,7 +117,7 @@ export type WireAction<T = DataPayload> = {
   onProgress: (
     handler: (percent: number, peerId: string, metadata?: JsonValue) => void
   ) => void
-  onReceive: (handler: WireReceiveHandler | null, guardOnly?: boolean) => void
+  onReceive: (handler: WireReceiveHandler | null) => void
   onReject: (handler: WireRejectHandler) => void
 }
 
@@ -128,7 +129,6 @@ type ReceiveRegistration = {
     | null
   onProgress: (percent: number, peerId: string, metadata?: JsonValue) => void
   receiveGate: WireReceiveHandler | null
-  guardOnly: boolean
   onReject: WireRejectHandler | null
 }
 
@@ -186,6 +186,7 @@ type PreListenerEntry = {
   message: IncomingMessageMeta
   data: Uint8Array
   receivedAt: number
+  admitted: boolean
 }
 
 type OutgoingTransfer = {
@@ -321,6 +322,7 @@ export type ActionWireManagerDeps = {
     signal?: AbortSignal
   ) => Promise<boolean> | boolean
   checkAborted?: (signal?: AbortSignal) => void
+  onUnknownType?: (type: string) => void
   maxReceiveBytes?: number
 }
 
@@ -331,6 +333,7 @@ export const createActionWireManager = ({
   onPeerError,
   broadcastInline,
   checkAborted = throwIfAborted,
+  onUnknownType,
   maxReceiveBytes = defaultMaxReceiveBytes
 }: ActionWireManagerDeps): {
   makeWireAction: <T = DataPayload>(
@@ -369,12 +372,19 @@ export const createActionWireManager = ({
   const payloadLimit = (registration?: ReceiveRegistration): number =>
     Math.min(maxReceiveBytes, registration?.maxPayloadBytes ?? maxReceiveBytes)
 
-  const failPeer = (peerId: string, reason: string): void => {
+  const failPeer = (
+    peerId: string,
+    reason: string,
+    protocolViolation = true
+  ): void => {
     const target = resolveTransport(peerId, true)
     if (target && !failedTransports.has(target)) {
       failedTransports.add(target)
       warn(`${reason}; disconnecting peer ${peerId}`)
-      onPeerError(peerId, mkErr(reason))
+      onPeerError(
+        peerId,
+        protocolViolation ? mkViolationErr(reason) : mkErr(reason)
+      )
     }
   }
 
@@ -397,7 +407,7 @@ export const createActionWireManager = ({
       }
       target.sendFrame(bytes, id)
     } catch {
-      failPeer(peerId, 'unable to send action control')
+      failPeer(peerId, 'unable to send action control', false)
     }
   }
 
@@ -585,13 +595,15 @@ export const createActionWireManager = ({
 
   const tryInline = (state: IncomingInline): void => {
     const registration = rxActions.get(state.message.type)
-    if (
-      isCurrent(state) &&
-      registration &&
-      admit(state, registration) &&
-      registration.receiver
-    ) {
+    if (!isCurrent(state) || !registration || !admit(state, registration)) {
+      return
+    }
+    if (registration.receiver) {
       complete(state, registration, state.data, true)
+    } else if (!state.scope) {
+      const {data, message} = state
+      release(state)
+      bufferPreListenerInline(message, data, true, true)
     }
   }
 
@@ -698,7 +710,10 @@ export const createActionWireManager = ({
 
   const bufferPreListenerInline = (
     message: IncomingMessageMeta,
-    dataSlice: Uint8Array
+    dataSlice: Uint8Array,
+    admitted = false,
+    alreadyOwned = false,
+    receivedAt = Date.now()
   ): void => {
     const now = Date.now()
     let byType = preListenerQueues.get(message.peerId)
@@ -720,7 +735,12 @@ export const createActionWireManager = ({
     if (ring.length >= maxPreListenerMessages) {
       ring.shift()
     }
-    ring.push({message, data: dataSlice.slice(), receivedAt: now})
+    ring.push({
+      message,
+      data: alreadyOwned ? dataSlice : dataSlice.slice(),
+      receivedAt,
+      admitted
+    })
     if (!preListenerSweepTimer) {
       preListenerSweepTimer = setTimeout(
         sweepPreListenerQueues,
@@ -819,15 +839,12 @@ export const createActionWireManager = ({
     registration: ReceiveRegistration
   ): void => {
     const isFlushable = (): boolean =>
-      Boolean(
-        registration.receiver ||
-        (registration.receiveGate && !registration.guardOnly)
-      )
+      Boolean(registration.receiver || registration.receiveGate)
     if (!isFlushable()) {
       return
     }
     const now = Date.now()
-    for (const [peerId, byType] of preListenerQueues) {
+    for (const [peerId, byType] of Array.from(preListenerQueues)) {
       if (!isFlushable()) {
         break
       }
@@ -861,9 +878,21 @@ export const createActionWireManager = ({
           notifyRejected(entry.message, sizeLimitMsg)
           continue
         }
+        if (entry.admitted && !registration.receiver) {
+          bufferPreListenerInline(
+            entry.message,
+            entry.data,
+            true,
+            true,
+            entry.receivedAt
+          )
+          continue
+        }
         if (
-          !registration.receiveGate &&
-          !peers.get(peerId)?.inlineQueues.has(type)
+          registration.receiver &&
+          (entry.admitted ||
+            (!registration.receiveGate &&
+              !peers.get(peerId)?.inlineQueues.has(type)))
         ) {
           let payload: DataPayload
           try {
@@ -876,6 +905,7 @@ export const createActionWireManager = ({
         } else {
           const state: IncomingInline = {
             ...createAdmissionBase(entry.message),
+            ...(entry.admitted ? {phase: phaseReady} : {}),
             kind: 'inline',
             queueKey: type,
             data: entry.data
@@ -1244,7 +1274,6 @@ export const createActionWireManager = ({
       ...(receiveScope ? {receiveScope} : {}),
       receiver: null,
       receiveGate: null,
-      guardOnly: false,
       onReject: null,
       onProgress: noOp
     }
@@ -1256,10 +1285,11 @@ export const createActionWireManager = ({
         flushPreListenerType(type, registration)
         drain()
       },
-      onReceive: (handler, guardOnly = false) => {
+      onReceive: handler => {
         registration.receiveGate = handler
-        registration.guardOnly = Boolean(handler && guardOnly)
-        flushPreListenerType(type, registration)
+        if (handler) {
+          flushPreListenerType(type, registration)
+        }
         drain()
       },
       onReject: handler => {
@@ -1446,7 +1476,11 @@ export const createActionWireManager = ({
       return
     }
     const type = decodeActionType(bytes)
-    const registered = actions.get(type)
+    let registered = actions.get(type)
+    if (!registered && onUnknownType) {
+      onUnknownType(type)
+      registered = actions.get(type)
+    }
     if (!canReceiveFromPeer(peerId, Boolean(registered?.receiveWhilePending))) {
       return
     }
@@ -1514,8 +1548,8 @@ export const createActionWireManager = ({
 
       if (
         !registration.receiver &&
-        !scope &&
-        (!hasGate || registration.guardOnly)
+        !hasGate &&
+        !peers.get(peerId)?.inlineQueues.has(queueKey)
       ) {
         bufferPreListenerInline(message, dataSlice)
         return

@@ -56,6 +56,7 @@ export type DescriptorStoreDeps = {
   loadLocalCryptoIdentity: () => Promise<CryptoIdentity>
   syncSelfIdFromIdentity: (peerId: string) => void
   isDirectPeer: (peerId: string) => boolean
+  isVirtualPeer?: ((peerId: string) => boolean) | undefined
   getDirectPeerIds: () => IterableIterator<string>
   getDirectPeerCount: () => number
   getDiscoveredCandidateCount: () => number
@@ -123,6 +124,7 @@ export const createDescriptorStore = (
     loadLocalCryptoIdentity,
     syncSelfIdFromIdentity,
     isDirectPeer,
+    isVirtualPeer,
     getDirectPeerIds,
     getDirectPeerCount,
     getDiscoveredCandidateCount,
@@ -305,11 +307,10 @@ export const createDescriptorStore = (
       !isPeerBanned(d.peerId)
     )
 
-  const verifyDescriptor = (d: PeerDescriptor): boolean | Promise<boolean> => {
+  const verifyDescriptor = (
+    d: PeerDescriptor & {signPubKey: string; sig: string}
+  ): boolean | Promise<boolean> => {
     const curRoomId = getRoomId()
-    if (!hasValidDescriptorShape(d)) {
-      return failSig()
-    }
     const keyThumbprint = d.signPubKey
     const pinned = pinnedSignKeys.get(d.peerId)
     if (pinned && pinned !== keyThumbprint) {
@@ -582,7 +583,13 @@ export const createDescriptorStore = (
         }
       }
     }
-    if (!latest || wasMarkedLeft || adjChanged || encKeyRotated) {
+    if (
+      !latest ||
+      wasMarkedLeft ||
+      adjChanged ||
+      encKeyRotated ||
+      (!isDirectPeer(d.peerId) && !(isVirtualPeer?.(d.peerId) ?? true))
+    ) {
       pendingTopologyDirty = true
     }
 
@@ -619,6 +626,7 @@ export const createDescriptorStore = (
       isDestroyed() ||
       !d ||
       d.peerId === getSelfId() ||
+      isPeerBanned(d.peerId) ||
       isStaleOrLeftSeq(d.peerId, d.seq)
     ) {
       return

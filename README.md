@@ -192,10 +192,11 @@ All `on*` methods accept `{once, signal}` options, plus `{replay: true}` on
 and `userState.onChange` to synchronously emit currently active state to a late
 subscriber (when combined with `{once: true}`, the first replayed item satisfies
 `once` and unsubscribes immediately). Unlike presence, media, and state replay,
-`action.onMessage` buffers up to `32` inbound messages for `10` seconds per
-registered action (including role-gated actions, without consuming the room's
-concurrent transfer budget) while zero listeners are attached and drains them in
-order to the first subscriber.
+`action.onMessage` buffers up to `32` inbound inline messages per sending peer
+for `10` seconds per registered action (including role-gated or
+`onReceive`-gated actions, without consuming the room's concurrent transfer
+budget) while zero listeners are attached and drains them in order to the first
+subscriber.
 
 To disconnect and clean up all room subscriptions at once, leave the room:
 
@@ -412,11 +413,11 @@ const room = joinRoom(
 )
 ```
 
-| `identity` value                        | `userId` lifetime                                                                                                                         |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `'local'` _(browser default)_           | Reused across all open tabs and future visits on the same device (`IndexedDB`) until `clearUserIdentity(appId)` or site storage clears it |
-| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload, new tab, or process restart generates a new `userId`.                                        |
-| Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno).                                  |
+| `identity` value                        | `userId` lifetime                                                                                                                                                                                                                           |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'local'` _(browser default)_           | Reused across all open tabs and future visits on the same device (`IndexedDB`) until `clearUserIdentity(appId)` or site storage clears it                                                                                                   |
+| `'none'` _(non-browser default)_        | Ephemeral for the current runtime; a reload, new tab, or process restart generates a new `userId`.                                                                                                                                          |
+| Custom (`UserIdentity` or async loader) | Controlled by your app (imported via `importUserIdentity()` from your backend or disk in Node/Bun/Deno; custom `sign(payload)` implementations are self-tested on load and must return a 64-byte IEEE P1363 ECDSA P-256 SHA-256 signature). |
 
 To reset a user's stored identity for an app (for example, on "Sign out" or a
 shared device), leave any active rooms and call
@@ -475,9 +476,10 @@ tab alone:
 
 - **Self-certifying IDs**: Each tab generates a fresh ECDSA P-256 endpoint
   keypair (`peerId`, a 20-character Base62 digest
-  `sha256("trystero:pid:v1:" || uncompressedPubKey) mod 62²⁰`) alongside the
-  user's ECDSA P-256 identity keypair (`userId`, a 22-character Base62 digest
-  `sha256("trystero:uid:v1:" || uncompressedPubKey) mod 62²²`). Domain-separated
+  `sha256("trystero:pid:v1:" || x || "." || y) mod 62²⁰`, where `x` and `y` are
+  the 43-character Base64URL P-256 public key coordinates) alongside the user's
+  ECDSA P-256 identity keypair (`userId`, a 22-character Base62 digest
+  `sha256("trystero:uid:v1:" || x || "." || y) mod 62²²`). Domain-separated
   prefixes guarantee a single P-256 key never shares prefix bytes between
   `peerId` and `userId`, and distinct lengths (`20` vs `22`) let any `target`
   option unambiguously recognize which one you passed.
@@ -1047,12 +1049,13 @@ permissionless.
   grant, revocation, ban, or unban is signed with the sender's private key and
   verified by every peer before being accepted.
 - **Self-certifying room IDs**: A user's 22-character Base62 `userId` is derived
-  directly from the domain-separated SHA-256 digest of their P-256 public key
-  (`sha256("trystero:uid:v1:" || uncompressedPubKey) mod 62²²`, ~131 bits). When
-  you create a room with `roles({selfAsAdmin: true})`, Trystero appends your
-  `userId` directly onto the room ID (`<baseRoomId>~<userId>`). When peers
-  connect—or when the host rejoins with the same persistent identity—everyone
-  can mathematically verify from the `userId` suffix alone who owns the room.
+  directly from the domain-separated SHA-256 digest of their compact Base64URL
+  P-256 public key (`sha256("trystero:uid:v1:" || x || "." || y) mod 62²²`, ~131
+  bits). When you create a room with `roles({selfAsAdmin: true})`, Trystero
+  appends your `userId` directly onto the room ID (`<baseRoomId>~<userId>`).
+  When peers connect—or when the host rejoins with the same persistent
+  identity—everyone can mathematically verify from the `userId` suffix alone who
+  owns the room.
 - **Root-signed role certificates & moderation**: Calling `room.grantRole()`
   issues a signed `RoleCertificate` binding the recipient's `subUserId` to the
   granted custom role(s) and a monotonic authority `(iat, seq)` stamp. Because
@@ -1545,7 +1548,9 @@ before rejoining the same room.
       that is discarded when the page reloads or process exits.
     - `UserIdentity | ((context: {appId: string, roomId: string}) => UserIdentity | Promise<UserIdentity>)` -
       Supplies a `UserIdentity` (from `createUserIdentity()` or
-      `importUserIdentity()`) or a custom sync/async loader function.
+      `importUserIdentity()`) or a custom sync/async loader function. Custom
+      `UserIdentity` objects are self-tested on load and must return a 64-byte
+      IEEE P1363 (`r || s`) ECDSA P-256 SHA-256 signature from `sign(payload)`.
 
   - `use` - **(optional)** Array of built-in `RoomPlugin`s created with
     `roles()` and/or `scale()`. TypeScript automatically infers the extra
@@ -1974,9 +1979,7 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
     (`{code, message, appId, roomId, cause?, ...}`). Switch on `error.code` to
     inspect structured fields:
     - `'room-full'` (`{peerId}`) - Refused during admission because the remote
-      peer's room view has reached `config.maxUsers` (suppressed when the local
-      room is already connected to peers and its own room view is also at
-      `config.maxUsers`).
+      peer's room view has reached `config.maxUsers`.
     - `'banned'` (`{peerId?, reason?}`) - Disconnected mid-session or refused
       during handshake because an admin banned the local user (`reason` contains
       `options.reason` from `room.ban()` when provided).
@@ -2044,9 +2047,10 @@ optional `{once?: boolean, signal?: AbortSignal}` options):
   - `onMessage(callback, [options])` - Multi-listener method subscribing
     `(data, {userId, peerId, metadata, roles}) => void | Promise<void>` for
     received messages and returning an `Unsubscribe` function. Up to `32`
-    inbound messages per registered action (including role-gated actions) are
-    buffered for up to `10` seconds before the first listener attaches and
-    drained in order when subscribed.
+    inbound inline messages per sending peer per registered action (including
+    role-gated or `onReceive`-gated actions, without consuming the concurrent
+    transfer budget) are buffered for up to `10` seconds before the first
+    listener attaches and drained in order when subscribed.
   - `onReceiveProgress(callback, [options])` - Multi-listener method subscribing
     `(percent, {userId, peerId, metadata}) => void` for inbound progress and
     returning an `Unsubscribe` function.

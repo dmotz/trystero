@@ -33,8 +33,13 @@ import {
   compareHlc,
   createMonotonicClock,
   isValidHlc,
+  signRoleCertInternal,
   stateMaxFutureSkewMs
 } from '../../packages/core/src/signed-record.ts'
+import {
+  createStateManager,
+  signStateRecord
+} from '../../packages/core/src/state.ts'
 import {
   canonicalUnicastHeader,
   createOverlayManager,
@@ -42,12 +47,14 @@ import {
   overlayUnicastKind,
   packOverlayBinary,
   packOverlayControl,
-  signOverlayPayload
+  signOverlayPayload,
+  signPeerDescriptor
 } from '../../packages/core/src/scale/index.ts'
 import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import type {MessageAction} from '../../packages/core/src/types.ts'
 import {
   encodeBytes,
+  mkViolationErr,
   peerBannedErr,
   toBase64Url
 } from '../../packages/core/src/utils.ts'
@@ -57,6 +64,7 @@ import {
   LinkedPeer,
   MockRTCPeerConnection,
   connectVerifiedPeers,
+  createLinkedHandlePair,
   getTestEndpointByPeerId,
   linkPeers,
   testPeerId,
@@ -703,28 +711,107 @@ void test('Overlay & action-wire regressions: unicast ts/IV checks, root-admin 2
     assert.equal(bob.getSnapshot().stats.signatureFailures, sigFailsBeforeStale)
     assert.equal(deliveredToBob.length, 0)
 
-    // Kicked virtual peer TTL quarantine: kicking virtual peer Alice on Bob blocks immediate gossip re-admission
-    bob.removeDirectPeer(alicePid, undefined, new Error('protocol violation'))
+    // Non-violation virtual kick (e.g. send-side control backpressure) must NOT quarantine Alice
+    bob.removeDirectPeer(
+      alicePid,
+      undefined,
+      new Error('unable to send action control')
+    )
     assert.equal(bob.getSnapshot().roomPeerIds.includes(alicePid), false)
 
-    // Re-gossiping Alice's descriptor while quarantined must NOT re-admit Alice
+    const signedAliceDesc98 = await signPeerDescriptor(
+      {
+        peerId: alicePid,
+        seq: 98,
+        neighbors: [relayPid],
+        signPubKey: aliceCrypto.signPubKey,
+        encPubKey: aliceCrypto.encPubKey
+      },
+      aliceCrypto,
+      appId,
+      roomId,
+      '',
+      null
+    )
     bob.handleOverlayFrame(
       relayPid,
       packOverlayControl({
         t: 'gossip',
-        descriptors: [
-          {
-            peerId: alicePid,
-            seq: 99,
-            neighbors: [relayPid],
-            signPubKey: aliceCrypto.signPubKey,
-            encPubKey: aliceCrypto.encPubKey
-          }
-        ]
+        descriptors: [signedAliceDesc98]
       }).slice().buffer
     )
-    await wait(30)
-    assert.equal(bob.getSnapshot().roomPeerIds.includes(alicePid), false)
+    await waitFor(() => bob.getSnapshot().roomPeerIds.includes(alicePid), 1_000)
+
+    // Add Charlie behind Bob (Alice <-> Relay <-> Bob <-> Charlie) to verify transit traffic & forwarder strikes
+    const charliePid = testPeerId('uc-charlie')
+    const deliveredToCharlie: Uint8Array[] = []
+    const charlie = createOverlayManager({
+      selfId: charliePid,
+      appId,
+      roomId,
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(charliePid),
+      onVirtualPeerJoin: () => true,
+      onVirtualPeerLeave: () => {},
+      onDeliverData: (_from, buf) =>
+        deliveredToCharlie.push(new Uint8Array(buf))
+    })
+
+    try {
+      bob.addDirectPeer(charliePid, makePipe(bobPid, charlie))
+      charlie.addDirectPeer(bobPid, makePipe(charliePid, bob))
+      await waitFor(
+        () => charlie.getSnapshot().roomPeerIds.includes(alicePid),
+        2_000
+      )
+
+      // Protocol-violation virtual kick on Bob quarantines Alice locally without dropping transit unicasts or penalizing Relay
+      bob.removeDirectPeer(
+        alicePid,
+        undefined,
+        mkViolationErr('protocol violation')
+      )
+      assert.equal(bob.getSnapshot().roomPeerIds.includes(alicePid), false)
+
+      const sigFailsBeforeRegossip = bob.getSnapshot().stats.signatureFailures
+      const signedAliceDesc99 = await signPeerDescriptor(
+        {
+          peerId: alicePid,
+          seq: 99,
+          neighbors: [relayPid],
+          signPubKey: aliceCrypto.signPubKey,
+          encPubKey: aliceCrypto.encPubKey
+        },
+        aliceCrypto,
+        appId,
+        roomId,
+        '',
+        null
+      )
+      bob.handleOverlayFrame(
+        relayPid,
+        packOverlayControl({
+          t: 'gossip',
+          descriptors: [signedAliceDesc99]
+        }).slice().buffer
+      )
+      await wait(30)
+      assert.equal(bob.getSnapshot().roomPeerIds.includes(alicePid), false)
+      assert.equal(
+        bob.getSnapshot().stats.signatureFailures,
+        sigFailsBeforeRegossip,
+        're-gossiping a quarantined peer descriptor must not increment signatureFailures or strike honest neighbors'
+      )
+
+      // Transit unicast from Alice -> Charlie routed through Bob MUST still be forwarded while Alice is quarantined on Bob
+      alice.sendUnicast(charliePid, encodeBytes('hello-charlie'))
+      await waitFor(() => deliveredToCharlie.length === 1, 1_000)
+      assert.equal(
+        new TextDecoder().decode(deliveredToCharlie[0]),
+        'hello-charlie'
+      )
+    } finally {
+      charlie.destroy()
+    }
     void peerBannedErr
   } finally {
     alice.destroy()
@@ -821,4 +908,401 @@ void test('Overlay & action-wire regressions: unicast ts/IV checks, root-admin 2
   const linked = linkPeers(new LinkedPeer(), new LinkedPeer())
   linked.peerA.destroy()
   linked.peerB.destroy()
+})
+
+void test('Round-3 regressions: optimistic state skew overwrite & rollback, pre-identity defer, offer-allocation failure recovery, user onReceive-before-onMessage ring, and authority verify-before-evict', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+
+  try {
+    // 1. State optimistic path:
+    // (a) Cert-bearing record at iat = now + 15s is accepted AND overwritten cleanly by a plain member
+    // (b) Clock jump causing >60s skew rejects set() and rolls back optimistic get() with 0 unhandled rejections
+    const adminUser = await createUserIdentity()
+    const memberUser = await createUserIdentity()
+    const adminEp = await createEndpointIdentity()
+    const memberEp = await createEndpointIdentity()
+    const appId = 'r3-state-app'
+    const roomId = formatSelfCertifyingRoomId('r3-room', adminUser.userId)
+    const fastIat = Date.now() + 15_000
+    const adminCert = await signRoleCertInternal(
+      adminUser.sign,
+      adminUser.signPubJwk,
+      adminUser.userId,
+      appId,
+      roomId,
+      ['admin'],
+      fastIat,
+      1
+    )
+    const fastRec = await signStateRecord(
+      adminUser.sign,
+      adminUser.signPubJwk,
+      {
+        kind: 's',
+        appId,
+        roomId,
+        ns: 'cursor',
+        hlc: [fastIat, 0],
+        peerId: adminEp.peerId,
+        userId: adminUser.userId,
+        val: 5,
+        cert: adminCert
+      }
+    )
+
+    const mgr = createStateManager({
+      appId,
+      getRoomId: () => roomId,
+      getSelfId: () => memberEp.peerId,
+      getLocalUserId: () => memberUser.userId,
+      ensureReady: async () => ({
+        selfId: memberEp.peerId,
+        user: memberUser,
+        roomId
+      }),
+      hasRolesPlugin: () => true,
+      getRolesProvider: () =>
+        ({
+          isAuthorityResolved: () => true,
+          getPeerRoles: (uid: string) =>
+            uid === adminUser.userId ? ['admin'] : [],
+          getStateWriteCert: async () => ({cert: null, roles: []}),
+          verifyStateRecordRoles: async (rec: {userId: string}) => ({
+            valid: true,
+            roles: rec.userId === adminUser.userId ? ['admin'] : []
+          })
+        }) as never,
+      isPeerActive: () => true,
+      isPeerPendingHandshake: () => false,
+      isDirectPeer: () => false,
+      getDirectPeerIds: () => [],
+      isUserOnline: () => true,
+      getKnownPeerUserId: () => undefined,
+      isPeerBanned: () => false,
+      getPeerRoles: () => []
+    })
+
+    try {
+      const cursor = mgr.makeState<number>('cursor', 0, {roles: '*'})
+      const applied = await mgr.verifyAndApplyStateRecord(
+        fastRec,
+        adminEp.peerId
+      )
+      assert.ok(applied, 'expected +15s cert-bearing record to be accepted')
+      assert.equal(cursor.get(), 5)
+
+      await cursor.set(7)
+      assert.equal(
+        cursor.get(),
+        7,
+        'plain member must be able to overwrite an accepted +15s cert record'
+      )
+
+      // Now simulate local wall clock jumping backward by 90s so minHlcVal (fastIat) exceeds now + 60s
+      const realNow = Date.now
+      Date.now = () => realNow() - 90_000
+      try {
+        const pReject = cursor.set(99)
+        assert.equal(cursor.get(), 99, 'optimistic value applied synchronously')
+        await assert.rejects(() => pReject, /state clock skew exceeded/)
+        assert.equal(
+          cursor.get(),
+          7,
+          'optimistic value must roll back to 7 when nextHlc throws'
+        )
+      } finally {
+        Date.now = realNow
+      }
+      await wait(30)
+      assert.deepEqual(unhandled, [])
+    } finally {
+      mgr.destroy()
+    }
+
+    // 2. Pre-identity set() defers optimistic apply instead of emitting userId: ''
+    let deferredUid = ''
+    let resolveDeferredIdentity!: () => void
+    const deferredReadyGate = new Promise<void>(r => {
+      resolveDeferredIdentity = r
+    })
+    const preIdUser = await createUserIdentity()
+    const preIdEp = await createEndpointIdentity()
+    const preIdMgr = createStateManager({
+      appId: 'r3-preid-app',
+      getRoomId: () => 'r3-preid-room',
+      getSelfId: () => preIdEp.peerId,
+      getLocalUserId: () => deferredUid,
+      ensureReady: async () => {
+        await deferredReadyGate
+        deferredUid = preIdUser.userId
+        return {
+          selfId: preIdEp.peerId,
+          user: preIdUser,
+          roomId: 'r3-preid-room'
+        }
+      },
+      hasRolesPlugin: () => false,
+      getRolesProvider: () => null,
+      isPeerActive: () => true,
+      isPeerPendingHandshake: () => false,
+      isDirectPeer: () => false,
+      getDirectPeerIds: () => [],
+      isUserOnline: () => true,
+      getKnownPeerUserId: () => undefined,
+      isPeerBanned: () => false,
+      getPeerRoles: () => []
+    })
+    try {
+      const seenUids: string[] = []
+      const uState = preIdMgr.makeUserState<string>('nick', 'anon')
+      uState.onChange((_val, ctx) => seenUids.push(ctx.userId))
+      const setP = uState.set('alice')
+      assert.deepEqual(
+        seenUids,
+        [],
+        'must defer optimistic onChange before local userId is known'
+      )
+      assert.equal(uState.has(), false)
+      assert.deepEqual(uState.getAll(), {})
+      resolveDeferredIdentity()
+      await setP
+      assert.deepEqual(seenUids, [preIdUser.userId])
+      assert.equal(uState.has(), true)
+      assert.deepEqual(uState.getAll(), {[preIdUser.userId]: 'alice'})
+    } finally {
+      preIdMgr.destroy()
+    }
+
+    // 3. Signal handler: transient offer-allocation throw clears relay placeholder and recovers on next announce
+    const subs = new Map<string, Set<(topic: string, msg: string) => void>>()
+    let rtcCalls = 0
+    class FlakyOnceRTCPeerConnection extends MockRTCPeerConnection {
+      constructor() {
+        super()
+        rtcCalls++
+        if (rtcCalls === 1) {
+          throw new Error('transient RTCPeerConnection allocation error')
+        }
+      }
+    }
+    const offerSignals: string[] = []
+
+    const makeFlakyStrategy = () =>
+      createTopicStrategy({
+        init: () => ['relay-0'],
+        subscribeTopic: (_relay, topic, onMsg) => {
+          let s = subs.get(topic)
+          if (!s) {
+            s = new Set()
+            subs.set(topic, s)
+          }
+          s.add(onMsg)
+          return () => s?.delete(onMsg)
+        },
+        publishTopic: (_relay, topic, payload, ctx) => {
+          const raw =
+            typeof payload === 'string' ? payload : JSON.stringify(payload)
+          if (ctx.kind === 'signal' && raw.includes('"offer"')) {
+            offerSignals.push(raw)
+          }
+          queueMicrotask(() => {
+            subs.get(topic)?.forEach(cb => cb(topic, raw))
+          })
+          return ctx.kind === 'announce' ? 80 : undefined
+        }
+      })
+
+    const origConsoleError = console.error
+    console.error = (...args: unknown[]) => {
+      if (
+        args[1] instanceof Error &&
+        args[1].message.includes('transient RTCPeerConnection')
+      ) {
+        return
+      }
+      origConsoleError(...args)
+    }
+    const room1 = makeFlakyStrategy()(
+      {
+        appId: 'r3-flaky-offer',
+        rtcPolyfill:
+          FlakyOnceRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'offer-room'
+    )
+    const room2 = makeFlakyStrategy()(
+      {
+        appId: 'r3-flaky-offer',
+        rtcPolyfill:
+          FlakyOnceRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'offer-room'
+    )
+    try {
+      await waitFor(() => offerSignals.length >= 1, 2_000)
+      assert.equal(
+        unhandled.length,
+        0,
+        'transient offer failure must not emit unhandledRejection'
+      )
+      assert.ok(
+        rtcCalls >= 2,
+        'expected FlakyOnceRTCPeerConnection to fail once, clear relay placeholder, and send offer on next announce'
+      )
+    } finally {
+      console.error = origConsoleError
+      await Promise.all([room1.leave(), room2.leave()])
+    }
+
+    // 4. User onReceive registered BEFORE onMessage uses 32-entry ring and never starves concurrent bulk transfers
+    const holIdA = testPeerId('hol-a')
+    const holIdB = testPeerId('hol-b')
+    let addPeerA!: (peer: PeerHandle, id: string) => void
+    let addPeerB!: (peer: PeerHandle, id: string) => void
+    const roomA = createRoom(
+      cb => {
+        addPeerA = cb
+      },
+      () => {},
+      () => {},
+      {
+        appId: 'r3-hol-app',
+        roomId: 'r3-hol-room',
+        endpointIdentity: getTestEndpointByPeerId(holIdA)
+      }
+    )
+    const roomB = createRoom(
+      cb => {
+        addPeerB = cb
+      },
+      () => {},
+      () => {},
+      {
+        appId: 'r3-hol-app',
+        roomId: 'r3-hol-room',
+        endpointIdentity: getTestEndpointByPeerId(holIdB)
+      }
+    )
+    const {peerA: pLeft, peerB: pRight} = createLinkedHandlePair()
+    addPeerA(pLeft, holIdB)
+    addPeerB(pRight, holIdA)
+    try {
+      await waitFor(
+        () =>
+          Boolean(roomA.getPeers()[holIdB]) &&
+          Boolean(roomB.getPeers()[holIdA]),
+        2_000
+      )
+      const gatedA = roomA.makeAction<string>('user-gated')
+      const gatedB = roomB.makeAction<string>('user-gated')
+      // Attach user onReceive BEFORE onMessage (canonical README pattern!)
+      gatedB.onReceive(({metadata}) => metadata !== 'drop')
+
+      for (let i = 1; i <= 70; i++) {
+        await gatedA.send(`m-${i}`)
+      }
+      await wait(30)
+
+      // Concurrent 100 KiB bulk transfer on another action must succeed immediately (64-slot budget untouched!)
+      const bulkA = roomA.makeAction<Uint8Array>('bulk-check')
+      const bulkB = roomB.makeAction<Uint8Array>('bulk-check')
+      let gotBulkBytes = 0
+      bulkB.onMessage(buf => {
+        gotBulkBytes = buf.byteLength
+      })
+      await bulkA.send(new Uint8Array(100_000).fill(9))
+      await waitFor(() => gotBulkBytes === 100_000, 2_000)
+
+      const drainedGated: string[] = []
+      gatedB.onMessage(m => drainedGated.push(m))
+      await waitFor(() => drainedGated.includes('m-70'), 1_000)
+      assert.equal(drainedGated.length, 32)
+      assert.equal(drainedGated[0], 'm-39')
+    } finally {
+      await Promise.all([roomA.leave(), roomB.leave()])
+    }
+
+    // 5. Authority verify-before-evict: garbage-signed moderation records at capacity must NOT evict unban tombstones
+    const rootAdmin = await createUserIdentity()
+    const victimUser = await createUserIdentity()
+    const authRoomId = formatSelfCertifyingRoomId(
+      'evict-room',
+      rootAdmin.userId
+    )
+    const senderAuth = createRoomAuthority({
+      selfId: () => 'root-p',
+      appId: 'r3-evict-app',
+      initialRoomId: authRoomId,
+      admin: {admins: [rootAdmin.userId]},
+      getLocalUserIdentity: async () => rootAdmin
+    })
+    const receiverAuth = createRoomAuthority({
+      selfId: () => 'recv-p',
+      appId: 'r3-evict-app',
+      initialRoomId: authRoomId,
+      admin: {admins: [rootAdmin.userId]},
+      getLocalUserIdentity: async () => victimUser
+    })
+    const banRec = await senderAuth.issuePeerModeration(
+      'ban',
+      victimUser.userId,
+      {reason: 'first'}
+    )
+    const unbanRec = await senderAuth.issuePeerModeration(
+      'unban',
+      victimUser.userId
+    )
+    assert.equal(await receiverAuth.verifyAndApplyModeration(banRec), true)
+    assert.equal(await receiverAuth.verifyAndApplyModeration(unbanRec), true)
+    assert.equal(receiverAuth.isPeerBanned(victimUser.userId), false)
+
+    // Fill moderation store to 4,096 with valid unban tombstones for synthetic base62 userIds
+    const chars =
+      '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    const mkUid = (idx: number): string => {
+      let s = ''
+      let x = idx + 1
+      for (let k = 0; k < 22; k++) {
+        s += chars[x % 62]!
+        x = Math.floor(x / 62) + k * 7 + 3
+      }
+      return s
+    }
+    for (let base = 0; base < 4_095; base += 128) {
+      const end = Math.min(4_095, base + 128)
+      const recs = await Promise.all(
+        Array.from({length: end - base}, (_, j) =>
+          senderAuth.issuePeerModeration('unban', mkUid(base + j))
+        )
+      )
+      for (const uRec of recs) {
+        await receiverAuth.verifyAndApplyModeration(uRec)
+      }
+    }
+
+    // Now send 10 shape-valid, garbage-signed moderation records for fresh targets:
+    // none may evict victimUser's oldest unban tombstone!
+    const badSig = 'A'.repeat(86)
+    for (let i = 0; i < 10; i++) {
+      const forged = {
+        ...unbanRec,
+        modId: `forged-${i}`,
+        targetUserId: mkUid(10_000 + i),
+        seq: 999_999 + i,
+        sig: badSig
+      }
+      assert.equal(await receiverAuth.verifyAndApplyModeration(forged), false)
+    }
+
+    // Replaying the superseded genuine banRec must STILL be rejected because victimUser's unban tombstone survived!
+    assert.equal(await receiverAuth.verifyAndApplyModeration(banRec), false)
+    assert.equal(receiverAuth.isPeerBanned(victimUser.userId), false)
+    assert.deepEqual(unhandled, [])
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
 })

@@ -370,7 +370,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             return
           }
 
-          clearConnectedPeer(state, peerId, 'replaced')
+          clearConnectedPeer(state)
         }
 
         markPeerConnected(state, peer)
@@ -415,7 +415,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         const state = peerStates.get(peerId)
 
         if (state?.connectedPeer === peer) {
-          clearConnectedPeer(state, peerId, 'close-event')
+          clearConnectedPeer(state)
           prunePeerStates(peerStates)
 
           reannounceAfterDisconnect()
