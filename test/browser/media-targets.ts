@@ -122,14 +122,16 @@ test('Trystero: ws-relay: targeted media connects multi-hop peers privately', as
       )
       .toEqual(ids.map(() => ids.length - 1))
 
+    const lastJoinedId = ids.at(-1)!
     const peerMaps = await Promise.all(
       pages.map(page =>
         page.evaluate(
-          roomId =>
-            Object.entries(window[roomId].getPeers())
+          ([rId, newestId]: [string, string]) =>
+            Object.entries(window[rId].getPeers())
               .filter(([, peer]) => !(peer as {direct: boolean}).direct)
-              .map(([id]) => id),
-          roomId
+              .map(([id]) => id)
+              .sort((a, b) => Number(a === newestId) - Number(b === newestId)),
+          [roomId, lastJoinedId] satisfies [string, string]
         )
       )
     )

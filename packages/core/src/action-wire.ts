@@ -350,6 +350,7 @@ export const createActionWireManager = ({
   const actions = new Map<string, RegisteredWireAction>()
   const rxActions = new Map<string, ReceiveRegistration>()
   const outgoing = new Map<string, Map<number, OutgoingTransfer>>()
+  const outgoingInlineQueues = new Map<string, Promise<void>>()
   const peers = new Map<string, PeerIncomingState>()
   const preListenerQueues = new Map<string, Map<string, PreListenerEntry[]>>()
   const waitingBulk = new Set<IncomingBulk>()
@@ -950,6 +951,7 @@ export const createActionWireManager = ({
       transfer.fail(disconnectedTransferErr())
     }
     outgoing.delete(peerId)
+    outgoingInlineQueues.delete(peerId)
     preListenerQueues.delete(peerId)
     const peer = peers.get(peerId)
     if (peer) {
@@ -963,16 +965,36 @@ export const createActionWireManager = ({
     drain()
   }
 
+  const raceAbort = <T>(p: Promise<T>, signal: AbortSignal): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => {
+        try {
+          checkAborted(signal)
+        } catch (err) {
+          reject(err as Error)
+        }
+      }
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener('abort', onAbort, {once: true})
+      void p.then(resolve, reject).finally(() => {
+        signal.removeEventListener('abort', onAbort)
+      })
+    })
+
   const sendFrameToTransport = async (
     transport: PeerDataTransport,
     bytes: Uint8Array,
     check: () => void,
     signal: AbortSignal | undefined,
     transferId?: number,
-    isOffer?: boolean
+    isOffer?: boolean,
+    initialDrain?: Promise<boolean> | boolean
   ): Promise<void> => {
     check()
-    const drainRes = transport.waitForDrain(signal)
+    const drainRes = initialDrain ?? transport.waitForDrain(signal)
     if (drainRes !== true) {
       if (!(await drainRes)) {
         checkAborted(signal)
@@ -1384,7 +1406,10 @@ export const createActionWireManager = ({
         for (const [peerId, transport] of resolvedTargets) {
           if (isSmall) {
             checkAborted(signal)
-            const drainRes = transport.waitForDrain(signal)
+            const prevQueue = outgoingInlineQueues.get(peerId)
+            const drainRes = prevQueue
+              ? undefined
+              : transport.waitForDrain(signal)
             if (drainRes === true) {
               try {
                 transport.sendFrame(startFrame)
@@ -1392,24 +1417,33 @@ export const createActionWireManager = ({
                 throw disconnectedTransferErr()
               }
               progressCb?.(1, peerId, metadata)
-            } else {
-              pushPending(
-                (async () => {
-                  await sendFrameToTransport(
-                    transport,
-                    startFrame,
-                    () => {
-                      checkAborted(signal)
-                      if (!transport.isOpen) {
-                        throw disconnectedTransferErr()
-                      }
-                    },
-                    signal
-                  )
-                  progressCb?.(1, peerId, metadata)
-                })()
-              )
+              continue
             }
+            const task = (async (): Promise<void> => {
+              await prevQueue
+              await sendFrameToTransport(
+                transport,
+                startFrame,
+                () => {
+                  checkAborted(signal)
+                  if (!transport.isOpen) {
+                    throw disconnectedTransferErr()
+                  }
+                },
+                signal,
+                undefined,
+                undefined,
+                drainRes
+              )
+              progressCb?.(1, peerId, metadata)
+            })()
+            const tail: Promise<void> = task.catch(noOp).finally(() => {
+              if (outgoingInlineQueues.get(peerId) === tail) {
+                outgoingInlineQueues.delete(peerId)
+              }
+            })
+            outgoingInlineQueues.set(peerId, tail)
+            pushPending(prevQueue && signal ? raceAbort(task, signal) : task)
           } else {
             pushPending(
               sendBulkToPeer(

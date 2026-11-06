@@ -639,3 +639,82 @@ void test('completed bulk transfer waiting for a removed handler does not block 
   })
   assert.equal(firstCount, 1)
 })
+
+void test('inline sends preserve FIFO order and single drain subscription across backpressure transitions', async t => {
+  const rx = receiver()
+  t.after(() => {
+    rx.wire.clearPeer('sender')
+  })
+  const received: number[] = []
+  rx.wire.makeWireAction<number>('cursor').onMessage(seq => {
+    received.push(seq)
+  })
+
+  let backpressured = true
+  let waitForDrainCallsWhileBackpressured = 0
+  let resolveDrain!: (ok: boolean) => void
+  const drainPromise = new Promise<boolean>(resolve => {
+    resolveDrain = resolve
+  })
+
+  const transport: PeerDataTransport = {
+    isOpen: true,
+    bufferedAmount: 0,
+    sendFrame: bytes => {
+      rx.wire.handleData('sender', bytes.slice().buffer)
+    },
+    waitForDrain: () => {
+      if (backpressured) {
+        waitForDrainCallsWhileBackpressured++
+        return drainPromise
+      }
+      return true
+    },
+    close: () => {}
+  }
+
+  const tx = createActionWireManager({
+    onPeerError: () => {},
+    resolveTransport: id => (id === 'peer' ? transport : undefined),
+    getPeerIds: () => ['peer'],
+    canReceiveFromPeer: () => true
+  })
+  t.after(() => tx.clearPeer('peer'))
+
+  const cursor = tx.makeWireAction<number>('cursor')
+  const send1 = cursor.send(1, 'peer')
+
+  // Simulate SCTP bufferedAmount dropping below threshold before the queued drain promise resolves
+  backpressured = false
+  const send2 = cursor.send(2, 'peer')
+  const abortController = new AbortController()
+  const sendAborted = cursor.send(
+    999,
+    'peer',
+    undefined,
+    undefined,
+    abortController.signal
+  )
+  const send3 = cursor.send(3, 'peer')
+
+  abortController.abort()
+  await assert.rejects(sendAborted, {name: 'AbortError'})
+  assert.deepEqual(
+    received,
+    [],
+    'subsequent inline frames must not overtake an in-flight draining frame'
+  )
+  assert.equal(
+    waitForDrainCallsWhileBackpressured,
+    1,
+    'backpressured inline send must subscribe to waitForDrain only once'
+  )
+
+  resolveDrain(true)
+  await Promise.all([send1, send2, send3])
+  assert.deepEqual(received, [1, 2, 3])
+
+  // Once the queue drains, uncontended inline sends resume the synchronous fast path
+  await cursor.send(4, 'peer')
+  assert.deepEqual(received, [1, 2, 3, 4])
+})

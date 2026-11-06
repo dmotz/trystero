@@ -5,7 +5,6 @@ import {cmpStr, createBoundedCache, mkErr, toJson} from '../utils'
 const defaultMaxDirectPeers = 6
 const minMaxDirectPeers = 4
 const maxMaxDirectPeers = 32
-export const defaultMinConnections = 3
 export const maxAllowedHops = 64
 export const defaultDescriptorTtlMs = 180_000
 export const defaultUnreachableGraceMs = 1_200
@@ -48,7 +47,7 @@ export const normalizeTopologyConfig = (
 
 const ringKeyCache = /*@__PURE__*/ createBoundedCache<string, string>(8_192)
 
-const hashRingKey = (ringSalt: string, peerId: string): string => {
+export const hashRingKey = (ringSalt: string, peerId: string): string => {
   const input = toJson([ringSalt, peerId])
   const cached = ringKeyCache.get(input)
   if (cached !== undefined) {

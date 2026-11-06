@@ -155,8 +155,8 @@ multi-hop peers).
   arrange themselves across `floor(maxDirectPeers / 2)` independent room-salted
   permuted Hamiltonian cycles, yielding symmetric target degree
   `<= maxDirectPeers` and `O(log N)` network diameter (under burst joins, actual
-  direct neighbor counts can briefly exceed `maxDirectPeers` due to soft inbound
-  ceilings and minimum-degree fallbacks).
+  direct neighbor counts can exceed `maxDirectPeers` due to soft inbound
+  ceilings and component-bridge admissions).
 - **Mutual link-state confirmation**: Peers advertise signed link-state
   descriptors (180 s TTL, refreshed by heartbeats and verified traffic, with a
   1.2 s churn grace window). Shortest-path routing tables only traverse edges

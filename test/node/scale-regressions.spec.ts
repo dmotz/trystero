@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {
+  createTopicStrategy,
   createUserIdentity,
   roles,
   type PeerHandle,
   type RolesPluginApi,
   type Room,
   type ScalePluginApi,
+  type StrategyMessage,
   type UserIdentity
 } from '../../packages/core/src/index.ts'
 import {actionWireVersion} from '../../packages/core/src/action-wire.ts'
@@ -30,16 +32,20 @@ import {
 import {
   createTestScaleCluster,
   createTrackedRoom as createRoom,
-  getRoomSignalingBridge
+  getRoomSignalingBridge,
+  makeOverlayPipe
 } from './overlay-harness.ts'
 import {
   allocTestPeerIds,
+  createSortedJoinRooms,
   getTestEndpointByPeerId,
   LinkedPeer,
   linkPeers,
   testEndpoint,
+  wait,
   waitFor
 } from './peer-harness.ts'
+import {createMemoryRtcRealm, createMemorySignalBus} from './memory-rtc.ts'
 
 let nextRegClusterSeq = 0
 
@@ -617,5 +623,291 @@ void test('Bug 1.7: early broadcast before PeerDescriptor is buffered until encP
     await Promise.all([roomB.leave(), roomC.leave()])
     linkBC_B.destroy()
     linkBC_C.destroy()
+  }
+})
+
+void test('Sequential 8-peer joins (ascending and descending peerId) with scale({maxDirectPeers: 4}) never lock out the 8th peer and preserve multi-hop indirect routes', async () => {
+  for (const order of ['ascending', 'descending'] as const) {
+    // Use the production 60 s steady announce interval so a lowest-ID newcomer in descending
+    // order relies on existing peers' immediate counter-pings ('bridge-hi') rather than rapid re-announces.
+    const bus = createMemorySignalBus({
+      delivery: 'timeout',
+      steadyAnnounceIntervalMs: 60_000
+    })
+    const appId = `seq-8-app-${order}`
+    const peers = await createSortedJoinRooms(
+      8,
+      () => bus.makeJoinRoom(),
+      appId
+    )
+    const orderedPeers = order === 'ascending' ? peers : [...peers].reverse()
+    const rooms: Array<Room & ScalePluginApi> = []
+
+    try {
+      for (const p of orderedPeers) {
+        const room = p.joinRoom(
+          {
+            appId,
+            rtcPolyfill: bus.rtcPolyfill,
+            use: [scale({maxDirectPeers: 4})]
+          },
+          `seq-8-room-${order}`
+        ) as Room & ScalePluginApi
+        rooms.push(room)
+        if (rooms.length > 1) {
+          await waitFor(() => Object.keys(room.getPeers()).length >= 1, 2_500)
+          await wait(80)
+        }
+      }
+
+      await waitFor(
+        () => rooms.every(r => Object.keys(r.getPeers()).length === 7),
+        4_000
+      )
+      await wait(80)
+
+      let indirectPairCount = 0
+      for (const r of rooms) {
+        for (const info of Object.values(r.getPeers())) {
+          if (!info.direct && (info.hops ?? 0) >= 2) {
+            indirectPairCount++
+          }
+        }
+      }
+      assert.ok(
+        indirectPairCount > 0,
+        `${order} 8-peer join with maxDirectPeers=4 must retain multi-hop indirect pairs, got 0`
+      )
+    } finally {
+      await Promise.all(rooms.map(r => r.leave()))
+      bus.clearRtcRealm()
+    }
+  }
+})
+
+void test('Two independently converged scale({maxDirectPeers: 4}) components ({0..6} and {7..11}) bridge and converge state once signaling connects them', async () => {
+  const realm = createMemoryRtcRealm()
+  let partitionActive = true
+  const handlersByTopic = new Map<
+    string,
+    Set<{
+      slot: {group: 0 | 1}
+      fn: (topic: string, data: StrategyMessage) => void
+    }>
+  >()
+  const slots: Array<{group: 0 | 1}> = []
+
+  const makePartitionedJoin = () => {
+    const slot: {group: 0 | 1} = {group: 0}
+    slots.push(slot)
+    const join = createTopicStrategy({
+      steadyAnnounceIntervalMs: 80,
+      init: () => ({}),
+      subscribeTopic: (_relay, topic, onMessage) => {
+        let set = handlersByTopic.get(topic)
+        if (!set) {
+          set = new Set()
+          handlersByTopic.set(topic, set)
+        }
+        const entry = {slot, fn: onMessage}
+        set.add(entry)
+        return () => {
+          set?.delete(entry)
+        }
+      },
+      publishTopic: (_relay, topic, message) => {
+        const set = handlersByTopic.get(topic)
+        if (!set) {
+          return
+        }
+        for (const entry of set) {
+          if (partitionActive && entry.slot.group !== slot.group) {
+            continue
+          }
+          setTimeout(() => {
+            if (handlersByTopic.get(topic)?.has(entry)) {
+              entry.fn(topic, message)
+            }
+          }, 1)
+        }
+      }
+    })
+    return {join, slot}
+  }
+
+  const slotByJoin = new Map<unknown, {group: 0 | 1}>()
+  const sortedPeers = await createSortedJoinRooms(
+    12,
+    () => {
+      const {join, slot} = makePartitionedJoin()
+      slotByJoin.set(join, slot)
+      return join
+    },
+    'split-brain-app'
+  )
+  sortedPeers.forEach((entry, idx) => {
+    slotByJoin.get(entry.joinRoom)!.group = idx < 7 ? 0 : 1
+  })
+
+  const rooms: Array<Room & ScalePluginApi> = []
+  try {
+    // Join peers 0..6 in partition group 0 so all 7 converge (previously hitting directCount == maxDirectPeers + 2)
+    for (let i = 0; i < 7; i++) {
+      const room = sortedPeers[i]!.joinRoom(
+        {
+          appId: 'split-brain-app',
+          rtcPolyfill: realm.rtcPolyfill,
+          use: [scale({maxDirectPeers: 4})]
+        },
+        'split-brain-room'
+      ) as Room & ScalePluginApi
+      rooms.push(room)
+      if (i > 0) {
+        await waitFor(() => Object.keys(room.getPeers()).length >= 1, 2_500)
+        await wait(80)
+      }
+    }
+    await waitFor(
+      () =>
+        rooms.slice(0, 7).every(r => Object.keys(r.getPeers()).length === 6),
+      4_000
+    )
+
+    // Join peers 7..11 in partition group 1 so they form an independent converged 5-clique
+    for (let i = 7; i < 12; i++) {
+      const room = sortedPeers[i]!.joinRoom(
+        {
+          appId: 'split-brain-app',
+          rtcPolyfill: realm.rtcPolyfill,
+          use: [scale({maxDirectPeers: 4})]
+        },
+        'split-brain-room'
+      ) as Room & ScalePluginApi
+      rooms.push(room)
+    }
+    await waitFor(
+      () =>
+        rooms.slice(7, 12).every(r => Object.keys(r.getPeers()).length === 4),
+      4_000
+    )
+
+    const states = rooms.map(r =>
+      r.makeState<{fromLow?: number; fromHigh?: number}>('merged-map', {})
+    )
+    await states[0]!.set({fromLow: 1})
+    await states[11]!.set({fromHigh: 2, fromLow: 1})
+
+    // Heal signaling partition: both converged components must bridge and converge
+    partitionActive = false
+
+    await waitFor(
+      () =>
+        rooms.every(r => Object.keys(r.getPeers()).length === 11) &&
+        states.every(s => s.get().fromLow === 1 && s.get().fromHigh === 2),
+      3_000
+    )
+  } finally {
+    await Promise.all(rooms.map(r => r.leave()))
+    realm.clear()
+  }
+})
+
+void test('Partitioned peer with a cached descriptor (within 180 s TTL) but no active route is still bridged outbound', async () => {
+  const sortedIds = allocTestPeerIds(7).sort()
+  const cliqueIds = sortedIds.slice(0, 5)
+  const relayOnlyNeighborId = sortedIds[5]!
+  const partitionedPeerId = sortedIds[6]!
+  const managers = cliqueIds.map(id =>
+    createOverlayManager({
+      selfId: id,
+      appId: 'cached-partition-app',
+      roomId: 'cached-partition-room',
+      config: {maxDirectPeers: 4},
+      getLocalEndpointIdentity: () => getTestEndpointByPeerId(id),
+      onVirtualPeerJoin: () => true,
+      onVirtualPeerLeave: () => {},
+      onDeliverData: () => {}
+    })
+  )
+
+  try {
+    for (let i = 0; i < managers.length; i++) {
+      for (let j = i + 1; j < managers.length; j++) {
+        const idA = cliqueIds[i]!
+        const idB = cliqueIds[j]!
+        managers[i]!.addDirectPeer(idB, makeOverlayPipe(idA, managers[j]!))
+        managers[j]!.addDirectPeer(idA, makeOverlayPipe(idB, managers[i]!))
+      }
+    }
+    await waitFor(
+      () =>
+        managers.every(
+          m =>
+            m.getSnapshot().directPeerIds.length === 4 &&
+            cliqueIds.every(
+              other =>
+                other === m.getSnapshot().peerId ||
+                m.getPeerSignPublicKey(other) !== undefined
+            )
+        ),
+      2_000
+    )
+
+    // Inject a valid cached descriptor for partitionedPeerId whose sole neighbor (relayOnlyNeighborId)
+    // is disconnected, so partitionedPeerId is in knownRoster without an active route.
+    const ep = getTestEndpointByPeerId(partitionedPeerId)
+    const signCompact = jwkToCompactPub(ep.signPubJwk)
+    const encKeyPair = await crypto.subtle.generateKey(
+      {name: 'ECDH', namedCurve: 'P-256'},
+      true,
+      ['deriveBits']
+    )
+    const encCompact = jwkToCompactPub(
+      await crypto.subtle.exportKey('jwk', encKeyPair.publicKey)
+    )
+    const cachedDesc = await signPeerDescriptor(
+      {
+        peerId: partitionedPeerId,
+        seq: 1,
+        neighbors: [relayOnlyNeighborId],
+        signPubKey: signCompact,
+        encPubKey: encCompact
+      },
+      {
+        peerId: partitionedPeerId,
+        signPrivateKey: ep.signPrivateKey,
+        signPubKey: signCompact,
+        encPrivateKey: encKeyPair.privateKey,
+        encPubKey: encCompact
+      },
+      'cached-partition-app',
+      'cached-partition-room',
+      '',
+      null
+    )
+    const gossipFrame = packGossipControlFrames([cachedDesc])[0]!.slice().buffer
+    managers[0]!.handleOverlayFrame(cliqueIds[1]!, gossipFrame)
+
+    await waitFor(
+      () =>
+        managers.every(
+          m => m.getPeerSignPublicKey(partitionedPeerId) !== undefined
+        ),
+      2_000
+    )
+
+    for (const m of managers) {
+      assert.equal(m.getRoute(partitionedPeerId), undefined)
+    }
+    const willingBridges = managers.filter(m =>
+      m.shouldConnectPeer(partitionedPeerId, 'outbound')
+    )
+    assert.equal(
+      willingBridges.length,
+      2,
+      'exactly 2 designated bridges must still dial an unreachable peer even when its descriptor is cached'
+    )
+  } finally {
+    managers.forEach(m => m.destroy())
   }
 })

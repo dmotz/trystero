@@ -987,10 +987,18 @@ export const createSignalHandler = (
     if (!offerId) {
       return
     }
-    if (shouldConnectPeer && !shouldConnectPeer(peerId, 'outbound')) {
+    if (
+      shouldConnectPeer &&
+      !shouldConnectPeer(peerId, peer ? 'outbound' : 'inbound')
+    ) {
       if (peer) {
         reclaimLeasedOffer(peer)
         destroyAlive(peer)
+      } else {
+        const currentState = peerStates.get(peerId)
+        if (currentState?.offerId === offerId) {
+          resetOfferState(currentState)
+        }
       }
       return
     }

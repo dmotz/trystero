@@ -5,6 +5,7 @@ import {isValidSignalPeerId} from '../signal-handler'
 import {createTokenBucketLimiter} from '../signed-record'
 import type {TopologyRoute} from '../types'
 import {
+  cmpStr,
   createBoundedCache,
   entries,
   fromEntries,
@@ -20,13 +21,16 @@ import type {DescriptorStore} from './descriptors'
 import {
   computeShortestPathRoutes,
   computeTargetNeighbors,
-  defaultMinConnections,
   deriveMaxHops,
+  hashRingKey,
   isExcludedPeer
 } from './topology'
 
 const maxDiscoveredCandidates = 512
 const maxLocalRequiredPeers = 2_048
+// Safety net if a newcomer's initial ring targets in discoveredCandidates are dead/unreachable:
+// wait briefly before dialing non-target candidates so normal joins stay sparse instead of cliquing.
+const isolatedDialGraceMs = 1_500
 export const defaultRequiredPeerIdleTtlMs = 60_000
 export const defaultQuarantineTtlMs = 30_000
 
@@ -142,6 +146,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
   let routes: Record<string, TopologyRoute> = {}
   let topologyVersion = 0
   let hasCompletedInitialBootstrap = false
+  let firstDiscoveryAt = 0
   let cachedTargetsVersion = -1
   let cachedEffectiveTargets: Set<string> | null = null
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
@@ -586,6 +591,9 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     const selfId = getSelfId()
     topologyVersion++
     descriptors.setLocalAdjacency(getDirectPeerIds())
+    if (!hasCompletedInitialBootstrap && descriptors.hasConvergedComponent()) {
+      hasCompletedInitialBootstrap = true
+    }
     const adjacency = descriptors.getAdjacency()
 
     for (const [u, uNeighbors] of adjacency.entries()) {
@@ -681,6 +689,54 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     }
   }
 
+  const maxBridgePeerDegree = maxDirectPeers * 2
+
+  // Select up to 2 rendezvous bridges per unreachable peer on each side of the tie-breaker:
+  // - 'bridge-lo' (selfId < peerId): sends SDP offers to higher-ID newcomers/components.
+  // - 'bridge-hi' (selfId > peerId): replies with a direct counter-ping when a lower-ID newcomer
+  //   announces (critical under 60 s steady announce intervals where existing peers stay silent).
+  const isDesignatedComponentBridge = (
+    peerId: string,
+    directCount: number
+  ): boolean => {
+    if (directCount >= maxBridgePeerDegree) {
+      return false
+    }
+    const selfId = getSelfId()
+    const wantLower = selfId < peerId
+    const bridgeSalt = toJson([
+      getRoomSalt(),
+      wantLower ? 'bridge-lo' : 'bridge-hi',
+      peerId
+    ])
+    const selfKey = hashRingKey(bridgeSalt, selfId)
+    const candidates = new Set<string>([
+      selfId,
+      ...getDirectPeerIds(),
+      ...keys(routes)
+    ])
+    let betterCount = 0
+    for (const id of candidates) {
+      if (id === selfId) {
+        continue
+      }
+      if (wantLower ? !(id < peerId) : !(id > peerId)) {
+        continue
+      }
+      const knownDeg = descriptors.getDescriptor(id)?.neighbors.length ?? 0
+      if (knownDeg >= maxBridgePeerDegree) {
+        continue
+      }
+      if (cmpStr(hashRingKey(bridgeSalt, id), selfKey) < 0) {
+        betterCount++
+        if (betterCount >= 2) {
+          return false
+        }
+      }
+    }
+    return true
+  }
+
   refreshPasswordSalt()
 
   return {
@@ -707,6 +763,9 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       ) {
         return false
       }
+      if (!firstDiscoveryAt) {
+        firstDiscoveryAt = Date.now()
+      }
       discoveredCandidates.set(peerId, true)
       topologyVersion++
       if (descriptors.getDescriptorCount() <= 1) {
@@ -723,30 +782,38 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       }
       const knownRoster = descriptors.getKnownRoster()
       if (!knownRoster.has(peerId) && !discoveredCandidates.has(peerId)) {
+        if (!firstDiscoveryAt) {
+          firstDiscoveryAt = Date.now()
+        }
         discoveredCandidates.set(peerId, true)
         topologyVersion++
       }
       const targets = computeEffectiveTargets()
       const directCount = getDirectPeerCount()
-      const minDirectPeers = Math.min(defaultMinConnections, maxDirectPeers)
+      if (targets.has(peerId) && directCount < maxDirectPeers) {
+        return true
+      }
       if (
-        (targets.has(peerId) && directCount < maxDirectPeers) ||
-        directCount < minDirectPeers
+        directCount === 0 &&
+        (targets.size === 0 ||
+          (firstDiscoveryAt > 0 &&
+            Date.now() - firstDiscoveryAt >= isolatedDialGraceMs))
       ) {
         return true
       }
+      // Key off !routes[peerId] (not !knownRoster.has) so partitioned components re-bridge
+      // immediately even while stale descriptors remain cached within their 180 s TTL.
       if (
         direction === 'outbound' &&
         hasCompletedInitialBootstrap &&
-        !knownRoster.has(peerId) &&
+        !routes[peerId] &&
         !descriptors.hasLeft(peerId) &&
         !capacityRejectedPeers.has(peerId) &&
-        getSelfId() < peerId &&
-        directCount < maxDirectPeers + 2
+        isDesignatedComponentBridge(peerId, directCount)
       ) {
         return true
       }
-      return direction === 'inbound' && directCount < maxDirectPeers * 2
+      return direction === 'inbound' && directCount < maxBridgePeerDegree
     },
     resolveHealthyNextHopId,
     getRoute: peerId => {
@@ -804,6 +871,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       localRequiredPeers.clear()
       mediaPinnedPeers.clear()
       hasCompletedInitialBootstrap = false
+      firstDiscoveryAt = 0
       topologyVersion++
     },
     destroy: () => {
