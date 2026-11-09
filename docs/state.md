@@ -32,7 +32,7 @@ multiple hops.
 ```js
 import {joinRoom} from 'trystero'
 
-const room = joinRoom({appId: 'dungeon-crawl'}, 'tavern-1')
+const room = joinRoom({appId: 'oedipa/dungeon-crawl'}, 'tavern-1')
 
 const player = room.makeUserState('player', {
   name: 'Stranger',
@@ -155,7 +155,7 @@ bookkeeping needed:
 import {joinRoom} from 'trystero'
 import {useSyncExternalStore} from 'react'
 
-const room = joinRoom({appId: 'jam-board'}, 'studio-1')
+const room = joinRoom({appId: 'jam-board.example.com'}, 'studio-1')
 const color = room.makeUserState('color', '#ff6b6b')
 const title = room.makeState('title', 'Untitled Jam')
 

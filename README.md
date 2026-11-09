@@ -41,8 +41,9 @@ cursor canvas in a dozen lines:
 ```js
 import {joinRoom} from 'trystero'
 
-// No API keys, accounts, or backend setup — pick a unique appId and a room name
-const room = joinRoom({appId: 'pixel-party'}, 'studio-42')
+// No API keys, accounts, or backend setup — pick a globally unique appId
+// (e.g. your app's domain or 'username/app-name') and a room name
+const room = joinRoom({appId: 'pixel-party.example.com'}, 'studio-42')
 
 // Give every user their own signed state slot
 const cursor = room.makeUserState('cursor', {x: 0, y: 0})
@@ -175,7 +176,7 @@ Combine `password` and `maxUsers` to spin up private, seat-capped matches like a
 ```js
 const room = joinRoom(
   {
-    appId: 'speed-chess',
+    appId: 'chess.example.com',
     password: 'knight-takes-f7-secret', // encrypts discovery so outsiders stay out
     maxUsers: 2 // cap this match at 2 unique players (you + 1 opponent)
   },
@@ -213,7 +214,7 @@ import {joinRoom, roles} from 'trystero'
 
 // Host creates a room where their userId has verified admin authority
 const room = joinRoom(
-  {appId: 'friday-trivia', use: [roles({selfAsAdmin: true})]},
+  {appId: 'oedipa/friday-trivia', use: [roles({selfAsAdmin: true})]},
   'quiz-night'
 )
 
@@ -304,7 +305,7 @@ _(experimental)_:
 ```js
 import {joinRoom, scale} from 'trystero'
 
-const room = joinRoom({appId: 'crowd-canvas', use: [scale()]}, 'plaza')
+const room = joinRoom({appId: 'canvas.example.com', use: [scale()]}, 'plaza')
 ```
 
 Small rooms stay in a fast direct mesh with zero extra overhead; as more people
@@ -327,7 +328,7 @@ import {joinRoom} from 'trystero'
 import {RTCPeerConnection} from 'werift'
 
 const room = joinRoom(
-  {appId: 'synth-jam', rtcPolyfill: RTCPeerConnection, passive: true},
+  {appId: 'oedipa/synth-jam', rtcPolyfill: RTCPeerConnection, passive: true},
   'room-1'
 )
 

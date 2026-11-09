@@ -35,7 +35,7 @@ import {RTCPeerConnection} from 'werift'
 
 const room = joinRoom(
   {
-    appId: 'hardware-synth',
+    appId: 'oedipa/hardware-synth',
     rtcPolyfill: RTCPeerConnection
   },
   'patch-bay-1'
@@ -64,7 +64,7 @@ import {RTCPeerConnection} from 'werift'
 
 const room = joinRoom(
   {
-    appId: 'fridge-poetry',
+    appId: 'poetry.example.com',
     rtcPolyfill: RTCPeerConnection,
     passive: true
   },
@@ -119,7 +119,7 @@ const botIdentity = await importUserIdentity(process.env.BOT_SECRET_KEY)
 
 const room = joinRoom(
   {
-    appId: 'trivia-bot',
+    appId: 'oedipa/trivia-night',
     identity: botIdentity,
     rtcPolyfill: RTCPeerConnection,
     use: [roles({selfAsAdmin: true})]

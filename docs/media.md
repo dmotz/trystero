@@ -14,7 +14,7 @@ straight to `room.addStream()`.
 ```js
 import {joinRoom} from 'trystero'
 
-const room = joinRoom({appId: 'walkie-talkie'}, 'channel-1')
+const room = joinRoom({appId: 'oedipa/walkie-talkie'}, 'channel-1')
 const peerAudios = {}
 
 // Grab microphone audio
