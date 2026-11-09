@@ -30,30 +30,47 @@ export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
 export const decodeBytes = (buf: ArrayBufferLike | ArrayBufferView): string =>
   decoder.decode(buf)
 
-const toBase64 = (bytes: Uint8Array): string => {
-  let bin = ''
-  for (let i = 0; i < bytes.byteLength; i++) {
-    bin += String.fromCharCode(bytes[i]!)
+const b64UrlEncodeOpts = {alphabet: 'base64url', omitPadding: true} as const
+const b64UrlDecodeOpts = {alphabet: 'base64url'} as const
+
+const nativeToBase64 = (
+  Uint8Array.prototype as Uint8Array & {
+    toBase64?: (options?: typeof b64UrlEncodeOpts) => string
   }
-  return btoa(bin)
-}
+).toBase64
 
-const fromBase64 = (b64: string): Uint8Array => {
-  const bin = atob(b64)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) {
-    out[i] = bin.charCodeAt(i)
+const nativeFromBase64 = (
+  Uint8Array as Uint8ArrayConstructor & {
+    fromBase64?: (b64: string, options?: typeof b64UrlDecodeOpts) => Uint8Array
   }
-  return out
-}
+).fromBase64
 
-export const toBase64Url = (bytes: Uint8Array): string =>
-  toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+export const toBase64Url: (bytes: Uint8Array) => string =
+  typeof nativeToBase64 === 'function'
+    ? bytes => nativeToBase64.call(bytes, b64UrlEncodeOpts)
+    : bytes => {
+        let bin = ''
+        for (let i = 0; i < bytes.byteLength; i++) {
+          bin += String.fromCharCode(bytes[i]!)
+        }
+        return btoa(bin)
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/g, '')
+      }
 
-export const fromBase64Url = (b64url: string): Uint8Array => {
-  const padded = b64url.replace(/-/g, '+').replace(/_/g, '/')
-  return fromBase64(padded + '='.repeat((4 - (padded.length % 4)) % 4))
-}
+export const fromBase64Url: (b64url: string) => Uint8Array =
+  typeof nativeFromBase64 === 'function'
+    ? b64url => nativeFromBase64(b64url, b64UrlDecodeOpts)
+    : b64url => {
+        const padded = b64url.replace(/-/g, '+').replace(/_/g, '/')
+        const bin = atob(padded + '='.repeat((4 - (padded.length % 4)) % 4))
+        const out = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) {
+          out[i] = bin.charCodeAt(i)
+        }
+        return out
+      }
 
 export const base62Alphabet =
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'

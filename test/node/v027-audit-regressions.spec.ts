@@ -52,6 +52,7 @@ import type {MessageAction} from '../../packages/core/src/types.ts'
 import {
   encodeBytes,
   formatSelfCertifyingRoomId,
+  fromBase64Url,
   mkViolationErr,
   toBase64Url
 } from '../../packages/core/src/utils.ts'
@@ -144,6 +145,60 @@ void test('Crypto & wire primitives: domain-separated userId vs peerId, compact 
   assert.deepEqual(withUndef, withoutUndef)
   assert.equal(canonicalizeAndMeasureJson(undefined), 0)
   assert.equal(canonicalizeAndMeasureJson([1, undefined, 3]), 0)
+
+  // 5. toBase64Url / fromBase64Url parity between native Uint8Array methods and module-load fallback
+  const proto = Uint8Array.prototype as any
+  const ctor = Uint8Array as any
+  const origToBase64 = Object.getOwnPropertyDescriptor(proto, 'toBase64')
+  const origFromBase64 = Object.getOwnPropertyDescriptor(ctor, 'fromBase64')
+  let fallbackMod: {
+    toBase64Url: (bytes: Uint8Array) => string
+    fromBase64Url: (b64url: string) => Uint8Array
+  }
+  try {
+    delete proto.toBase64
+    delete ctor.fromBase64
+    fallbackMod = (await import(
+      new URL(
+        '../../packages/core/src/primitives.ts?fallback=1',
+        import.meta.url
+      ).href
+    )) as typeof fallbackMod
+  } finally {
+    if (origToBase64) {
+      Object.defineProperty(proto, 'toBase64', origToBase64)
+    }
+    if (origFromBase64) {
+      Object.defineProperty(ctor, 'fromBase64', origFromBase64)
+    }
+  }
+
+  const backing = new Uint8Array([0xaa, 0xfb, 0xff, 0xfe, 0xbb])
+  const vectors = [
+    new Uint8Array(0),
+    new Uint8Array([0x00]),
+    new Uint8Array([0xff]),
+    new Uint8Array([0xfb, 0xff]),
+    backing.subarray(1, 4),
+    crypto.getRandomValues(new Uint8Array(32)),
+    crypto.getRandomValues(new Uint8Array(65))
+  ]
+  for (const vec of vectors) {
+    const nativeEnc = toBase64Url(vec)
+    const fallbackEnc = fallbackMod.toBase64Url(vec)
+    assert.equal(nativeEnc, fallbackEnc)
+    assert.equal(nativeEnc.includes('+'), false)
+    assert.equal(nativeEnc.includes('/'), false)
+    assert.equal(nativeEnc.includes('='), false)
+    assert.deepEqual(fromBase64Url(nativeEnc), new Uint8Array(vec))
+    assert.deepEqual(
+      fallbackMod.fromBase64Url(fallbackEnc),
+      new Uint8Array(vec)
+    )
+  }
+  assert.equal(toBase64Url(backing.subarray(1, 4)), '-__-')
+  assert.throws(() => fromBase64Url('A'))
+  assert.throws(() => fallbackMod.fromBase64Url('A'))
 })
 
 void test('Signaling & relay hardening: peerId prototype-pollution guard, malformed WS resilience, duplicate joinRoom throw, and ws-relay/server rate-limit RangeError', async () => {
