@@ -105,8 +105,29 @@ const normalize = (value: string): string | undefined => {
   }
 }
 
+const nostrIndexPath = new URL(
+  '../packages/nostr/src/index.ts',
+  import.meta.url
+)
+
 const quoteUrl = (url: string): string =>
   JSON.stringify(url).replace(/'/g, "\\'").replace(/^"|"$/g, "'")
+
+const defaultRelayUrlsPattern =
+  /^export const defaultRelayUrls(?::\s*string\[\])?\s*=\s*\[\s*(?:(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")(?:\s*,\s*(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"))*(?:\s*,)?\s*)?\](?=[ \t]*;?[ \t]*$)/gm
+
+const updateDefaultRelayUrls = (source: string, urls: string[]): string => {
+  assert.equal(
+    [...source.matchAll(defaultRelayUrlsPattern)].length,
+    1,
+    'Expected exactly one default relay list'
+  )
+  return source.replace(defaultRelayUrlsPattern, () =>
+    urls.length === 0
+      ? 'export const defaultRelayUrls: string[] = []'
+      : `export const defaultRelayUrls: string[] = [\n${urls.map(url => `  ${quoteUrl(url)}`).join(',\n')}\n]`
+  )
+}
 
 const rawDataToString = (raw: WebSocket.RawData): string =>
   (Array.isArray(raw)
@@ -400,6 +421,7 @@ const probeTrystero = async (
 }
 
 const main = async (browser: Browser, siteUrl: string) => {
+  updateDefaultRelayUrls(await readFile(nostrIndexPath, 'utf8'), [])
   log(
     `Discovering and ranking relay candidates; target ${targetCount} defaults`
   )
@@ -567,25 +589,11 @@ const main = async (browser: Browser, siteUrl: string) => {
   }
   const urls = selected
     .slice(0, targetCount)
-    .map(candidate => candidate.url.slice(6))
+    .map(candidate => candidate.url)
     .sort()
-  const path = new URL('../packages/nostr/src/index.ts', import.meta.url)
-  log(`Writing ${targetCount} relay defaults to ${path.pathname}`)
-  const source = await readFile(path, 'utf8')
-  const pattern =
-    /export const defaultRelayUrls = \[[\s\S]*?\]\.map\(url => 'wss:\/\/' \+ url\)/g
-  assert.equal(
-    [...source.matchAll(pattern)].length,
-    1,
-    'Expected exactly one default relay list'
-  )
-  await writeFile(
-    path,
-    source.replace(
-      pattern,
-      `export const defaultRelayUrls = [\n${urls.map(url => `  ${quoteUrl(url)}`).join(',\n')}\n].map(url => 'wss://' + url)`
-    )
-  )
+  log(`Writing ${targetCount} relay defaults to ${nostrIndexPath.pathname}`)
+  const source = await readFile(nostrIndexPath, 'utf8')
+  await writeFile(nostrIndexPath, updateDefaultRelayUrls(source, urls))
   log(`Updated ${targetCount} alphabetized defaults`)
 }
 
@@ -646,6 +654,35 @@ try {
     assert.equal(normalize('wss://EXAMPLE.com/'), 'wss://example.com')
     assert.equal(normalize('wss://user:pass@example.com'), undefined)
     assert.equal(normalize('ws://example.com'), undefined)
+    const nostrSource = await readFile(nostrIndexPath, 'utf8')
+    const rewritten = updateDefaultRelayUrls(nostrSource, [
+      'wss://[::1]:8080/$a',
+      'wss://relay.example.com'
+    ])
+    assert.match(
+      rewritten,
+      /^export const defaultRelayUrls: string\[\] = \[\n  'wss:\/\/\[::1\]:8080\/\$a',\n  'wss:\/\/relay\.example\.com'\n\]$/m
+    )
+    assert.equal(
+      updateDefaultRelayUrls(rewritten, ['wss://only.example.com']),
+      nostrSource.replace(
+        defaultRelayUrlsPattern,
+        () =>
+          "export const defaultRelayUrls: string[] = [\n  'wss://only.example.com'\n]"
+      )
+    )
+    assert.throws(
+      () => updateDefaultRelayUrls('export const other = []\n', []),
+      /Expected exactly one default relay list/
+    )
+    assert.throws(
+      () =>
+        updateDefaultRelayUrls(
+          "export const defaultRelayUrls = ['x'].map(url => 'wss://' + url)\n",
+          []
+        ),
+      /Expected exactly one default relay list/
+    )
     // Exercise actual cross-connection delivery and rejection without public relays.
     const server = new WebSocketServer({host: '127.0.0.1', port: 0})
     await new Promise<void>(resolve => server.once('listening', resolve))
