@@ -15,6 +15,9 @@ const socketRetryPeriods = /*@__PURE__*/ createBoundedCache<string, number>(256)
 type SocketController = [disconnect: () => void, reconnect: () => void]
 
 const socketControllers = /*@__PURE__*/ new Set<SocketController>()
+const socketWakeFns = /*@__PURE__*/ new WeakMap<object, () => void>()
+const defaultIsRelayClosed = (relay: object): boolean =>
+  Boolean((relay as {isClosed?: boolean}).isClosed)
 let relayConnectivity: RelayConnectivity = 'auto'
 let isRelayOffline = false
 let stopWatchingOnline: (() => void) | null = null
@@ -52,6 +55,20 @@ const attachOnlineWatcher = (): void => {
   const {signal} = controller
   addEventListener('online', reconnectRelaySockets, {signal})
   addEventListener('offline', holdRelaySockets, {signal})
+  if (
+    typeof document !== 'undefined' &&
+    typeof document.addEventListener === 'function'
+  ) {
+    document.addEventListener(
+      'visibilitychange',
+      () => {
+        if (!isRelayOffline && document.visibilityState === 'visible') {
+          reconnectRelaySockets()
+        }
+      },
+      {signal}
+    )
+  }
   stopWatchingOnline = () => controller.abort()
 }
 
@@ -99,32 +116,37 @@ export const makeSocket = (
     send: noOp
   } as unknown as SocketClient
   let didOpen = false
+  let isSocketOpen = false
   let isReconnectPending = false
-  let initialFailure: Error | null = null
+  let attemptFailure: Error | null = null
   let retryTimer: ReturnType<typeof setTimeout> | undefined
-  const {promise: ready, resolve: resolveReady} =
-    Promise.withResolvers<SocketClient>()
-  const initialFailureWaiters = new Set<(err: Error | null) => void>()
+  let resolveReady: (value: SocketClient) => void = noOp
+  const failureWaiters = new Set<(err: Error | null) => void>()
 
-  const settleInitialAttempt = (err: Error | null): void => {
-    initialFailureWaiters.forEach(w => w(err))
-    initialFailureWaiters.clear()
+  const settleAttempt = (err: Error | null): void => {
+    failureWaiters.forEach(w => w(err))
+    failureWaiters.clear()
   }
 
-  client.ready = ready
+  const resetReadyPromise = (): void => {
+    const {promise, resolve} = Promise.withResolvers<SocketClient>()
+    resolveReady = resolve
+    void Object.defineProperty(promise, socketInitialFailureSymbol, {
+      value: (): Promise<Error | null> =>
+        isSocketOpen || client.isClosed || isRelayOffline
+          ? Promise.resolve(null)
+          : attemptFailure
+            ? Promise.resolve(attemptFailure)
+            : new Promise<Error | null>(res => {
+                failureWaiters.add(res)
+              }),
+      enumerable: false,
+      configurable: true
+    })
+    client.ready = promise
+  }
 
-  void Object.defineProperty(client.ready, socketInitialFailureSymbol, {
-    value: (): Promise<Error | null> =>
-      didOpen || client.isClosed || isRelayOffline
-        ? Promise.resolve(null)
-        : initialFailure
-          ? Promise.resolve(initialFailure)
-          : new Promise<Error | null>(res => {
-              initialFailureWaiters.add(res)
-            }),
-    enumerable: false,
-    configurable: true
-  })
+  resetReadyPromise()
 
   if (relayConnectivity === 'auto') {
     attachOnlineWatcher()
@@ -137,8 +159,18 @@ export const makeSocket = (
     }
   }
 
+  const markDisconnected = (): void => {
+    if (isSocketOpen) {
+      isSocketOpen = false
+      if (!client.isClosed) {
+        resetReadyPromise()
+      }
+    }
+  }
+
   const closeSocket = (): void => {
     const socket = client.socket
+    markDisconnected()
     if (socket) {
       socket.onopen = socket.onclose = socket.onmessage = null
       socket.close()
@@ -151,6 +183,7 @@ export const makeSocket = (
     }
     clearRetryTimer()
     isReconnectPending = false
+    attemptFailure = null
 
     const socket = new WebSocket(url)
     client.socket = socket
@@ -160,16 +193,18 @@ export const makeSocket = (
       if (client.isClosed || isReconnectPending || client.socket !== socket) {
         return
       }
+      const wasOpen = isSocketOpen
+      markDisconnected()
       isReconnectPending = true
       if (isRelayOffline) {
-        if (!didOpen) {
-          settleInitialAttempt(null)
+        if (!wasOpen) {
+          settleAttempt(null)
         }
         return
       }
-      if (!didOpen) {
-        initialFailure = mkErr(`failed to connect to relay ${client.url}`)
-        settleInitialAttempt(initialFailure)
+      if (!wasOpen) {
+        attemptFailure = mkErr(`failed to connect to relay ${client.url}`)
+        settleAttempt(attemptFailure)
       }
       const period = socketRetryPeriods.get(url) ?? defaultRetryMs
       socketRetryPeriods.set(url, period)
@@ -191,8 +226,9 @@ export const makeSocket = (
       }
       const isReconnect = didOpen
       didOpen = true
-      initialFailure = null
-      settleInitialAttempt(null)
+      isSocketOpen = true
+      attemptFailure = null
+      settleAttempt(null)
       resolveReady(client)
       socketRetryPeriods.set(url, defaultRetryMs)
       if (isReconnect) {
@@ -211,6 +247,8 @@ export const makeSocket = (
     () => {
       if (!client.isClosed) {
         clearRetryTimer()
+        attemptFailure = null
+        settleAttempt(null)
         if (!isReconnectPending) {
           isReconnectPending = true
           closeSocket()
@@ -229,11 +267,19 @@ export const makeSocket = (
   ]
 
   socketControllers.add(controller)
+  socketWakeFns.set(client, () => {
+    if (!client.isClosed && !isRelayOffline && isReconnectPending) {
+      controller[1]()
+    }
+  })
 
   client.close = () => {
     client.isClosed = true
-    settleInitialAttempt(null)
+    attemptFailure = null
+    settleAttempt(null)
     socketControllers.delete(controller)
+    socketWakeFns.delete(client)
+    socketRetryPeriods.delete(url)
     clearRetryTimer()
     closeSocket()
   }
@@ -282,7 +328,8 @@ export const releaseRelayLease = (leaseTarget: unknown): void => {
 
 export const createRelayManager = <TRelay extends object>(
   getSocket: (relay: TRelay) => WebSocket | undefined,
-  closeRelay?: (relay: TRelay) => void
+  closeRelay?: (relay: TRelay) => void,
+  isRelayClosed?: (relay: TRelay) => boolean
 ): {
   register: (key: string, createRelay: () => TRelay) => TRelay
   lease: (relay: TRelay, readyP: Promise<TRelay>) => Promise<TRelay>
@@ -292,6 +339,7 @@ export const createRelayManager = <TRelay extends object>(
   const relays = new Map<string, TRelay>()
   const relayKeys = new WeakMap<TRelay, string>()
   const leaseCounts = new WeakMap<TRelay, number>()
+  const checkClosed = isRelayClosed ?? defaultIsRelayClosed
 
   const evict = (relay: TRelay): void => {
     const key = relayKeys.get(relay)
@@ -304,14 +352,21 @@ export const createRelayManager = <TRelay extends object>(
   return {
     register: (key, createRelay) => {
       let relay = relays.get(key)
+      if (relay && checkClosed(relay)) {
+        evict(relay)
+        relay = undefined
+      }
       if (!relay) {
         relay = createRelay()
         relays.set(key, relay)
         relayKeys.set(relay, key)
+      } else {
+        socketWakeFns.get(relay)?.()
       }
       return relay
     },
     lease: (relay, readyP) => {
+      socketWakeFns.get(relay)?.()
       leaseCounts.set(relay, (leaseCounts.get(relay) ?? 0) + 1)
       const leasedP = Promise.resolve(readyP).then(r => r)
       void leasedP.catch(noOp)
@@ -350,7 +405,7 @@ export const createRelayManager = <TRelay extends object>(
     getSockets: () =>
       fromEntries(
         [...relays.entries()].flatMap(([key, relay]) => {
-          const socket = getSocket(relay)
+          const socket = checkClosed(relay) ? undefined : getSocket(relay)
           return socket ? [[key, socket]] : []
         })
       ) as Record<string, WebSocket>

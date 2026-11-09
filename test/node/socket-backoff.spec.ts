@@ -393,3 +393,211 @@ void test(
     }
   }
 )
+
+void test(
+  'Trystero: visibilitychange wakes background-disconnected sockets in auto mode without disturbing open or offline-held sockets',
+  {timeout: 5_000},
+  () => {
+    const realRandom = Math.random
+    const realSetTimeout = globalThis.setTimeout
+    const realClearTimeout = globalThis.clearTimeout
+    const realWebSocket = globalThis.WebSocket
+    const realAddEventListener = globalThis.addEventListener
+    const realDocument = (globalThis as {document?: unknown}).document
+
+    const sockets: ControlledSocket[] = []
+    const timers = new Map<number, () => void>()
+    let nextTimerId = 1
+    const scheduledDelays: number[] = []
+    const windowListeners = new Map<string, Set<() => void>>()
+    const docListeners = new Map<string, Set<() => void>>()
+    let visibilityState: 'visible' | 'hidden' = 'hidden'
+
+    class ControlledSocket {
+      url = ''
+      readyState = 0
+      closeCalls = 0
+      onclose: (() => void) | null = null
+      onopen: (() => void) | null = null
+      onmessage: ((event: {data: string}) => void) | null = null
+
+      constructor(url: string) {
+        this.url = url
+        sockets.push(this)
+      }
+
+      send() {}
+
+      open() {
+        this.readyState = 1
+        this.onopen?.()
+      }
+
+      fail() {
+        this.readyState = 3
+        this.onclose?.()
+      }
+
+      close() {
+        this.closeCalls += 1
+        this.readyState = 3
+        this.onclose?.()
+      }
+    }
+
+    const emitWindowEvent = (type: string) => {
+      for (const listener of windowListeners.get(type) ?? []) {
+        listener()
+      }
+    }
+
+    const emitVisibility = (next: 'visible' | 'hidden') => {
+      visibilityState = next
+      for (const listener of docListeners.get('visibilitychange') ?? []) {
+        listener()
+      }
+    }
+
+    let clientA: SocketClient | undefined
+    let clientB: SocketClient | undefined
+    let clientC: SocketClient | undefined
+    try {
+      Math.random = () => 1
+      globalThis.setTimeout = ((fn: () => void, delay: number) => {
+        const id = nextTimerId++
+        timers.set(id, fn)
+        scheduledDelays.push(delay)
+        return id
+      }) as unknown as typeof setTimeout
+      globalThis.clearTimeout = ((id: unknown) => {
+        timers.delete(id as number)
+      }) as typeof clearTimeout
+      globalThis.WebSocket = ControlledSocket as unknown as typeof WebSocket
+      globalThis.addEventListener = ((
+        type: string,
+        listener: () => void,
+        options?: AddEventListenerOptions
+      ) => {
+        const set = windowListeners.get(type) ?? new Set<() => void>()
+        set.add(listener)
+        windowListeners.set(type, set)
+        options?.signal?.addEventListener('abort', () => {
+          set.delete(listener)
+        })
+      }) as unknown as typeof addEventListener
+      ;(globalThis as {document?: unknown}).document = {
+        get visibilityState() {
+          return visibilityState
+        },
+        addEventListener(
+          type: string,
+          listener: () => void,
+          options?: AddEventListenerOptions
+        ) {
+          const set = docListeners.get(type) ?? new Set<() => void>()
+          set.add(listener)
+          docListeners.set(type, set)
+          options?.signal?.addEventListener('abort', () => {
+            set.delete(listener)
+          })
+        }
+      }
+
+      // Reset watcher attachment so it binds to the mocked window and document.
+      setRelayConnectivity('offline')
+      setRelayConnectivity('auto')
+
+      const urlA = `ws://test-visibility-a-${Date.now()}`
+      const urlB = `ws://test-visibility-b-${Date.now()}`
+      clientA = makeSocket(urlA, () => {})
+      clientB = makeSocket(urlB, () => {})
+      sockets[0]!.open()
+      sockets[1]!.open()
+      assert.equal(docListeners.get('visibilitychange')?.size, 1)
+
+      // Simulate Android background cutoff: navigator.onLine never fires 'offline',
+      // clientA exhausts backoff up to 60s, while clientB happens to remain open.
+      let activeA = sockets[0]!
+      for (let i = 0; i < 6; i++) {
+        activeA.fail()
+        if (i < 5) {
+          const retry = [...timers.values()][0]!
+          timers.clear()
+          retry()
+          activeA = sockets.at(-1)!
+        }
+      }
+      assert.equal(scheduledDelays.at(-1), 60_000)
+      assert.equal(timers.size, 1)
+
+      // Hidden visibilitychange does not wake sleeping sockets.
+      const beforeHiddenCount = sockets.length
+      emitVisibility('hidden')
+      assert.equal(sockets.length, beforeHiddenCount)
+      assert.equal(timers.size, 1)
+
+      // Returning to foreground ('visible') immediately wakes disconnected clientA
+      // and resets its backoff without closing healthy clientB.
+      emitVisibility('visible')
+      assert.equal(timers.size, 0)
+      assert.equal(sockets.length, beforeHiddenCount + 1)
+      assert.equal(sockets[1]!.closeCalls, 0)
+
+      // Even if the immediate foreground dial fails transiently, backoff restarted at 3333ms.
+      sockets.at(-1)!.fail()
+      assert.equal(scheduledDelays.at(-1), 3_333)
+
+      // When genuinely offline via window 'offline', 'visible' must not override the hold.
+      emitWindowEvent('offline')
+      assert.equal(timers.size, 0)
+      const countWhileOffline = sockets.length
+      emitVisibility('visible')
+      assert.equal(
+        sockets.length,
+        countWhileOffline,
+        'visibilitychange must not reconnect while browser reports offline'
+      )
+
+      emitWindowEvent('online')
+      sockets.at(-2)!.open()
+      sockets.at(-1)!.open()
+
+      // Closing a socket client clears any accumulated URL backoff for future clients.
+      sockets.at(-2)!.fail()
+      const retryFn = [...timers.values()][0]!
+      timers.clear()
+      retryFn()
+      sockets.at(-1)!.fail()
+      assert.equal(scheduledDelays.at(-1), 6_666)
+      clientA.close?.()
+
+      clientC = makeSocket(urlA, () => {})
+      sockets.at(-1)!.fail()
+      assert.equal(
+        scheduledDelays.at(-1),
+        3_333,
+        'fresh client after close() must start at defaultRetryMs'
+      )
+
+      // Switching to manual mode detaches the visibilitychange listener.
+      setRelayConnectivity('online')
+      assert.equal(docListeners.get('visibilitychange')?.size ?? 0, 0)
+    } finally {
+      clientA?.close?.()
+      clientB?.close?.()
+      clientC?.close?.()
+      if (realDocument === undefined) {
+        delete (globalThis as {document?: unknown}).document
+      } else {
+        ;(globalThis as {document?: unknown}).document = realDocument
+      }
+      setRelayConnectivity('offline')
+      setRelayConnectivity('auto')
+      Math.random = realRandom
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+      globalThis.WebSocket = realWebSocket
+      globalThis.addEventListener = realAddEventListener
+    }
+  }
+)

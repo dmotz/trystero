@@ -27,7 +27,10 @@ const relayManager = /*@__PURE__*/ createRelayManager<mqtt.MqttClient>(
   client => {
     endedClients.add(client)
     client.end(true)
-  }
+  },
+  client =>
+    endedClients.has(client) ||
+    Boolean(client.disconnecting || client.disconnected)
 )
 type TopicState = {
   handlers: Set<(topic: string, data: string) => void | Promise<void>>
