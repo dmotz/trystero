@@ -421,10 +421,12 @@ export const createOverlayDataPlane = (
         return (async () => {
           if (queuePromise) {
             if (signal) {
-              let onAbort: (() => void) | undefined
+              const ac = new AbortController()
               const abortP = new Promise<false>(res => {
-                onAbort = () => res(false)
-                signal.addEventListener('abort', onAbort, {once: true})
+                signal.addEventListener('abort', () => res(false), {
+                  once: true,
+                  signal: ac.signal
+                })
               })
               try {
                 const raced = await Promise.race([
@@ -435,9 +437,7 @@ export const createOverlayDataPlane = (
                   return false
                 }
               } finally {
-                if (onAbort) {
-                  signal.removeEventListener('abort', onAbort)
-                }
+                ac.abort()
               }
             } else {
               await queuePromise

@@ -13,10 +13,12 @@ import {
   base64UrlRe,
   decodeBytes,
   encodeBytes,
+  encodeBytesInto,
   fromJson,
   isObj,
   mkErr,
-  toJson
+  toJson,
+  utf8ByteLength
 } from '../utils'
 
 export const overlayFrameVersion = 4
@@ -84,15 +86,16 @@ export const packOverlayBinary = (
   header: Record<string, unknown>,
   payload: Uint8Array
 ): Uint8Array => {
-  const headerBytes = encodeBytes(toJson(header))
-  const frame = new Uint8Array(5 + headerBytes.byteLength + payload.byteLength)
+  const headerJson = toJson(header)
+  const headerByteLen = utf8ByteLength(headerJson)
+  const frame = new Uint8Array(5 + headerByteLen + payload.byteLength)
   frame[0] = overlayFrameVersion
   frame[1] = kind
   frame[2] = ttl & 0xff
-  frame[3] = (headerBytes.byteLength >>> 8) & 0xff
-  frame[4] = headerBytes.byteLength & 0xff
-  frame.set(headerBytes, 5)
-  frame.set(payload, 5 + headerBytes.byteLength)
+  frame[3] = (headerByteLen >>> 8) & 0xff
+  frame[4] = headerByteLen & 0xff
+  encodeBytesInto(headerJson, frame.subarray(5, 5 + headerByteLen))
+  frame.set(payload, 5 + headerByteLen)
   return frame
 }
 
@@ -222,13 +225,11 @@ export const buildOverlaySignedBytes = (
   canonicalHeader: string,
   payload: Uint8Array
 ): Uint8Array => {
-  const headerBytes = encodeBytes(canonicalHeader)
-  const combined = new Uint8Array(
-    4 + headerBytes.byteLength + payload.byteLength
-  )
-  new DataView(combined.buffer).setUint32(0, headerBytes.byteLength)
-  combined.set(headerBytes, 4)
-  combined.set(payload, 4 + headerBytes.byteLength)
+  const headerByteLen = utf8ByteLength(canonicalHeader)
+  const combined = new Uint8Array(4 + headerByteLen + payload.byteLength)
+  new DataView(combined.buffer).setUint32(0, headerByteLen)
+  encodeBytesInto(canonicalHeader, combined.subarray(4, 4 + headerByteLen))
+  combined.set(payload, 4 + headerByteLen)
   return combined
 }
 

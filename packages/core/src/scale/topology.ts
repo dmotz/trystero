@@ -172,16 +172,14 @@ export const computeShortestPathRoutes = (
   if (maxHops < 1) {
     return routes
   }
-  const directSet = new Set(directPeerIds)
-  if (excludePeerIds !== undefined) {
-    if (typeof excludePeerIds === 'string') {
-      directSet.delete(excludePeerIds)
-    } else {
-      for (const id of excludePeerIds) {
-        directSet.delete(id)
-      }
-    }
+  const baseDirectSet = new Set(directPeerIds)
+  if (typeof excludePeerIds === 'string') {
+    baseDirectSet.delete(excludePeerIds)
   }
+  const directSet =
+    excludePeerIds !== undefined && typeof excludePeerIds !== 'string'
+      ? baseDirectSet.difference(excludePeerIds)
+      : baseDirectSet
   const graph = buildUndirectedGraph(adjacency, localPeerId, directSet)
 
   const visited = new Map<string, [nextHop: string, hops: number]>()

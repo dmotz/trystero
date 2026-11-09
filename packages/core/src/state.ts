@@ -547,10 +547,7 @@ export const createStateManager = ({
     }
     let waiter = pendingJoinWaiters.get(peerId)
     if (!waiter) {
-      let resolve!: (ok: boolean) => void
-      const promise = new Promise<boolean>(r => {
-        resolve = r
-      })
+      const {promise, resolve} = Promise.withResolvers<boolean>()
       waiter = {promise, resolve, count: 0}
       pendingJoinWaiters.set(peerId, waiter)
     }
@@ -1456,10 +1453,9 @@ export const createStateManager = ({
             break
           }
 
-          let doneStep!: () => void
-          slot.stepPromise = new Promise<void>(r => {
-            doneStep = r
-          })
+          const {promise: stepPromise, resolve: doneStep} =
+            Promise.withResolvers<void>()
+          slot.stepPromise = stepPromise
           try {
             let readySelfId: string
             let readyUser: UserIdentity

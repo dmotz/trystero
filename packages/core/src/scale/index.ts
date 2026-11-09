@@ -79,12 +79,7 @@ export const scale = (
       if (pending) {
         return pending[0]
       }
-      let resolve!: (peer: PeerHandle) => void
-      let reject!: (reason: Error) => void
-      const promise = new Promise<PeerHandle>((res, rej) => {
-        resolve = res
-        reject = rej
-      })
+      const {promise, resolve, reject} = Promise.withResolvers<PeerHandle>()
       const timer = setTimeout(
         () => reject(mkErr('timed out connecting media peer')),
         10_000

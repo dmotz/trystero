@@ -291,4 +291,38 @@ void test('Crypto audit fixes: single-PBKDF2 -> HKDF roomAES/roomHMAC split, HKD
     `expected topics to span kinds >= 24000, got ${above24000}/60`
   )
   assert.ok(kinds.size > 50)
+
+  // 7. Native Uint8Array.prototype.toHex vs module-load fallback parity in Nostr signing
+  const origToHex = (Uint8Array.prototype as {toHex?: unknown}).toHex
+  assert.equal(typeof origToHex, 'function')
+  const realDateNow = Date.now
+  try {
+    Date.now = () => 1_760_000_000_000
+    delete (Uint8Array.prototype as {toHex?: unknown}).toHex
+    const fallbackUrl = new URL(
+      '../../packages/nostr/src/protocol.ts?fallback=1',
+      import.meta.url
+    ).href
+    const fallbackProtocol = (await import(
+      fallbackUrl
+    )) as typeof import('../../packages/nostr/src/protocol.ts')
+
+    const fbSigner = fallbackProtocol.createSigner()
+    assert.match(fbSigner.pubkey, /^[0-9a-f]{64}$/)
+
+    const topic = await hashTopic('nostr-tohex-parity')
+    const nativeEv = JSON.parse(
+      await createEvent(topic, 'hello-hex', signer)
+    )[1] as {id: string; pubkey: string; sig: string}
+    const fallbackEv = JSON.parse(
+      await fallbackProtocol.createEvent(topic, 'hello-hex', signer)
+    )[1] as {id: string; pubkey: string; sig: string}
+
+    assert.equal(fallbackEv.pubkey, nativeEv.pubkey)
+    assert.equal(fallbackEv.id, nativeEv.id)
+    assert.match(fallbackEv.sig, /^[0-9a-f]{128}$/)
+  } finally {
+    Date.now = realDateNow
+    ;(Uint8Array.prototype as {toHex?: unknown}).toHex = origToHex
+  }
 })

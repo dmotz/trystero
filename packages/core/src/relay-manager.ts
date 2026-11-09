@@ -102,7 +102,8 @@ export const makeSocket = (
   let isReconnectPending = false
   let initialFailure: Error | null = null
   let retryTimer: ReturnType<typeof setTimeout> | undefined
-  let resolveReady: (_: SocketClient) => void = noOp
+  const {promise: ready, resolve: resolveReady} =
+    Promise.withResolvers<SocketClient>()
   const initialFailureWaiters = new Set<(err: Error | null) => void>()
 
   const settleInitialAttempt = (err: Error | null): void => {
@@ -110,7 +111,7 @@ export const makeSocket = (
     initialFailureWaiters.clear()
   }
 
-  client.ready = new Promise(res => (resolveReady = res))
+  client.ready = ready
 
   void Object.defineProperty(client.ready, socketInitialFailureSymbol, {
     value: (): Promise<Error | null> =>

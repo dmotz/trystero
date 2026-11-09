@@ -27,6 +27,34 @@ export const fromJson = <T>(s: string): T => {
 
 export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
 
+export const encodeBytesInto = (
+  txt: string,
+  dest: Uint8Array
+): TextEncoderEncodeIntoResult => encoder.encodeInto(txt, dest)
+
+export const utf8ByteLength = (txt: string): number => {
+  let bytes = 0
+  for (let i = 0; i < txt.length; i++) {
+    const code = txt.charCodeAt(i)
+    if (code < 0x80) {
+      bytes += 1
+    } else if (code < 0x800) {
+      bytes += 2
+    } else if (
+      code >= 0xd800 &&
+      code <= 0xdbff &&
+      i + 1 < txt.length &&
+      (txt.charCodeAt(i + 1) & 0xfc00) === 0xdc00
+    ) {
+      bytes += 4
+      i++
+    } else {
+      bytes += 3
+    }
+  }
+  return bytes
+}
+
 export const decodeBytes = (buf: ArrayBufferLike | ArrayBufferView): string =>
   decoder.decode(buf)
 

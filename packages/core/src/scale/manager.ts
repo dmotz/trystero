@@ -1,3 +1,4 @@
+import {maxRoomFrameBytes} from '../data-limits'
 import {
   createEndpointIdentity,
   jwkToCompactPub,
@@ -363,6 +364,9 @@ export const createOverlayManager = ({
     new Uint8Array(data, 0, 1)[0] === overlayFrameVersion
 
   const handleOverlayFrame = (fromPeerId: string, data: ArrayBuffer): void => {
+    if (data.byteLength > maxRoomFrameBytes) {
+      return
+    }
     if (bannedPeers.has(fromPeerId)) {
       stats.signatureFailures++
       return
@@ -401,6 +405,9 @@ export const createOverlayManager = ({
     handleFrame: (fromPeerId, data) => {
       if (!isOverlayFrame(data)) {
         return false
+      }
+      if (data.byteLength > maxRoomFrameBytes) {
+        return true
       }
       if (!directPeers.has(fromPeerId)) {
         let q = pendingFramesByPeer.get(fromPeerId)

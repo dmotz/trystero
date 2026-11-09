@@ -5,7 +5,7 @@
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": ["ES2024", "ES2025.Collection", "DOM", "DOM.Iterable"],
     "strict": true,
     "noImplicitAny": true,
     "noImplicitReturns": true,

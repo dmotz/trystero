@@ -631,10 +631,9 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       }
     }
 
-    for (const peerId of new Set<string>([
-      ...virtualTransports.keys(),
-      ...hadRoutePeers
-    ])) {
+    for (const peerId of new Set(virtualTransports.keys()).union(
+      hadRoutePeers
+    )) {
       if (peerId === selfId || isDirectPeer(peerId) || routes[peerId]) {
         continue
       }

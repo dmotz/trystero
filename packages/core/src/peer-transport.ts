@@ -1,9 +1,11 @@
+import {maxActionFrameBytes, maxBulkFrameBytes} from './data-limits'
 import type {PeerHandle} from './internal-types'
 import {noOp, resetTimer, unrefTimer} from './utils'
 
 export type PeerDataTransport = {
   readonly isOpen: boolean
   readonly bufferedAmount: number
+  readonly maxBulkFrameBytes?: number
   sendFrame: (bytes: Uint8Array, transferId?: number, isOffer?: boolean) => void
   waitForDrain: (signal?: AbortSignal) => boolean | Promise<boolean>
   close?: () => void
@@ -29,17 +31,16 @@ export const waitForBufferedAmountLow = (
   return new Promise<boolean>(res => {
     let settled = false
     let timeout: ReturnType<typeof setTimeout> | null = null
+    const abortCleanup = new AbortController()
 
     const onBufferLow = (): void => finish(true)
     const onCloseOrError = (): void => finish(false)
-    const toggle = (
-      op: 'addEventListener' | 'removeEventListener',
-      sigOp: 'addEventListener' | 'removeEventListener'
+    const toggleChannel = (
+      op: 'addEventListener' | 'removeEventListener'
     ): void => {
       channel[op]('bufferedamountlow', onBufferLow)
       channel[op]('close', onCloseOrError)
       channel[op]('error', onCloseOrError)
-      signal?.[sigOp]('abort', onCloseOrError)
     }
 
     const finish = (didDrain: boolean): void => {
@@ -47,12 +48,17 @@ export const waitForBufferedAmountLow = (
         return
       }
       settled = true
-      toggle('removeEventListener', 'removeEventListener')
+      toggleChannel('removeEventListener')
+      abortCleanup.abort()
       resetTimer(timeout)
       res(didDrain)
     }
 
-    toggle('addEventListener', 'addEventListener')
+    toggleChannel('addEventListener')
+    signal?.addEventListener('abort', onCloseOrError, {
+      once: true,
+      signal: abortCleanup.signal
+    })
 
     timeout = setTimeout(() => finish(false), timeoutMs)
     unrefTimer(timeout)
@@ -164,6 +170,16 @@ export const createDirectPeerTransport = (
     return typeof peer.channel?.bufferedAmount === 'number'
       ? peer.channel.bufferedAmount
       : 0
+  },
+  get maxBulkFrameBytes(): number {
+    const sctpMax = (
+      peer.connection as {sctp?: {maxMessageSize?: number}} | undefined
+    )?.sctp?.maxMessageSize
+    return typeof sctpMax === 'number' &&
+      Number.isFinite(sctpMax) &&
+      sctpMax >= maxBulkFrameBytes
+      ? maxBulkFrameBytes
+      : maxActionFrameBytes
   },
   sendFrame: bytes => {
     peer.sendData(bytes)

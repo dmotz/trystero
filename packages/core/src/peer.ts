@@ -1,4 +1,5 @@
 import {
+  maxBulkFrameBytes,
   maxRoomFrameBytes,
   maxQueuedDataFrames,
   pendingDataTimeoutMs
@@ -234,7 +235,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
       if (
         (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) ||
-        data.byteLength > maxRoomFrameBytes
+        data.byteLength >
+          (handlers.data ? maxBulkFrameBytes : maxRoomFrameBytes)
       ) {
         failData()
         return
@@ -450,11 +452,14 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       handlers.stream(stream)
     }
   }
-  const offerPromise = initiator
-    ? new Promise<Signal | void>(res => {
-        resolveInitialOffer = res
-      })
-    : Promise.resolve()
+  let offerPromise: Promise<Signal | void>
+  if (initiator) {
+    const deferred = Promise.withResolvers<Signal | void>()
+    resolveInitialOffer = deferred.resolve
+    offerPromise = deferred.promise
+  } else {
+    offerPromise = Promise.resolve()
+  }
 
   if (initiator) {
     queueMicrotask(() => {

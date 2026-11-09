@@ -132,7 +132,7 @@ withStrategyBrowserPair(
           let sequence = 50
           window['__wireSend'] = window[roomId]
             .makeAction('file')
-            .send(new Blob([new Uint8Array(2 * 1024 ** 2).fill(42)]), {
+            .send(new Blob([new Uint8Array(4 * 1024 ** 2).fill(42)]), {
               target,
               onProgress: (progress: number) => {
                 if (progress < 1 && sequence < 100) {
@@ -165,7 +165,7 @@ withStrategyBrowserPair(
       await page.evaluate(() => window['__wireSend'])
       await expect
         .poll(() => page2.evaluate(() => window['__wireTest'].files))
-        .toEqual([[2 * 1024 ** 2, 42, 42]])
+        .toEqual([[4 * 1024 ** 2, 42, 42]])
       await expect
         .poll(() => page2.evaluate(() => window['__wireTest'].cursors.length))
         .toBe(100)

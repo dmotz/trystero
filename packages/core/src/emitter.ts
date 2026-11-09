@@ -46,6 +46,7 @@ export const createEventEmitter = <Args extends unknown[]>(
         return noOp
       }
       const once = Boolean(options?.once)
+      const abortCleanup = signal ? new AbortController() : null
       let active = true
       let added = false
       const unsub: Unsubscribe = () => {
@@ -53,7 +54,7 @@ export const createEventEmitter = <Args extends unknown[]>(
           return
         }
         active = false
-        signal?.removeEventListener('abort', unsub)
+        abortCleanup?.abort()
         if (added && subs.delete(entry) && subs.size === 0) {
           onActiveChange?.(false)
         }
@@ -70,7 +71,12 @@ export const createEventEmitter = <Args extends unknown[]>(
         },
         unsub
       ]
-      signal?.addEventListener('abort', unsub, {once: true})
+      if (abortCleanup && signal) {
+        signal.addEventListener('abort', unsub, {
+          once: true,
+          signal: abortCleanup.signal
+        })
+      }
 
       if (options?.replay && getReplayItems) {
         for (const item of getReplayItems()) {
@@ -134,13 +140,14 @@ export const initSingleHandler = <F extends (...args: never[]) => unknown>(
         throw mkErr(`${name} handler already registered; unsubscribe first`)
       }
       const once = Boolean(options?.once)
+      const abortCleanup = signal ? new AbortController() : null
       let active = true
       const unsub: Unsubscribe = () => {
         if (!active) {
           return
         }
         active = false
-        signal?.removeEventListener('abort', unsub)
+        abortCleanup?.abort()
         if (current === entry) {
           current = null
           onChange?.(null)
@@ -157,7 +164,12 @@ export const initSingleHandler = <F extends (...args: never[]) => unknown>(
       }) as F
       const entry: [call: F, unsub: () => void] = [call, unsub]
       current = entry
-      signal?.addEventListener('abort', unsub, {once: true})
+      if (abortCleanup && signal) {
+        signal.addEventListener('abort', unsub, {
+          once: true,
+          signal: abortCleanup.signal
+        })
+      }
       onChange?.(call)
       return unsub
     },

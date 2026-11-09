@@ -86,8 +86,6 @@ type PendingRequestWaiter = {
   resolve: (payload: DataPayload) => void
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout> | null
-  signal: AbortSignal | undefined
-  abortHandler: (() => void) | undefined
 }
 
 const getEnvelopeRecord = (
@@ -376,9 +374,6 @@ export const createActionManager = (
       return
     }
     resetTimer(waiter.timer)
-    if (waiter.signal && waiter.abortHandler) {
-      waiter.signal.removeEventListener('abort', waiter.abortHandler)
-    }
     delete pendingRequestWaiters[requestId]
     waiter.controller.abort()
   }
@@ -798,32 +793,37 @@ export const createActionManager = (
 
       const requestId = crypto.randomUUID()
       const controller = new AbortController()
-      const responsePromise = new Promise<DataPayload>((resolve, reject) => {
-        const waiter: PendingRequestWaiter = {
-          controller,
-          getReceive: getReceiveGate,
-          emitReceiveProgress: emitProgress,
-          peerId: resolvedTarget,
-          resolve,
-          reject,
-          timer: null,
-          signal,
-          abortHandler: undefined
-        }
+      const {
+        promise: responsePromise,
+        resolve,
+        reject
+      } = Promise.withResolvers<DataPayload>()
+      const waiter: PendingRequestWaiter = {
+        controller,
+        getReceive: getReceiveGate,
+        emitReceiveProgress: emitProgress,
+        peerId: resolvedTarget,
+        resolve,
+        reject,
+        timer: null
+      }
 
-        if (signal) {
-          const rejectAsAborted = (): void => {
-            clearPendingRequestWaiter(requestId)
-            reject(makeActionError('aborted', operationAbortedMsg))
-          }
-          if (signal.aborted) {
-            rejectAsAborted()
-            return
-          }
-          waiter.abortHandler = rejectAsAborted
-          signal.addEventListener('abort', rejectAsAborted, {once: true})
+      if (signal) {
+        const rejectAsAborted = (): void => {
+          clearPendingRequestWaiter(requestId)
+          reject(makeActionError('aborted', operationAbortedMsg))
         }
+        if (signal.aborted) {
+          rejectAsAborted()
+        } else {
+          signal.addEventListener('abort', rejectAsAborted, {
+            once: true,
+            signal: controller.signal
+          })
+        }
+      }
 
+      if (!controller.signal.aborted) {
         pendingRequestWaiters[requestId] = waiter
         if (timeoutMs !== undefined) {
           const timer = setTimeout(() => {
@@ -833,9 +833,12 @@ export const createActionManager = (
           unrefTimer(timer)
           waiter.timer = timer
         }
-      })
+      }
 
       try {
+        const sendSignal = signal
+          ? AbortSignal.any([controller.signal, signal])
+          : controller.signal
         const sending = rawAction.send(
           data,
           resolvedTarget,
@@ -843,7 +846,7 @@ export const createActionManager = (
             ? {r: requestId}
             : {r: requestId, m: innerMeta},
           toProgressBridge(onProgress, metadata),
-          controller.signal
+          sendSignal
         )
         return (await Promise.race([
           responsePromise,

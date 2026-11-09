@@ -11,8 +11,17 @@ export const eventMsgType = 'EVENT'
 
 const subscribeClockSkewSeconds = 60
 
-const toHex = (bytes: Uint8Array): string =>
-  Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+const nativeToHex = (
+  Uint8Array.prototype as Uint8Array & {
+    toHex?: () => string
+  }
+).toHex
+
+const toHex: (bytes: Uint8Array) => string =
+  typeof nativeToHex === 'function'
+    ? bytes => nativeToHex.call(bytes)
+    : bytes =>
+        Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
 
 const now = (): number => Math.floor(Date.now() / 1000)
 

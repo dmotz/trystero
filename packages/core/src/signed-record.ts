@@ -11,7 +11,8 @@ import {
   keys,
   mkErr,
   toBase64Url,
-  toJson
+  toJson,
+  utf8ByteLength
 } from './utils'
 
 export type StateSigner =
@@ -140,7 +141,7 @@ export const canonicalizeAndMeasureJson = (
   if (json === null) {
     return 0
   }
-  const bytes = encodeBytes(json).byteLength
+  const bytes = utf8ByteLength(json)
   return bytes > maxBytes ? 1 : [json, bytes]
 }
 
@@ -219,7 +220,7 @@ export const roleCertPayload = (cert: Omit<RoleCertificate, 'sig'>): string =>
       cert.subUserId,
       cert.appId,
       cert.roomId,
-      [...cert.roles].sort(),
+      cert.roles.toSorted(),
       cert.seq,
       cert.iat
     ],

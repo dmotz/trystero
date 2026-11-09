@@ -8,6 +8,7 @@ import {
   decodeBytes,
   domainTag,
   encodeBytes,
+  encodeBytesInto,
   fromBase64Url,
   fromJson,
   hash32,
@@ -16,7 +17,8 @@ import {
   mkErr,
   toBase64Url,
   toJson,
-  userIdLength
+  userIdLength,
+  utf8ByteLength
 } from './primitives'
 import type {DataPayload, RoleCertificate} from './types'
 
@@ -28,6 +30,7 @@ export {
   decodeBytes,
   domainTag,
   encodeBytes,
+  encodeBytesInto,
   fromBase64Url,
   fromJson,
   initSingleHandler,
@@ -35,7 +38,8 @@ export {
   libName,
   mkErr,
   toBase64Url,
-  toJson
+  toJson,
+  utf8ByteLength
 }
 
 export const lockMethods = <T extends object>(

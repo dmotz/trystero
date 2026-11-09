@@ -13,6 +13,11 @@ import {
   verifyPeerIdKey,
   verifyUserIdKey
 } from '../../packages/core/src/identity.ts'
+import {
+  maxActionFrameBytes,
+  maxBulkFrameBytes
+} from '../../packages/core/src/data-limits.ts'
+import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
 import type {
   PeerHandle,
   SocketClient
@@ -51,10 +56,12 @@ import createTopicStrategy from '../../packages/core/src/topic-strategy.ts'
 import type {MessageAction} from '../../packages/core/src/types.ts'
 import {
   encodeBytes,
+  encodeBytesInto,
   formatSelfCertifyingRoomId,
   fromBase64Url,
   mkViolationErr,
-  toBase64Url
+  toBase64Url,
+  utf8ByteLength
 } from '../../packages/core/src/utils.ts'
 import {createWsRelayServer} from '../../packages/ws-relay/src/server.ts'
 import {createTestScaleCluster} from './overlay-harness.ts'
@@ -1628,5 +1635,134 @@ void test('Round-3 regressions: optimistic state skew overwrite & rollback, pre-
     assert.deepEqual(unhandled, [])
   } finally {
     process.off('unhandledRejection', onUnhandled)
+  }
+})
+
+void test('Native runtime fast-paths: zero-alloc utf8ByteLength + encodeBytesInto and SCTP 64 KiB bulk chunk negotiation', async () => {
+  // 1. utf8ByteLength and encodeBytesInto match TextEncoder across ASCII, BMP, astral surrogates, and lone surrogates
+  const utf8Samples = [
+    '',
+    'plain-ascii-0123456789',
+    'café naïve über ß',
+    '日本語と한국어と€',
+    '🚀🎉𝌆👨‍👩‍👧‍👦',
+    'lone-high-\uD800-mid',
+    'lone-low-\uDC00-mid',
+    'reversed-\uDC00\uD800-pair',
+    'trailing-high-\uD83D'
+  ]
+  for (const sample of utf8Samples) {
+    const expected = encodeBytes(sample)
+    const measured = utf8ByteLength(sample)
+    assert.equal(
+      measured,
+      expected.byteLength,
+      `utf8ByteLength mismatch for ${JSON.stringify(sample)}`
+    )
+    const dest = new Uint8Array(measured)
+    const {read, written} = encodeBytesInto(sample, dest)
+    assert.equal(read, sample.length)
+    assert.equal(written, measured)
+    assert.deepEqual(dest, expected)
+  }
+
+  // 2. Direct WebRTC peers with pc.sctp.maxMessageSize >= 64 KiB negotiate 64 KiB bulk chunks while keeping non-chunk frames capped at 16 KiB
+  const pidA = testPeerId('sctp64-peer-a')
+  const pidB = testPeerId('sctp64-peer-b')
+  let onPeerA!: (peer: PeerHandle, id: string) => void
+  let onPeerB!: (peer: PeerHandle, id: string) => void
+
+  const roomA = createRoom(
+    p => {
+      onPeerA = p
+    },
+    () => {},
+    () => {},
+    {
+      appId: 'sctp64-app',
+      roomId: 'sctp64-room',
+      endpointIdentity: getTestEndpointByPeerId(pidA)
+    }
+  )
+  const roomB = createRoom(
+    p => {
+      onPeerB = p
+    },
+    () => {},
+    () => {},
+    {
+      appId: 'sctp64-app',
+      roomId: 'sctp64-room',
+      endpointIdentity: getTestEndpointByPeerId(pidB)
+    }
+  )
+  const errorsB: string[] = []
+  roomB.onError(e => errorsB.push(e.message))
+
+  try {
+    const {peerA, peerB} = createLinkedHandlePair()
+    assert.equal(
+      createDirectPeerTransport(peerA).maxBulkFrameBytes,
+      maxActionFrameBytes
+    )
+    ;(peerA.connection as {sctp?: {maxMessageSize?: number}}).sctp = {
+      maxMessageSize: 262_144
+    }
+    ;(peerB.connection as {sctp?: {maxMessageSize?: number}}).sctp = {
+      maxMessageSize: 262_144
+    }
+    assert.equal(
+      createDirectPeerTransport(peerA).maxBulkFrameBytes,
+      maxBulkFrameBytes
+    )
+
+    const joined = Promise.all([
+      new Promise<void>(res => roomA.onPeerJoin(() => res())),
+      new Promise<void>(res => roomB.onPeerJoin(() => res()))
+    ])
+    onPeerA(peerA, pidB)
+    onPeerB(peerB, pidA)
+    await joined
+
+    const txA = roomA.makeAction<Uint8Array>('bulk64')
+    const rxB = roomB.makeAction<Uint8Array>('bulk64')
+    let received: Uint8Array | null = null
+    let receivedMeta: unknown = null
+    rxB.onMessage((data, ctx) => {
+      received = data
+      receivedMeta = ctx.metadata
+    })
+
+    const sentChunkLengths: number[] = []
+    const origSend = peerA.sendData.bind(peerA)
+    peerA.sendData = bytes => {
+      if (bytes[0] === 3 && (bytes[1]! & 15) === 2) {
+        sentChunkLengths.push(bytes.byteLength)
+      }
+      origSend(bytes)
+    }
+
+    const payload = new Uint8Array(200_000)
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] = (i * 17 + 3) & 0xff
+    }
+    await txA.send(payload, {target: pidB, metadata: {label: '🚀-64k'}})
+    await waitFor(() => received !== null, 2_000)
+
+    assert.deepEqual(received, payload)
+    assert.deepEqual(receivedMeta, {label: '🚀-64k'})
+    // 200,000 bytes over 64 KiB frames (65,522 payload + 14 header = 65,536) = 3 full 64 KiB frames + 1 tail frame (3,434 + 14 = 3,448)
+    assert.deepEqual(sentChunkLengths, [65_536, 65_536, 65_536, 3_448])
+    assert.deepEqual(errorsB, [])
+
+    // Oversized non-chunk frame (> 16 KiB inlineKind=0) is still rejected at wire ingress
+    const oversizedInline = new Uint8Array(maxActionFrameBytes + 64)
+    oversizedInline[0] = 3
+    oversizedInline[1] = 0
+    origSend(oversizedInline)
+    await waitFor(() => errorsB.length > 0, 1_000)
+    assert.match(errorsB[0]!, /invalid action frame/)
+  } finally {
+    await Promise.all([roomA.leave(), roomB.leave()])
   }
 })

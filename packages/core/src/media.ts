@@ -405,17 +405,13 @@ export const createMediaManager = ({
             peerStreams.set(stream, synced)
           } else {
             const nextSet = new Set(effectiveTracks)
-            for (const prevTrack of synced) {
-              if (!nextSet.has(prevTrack)) {
-                mediaPeer.removeTrack(prevTrack, stream)
-                synced.delete(prevTrack)
-              }
+            for (const prevTrack of synced.difference(nextSet)) {
+              mediaPeer.removeTrack(prevTrack, stream)
+              synced.delete(prevTrack)
             }
-            for (const nextTrack of effectiveTracks) {
-              if (!synced.has(nextTrack)) {
-                toAdd.push(nextTrack)
-                synced.add(nextTrack)
-              }
+            for (const nextTrack of nextSet.difference(synced)) {
+              toAdd.push(nextTrack)
+              synced.add(nextTrack)
             }
           }
 
@@ -466,11 +462,10 @@ export const createMediaManager = ({
         }
         directPeer.removeStream(stream)
         if (prevTracks) {
-          const rawSet = new Set(tracksOf(stream))
-          for (const track of prevTracks) {
-            if (!rawSet.has(track)) {
-              directPeer.removeTrack(track, stream)
-            }
+          for (const track of prevTracks.difference(
+            new Set(tracksOf(stream))
+          )) {
+            directPeer.removeTrack(track, stream)
           }
         }
       })

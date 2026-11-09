@@ -1,5 +1,6 @@
 import {
   maxActionFrameBytes as maxFrameBytes,
+  maxBulkFrameBytes,
   pendingDataTimeoutMs,
   transferTimeoutMs
 } from './data-limits'
@@ -17,6 +18,7 @@ import {
   all,
   decodeBytes,
   encodeBytes,
+  encodeBytesInto,
   fromJson,
   invalidActionMsg,
   logActionHandlerErr,
@@ -32,6 +34,7 @@ import {
   toJson,
   toPayloadSource,
   unrefTimer,
+  utf8ByteLength,
   warn
 } from './utils'
 
@@ -42,12 +45,14 @@ const chunkKind = 2
 const acceptedKind = 3
 const rejectedKind = 4
 const cancelledKind = 5
+const wideBulkFlag = 64
 
 const inlineHeaderSize = 36 // version, kind/format, action name, metadata length
 const offerHeaderSize = 48 // inline header, uint32 id, float64 byte length
 const controlHeaderSize = 6 // version, kind, uint32 id
 const chunkHeaderSize = 14 // control header, float64 byte offset
-const chunkSize = maxFrameBytes - chunkHeaderSize
+const minChunkSize = maxFrameBytes - chunkHeaderSize
+const maxChunkSize = maxBulkFrameBytes - chunkHeaderSize
 const defaultMaxReceiveBytes = 256 * 1024 ** 2
 const maxControlBufferedBytes = 1024 ** 2
 
@@ -168,6 +173,7 @@ type IncomingBulk = AdmissionBase & {
   kind: 'bulk'
   transferId: number
   accepted: boolean
+  chunkSize: number
   data: Uint8Array | null
   seenChunks: Uint8Array | null
   offset: number
@@ -825,12 +831,13 @@ export const createActionWireManager = ({
         rejectRx(state, 'receive cancelled')
         drain()
       }
-      sig.addEventListener('abort', cancel, {once: true})
-      state.unbindAbort = () => sig.removeEventListener('abort', cancel)
       if (sig.aborted) {
         cancel()
         return false
       }
+      const ac = new AbortController()
+      sig.addEventListener('abort', cancel, {once: true, signal: ac.signal})
+      state.unbindAbort = () => ac.abort()
     }
     return true
   }
@@ -978,9 +985,10 @@ export const createActionWireManager = ({
         onAbort()
         return
       }
-      signal.addEventListener('abort', onAbort, {once: true})
+      const ac = new AbortController()
+      signal.addEventListener('abort', onAbort, {once: true, signal: ac.signal})
       void p.then(resolve, reject).finally(() => {
-        signal.removeEventListener('abort', onAbort)
+        ac.abort()
       })
     })
 
@@ -1036,12 +1044,11 @@ export const createActionWireManager = ({
     let didSendOffer = false
     let settledByReceiver = false
     let lastSeen = Date.now()
-    let acceptOffer!: () => void
-    let rejectOffer!: (error: Error) => void
-    const permission = new Promise<void>((resolve, rejectPromise) => {
-      acceptOffer = resolve
-      rejectOffer = rejectPromise
-    })
+    const {
+      promise: permission,
+      resolve: acceptOffer,
+      reject: rejectOffer
+    } = Promise.withResolvers<void>()
     void permission.catch(noOp)
 
     const transfers =
@@ -1086,19 +1093,33 @@ export const createActionWireManager = ({
       }
     )
 
-    const onAbort = (): void => {
-      try {
-        checkAborted(signal)
-      } catch (error) {
-        transferState.fail(error as Error)
-      }
+    const abortCleanup = signal ? new AbortController() : null
+    if (abortCleanup && signal) {
+      signal.addEventListener(
+        'abort',
+        () => {
+          try {
+            checkAborted(signal)
+          } catch (error) {
+            transferState.fail(error as Error)
+          }
+        },
+        {once: true, signal: abortCleanup.signal}
+      )
     }
-    signal?.addEventListener('abort', onAbort, {once: true})
 
     try {
+      const useWideChunks =
+        (transport.maxBulkFrameBytes ?? maxFrameBytes) >= maxBulkFrameBytes
+      const txChunkSize = useWideChunks ? maxChunkSize : minChunkSize
+      let peerOfferFrame = offerFrame
+      if (useWideChunks) {
+        peerOfferFrame = offerFrame.slice()
+        peerOfferFrame[1] = peerOfferFrame[1]! | wideBulkFlag
+      }
       await sendFrameToTransport(
         transport,
-        offerFrame,
+        peerOfferFrame,
         check,
         signal,
         transferId,
@@ -1106,9 +1127,9 @@ export const createActionWireManager = ({
       )
       didSendOffer = true
       await permission
-      for (let offset = 0; offset < size; offset += chunkSize) {
+      for (let offset = 0; offset < size; offset += txChunkSize) {
         check()
-        const length = Math.min(chunkSize, size - offset)
+        const length = Math.min(txChunkSize, size - offset)
         const bytes = buildControlPacket(
           chunkKind,
           transferId,
@@ -1140,7 +1161,7 @@ export const createActionWireManager = ({
       throw error
     } finally {
       timer = resetTimer(timer)
-      signal?.removeEventListener('abort', onAbort)
+      abortCleanup?.abort()
       transfers.delete(transferId)
       if (!transfers.size && outgoing.get(peerId) === transfers) {
         outgoing.delete(peerId)
@@ -1203,25 +1224,26 @@ export const createActionWireManager = ({
       return
     }
     const totalSize = state.message.size
+    const rxChunkSize = state.chunkSize
     if (
       !state.accepted ||
       !Number.isSafeInteger(offset) ||
       offset < 0 ||
       offset >= totalSize ||
-      offset % chunkSize !== 0 ||
+      offset % rxChunkSize !== 0 ||
       !chunkData.length ||
-      chunkData.length !== Math.min(chunkSize, totalSize - offset)
+      chunkData.length !== Math.min(rxChunkSize, totalSize - offset)
     ) {
       failPeer(peerId, invalidActionMsg('chunk'))
       return
     }
-    const chunkIdx = offset / chunkSize
+    const chunkIdx = offset / rxChunkSize
     const byteIdx = chunkIdx >>> 3
     const bitMask = 1 << (chunkIdx & 7)
     try {
       state.data ??= new Uint8Array(totalSize)
       state.seenChunks ??= new Uint8Array(
-        Math.ceil(Math.ceil(totalSize / chunkSize) / 8)
+        Math.ceil(Math.ceil(totalSize / rxChunkSize) / 8)
       )
     } catch {
       rejectRx(state, 'unable to allocate receive buffer')
@@ -1327,35 +1349,40 @@ export const createActionWireManager = ({
         const [format, source] = toPayloadSource(data)
         const size =
           source instanceof Uint8Array ? source.byteLength : source.size
-        const metaBytes =
-          metadata === undefined ? emptyBytes : encodeBytes(toJson(metadata))
-        if (metaBytes.length > maxFrameBytes - offerHeaderSize) {
+        const metaJson = metadata === undefined ? '' : toJson(metadata)
+        const metaByteLen =
+          metadata === undefined ? 0 : utf8ByteLength(metaJson)
+        if (metaByteLen > maxFrameBytes - offerHeaderSize) {
           throw mkErr('action metadata is too large')
         }
 
-        const isSmall =
-          inlineHeaderSize + metaBytes.length + size <= maxFrameBytes
+        const isSmall = inlineHeaderSize + metaByteLen + size <= maxFrameBytes
         const transferId = isSmall ? 0 : nextTransferId++ >>> 0
         const headerSize = isSmall ? inlineHeaderSize : offerHeaderSize
         const startFrame = new Uint8Array(
-          headerSize + metaBytes.length + (isSmall ? size : 0)
+          headerSize + metaByteLen + (isSmall ? size : 0)
         )
         startFrame[0] = actionWireVersion
         startFrame[1] = (isSmall ? inlineKind : offerKind) | (format << 4)
         startFrame.set(typeBytes, 2)
         const view = viewOf(startFrame)
-        view.setUint16(34, metaBytes.length)
+        view.setUint16(34, metaByteLen)
         if (!isSmall) {
           view.setUint32(36, transferId)
           view.setFloat64(40, size)
         }
-        startFrame.set(metaBytes, headerSize)
+        if (metaByteLen > 0) {
+          encodeBytesInto(
+            metaJson,
+            startFrame.subarray(headerSize, headerSize + metaByteLen)
+          )
+        }
         if (isSmall) {
           startFrame.set(
             source instanceof Uint8Array
               ? source
               : new Uint8Array(await source.arrayBuffer()),
-            headerSize + metaBytes.length
+            headerSize + metaByteLen
           )
         }
 
@@ -1478,7 +1505,7 @@ export const createActionWireManager = ({
   }
 
   const handleData = (peerId: string, data: ArrayBuffer): void => {
-    if (data.byteLength < 2 || data.byteLength > maxFrameBytes) {
+    if (data.byteLength < 2 || data.byteLength > maxBulkFrameBytes) {
       failPeer(peerId, invalidFrameMsg)
       return
     }
@@ -1488,12 +1515,15 @@ export const createActionWireManager = ({
       return
     }
     const kind = bytes[1]! & 15
-    const format = bytes[1]! >>> 4
+    const format = (bytes[1]! >>> 4) & 3
+    const flags = bytes[1]! >>> 6
     const view = viewOf(bytes)
     if (
       kind > cancelledKind ||
       format > binaryFormat ||
-      (kind > offerKind && format !== textFormat)
+      flags > (kind === offerKind ? 1 : 0) ||
+      (kind > offerKind && format !== textFormat) ||
+      (kind !== chunkKind && bytes.length > maxFrameBytes)
     ) {
       failPeer(peerId, invalidFrameMsg)
       return
@@ -1614,6 +1644,7 @@ export const createActionWireManager = ({
       kind: 'bulk',
       transferId,
       accepted: false,
+      chunkSize: flags === 1 ? maxChunkSize : minChunkSize,
       offset: 0,
       data: null,
       seenChunks: null
