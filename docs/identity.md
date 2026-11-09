@@ -25,7 +25,7 @@ Inspect your own identity and room details at any time with `room.getSelf()`:
 ```js
 import {joinRoom} from 'trystero'
 
-const room = joinRoom({appId: 'tabletop-club'}, 'room-42')
+const room = joinRoom({appId: 'tabletop.example.com'}, 'room-42')
 const {userId, peerId, identityPersistence} = await room.getSelf()
 
 console.log(`I am user ${userId} on tab ${peerId} (${identityPersistence})`)
@@ -46,10 +46,7 @@ with a single config property:
 #### Ephemeral mode (no browser storage)
 
 ```js
-const room = joinRoom(
-  {appId: 'anonymous-sketchpad', identity: 'none'},
-  'canvas-1'
-)
+const room = joinRoom({appId: 'oedipa/sketchpad', identity: 'none'}, 'canvas-1')
 ```
 
 #### Resetting a stored browser identity ("Sign out")
@@ -58,7 +55,7 @@ const room = joinRoom(
 import {clearUserIdentity} from 'trystero'
 
 await room.leave()
-await clearUserIdentity('tabletop-club')
+await clearUserIdentity('tabletop.example.com')
 ```
 
 #### Portable identities across devices (custom storage / backend)
@@ -77,7 +74,7 @@ import {
 
 const room = joinRoom(
   {
-    appId: 'co-op-rpg',
+    appId: 'rpg.example.com',
     identity: async ({appId, roomId}) => {
       const savedKey = await fetchKeyFromYourBackend(appId)
       if (savedKey) {
@@ -192,7 +189,7 @@ For private rooms, add a `password`:
 ```js
 const room = joinRoom(
   {
-    appId: 'late-night-poker',
+    appId: 'oedipa/late-night-poker',
     password: 'correct-horse-battery-staple'
   },
   'back-room'
@@ -215,7 +212,7 @@ extra people clicking the invite link shouldn't barge into an active match? Pass
 ```js
 const room = joinRoom(
   {
-    appId: 'battleship',
+    appId: 'example.com/battleship',
     maxUsers: 2 // advisory cap of 2 unique users (you + 1 opponent)
   },
   'match-99'

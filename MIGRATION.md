@@ -53,7 +53,7 @@ handling to **`room.onError()`**.
 ```js
 import {joinRoom, selfId} from 'trystero'
 
-const room = joinRoom({appId: 'my-app'}, 'lobby', {
+const room = joinRoom({appId: 'example.com/my-app'}, 'lobby', {
   onJoinError: err => console.error(err)
 })
 
@@ -68,7 +68,7 @@ room.onPeerLeave = peerId => console.log(`${peerId} left`)
 ```js
 import {joinRoom} from 'trystero'
 
-const room = joinRoom({appId: 'my-app'}, 'lobby')
+const room = joinRoom({appId: 'example.com/my-app'}, 'lobby')
 const {userId, peerId} = await room.getSelf()
 
 room.onError(err => console.error(err.code, err.message))

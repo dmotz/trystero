@@ -23,7 +23,7 @@ Create a named action (`1–32` UTF-8 bytes) with `room.makeAction(namespace)`:
 ```js
 import {joinRoom} from 'trystero'
 
-const room = joinRoom({appId: 'cantina'}, 'table-4')
+const room = joinRoom({appId: 'cantina.example.com'}, 'table-4')
 const drink = room.makeAction('drink')
 
 // Broadcast to everyone currently in the room

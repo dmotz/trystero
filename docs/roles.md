@@ -35,7 +35,7 @@ import {joinRoom, roles} from 'trystero'
 // Host creates the room
 const hostRoom = joinRoom(
   {
-    appId: 'trivia-night',
+    appId: 'oedipa/trivia-night',
     use: [roles({selfAsAdmin: true})]
   },
   'friday-quiz'
@@ -56,7 +56,7 @@ who owns the room:
 // Guests join using the shared `roomId`
 const guestRoom = joinRoom(
   {
-    appId: 'trivia-night',
+    appId: 'oedipa/trivia-night',
     use: [roles()]
   },
   roomId
@@ -90,7 +90,7 @@ const ADMINS = ['tY8mK3pQvN2xR7wL9jB4cF', '9fX2kLm8pQr7vBn3wZy4xT']
 // everyone else joins as a regular participant who trusts ADMINS.
 const room = joinRoom(
   {
-    appId: 'town-hall',
+    appId: 'town-hall.example.com',
     use: [roles({admins: ADMINS})]
   },
   'main-stage'

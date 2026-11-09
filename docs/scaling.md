@@ -23,7 +23,7 @@ import {joinRoom, scale} from 'trystero'
 
 const room = joinRoom(
   {
-    appId: 'crowd-canvas',
+    appId: 'canvas.example.com',
     use: [scale()]
   },
   'plaza-1'
@@ -87,7 +87,7 @@ count against hop count:
 ```js
 const room = joinRoom(
   {
-    appId: 'crowd-canvas',
+    appId: 'canvas.example.com',
     use: [
       scale({
         maxDirectPeers: 8 // target direct WebRTC neighbors per peer (4..32)

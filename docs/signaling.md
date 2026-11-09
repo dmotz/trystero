@@ -47,6 +47,12 @@ import {joinRoom} from 'trystero'
 // import {joinRoom} from '@trystero-p2p/firebase'
 ```
 
+> **Namespace your `appId`:** On shared public relays (`trystero`, `mqtt`,
+> `torrent`), signaling topics are derived from `(appId, roomId)`. Use a domain
+> you control (`'pixel-party.example.com'`, `'example.com/pixel-party'`) or
+> `'username/app-name'` rather than a generic slug like `'my-app'` or `'chess'`
+> so your rooms never collide with another developer's app.
+
 ---
 
 ## Bundle sizes
@@ -83,7 +89,7 @@ Customize this behavior via `relayConfig`:
 ```js
 const room = joinRoom(
   {
-    appId: 'my-app',
+    appId: 'lobby.example.com',
     relayConfig: {
       // Optional: point to your own relay/broker/tracker URLs (overrides defaults)
       urls: ['wss://relay-1.example.com', 'wss://relay-2.example.com'],
@@ -163,7 +169,7 @@ import {joinRoom} from '@trystero-p2p/ws-relay'
 
 const room = joinRoom(
   {
-    appId: 'lan-party',
+    appId: 'your-domain.example/lan-party',
     relayConfig: {
       urls: ['wss://relay.your-domain.example']
     }
