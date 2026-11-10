@@ -19,16 +19,19 @@ import {
 } from '@trystero-p2p/core'
 import {parseServerMessage, type WsRelayClientMessage} from './protocol'
 
+type TopicHandler = (topic: string, data: StrategyMessage) => void
+
+type TopicSubscriptionEntry = {
+  handlers: Set<TopicHandler>
+  announcement?: StrategyMessage
+}
+
 const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
   client => client.socket,
   client => client.close?.()
 )
-const msgHandlers =
-  /*@__PURE__*/ createRelayScopedStore<
-    Set<(topic: string, data: StrategyMessage) => void>
-  >()
-const announcementMessages =
-  /*@__PURE__*/ createRelayScopedStore<StrategyMessage>()
+const topicSubscriptions =
+  /*@__PURE__*/ createRelayScopedStore<TopicSubscriptionEntry>()
 
 export type WsRelayConfig = Omit<RelayConfig, 'urls' | 'redundancy'> & {
   urls: string[]
@@ -72,17 +75,24 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> =
                 return
               }
 
-              msgHandlers
+              topicSubscriptions
                 .forRelay(created)
-                [msg.topic]?.forEach(handler => handler(msg.topic, msg.payload))
+                [msg.topic]?.handlers.forEach(handler =>
+                  handler(msg.topic, msg.payload)
+                )
             },
             () => {
-              Object.keys(msgHandlers.forRelay(created)).forEach(topic =>
+              const activeEntries = Object.entries(
+                topicSubscriptions.forRelay(created)
+              )
+              activeEntries.forEach(([topic]) =>
                 created.send(toJson(subscribe(topic)))
               )
-              Object.entries(announcementMessages.forRelay(created)).forEach(
-                ([topic, msg]) => created.send(toJson(publish(topic, msg)))
-              )
+              activeEntries.forEach(([topic, entry]) => {
+                if (entry.announcement !== undefined) {
+                  created.send(toJson(publish(topic, entry.announcement)))
+                }
+              })
             }
           )
           return created
@@ -92,42 +102,49 @@ export const joinRoom: JoinRoom<WsRelayRoomConfig> =
       }),
 
     subscribeTopic: (client, topic, onMessage) => {
-      const handlers = msgHandlers.forRelay(client)
-      const topicHandler = (topic: string, data: StrategyMessage): void =>
-        void onMessage(topic, data)
+      const subscriptions = topicSubscriptions.forRelay(client)
+      const topicHandler: TopicHandler = (receivedTopic, data) =>
+        void onMessage(receivedTopic, data)
 
-      const wasEmpty = !handlers[topic]
-      const topicHandlers = (handlers[topic] ??= new Set())
+      let entry = subscriptions[topic]
+      const wasEmpty = !entry
+      if (!entry) {
+        entry = {handlers: new Set()}
+        subscriptions[topic] = entry
+      }
 
-      topicHandlers.add(topicHandler)
+      entry.handlers.add(topicHandler)
 
       if (wasEmpty) {
         client.send(toJson(subscribe(topic)))
       }
 
       return () => {
-        const topicHandlers = handlers[topic]
+        const current = subscriptions[topic]
 
-        if (!topicHandlers) {
+        if (!current) {
           return
         }
 
-        topicHandlers.delete(topicHandler)
+        current.handlers.delete(topicHandler)
 
-        if (topicHandlers.size === 0) {
-          delete handlers[topic]
-          delete announcementMessages.forRelay(client)[topic]
+        if (current.handlers.size === 0) {
+          delete subscriptions[topic]
           client.send(toJson(unsubscribe(topic)))
         }
       }
     },
 
     publishTopic: (client, topic, msg, {kind}) => {
-      client.send(toJson(publish(topic, msg)))
-
       if (kind === 'announce') {
-        announcementMessages.forRelay(client)[topic] = msg
+        const entry = topicSubscriptions.forRelay(client)[topic]
+        if (!entry || entry.handlers.size === 0) {
+          return
+        }
+        entry.announcement = msg
       }
+
+      client.send(toJson(publish(topic, msg)))
     }
   })
 

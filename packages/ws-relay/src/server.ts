@@ -1,10 +1,14 @@
-import type {JsonValue} from '@trystero-p2p/core'
+import {mkErr, type JsonValue} from '@trystero-p2p/core'
 import WebSocket, {WebSocketServer} from 'ws'
 import {
   parseClientMessage,
   type WsRelayClientMessage,
   type WsRelayServerMessage
 } from './protocol'
+
+const unreachable = (x: never): never => {
+  throw mkErr(`unreachable: ${String(x)}`)
+}
 
 export type {WsRelayClientMessage, WsRelayServerMessage}
 
@@ -84,6 +88,24 @@ type RateBucket = {
   lastRefillMs: number
 }
 
+type ServerLifecycleState =
+  | {
+      readonly phase: 'starting'
+      readonly resolve: () => void
+      readonly reject: (err: Error) => void
+    }
+  | {readonly phase: 'ready'}
+  | {readonly phase: 'failed'}
+  | {readonly phase: 'closed'; readonly promise: Promise<void>}
+
+type OpenClientSession = {
+  readonly phase: 'open'
+  readonly topics: Set<string>
+  rateBucket: RateBucket | null
+}
+
+type ClientSessionState = OpenClientSession | {readonly phase: 'closed'}
+
 const toError = (err: unknown): Error =>
   err instanceof Error ? err : new Error(String(err))
 
@@ -121,29 +143,44 @@ export const createWsRelayServer = (
   if (!(maxBurstMessages > 0)) {
     throw new RangeError('maxBurstMessages must be greater than 0')
   }
-  let resolveReady = (): void => {}
-  let rejectReady = (_err: Error): void => {}
-  let didSettleReady = false
-  const ready = new Promise<void>((resolve, reject) => {
-    resolveReady = resolve
-    rejectReady = reject
-  })
-  const reportError = (err: unknown): void => {
-    const error = toError(err)
 
-    if (!didSettleReady) {
-      didSettleReady = true
-      rejectReady(error)
+  const {
+    promise: ready,
+    resolve: resolveReady,
+    reject: rejectReady
+  } = Promise.withResolvers<void>()
+  void ready.catch(() => {})
+
+  const serverBox: {state: ServerLifecycleState} = {
+    state: {
+      phase: 'starting',
+      resolve: resolveReady,
+      reject: rejectReady
     }
+  }
 
+  const markServerReady = (): void => {
+    if (serverBox.state.phase === 'starting') {
+      const {resolve} = serverBox.state
+      serverBox.state = {phase: 'ready'}
+      resolve()
+    }
+  }
+
+  const handleServerError = (err: unknown): void => {
+    const error = toError(err)
+    if (serverBox.state.phase === 'starting') {
+      const {reject} = serverBox.state
+      serverBox.state = {phase: 'failed'}
+      reject(error)
+    }
     onError?.(error)
   }
-  const resolveReadyOnce = (): void => {
-    if (!didSettleReady) {
-      didSettleReady = true
-      resolveReady()
-    }
+
+  const handleClientError = (err: unknown): void => {
+    onError?.(toError(err))
   }
+
   const wss = new WebSocketServer(
     {
       port:
@@ -153,52 +190,91 @@ export const createWsRelayServer = (
       maxPayload: 256 * 1024,
       ...(wsOptions as WebSocket.ServerOptions)
     },
-    resolveReadyOnce
+    markServerReady
   )
   const topics = new Map<string, Set<WebSocket>>()
-  const socketTopics = new WeakMap<WebSocket, Set<string>>()
-  const socketRateBuckets = new WeakMap<WebSocket, RateBucket>()
+  const clientSessions = new WeakMap<WebSocket, ClientSessionState>()
   let subscriptionCount = 0
 
   if (wsOptions.server || wsOptions.noServer) {
-    queueMicrotask(resolveReadyOnce)
+    queueMicrotask(markServerReady)
   }
 
-  const consumeRateToken = (socket: WebSocket): boolean => {
+  const getOpenSession = (socket: WebSocket): OpenClientSession | null => {
+    const session = clientSessions.get(socket)
+    if (!session || session.phase === 'closed') {
+      return null
+    }
+    return session
+  }
+
+  const consumeRateToken = (session: OpenClientSession): boolean => {
     if (maxMessagesPerSecond === Infinity || maxBurstMessages === Infinity) {
       return true
     }
     const now = Date.now()
-    let bucket = socketRateBuckets.get(socket)
-    if (!bucket) {
-      bucket = {tokens: maxBurstMessages, lastRefillMs: now}
-      socketRateBuckets.set(socket, bucket)
+    let {rateBucket} = session
+    if (!rateBucket) {
+      rateBucket = {tokens: maxBurstMessages, lastRefillMs: now}
+      session.rateBucket = rateBucket
     } else {
-      const elapsedSeconds = Math.max(0, now - bucket.lastRefillMs) / 1000
+      const elapsedSeconds = Math.max(0, now - rateBucket.lastRefillMs) / 1000
       if (elapsedSeconds > 0) {
-        bucket.tokens = Math.min(
+        rateBucket.tokens = Math.min(
           maxBurstMessages,
-          bucket.tokens + elapsedSeconds * maxMessagesPerSecond
+          rateBucket.tokens + elapsedSeconds * maxMessagesPerSecond
         )
-        bucket.lastRefillMs = now
+        rateBucket.lastRefillMs = now
       }
     }
-    if (bucket.tokens < 1) {
+    if (rateBucket.tokens < 1) {
       return false
     }
-    bucket.tokens -= 1
+    rateBucket.tokens -= 1
     return true
   }
 
-  const unsubscribe = (socket: WebSocket, topic: string): void => {
-    if (!socketTopics.get(socket)?.delete(topic)) {
+  const cleanupSocket = (socket: WebSocket): void => {
+    const session = clientSessions.get(socket)
+    if (!session || session.phase === 'closed') {
+      return
+    }
+
+    for (const topic of session.topics) {
+      subscriptionCount--
+      const subscribers = topics.get(topic)
+      if (subscribers) {
+        subscribers.delete(socket)
+        if (subscribers.size === 0) {
+          topics.delete(topic)
+        }
+      }
+    }
+
+    session.topics.clear()
+    clientSessions.set(socket, {phase: 'closed'})
+  }
+
+  const closeWithPolicyViolation = (
+    socket: WebSocket,
+    reason: string
+  ): void => {
+    cleanupSocket(socket)
+    socket.close(1008, reason)
+  }
+
+  const unsubscribe = (
+    socket: WebSocket,
+    session: OpenClientSession,
+    topic: string
+  ): void => {
+    if (!session.topics.delete(topic)) {
       return
     }
 
     subscriptionCount--
 
     const subscribers = topics.get(topic)
-
     if (!subscribers) {
       return
     }
@@ -210,18 +286,20 @@ export const createWsRelayServer = (
     }
   }
 
-  const subscribe = (socket: WebSocket, topic: string): void => {
-    let subscriptions = socketTopics.get(socket)
-
-    if (subscriptions?.has(topic)) {
+  const subscribe = (
+    socket: WebSocket,
+    session: OpenClientSession,
+    topic: string
+  ): void => {
+    if (session.topics.has(topic)) {
       return
     }
 
     if (
-      (subscriptions?.size ?? 0) >= maxSubscriptionsPerSocket ||
+      session.topics.size >= maxSubscriptionsPerSocket ||
       subscriptionCount >= maxSubscriptions
     ) {
-      socket.close(1008, 'subscription limit exceeded')
+      closeWithPolicyViolation(socket, 'subscription limit exceeded')
       return
     }
 
@@ -233,13 +311,7 @@ export const createWsRelayServer = (
     }
 
     subscribers.add(socket)
-
-    if (!subscriptions) {
-      subscriptions = new Set()
-      socketTopics.set(socket, subscriptions)
-    }
-
-    subscriptions.add(topic)
+    session.topics.add(topic)
     subscriptionCount++
   }
 
@@ -253,28 +325,35 @@ export const createWsRelayServer = (
     })
   }
 
-  const cleanup = (socket: WebSocket): void => {
-    socketTopics.get(socket)?.forEach(topic => unsubscribe(socket, topic))
-    socketTopics.delete(socket)
-    socketRateBuckets.delete(socket)
-  }
-
   wss.on('connection', socket => {
+    if (serverBox.state.phase === 'closed') {
+      clientSessions.set(socket, {phase: 'closed'})
+      socket.close()
+      return
+    }
+
+    clientSessions.set(socket, {
+      phase: 'open',
+      topics: new Set(),
+      rateBucket: null
+    })
+
     socket.on('message', data => {
       try {
-        if (socket.readyState !== WebSocket.OPEN) {
+        const session = getOpenSession(socket)
+        if (!session || socket.readyState !== WebSocket.OPEN) {
           return
         }
 
-        if (!consumeRateToken(socket)) {
-          socket.close(1008, 'rate limit exceeded')
+        if (!consumeRateToken(session)) {
+          closeWithPolicyViolation(socket, 'rate limit exceeded')
           return
         }
 
         const msg = parseClientMessage(rawDataToString(data))
 
         if (!msg) {
-          socket.close(1008, 'invalid message')
+          closeWithPolicyViolation(socket, 'invalid message')
           return
         }
 
@@ -282,35 +361,59 @@ export const createWsRelayServer = (
           msg.topic.length > maxTopicLength ||
           !validTopicPattern.test(msg.topic)
         ) {
-          socket.close(1008, 'invalid topic')
+          closeWithPolicyViolation(socket, 'invalid topic')
           return
         }
 
         if (msg.type === 'subscribe') {
-          subscribe(socket, msg.topic)
+          subscribe(socket, session, msg.topic)
         } else if (msg.type === 'unsubscribe') {
-          unsubscribe(socket, msg.topic)
+          unsubscribe(socket, session, msg.topic)
         } else {
           publish(msg.topic, msg.payload)
         }
       } catch (err) {
-        reportError(err)
+        handleClientError(err)
       }
     })
-    socket.on('close', () => cleanup(socket))
-    socket.on('error', reportError)
+    socket.on('close', () => cleanupSocket(socket))
+    socket.on('error', handleClientError)
   })
-  wss.on('error', reportError)
+  wss.on('error', handleServerError)
 
   return {
     wss: wss as unknown as WsServerLike,
     ready,
     address: () => wss.address(),
-    close: () =>
-      new Promise((resolve, reject) => {
-        wss.clients.forEach(socket => socket.close())
+    close: () => {
+      switch (serverBox.state.phase) {
+        case 'closed':
+          return serverBox.state.promise
+        case 'starting':
+          serverBox.state.reject(new Error('WebSocket relay server closed'))
+          break
+        case 'ready':
+        case 'failed':
+          break
+        default:
+          return unreachable(serverBox.state)
+      }
+      const promise = new Promise<void>((resolve, reject) => {
+        for (const subscribers of topics.values()) {
+          for (const socket of subscribers) {
+            cleanupSocket(socket)
+            socket.close()
+          }
+        }
+        wss.clients?.forEach(socket => {
+          cleanupSocket(socket)
+          socket.close()
+        })
         wss.close(err => (err ? reject(err) : resolve()))
-      }),
+      })
+      serverBox.state = {phase: 'closed', promise}
+      return promise
+    },
     publish,
     getSubscriberCount: topic =>
       topic ? (topics.get(topic)?.size ?? 0) : subscriptionCount
