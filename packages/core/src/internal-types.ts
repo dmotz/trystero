@@ -1,6 +1,6 @@
 import type {EndpointIdentity} from './identity'
-import type {Hlc} from './signed-record'
 import type {PeerDataTransport} from './peer-transport'
+import type {Hlc} from './signed-record'
 import type {
   ActionProgressHandler,
   AnyRoomPlugin,
@@ -27,6 +27,8 @@ import type {
 } from './types'
 
 export type {PeerDataTransport}
+
+export type Timeout = ReturnType<typeof setTimeout>
 
 export type MaybePromise<T> = T | Promise<T>
 
@@ -471,26 +473,70 @@ export type AnswerReplayState = {
   relays: Array<((message: string) => void) | undefined>
 }
 
+export type RelayOfferSlotState =
+  | {readonly phase: 'reserved'}
+  | {
+      readonly phase: 'retrying'
+      readonly retryTimer: Timeout
+      readonly sendCandidate: (signal: Signal) => void
+    }
+  | {
+      readonly phase: 'exhausted'
+      readonly sendCandidate: (signal: Signal) => void
+    }
+
+export type OutboundOfferState =
+  | {readonly phase: 'idle'}
+  | {
+      readonly phase: 'allocating'
+      readonly promise: Promise<
+        [peer: PeerHandle, offer: string, offerId: string] | null
+      >
+    }
+  | {
+      readonly phase: 'advertising'
+      readonly peer: PeerHandle
+      readonly offerId: string
+      readonly offerSdp: string
+      readonly expiryTimer: Timeout
+      readonly bufferedCandidates: Signal[]
+    }
+  | {
+      readonly phase: 'answered'
+      readonly peer: PeerHandle
+      readonly offerId: string
+      readonly expiryTimer: Timeout
+      readonly bufferedCandidates: Signal[]
+    }
+
+export type InboundAnswerState =
+  | {readonly phase: 'idle'}
+  | {
+      readonly phase: 'answering'
+      readonly peer: PeerHandle
+      readonly offerId: string
+      readonly expiryTimer: Timeout
+      didSendAnswer: boolean
+      readonly replay: AnswerReplayState
+    }
+
+export type PeerConnectionSlotState =
+  | {readonly phase: 'disconnected'}
+  | {
+      readonly phase: 'connected'
+      readonly peer: PeerHandle
+      unhealthySince: number | null
+    }
+
 export type PeerState = {
-  offerPeer: PeerHandle | null
-  offerId: string | null
-  offerInitPromise: Promise<
-    [peer: PeerHandle, offer: string, offerId: string] | null
-  > | null
-  offerRelays: unknown[]
-  connectedPeer: PeerHandle | null
-  answeringPeer: PeerHandle | null
-  offerSdp: string | null
-  offerAnswered: boolean
-  offerCandidateSenders: Array<((signal: Signal) => void) | null>
-  bufferedOfferCandidates: Signal[]
-  offerRetryTimers: Array<ReturnType<typeof setTimeout> | null>
-  offerExpiryTimer: ReturnType<typeof setTimeout> | null
-  unhealthySince: number | null
-  answeringExpiryTimer: ReturnType<typeof setTimeout> | null
-  didSendAnswer: boolean
-  answerReplay: AnswerReplayState | null
-  didReportConnectFailure: boolean
+  outbound: OutboundOfferState
+  inbound: InboundAnswerState
+  connection: PeerConnectionSlotState
+  readonly relaySlots: Array<RelayOfferSlotState | undefined>
+  didReportFailure: boolean
+  readonly offerPeer: PeerHandle | null
+  readonly answeringPeer: PeerHandle | null
+  readonly connectedPeer: PeerHandle | null
 }
 
 export type OfferCheckoutFn = (
@@ -513,7 +559,7 @@ export type SignalContext = {
   isLeaving: () => boolean
   onError: ((error: RoomError) => void) | undefined
   checkoutOffers: OfferCheckoutFn
-  claimLeasedOffer: (peer: PeerHandle) => void
+  claimLeasedOffer: (peer: PeerHandle) => boolean
   reclaimLeasedOffer: (peer: PeerHandle) => void
   encryptOffer: (
     peer: PeerHandle,

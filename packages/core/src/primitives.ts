@@ -15,6 +15,11 @@ export const pluginSlotSymbol: unique symbol = /*@__PURE__*/ Symbol.for(
 
 export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
 
+// State-machine conventions: dispatch on phase -> switch + default: unreachable; predicates -> named type guards; never negative phase lists.
+export const unreachable = (x: never): never => {
+  throw mkErr(x)
+}
+
 export const toJson: typeof JSON.stringify = JSON.stringify
 
 export const fromJson = <T>(s: string): T => {

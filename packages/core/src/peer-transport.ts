@@ -1,6 +1,6 @@
 import {maxActionFrameBytes, maxBulkFrameBytes} from './data-limits'
-import type {PeerHandle} from './internal-types'
-import {noOp, resetTimer, unrefTimer} from './utils'
+import type {PeerHandle, Timeout} from './internal-types'
+import {noOp, resetTimer, unreachable, unrefTimer} from './utils'
 
 export type PeerDataTransport = {
   readonly isOpen: boolean
@@ -12,6 +12,18 @@ export type PeerDataTransport = {
 }
 
 const backpressureWaitTimeoutMs = 10_000
+
+type FlushTeardownState =
+  | {
+      readonly phase: 'grace-hold'
+      readonly graceTimer: Timeout
+      readonly capTimer: Timeout
+    }
+  | {
+      readonly phase: 'draining'
+      readonly capTimer: Timeout
+    }
+  | {readonly phase: 'done'}
 
 export const waitForBufferedAmountLow = (
   channel: RTCDataChannel,
@@ -30,9 +42,8 @@ export const waitForBufferedAmountLow = (
 
   return new Promise<boolean>(res => {
     let settled = false
-    let timeout: ReturnType<typeof setTimeout> | null = null
+    let timeout: Timeout | null = null
     const abortCleanup = new AbortController()
-
     const onBufferLow = (): void => finish(true)
     const onCloseOrError = (): void => finish(false)
     const toggleChannel = (
@@ -50,18 +61,18 @@ export const waitForBufferedAmountLow = (
       settled = true
       toggleChannel('removeEventListener')
       abortCleanup.abort()
-      resetTimer(timeout)
+      timeout = resetTimer(timeout)
       res(didDrain)
     }
+
+    timeout = setTimeout(() => finish(false), timeoutMs)
+    unrefTimer(timeout)
 
     toggleChannel('addEventListener')
     signal?.addEventListener('abort', onCloseOrError, {
       once: true,
       signal: abortCleanup.signal
     })
-
-    timeout = setTimeout(() => finish(false), timeoutMs)
-    unrefTimer(timeout)
 
     if (channel.readyState !== 'open' || signal?.aborted) {
       finish(false)
@@ -85,6 +96,7 @@ export const destroyAfterFlush = (
     return noOp
   }
   peer.setHandlers({
+    connect: noOp,
     data: noOp,
     stream: noOp,
     close: noOp,
@@ -97,37 +109,58 @@ export const destroyAfterFlush = (
     return noOp
   }
 
-  let done = false
-  let graceDone = graceMs <= 0
-  let graceTimer: ReturnType<typeof setTimeout> | null = null
-  let capTimer: ReturnType<typeof setTimeout> | null = null
   const hasEventTarget = typeof channel.addEventListener === 'function'
+  let state: FlushTeardownState
 
   const finish = (): void => {
-    if (done) {
-      return
+    switch (state.phase) {
+      case 'done':
+        return
+      case 'grace-hold':
+        resetTimer(state.graceTimer)
+        resetTimer(state.capTimer)
+        break
+      case 'draining':
+        resetTimer(state.capTimer)
+        break
+      default:
+        unreachable(state)
     }
-    done = true
+    state = {phase: 'done'}
     if (hasEventTarget) {
       channel.removeEventListener('bufferedamountlow', maybeFinish)
       channel.removeEventListener('close', finish)
       channel.removeEventListener('error', finish)
     }
-    resetTimer(graceTimer)
-    resetTimer(capTimer)
     peer.destroy()
     onDone?.()
   }
 
+  const isBufferDrained = (): boolean =>
+    channel.readyState !== 'open' ||
+    typeof channel.bufferedAmount !== 'number' ||
+    channel.bufferedAmount <= 0
+
   const maybeFinish = (): void => {
-    if (
-      graceDone &&
-      (channel.readyState !== 'open' ||
-        typeof channel.bufferedAmount !== 'number' ||
-        channel.bufferedAmount <= 0)
-    ) {
+    if (state.phase === 'draining' && isBufferDrained()) {
       finish()
     }
+  }
+
+  const capTimer = setTimeout(finish, Math.max(graceMs, capMs))
+  unrefTimer(capTimer)
+
+  if (graceMs > 0) {
+    const graceTimer = setTimeout(() => {
+      if (state.phase === 'grace-hold') {
+        state = {phase: 'draining', capTimer: state.capTimer}
+        maybeFinish()
+      }
+    }, graceMs)
+    unrefTimer(graceTimer)
+    state = {phase: 'grace-hold', graceTimer, capTimer}
+  } else {
+    state = {phase: 'draining', capTimer}
   }
 
   if (hasEventTarget) {
@@ -141,16 +174,9 @@ export const destroyAfterFlush = (
     channel.addEventListener('error', finish)
   }
 
-  if (!graceDone) {
-    graceTimer = setTimeout(() => {
-      graceDone = true
-      maybeFinish()
-    }, graceMs)
-    unrefTimer(graceTimer)
+  if (graceMs <= 0) {
+    maybeFinish()
   }
-  capTimer = setTimeout(finish, Math.max(graceMs, capMs))
-  unrefTimer(capTimer)
-  maybeFinish()
 
   return finish
 }
@@ -160,10 +186,12 @@ export const createDirectPeerTransport = (
   isCurrent?: () => boolean
 ): PeerDataTransport => ({
   get isOpen(): boolean {
+    const channelState = peer.channel?.readyState
     return (
       (!isCurrent || isCurrent()) &&
       !peer.isDead &&
-      peer.channel?.readyState !== 'closed'
+      channelState !== 'closing' &&
+      channelState !== 'closed'
     )
   },
   get bufferedAmount(): number {

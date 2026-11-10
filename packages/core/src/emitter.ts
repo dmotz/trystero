@@ -1,10 +1,33 @@
-import {libName, mkErr} from './primitives'
+import {libName, mkErr, unreachable} from './primitives'
 import type {ListenerOptions, ReplayListenerOptions, Unsubscribe} from './types'
 
 const noOp = (): void => {}
 
 const logHandlerErr = (kind: string, err: unknown): void =>
   console.error(`${libName} ${kind} error:`, err)
+
+type SubEntry<Args extends unknown[]> = readonly [
+  call: (...args: Args) => void,
+  unsub: () => void
+]
+
+type SingleSubEntry<F extends (...args: never[]) => unknown> = readonly [
+  call: F,
+  unsub: () => void
+]
+
+type SubscriptionState<Entry> =
+  | {
+      readonly phase: 'replaying'
+      readonly epoch: number
+      readonly abortCleanup: AbortController | null
+    }
+  | {
+      readonly phase: 'live'
+      readonly entry: Entry
+      readonly abortCleanup: AbortController | null
+    }
+  | {readonly phase: 'closed'}
 
 type EventEmitter<Args extends unknown[]> = readonly [
   subscribe: (
@@ -21,7 +44,8 @@ export const createEventEmitter = <Args extends unknown[]>(
   kind: string,
   onActiveChange?: (active: boolean) => void
 ): EventEmitter<Args> => {
-  const subs = new Set<[call: (...args: Args) => void, unsub: () => void]>()
+  const subs = new Set<SubEntry<Args>>()
+  let clearEpoch = 0
 
   const invoke = (handler: (...args: Args) => unknown, args: Args): void => {
     try {
@@ -47,21 +71,35 @@ export const createEventEmitter = <Args extends unknown[]>(
       }
       const once = Boolean(options?.once)
       const abortCleanup = signal ? new AbortController() : null
-      let active = true
-      let added = false
+      let state: SubscriptionState<SubEntry<Args>>
+
       const unsub: Unsubscribe = () => {
-        if (!active) {
-          return
-        }
-        active = false
-        abortCleanup?.abort()
-        if (added && subs.delete(entry) && subs.size === 0) {
-          onActiveChange?.(false)
+        switch (state.phase) {
+          case 'closed':
+            return
+          case 'replaying': {
+            const cleanup = state.abortCleanup
+            state = {phase: 'closed'}
+            cleanup?.abort()
+            return
+          }
+          case 'live': {
+            const {entry: liveEntry, abortCleanup: cleanup} = state
+            state = {phase: 'closed'}
+            cleanup?.abort()
+            if (subs.delete(liveEntry) && subs.size === 0) {
+              onActiveChange?.(false)
+            }
+            return
+          }
+          default:
+            unreachable(state)
         }
       }
-      const entry: [call: (...args: Args) => void, unsub: () => void] = [
+
+      const entry: SubEntry<Args> = [
         (...args: Args): void => {
-          if (!active) {
+          if (state.phase !== 'live') {
             return
           }
           if (once) {
@@ -71,6 +109,40 @@ export const createEventEmitter = <Args extends unknown[]>(
         },
         unsub
       ]
+
+      const activateAfterReplay = (): void => {
+        switch (state.phase) {
+          case 'replaying': {
+            if (state.epoch !== clearEpoch) {
+              unsub()
+              return
+            }
+            const wasEmpty = subs.size === 0
+            state = {
+              phase: 'live',
+              entry,
+              abortCleanup: state.abortCleanup
+            }
+            subs.add(entry)
+            if (wasEmpty) {
+              onActiveChange?.(true)
+            }
+            return
+          }
+          case 'live':
+          case 'closed':
+            return
+          default:
+            unreachable(state)
+        }
+      }
+
+      state = {
+        phase: 'replaying',
+        epoch: clearEpoch,
+        abortCleanup
+      }
+
       if (abortCleanup && signal) {
         signal.addEventListener('abort', unsub, {
           once: true,
@@ -79,8 +151,11 @@ export const createEventEmitter = <Args extends unknown[]>(
       }
 
       if (options?.replay && getReplayItems) {
+        const currentPhase = (): SubscriptionState<SubEntry<Args>> => state
         for (const item of getReplayItems()) {
-          if (!active) {
+          const cur = currentPhase()
+          if (cur.phase !== 'replaying' || cur.epoch !== clearEpoch) {
+            unsub()
             break
           }
           if (once) {
@@ -90,15 +165,7 @@ export const createEventEmitter = <Args extends unknown[]>(
         }
       }
 
-      if (active) {
-        const wasEmpty = subs.size === 0
-        added = true
-        subs.add(entry)
-        if (wasEmpty) {
-          onActiveChange?.(true)
-        }
-      }
-
+      activateAfterReplay()
       return unsub
     },
     (...args: Args): void => {
@@ -107,6 +174,7 @@ export const createEventEmitter = <Args extends unknown[]>(
       }
     },
     (): void => {
+      clearEpoch++
       for (const sub of Array.from(subs)) {
         sub[1]()
       }
@@ -125,7 +193,7 @@ export const initSingleHandler = <F extends (...args: never[]) => unknown>(
   name: string,
   onChange?: (handler: F | null) => void
 ): SingleHandlerTuple<F> => {
-  let current: [call: F, unsub: () => void] | null = null
+  let current: SingleSubEntry<F> | null = null
 
   return [
     (handler, options) => {
@@ -142,17 +210,19 @@ export const initSingleHandler = <F extends (...args: never[]) => unknown>(
       const once = Boolean(options?.once)
       const abortCleanup = signal ? new AbortController() : null
       let active = true
+
       const unsub: Unsubscribe = () => {
         if (!active) {
           return
         }
         active = false
         abortCleanup?.abort()
-        if (current === entry) {
+        if (current?.[1] === unsub) {
           current = null
           onChange?.(null)
         }
       }
+
       const call = ((...args: Parameters<F>): ReturnType<F> => {
         if (!active) {
           return undefined as ReturnType<F>
@@ -162,8 +232,9 @@ export const initSingleHandler = <F extends (...args: never[]) => unknown>(
         }
         return handler(...args) as ReturnType<F>
       }) as F
-      const entry: [call: F, unsub: () => void] = [call, unsub]
-      current = entry
+
+      current = [call, unsub]
+
       if (abortCleanup && signal) {
         signal.addEventListener('abort', unsub, {
           once: true,

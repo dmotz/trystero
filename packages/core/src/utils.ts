@@ -1,5 +1,5 @@
 import {createEventEmitter, initSingleHandler} from './emitter'
-import type {KernelRoomErrorInput} from './internal-types'
+import type {KernelRoomErrorInput, Timeout} from './internal-types'
 import {
   base62Alphabet,
   base64UrlRe,
@@ -17,6 +17,7 @@ import {
   mkErr,
   toBase64Url,
   toJson,
+  unreachable,
   userIdLength,
   utf8ByteLength
 } from './primitives'
@@ -39,6 +40,7 @@ export {
   mkErr,
   toBase64Url,
   toJson,
+  unreachable,
   utf8ByteLength
 }
 
@@ -167,9 +169,7 @@ export const noOp = (): void => {}
 
 export const candidateType = 'candidate'
 
-export const resetTimer = (
-  timer: ReturnType<typeof setTimeout> | null | undefined
-): null => {
+export const resetTimer = (timer: Timeout | null | undefined): null => {
   if (timer !== null && timer !== undefined) {
     clearTimeout(timer)
   }
