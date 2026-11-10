@@ -10,7 +10,8 @@ import type {
   InternalMessageContext,
   InternalReceiveContext,
   PeerDataTransport,
-  TargetPeers
+  TargetPeers,
+  Timeout
 } from './internal-types'
 import type {
   ActionError,
@@ -40,7 +41,6 @@ import {
   all,
   authMetaKey,
   createEventEmitter,
-  entries,
   initSingleHandler,
   insufficientAuthPrefix,
   internalActionPrefix,
@@ -55,6 +55,7 @@ import {
   resetTimer,
   toError,
   toErrorMessage,
+  unreachable,
   unrefTimer,
   validateRoleCertificateShape,
   values
@@ -75,17 +76,26 @@ type RegisteredPublicAction = {
   internal: boolean
 }
 
-type PendingRequestWaiter = {
-  controller: AbortController
-  getReceive: () => ActionReceiveHandler | null
-  emitReceiveProgress: (
+type OutboundRequestWaiterState =
+  | {readonly phase: 'preparing'; readonly controller: AbortController}
+  | {
+      readonly phase: 'active'
+      readonly controller: AbortController
+      readonly timer: Timeout | null
+    }
+  | {readonly phase: 'done'}
+
+type OutboundRequestWaiter = {
+  readonly requestId: string
+  readonly peerId: string
+  state: OutboundRequestWaiterState
+  readonly getReceive: () => ActionReceiveHandler | null
+  readonly emitReceiveProgress: (
     progress: number,
     context: ActionProgressContext
   ) => void
-  peerId: string
-  resolve: (payload: DataPayload) => void
-  reject: (error: Error) => void
-  timer: ReturnType<typeof setTimeout> | null
+  readonly resolve: (payload: DataPayload) => void
+  readonly reject: (error: Error) => void
 }
 
 const getEnvelopeRecord = (
@@ -232,7 +242,7 @@ export const createActionManager = (
   const publicActions: Record<string, RegisteredPublicAction> =
     Object.create(null)
   const internalActions = new Map<string, InternalAction<DataPayload>>()
-  const pendingRequestWaiters: Record<string, PendingRequestWaiter> = {}
+  const requestWaiters = new Map<string, OutboundRequestWaiter>()
   const activeRequestControllers = new Map<string, Set<AbortController>>()
 
   const {
@@ -368,14 +378,52 @@ export const createActionManager = (
     return action
   }
 
-  const clearPendingRequestWaiter = (requestId: string): void => {
-    const waiter = pendingRequestWaiters[requestId]
-    if (!waiter) {
-      return
+  const closeWaiter = (waiter: OutboundRequestWaiter): boolean => {
+    const prev = waiter.state
+    switch (prev.phase) {
+      case 'done':
+        return false
+      case 'preparing':
+        waiter.state = {phase: 'done'}
+        requestWaiters.delete(waiter.requestId)
+        prev.controller.abort()
+        return true
+      case 'active':
+        waiter.state = {phase: 'done'}
+        resetTimer(prev.timer)
+        requestWaiters.delete(waiter.requestId)
+        prev.controller.abort()
+        return true
+      default:
+        return unreachable(prev)
     }
-    resetTimer(waiter.timer)
-    delete pendingRequestWaiters[requestId]
-    waiter.controller.abort()
+  }
+
+  const isWaiterSettled = (waiter: OutboundRequestWaiter): boolean =>
+    waiter.state.phase === 'done'
+
+  const activateWaiter = (
+    waiter: OutboundRequestWaiter,
+    timeoutMs: number | undefined
+  ): boolean => {
+    if (waiter.state.phase !== 'preparing') {
+      return false
+    }
+    let timer: Timeout | null = null
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        if (waiter.state.phase === 'active') {
+          waiter.reject(makeActionError('timeout', 'request timed out'))
+        }
+      }, timeoutMs)
+      unrefTimer(timer)
+    }
+    waiter.state = {
+      phase: 'active',
+      controller: waiter.state.controller,
+      timer
+    }
+    return true
   }
 
   const clearPeer = (id: string, error: Error): void => {
@@ -389,12 +437,21 @@ export const createActionManager = (
       'disconnected',
       toErrorMessage(error, peerDisconnectedMsg)
     )
-    entries(pendingRequestWaiters).forEach(([requestId, waiter]) => {
-      if (waiter.peerId === id) {
-        clearPendingRequestWaiter(requestId)
-        waiter.reject(disconnectedErr)
+    for (const waiter of Array.from(requestWaiters.values())) {
+      if (waiter.peerId !== id) {
+        continue
       }
-    })
+      switch (waiter.state.phase) {
+        case 'preparing':
+        case 'active':
+          waiter.reject(disconnectedErr)
+          break
+        case 'done':
+          break
+        default:
+          unreachable(waiter.state)
+      }
+    }
   }
 
   const matchResponseWaiter = (
@@ -403,12 +460,15 @@ export const createActionManager = (
   ):
     | readonly [
         parsed: [r: string, e: string | undefined],
-        waiter: PendingRequestWaiter
+        waiter: OutboundRequestWaiter
       ]
     | null => {
     const parsed = getResponseMetadata(metadata)
-    const waiter = parsed && pendingRequestWaiters[parsed[0]]
-    return parsed && waiter && waiter.peerId === peerId
+    const waiter = parsed ? requestWaiters.get(parsed[0]) : undefined
+    return parsed &&
+      waiter &&
+      waiter.state.phase === 'active' &&
+      waiter.peerId === peerId
       ? [parsed, waiter]
       : null
   }
@@ -422,10 +482,13 @@ export const createActionManager = (
           return null
         }
         const [parsed, waiter] = matched
+        if (waiter.state.phase !== 'active') {
+          return null
+        }
         const receive = parsed[1] === undefined ? waiter.getReceive() : null
         return [
           parsed[0],
-          waiter.controller.signal,
+          waiter.state.controller.signal,
           receive
             ? context =>
                 receive({
@@ -438,10 +501,7 @@ export const createActionManager = (
                 })
             : null,
           reason => {
-            if (pendingRequestWaiters[parsed[0]] === waiter) {
-              clearPendingRequestWaiter(parsed[0])
-              waiter.reject(makeActionError('rejected', reason))
-            }
+            waiter.reject(makeActionError('rejected', reason))
           }
         ]
       }
@@ -464,7 +524,6 @@ export const createActionManager = (
       return
     }
     const [parsed, waiter] = matched
-    clearPendingRequestWaiter(parsed[0])
     if (parsed[1] !== undefined) {
       waiter.reject(makeActionError('rejected', parsed[1]))
     } else {
@@ -700,11 +759,12 @@ export const createActionManager = (
       if (!parsed) {
         return
       }
+      const requestId = parsed[0]
       let peerControllers = activeRequestControllers.get(peerId)
       if ((peerControllers?.size ?? 0) >= maxConcurrentRequestsPerPeer) {
         void responseAction
           .send(null, peerId, {
-            r: parsed[0],
+            r: requestId,
             e: 'too many concurrent requests'
           })
           .catch(noOp)
@@ -722,15 +782,15 @@ export const createActionManager = (
         if (
           hasRoleGuard &&
           (!deps.authorizePeerAction ||
-            deps.authorizePeerAction(peerId, requiredRoles) !== true)
+            (await deps.authorizePeerAction(peerId, requiredRoles)) !== true)
         ) {
           throw mkErr(`${insufficientAuthPrefix} for request`)
         }
-        const [, userMeta] = extractAuthMetadata(parsed[1])
         const handler = getRequestGate()
         if (!handler) {
           throw mkErr('no active request handler')
         }
+        const [, userMeta] = extractAuthMetadata(parsed[1])
         const response = await handler(payload, {
           ...buildPeerContext(peerId, userMeta),
           signal: controller.signal
@@ -744,20 +804,34 @@ export const createActionManager = (
       void runHandler()
         .then(
           response =>
-            responseAction.send(response as DataPayload, peerId, {
-              r: parsed[0]
-            }),
+            controller.signal.aborted
+              ? undefined
+              : responseAction.send(
+                  response as DataPayload,
+                  peerId,
+                  {r: requestId},
+                  undefined,
+                  controller.signal
+                ),
           error =>
-            responseAction.send(null, peerId, {
-              r: parsed[0],
-              e: toErrorMessage(error, requestFailedMsg).slice(0, 512)
-            })
+            controller.signal.aborted
+              ? undefined
+              : responseAction.send(
+                  null,
+                  peerId,
+                  {
+                    r: requestId,
+                    e: toErrorMessage(error, requestFailedMsg).slice(0, 512)
+                  },
+                  undefined,
+                  controller.signal
+                )
         )
         .catch(noOp)
         .finally(() => {
-          const controllers = activeRequestControllers.get(peerId)
-          controllers?.delete(controller)
-          if (controllers && !controllers.size) {
+          const set = activeRequestControllers.get(peerId)
+          set?.delete(controller)
+          if (set && !set.size) {
             activeRequestControllers.delete(peerId)
           }
           controller.abort()
@@ -776,19 +850,9 @@ export const createActionManager = (
       options: Omit<RequestOptions, 'target'>
     ): Promise<R> => {
       const {metadata, onProgress, signal, timeoutMs} = options
-      const checkReqPeer = (): void => {
-        throwIfAborted(signal)
-        if (!hasActivePeer(resolvedTarget)) {
-          throw makeActionError('disconnected', noActivePeerMsg(displayTarget))
-        }
-      }
-      checkReqPeer()
-
-      const innerMeta = hasRoleGuard
-        ? await prepareSendMeta(metadata)
-        : metadata
-      if (hasRoleGuard) {
-        checkReqPeer()
+      throwIfAborted(signal)
+      if (!hasActivePeer(resolvedTarget)) {
+        throw makeActionError('disconnected', noActivePeerMsg(displayTarget))
       }
 
       const requestId = crypto.randomUUID()
@@ -798,20 +862,30 @@ export const createActionManager = (
         resolve,
         reject
       } = Promise.withResolvers<DataPayload>()
-      const waiter: PendingRequestWaiter = {
-        controller,
+      void responsePromise.catch(noOp)
+
+      const waiter: OutboundRequestWaiter = {
+        requestId,
+        peerId: resolvedTarget,
+        state: {phase: 'preparing', controller},
         getReceive: getReceiveGate,
         emitReceiveProgress: emitProgress,
-        peerId: resolvedTarget,
-        resolve,
-        reject,
-        timer: null
+        resolve: payload => {
+          if (closeWaiter(waiter)) {
+            resolve(payload)
+          }
+        },
+        reject: err => {
+          if (closeWaiter(waiter)) {
+            reject(err)
+          }
+        }
       }
+      requestWaiters.set(requestId, waiter)
 
       if (signal) {
         const rejectAsAborted = (): void => {
-          clearPendingRequestWaiter(requestId)
-          reject(makeActionError('aborted', operationAbortedMsg))
+          waiter.reject(makeActionError('aborted', operationAbortedMsg))
         }
         if (signal.aborted) {
           rejectAsAborted()
@@ -823,37 +897,53 @@ export const createActionManager = (
         }
       }
 
-      if (!controller.signal.aborted) {
-        pendingRequestWaiters[requestId] = waiter
-        if (timeoutMs !== undefined) {
-          const timer = setTimeout(() => {
-            clearPendingRequestWaiter(requestId)
-            waiter.reject(makeActionError('timeout', 'request timed out'))
-          }, timeoutMs)
-          unrefTimer(timer)
-          waiter.timer = timer
+      if (isWaiterSettled(waiter)) {
+        return (await responsePromise) as R
+      }
+
+      let innerMeta: JsonValue | undefined = metadata
+      if (hasRoleGuard) {
+        try {
+          innerMeta = await prepareSendMeta(metadata)
+        } catch (err) {
+          waiter.reject(toError(err, requestFailedMsg))
+          return (await responsePromise) as R
         }
+        if (isWaiterSettled(waiter)) {
+          return (await responsePromise) as R
+        }
+        if (!hasActivePeer(resolvedTarget)) {
+          waiter.reject(
+            makeActionError('disconnected', noActivePeerMsg(displayTarget))
+          )
+          return (await responsePromise) as R
+        }
+      }
+
+      if (!activateWaiter(waiter, timeoutMs)) {
+        return (await responsePromise) as R
       }
 
       try {
         const sendSignal = signal
           ? AbortSignal.any([controller.signal, signal])
           : controller.signal
-        const sending = rawAction.send(
-          data,
-          resolvedTarget,
-          innerMeta === undefined
-            ? {r: requestId}
-            : {r: requestId, m: innerMeta},
-          toProgressBridge(onProgress, metadata),
-          sendSignal
-        )
-        return (await Promise.race([
-          responsePromise,
-          sending.then(() => responsePromise)
-        ])) as R
+        void rawAction
+          .send(
+            data,
+            resolvedTarget,
+            innerMeta === undefined
+              ? {r: requestId}
+              : {r: requestId, m: innerMeta},
+            toProgressBridge(onProgress, metadata),
+            sendSignal
+          )
+          .catch(err => {
+            waiter.reject(toError(err, requestFailedMsg))
+          })
+        return (await responsePromise) as R
       } finally {
-        clearPendingRequestWaiter(requestId)
+        waiter.reject(makeActionError('aborted', operationAbortedMsg))
       }
     }
 

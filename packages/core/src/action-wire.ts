@@ -4,7 +4,7 @@ import {
   pendingDataTimeoutMs,
   transferTimeoutMs
 } from './data-limits'
-import type {TargetPeers} from './internal-types'
+import type {TargetPeers, Timeout} from './internal-types'
 import type {PeerDataTransport} from './peer-transport'
 import type {
   ActionError,
@@ -33,6 +33,7 @@ import {
   resetTimer,
   toJson,
   toPayloadSource,
+  unreachable,
   unrefTimer,
   utf8ByteLength,
   warn
@@ -61,18 +62,12 @@ const maxPendingPerPeer = 64
 const maxDecisions = 128
 const maxDecisionsPerPeer = 8
 const maxPreListenerMessages = 32
-const emptyBytes = new Uint8Array()
 const sizeLimitMsg = 'payload exceeds receiver size limit'
 const invalidPayloadMsg = invalidActionMsg('payload')
 
 const textFormat = 0
 const jsonFormat = 1
 const binaryFormat = 2
-
-const phasePending = 0
-const phaseDeciding = 1
-const phaseReady = 2
-const phaseReleased = 3
 
 type WireReceiveContext = Omit<
   ActionReceiveContext,
@@ -153,30 +148,62 @@ type IncomingMessageMeta = {
   metadata: JsonValue | undefined
 }
 
-type AdmissionBase = {
-  message: IncomingMessageMeta
-  scope?: ReceiveScope
-  unbindAbort?: () => void
-  phase: 0 | 1 | 2 | 3
+type IncomingInlineState =
+  | {readonly phase: 'pending'; readonly data: Uint8Array}
+  | {readonly phase: 'deciding'; readonly data: Uint8Array}
+  | {readonly phase: 'ready'; readonly data: Uint8Array}
+  | {readonly phase: 'closed'}
+
+type IncomingBulkState =
+  | {readonly phase: 'pending'}
+  | {readonly phase: 'deciding'}
+  | {readonly phase: 'queued'}
+  | {readonly phase: 'accepted'}
+  | {
+      readonly phase: 'receiving'
+      readonly data: Uint8Array
+      readonly seenChunks: Uint8Array
+      offset: number
+    }
+  | {
+      readonly phase: 'buffered'
+      readonly data: Uint8Array
+    }
+  | {readonly phase: 'closed'}
+
+const bulkPhaseClass = {
+  pending: {waiting: true, reserved: false, active: false, admitted: false},
+  deciding: {waiting: true, reserved: false, active: false, admitted: false},
+  queued: {waiting: true, reserved: false, active: false, admitted: true},
+  accepted: {waiting: false, reserved: true, active: true, admitted: true},
+  receiving: {waiting: false, reserved: true, active: true, admitted: true},
+  buffered: {waiting: false, reserved: true, active: false, admitted: true},
+  closed: {waiting: false, reserved: false, active: false, admitted: false}
+} satisfies Record<
+  IncomingBulkState['phase'],
+  {waiting: boolean; reserved: boolean; active: boolean; admitted: boolean}
+>
+
+type TransferEnvelopeBase = {
+  readonly message: IncomingMessageMeta
+  readonly scope: ReceiveScope | undefined
+  unbindScopeAbort: (() => void) | null
   controller: AbortController | null
   lastSeenAt: number
-  timer: ReturnType<typeof setTimeout> | null
+  timer: Timeout | null
 }
 
-type IncomingInline = AdmissionBase & {
-  kind: 'inline'
-  queueKey: string
-  data: Uint8Array
+type IncomingInline = TransferEnvelopeBase & {
+  readonly kind: 'inline'
+  readonly queueKey: string
+  state: IncomingInlineState
 }
 
-type IncomingBulk = AdmissionBase & {
-  kind: 'bulk'
-  transferId: number
-  accepted: boolean
-  chunkSize: number
-  data: Uint8Array | null
-  seenChunks: Uint8Array | null
-  offset: number
+type IncomingBulk = TransferEnvelopeBase & {
+  readonly kind: 'bulk'
+  readonly transferId: number
+  readonly chunkSize: number
+  state: IncomingBulkState
 }
 
 type IncomingTransfer = IncomingInline | IncomingBulk
@@ -189,11 +216,32 @@ type PeerIncomingState = {
 }
 
 type PreListenerEntry = {
-  message: IncomingMessageMeta
-  data: Uint8Array
-  receivedAt: number
-  admitted: boolean
+  readonly admitted: boolean
+  readonly message: IncomingMessageMeta
+  readonly data: Uint8Array
+  readonly receivedAt: number
 }
+
+type OutgoingBulkState =
+  | {
+      readonly phase: 'offering'
+      sent: boolean
+      timer: Timeout
+      lastSeen: number
+    }
+  | {readonly phase: 'streaming'}
+  | {
+      readonly phase: 'failed'
+      readonly error: Error
+      readonly fromReceiver: boolean
+      readonly didSendOffer: boolean
+    }
+  | {readonly phase: 'done'}
+
+const isBulkSettled = (
+  s: OutgoingBulkState
+): s is Extract<OutgoingBulkState, {phase: 'failed' | 'done'}> =>
+  s.phase === 'failed' || s.phase === 'done'
 
 type OutgoingTransfer = {
   accept: () => boolean
@@ -236,21 +284,21 @@ const buildControlPacket = (
 const startIdleTimer = (
   getLast: () => number,
   onTimeout: () => void,
-  setTimer: (timer: ReturnType<typeof setTimeout>) => void
-): void => {
+  onReschedule: (timer: Timeout) => void
+): Timeout => {
   const tick = (): void => {
     const remaining = transferTimeoutMs - (Date.now() - getLast())
     if (remaining > 0) {
       const next = setTimeout(tick, remaining)
       unrefTimer(next)
-      setTimer(next)
+      onReschedule(next)
     } else {
       onTimeout()
     }
   }
   const initial = setTimeout(tick, transferTimeoutMs)
   unrefTimer(initial)
-  setTimer(initial)
+  return initial
 }
 
 const decodeActionType = (frame: Uint8Array): string =>
@@ -363,21 +411,27 @@ export const createActionWireManager = ({
   const decisions = new Map<string, number>()
   const failedTransports = new WeakSet<PeerDataTransport>()
 
-  let preListenerSweepTimer: ReturnType<typeof setTimeout> | null = null
+  let preListenerSweepTimer: Timeout | null = null
   let nextTransferId = 0
   let pendingCount = 0
   let decisionCount = 0
   let reservedBytes = 0
   let draining = false
-  let drainAgain = false
+  let drainDirty = false
 
   const disconnectedTransferErr = (): ActionError =>
     makeActionError('disconnected', peerDisconnectedMsg)
   const invalidFrameMsg = invalidActionMsg('frame')
-  const isCurrent = (state: IncomingTransfer): boolean =>
-    state.phase !== phaseReleased
+  const isCurrent = (transfer: IncomingTransfer): boolean =>
+    transfer.state.phase !== 'closed'
   const payloadLimit = (registration?: ReceiveRegistration): number =>
     Math.min(maxReceiveBytes, registration?.maxPayloadBytes ?? maxReceiveBytes)
+
+  const markDrainDirty = (): void => {
+    if (draining) {
+      drainDirty = true
+    }
+  }
 
   const failPeer = (
     peerId: string,
@@ -451,123 +505,280 @@ export const createActionWireManager = ({
     }
   }
 
-  const release = (state: IncomingTransfer): void => {
-    if (!isCurrent(state)) {
-      return
+  const releaseDecisionSlot = (peerId: string): void => {
+    decisionCount--
+    const count = (decisions.get(peerId) ?? 1) - 1
+    if (count > 0) {
+      decisions.set(peerId, count)
+    } else {
+      decisions.delete(peerId)
     }
-    state.phase = phaseReleased
-    state.unbindAbort?.()
-    state.timer = resetTimer(state.timer)
-    const {peerId} = state.message
+  }
+
+  const transitionBulk = (
+    transfer: IncomingBulk,
+    next: IncomingBulkState
+  ): void => {
+    const from = bulkPhaseClass[transfer.state.phase]
+    const to = bulkPhaseClass[next.phase]
+    const {peerId, size} = transfer.message
     const peer = peers.get(peerId)
-    if (peer) {
-      if (state.kind === 'inline') {
-        const queue = peer.inlineQueues.get(state.queueKey)
-        if (queue) {
-          const idx = queue.indexOf(state)
-          if (idx >= 0) {
-            queue.splice(idx, 1)
-          }
-          if (!queue.length) {
-            peer.inlineQueues.delete(state.queueKey)
-          }
-        }
-        state.data = emptyBytes
+    if (from.reserved !== to.reserved) {
+      reservedBytes += to.reserved ? size : -size
+      if (!to.reserved) {
+        markDrainDirty()
+      }
+    }
+    if (from.waiting !== to.waiting) {
+      if (to.waiting) {
+        waitingBulk.add(transfer)
       } else {
-        peer.bulkTransfers.delete(state.transferId)
-        waitingBulk.delete(state)
-        state.data = null
-        state.seenChunks = null
-        if (state.accepted) {
-          reservedBytes -= state.message.size
-          if (peer.activeBulk === state) {
-            peer.activeBulk = null
-            rotateWaitingForPeer(peerId)
-          }
-          drainAgain = true
+        waitingBulk.delete(transfer)
+      }
+    }
+    if (from.active !== to.active && peer) {
+      if (to.active) {
+        peer.activeBulk = transfer
+      } else if (peer.activeBulk === transfer) {
+        peer.activeBulk = null
+        rotateWaitingForPeer(peerId)
+      }
+    }
+    transfer.state = next
+    if (next.phase === 'buffered') {
+      markDrainDirty()
+    }
+  }
+
+  const releaseTransfer = (transfer: IncomingTransfer): boolean => {
+    if (transfer.state.phase === 'closed') {
+      return false
+    }
+    const {peerId} = transfer.message
+    const peer = peers.get(peerId)
+
+    transfer.unbindScopeAbort?.()
+    transfer.unbindScopeAbort = null
+    transfer.timer = resetTimer(transfer.timer)
+    const admissionController = transfer.controller
+    transfer.controller = null
+
+    if (transfer.kind === 'inline') {
+      transfer.state = {phase: 'closed'}
+      const queue = peer?.inlineQueues.get(transfer.queueKey)
+      if (queue) {
+        const idx = queue.indexOf(transfer)
+        if (idx >= 0) {
+          queue.splice(idx, 1)
+        }
+        if (!queue.length) {
+          peer!.inlineQueues.delete(transfer.queueKey)
         }
       }
+    } else {
+      peer?.bulkTransfers.delete(transfer.transferId)
+      transitionBulk(transfer, {phase: 'closed'})
+    }
+    if (peer) {
       peer.pendingCount--
       pendingCount--
       if (!peer.pendingCount) {
         peers.delete(peerId)
       }
     }
-    state.controller?.abort()
+    admissionController?.abort()
+    return true
   }
 
-  const rejectRx = (state: IncomingTransfer, reason: string): void => {
-    if (!isCurrent(state)) {
+  const rejectRx = (transfer: IncomingTransfer, reason: string): void => {
+    if (!releaseTransfer(transfer)) {
       return
     }
-    release(state)
     notifyRejected(
-      state.message,
+      transfer.message,
       reason,
-      state.scope,
-      state.kind === 'bulk' ? state.transferId : undefined
+      transfer.scope,
+      transfer.kind === 'bulk' ? transfer.transferId : undefined
     )
   }
 
-  const admit = (
-    state: IncomingTransfer,
-    registration: ReceiveRegistration
-  ): boolean => {
-    if (state.phase !== phasePending) {
-      return state.phase === phaseReady
+  const enterDeciding = (
+    transfer: IncomingTransfer
+  ): AbortController | null => {
+    if (transfer.state.phase !== 'pending') {
+      return null
     }
-    if (state.message.size > payloadLimit(registration)) {
-      rejectRx(state, sizeLimitMsg)
-      return false
-    }
-    const receive = state.scope ? state.scope[2] : registration.receiveGate
-    if (!receive) {
-      if (!registration.receiver) {
-        return false
-      }
-      state.phase = phaseReady
-      return true
-    }
-    const {peerId} = state.message
+    const {peerId} = transfer.message
     if (
       decisionCount >= maxDecisions ||
       (decisions.get(peerId) ?? 0) >= maxDecisionsPerPeer
     ) {
-      rejectRx(state, 'too many pending receive decisions')
-      return false
+      rejectRx(transfer, 'too many pending receive decisions')
+      return null
     }
-    state.phase = phaseDeciding
     const controller = new AbortController()
-    state.controller = controller
+    transfer.controller = controller
     decisionCount++
     decisions.set(peerId, (decisions.get(peerId) ?? 0) + 1)
+    if (transfer.kind === 'inline') {
+      transfer.state = {
+        phase: 'deciding',
+        data: transfer.state.data
+      }
+    } else {
+      transitionBulk(transfer, {phase: 'deciding'})
+    }
+    return controller
+  }
+
+  const enterReady = (transfer: IncomingTransfer): boolean => {
+    if (transfer.kind === 'inline') {
+      switch (transfer.state.phase) {
+        case 'pending':
+        case 'deciding':
+          transfer.state = {phase: 'ready', data: transfer.state.data}
+          return true
+        case 'ready':
+          return true
+        case 'closed':
+          return false
+        default:
+          return unreachable(transfer.state)
+      }
+    }
+
+    switch (transfer.state.phase) {
+      case 'pending':
+      case 'deciding':
+        transitionBulk(transfer, {phase: 'queued'})
+        return true
+      case 'queued':
+      case 'accepted':
+      case 'receiving':
+      case 'buffered':
+        return true
+      case 'closed':
+        return false
+      default:
+        return unreachable(transfer.state)
+    }
+  }
+
+  const acceptBulk = (transfer: IncomingBulk): void => {
+    if (transfer.state.phase !== 'queued') {
+      return
+    }
+    const peer = peers.get(transfer.message.peerId)
+    if (
+      !peer ||
+      peer.activeBulk !== null ||
+      reservedBytes + transfer.message.size > maxReceiveBytes
+    ) {
+      return
+    }
+    transfer.lastSeenAt = Date.now()
+    transitionBulk(transfer, {phase: 'accepted'})
+    sendControl(transfer.message.peerId, transfer.transferId, acceptedKind)
+  }
+
+  const beginReceivingChunks = (
+    transfer: IncomingBulk
+  ): Extract<IncomingBulkState, {phase: 'receiving'}> | null => {
+    switch (transfer.state.phase) {
+      case 'receiving':
+        return transfer.state
+      case 'accepted': {
+        const totalSize = transfer.message.size
+        try {
+          const nextState: Extract<IncomingBulkState, {phase: 'receiving'}> = {
+            phase: 'receiving',
+            data: new Uint8Array(totalSize),
+            seenChunks: new Uint8Array(
+              Math.ceil(Math.ceil(totalSize / transfer.chunkSize) / 8)
+            ),
+            offset: 0
+          }
+          transitionBulk(transfer, nextState)
+          return nextState
+        } catch {
+          rejectRx(transfer, 'unable to allocate receive buffer')
+          drain()
+          return null
+        }
+      }
+      case 'pending':
+      case 'deciding':
+      case 'queued':
+      case 'buffered':
+      case 'closed':
+        return null
+      default:
+        return unreachable(transfer.state)
+    }
+  }
+
+  const parkCompletedBulk = (transfer: IncomingBulk): void => {
+    if (transfer.state.phase !== 'receiving') {
+      return
+    }
+    const {data} = transfer.state
+    transitionBulk(transfer, {phase: 'buffered', data})
+  }
+
+  const isAdmittedTransfer = (transfer: IncomingTransfer): boolean =>
+    transfer.kind === 'inline'
+      ? transfer.state.phase === 'ready'
+      : bulkPhaseClass[transfer.state.phase].admitted
+
+  const admit = (
+    transfer: IncomingTransfer,
+    registration: ReceiveRegistration
+  ): boolean => {
+    if (transfer.state.phase !== 'pending') {
+      return isAdmittedTransfer(transfer)
+    }
+    if (transfer.message.size > payloadLimit(registration)) {
+      rejectRx(transfer, sizeLimitMsg)
+      return false
+    }
+    const receive = transfer.scope
+      ? transfer.scope[2]
+      : registration.receiveGate
+    if (!receive) {
+      if (!registration.receiver) {
+        return false
+      }
+      return enterReady(transfer)
+    }
+    const controller = enterDeciding(transfer)
+    if (!controller) {
+      return false
+    }
+    const {peerId} = transfer.message
+    let settled = false
     const result = decideReceive(
       () =>
         receive({
-          byteLength: state.message.size,
+          byteLength: transfer.message.size,
           peerId,
           signal: controller.signal,
-          ...(state.message.metadata === undefined
+          ...(transfer.message.metadata === undefined
             ? {}
-            : {metadata: state.message.metadata})
+            : {metadata: transfer.message.metadata})
         }),
       allow => {
-        decisionCount--
-        const count = (decisions.get(peerId) ?? 1) - 1
-        if (count > 0) {
-          decisions.set(peerId, count)
-        } else {
-          decisions.delete(peerId)
+        if (!settled) {
+          settled = true
+          releaseDecisionSlot(peerId)
         }
-        if (!isCurrent(state)) {
+        if (transfer.state.phase !== 'deciding') {
           return false
         }
         if (allow) {
-          state.phase = phaseReady
-        } else {
-          rejectRx(state, 'payload rejected by receiver')
+          return enterReady(transfer)
         }
-        return allow
+        rejectRx(transfer, 'payload rejected by receiver')
+        return false
       }
     )
     if (typeof result === 'boolean') {
@@ -578,79 +789,86 @@ export const createActionWireManager = ({
   }
 
   const complete = (
-    state: IncomingTransfer,
+    transfer: IncomingTransfer,
     registration: ReceiveRegistration,
     bytes: Uint8Array,
     copyBinary: boolean
   ): void => {
     let payload: DataPayload
     try {
-      payload = decodePayload(bytes, state.message.format, copyBinary)
+      payload = decodePayload(bytes, transfer.message.format, copyBinary)
     } catch {
-      release(state)
-      failPeer(state.message.peerId, invalidPayloadMsg)
+      releaseTransfer(transfer)
+      failPeer(transfer.message.peerId, invalidPayloadMsg)
       return
     }
-    release(state)
+    releaseTransfer(transfer)
     deliverPayload(
       registration,
       payload,
-      state.message.peerId,
-      state.message.metadata
+      transfer.message.peerId,
+      transfer.message.metadata
     )
   }
 
-  const tryInline = (state: IncomingInline): void => {
-    const registration = rxActions.get(state.message.type)
-    if (!isCurrent(state) || !registration || !admit(state, registration)) {
+  const tryInline = (transfer: IncomingInline): void => {
+    const registration = rxActions.get(transfer.message.type)
+    if (!registration) {
+      return
+    }
+    if (transfer.state.phase === 'pending' && !admit(transfer, registration)) {
+      return
+    }
+    if (transfer.state.phase !== 'ready') {
       return
     }
     if (registration.receiver) {
-      complete(state, registration, state.data, true)
-    } else if (!state.scope) {
-      const {data, lastSeenAt, message} = state
-      release(state)
+      complete(transfer, registration, transfer.state.data, true)
+    } else if (!transfer.scope) {
+      const {data} = transfer.state
+      const {lastSeenAt, message} = transfer
+      releaseTransfer(transfer)
       bufferPreListenerInline(message, data, true, true, lastSeenAt)
     }
   }
 
-  const tryBulk = (state: IncomingBulk): void => {
-    const registration = rxActions.get(state.message.type)
-    if (
-      !isCurrent(state) ||
-      !registration ||
-      !admit(state, registration) ||
-      !registration.receiver
-    ) {
+  const tryBulk = (transfer: IncomingBulk): void => {
+    const registration = rxActions.get(transfer.message.type)
+    if (!registration) {
       return
     }
-    if (state.accepted) {
-      if (state.offset === state.message.size && state.data) {
-        complete(state, registration, state.data, false)
-      }
-      return
-    }
-    const peer = peers.get(state.message.peerId)
-    if (
-      peer &&
-      !peer.activeBulk &&
-      reservedBytes + state.message.size <= maxReceiveBytes
-    ) {
-      peer.activeBulk = state
-      state.accepted = true
-      reservedBytes += state.message.size
-      state.lastSeenAt = Date.now()
-      waitingBulk.delete(state)
-      sendControl(state.message.peerId, state.transferId, acceptedKind)
+    switch (transfer.state.phase) {
+      case 'pending':
+        if (admit(transfer, registration) && registration.receiver) {
+          acceptBulk(transfer)
+        }
+        return
+      case 'queued':
+        if (registration.receiver) {
+          acceptBulk(transfer)
+        }
+        return
+      case 'buffered':
+        if (registration.receiver) {
+          complete(transfer, registration, transfer.state.data, false)
+        }
+        return
+      case 'deciding':
+      case 'accepted':
+      case 'receiving':
+      case 'closed':
+        return
+      default:
+        unreachable(transfer.state)
     }
   }
 
   const drainInline = (peerId: string, queueKey: string): void => {
     const queue = peers.get(peerId)?.inlineQueues.get(queueKey)
     while (queue?.[0]) {
-      const state = queue[0]
-      tryInline(state)
-      if (isCurrent(state)) {
+      const head = queue[0]
+      tryInline(head)
+      if (isCurrent(head)) {
         break
       }
     }
@@ -658,29 +876,40 @@ export const createActionWireManager = ({
 
   const drain = (): void => {
     if (draining) {
-      drainAgain = true
+      drainDirty = true
       return
     }
     draining = true
     try {
       do {
-        drainAgain = false
-        for (const state of waitingBulk) {
-          tryBulk(state)
+        drainDirty = false
+        for (const transfer of waitingBulk) {
+          tryBulk(transfer)
         }
         for (const [id, peer] of peers) {
-          for (const state of peer.bulkTransfers.values()) {
-            if (state.offset === state.message.size) {
-              tryBulk(state)
+          for (const transfer of peer.bulkTransfers.values()) {
+            if (transfer.state.phase === 'buffered') {
+              tryBulk(transfer)
             }
           }
           for (const key of peer.inlineQueues.keys()) {
             drainInline(id, key)
           }
         }
-      } while (drainAgain)
+      } while (drainDirty)
     } finally {
       draining = false
+      drainDirty = false
+    }
+  }
+
+  const ensurePreListenerSweepTimer = (): void => {
+    if (!preListenerSweepTimer) {
+      preListenerSweepTimer = setTimeout(
+        sweepPreListenerQueues,
+        pendingDataTimeoutMs
+      )
+      unrefTimer(preListenerSweepTimer)
     }
   }
 
@@ -707,11 +936,7 @@ export const createActionWireManager = ({
       }
     }
     if (hasRemaining) {
-      preListenerSweepTimer = setTimeout(
-        sweepPreListenerQueues,
-        pendingDataTimeoutMs
-      )
-      unrefTimer(preListenerSweepTimer)
+      ensurePreListenerSweepTimer()
     }
   }
 
@@ -743,63 +968,61 @@ export const createActionWireManager = ({
       ring.shift()
     }
     ring.push({
+      admitted,
       message,
       data: alreadyOwned ? dataSlice : dataSlice.slice(),
-      receivedAt,
-      admitted
+      receivedAt
     })
-    if (!preListenerSweepTimer) {
-      preListenerSweepTimer = setTimeout(
-        sweepPreListenerQueues,
-        pendingDataTimeoutMs
-      )
-      unrefTimer(preListenerSweepTimer)
-    }
+    ensurePreListenerSweepTimer()
   }
 
-  const createAdmissionBase = (
+  const createTransferBase = (
     message: IncomingMessageMeta,
     scope?: ReceiveScope
-  ): AdmissionBase => ({
+  ): TransferEnvelopeBase => ({
     message,
-    ...(scope ? {scope} : {}),
-    phase: phasePending,
+    scope,
+    unbindScopeAbort: null,
     controller: null,
     lastSeenAt: Date.now(),
     timer: null
   })
 
-  const ensureIdleTimer = (state: IncomingTransfer): void => {
-    if (!isCurrent(state) || state.timer) {
+  const ensureIdleTimer = (transfer: IncomingTransfer): void => {
+    if (!isCurrent(transfer) || transfer.timer) {
       return
     }
-    startIdleTimer(
-      () => state.lastSeenAt,
+    transfer.timer = startIdleTimer(
+      () => transfer.lastSeenAt,
       () => {
-        rejectRx(state, 'action transfer timed out')
+        rejectRx(transfer, 'action transfer timed out')
         drain()
       },
-      timer => {
-        state.timer = timer
+      nextTimer => {
+        if (isCurrent(transfer)) {
+          transfer.timer = nextTimer
+        } else {
+          clearTimeout(nextTimer)
+        }
       }
     )
   }
 
   const enqueueTransfer = (
-    state: IncomingTransfer,
+    transfer: IncomingTransfer,
     deferTimer = false
   ): boolean => {
-    const {peerId} = state.message
+    const {peerId} = transfer.message
     let peer = peers.get(peerId)
     if (
       pendingCount >= maxPendingTransfers ||
       (peer?.pendingCount ?? 0) >= maxPendingPerPeer
     ) {
       notifyRejected(
-        state.message,
+        transfer.message,
         'too many pending transfers',
-        state.scope,
-        state.kind === 'bulk' ? state.transferId : undefined
+        transfer.scope,
+        transfer.kind === 'bulk' ? transfer.transferId : undefined
       )
       return false
     }
@@ -814,21 +1037,21 @@ export const createActionWireManager = ({
     }
     peer.pendingCount++
     pendingCount++
-    if (state.kind === 'inline') {
-      const queue = peer.inlineQueues.get(state.queueKey) ?? []
-      queue.push(state)
-      peer.inlineQueues.set(state.queueKey, queue)
+    if (transfer.kind === 'inline') {
+      const queue = peer.inlineQueues.get(transfer.queueKey) ?? []
+      queue.push(transfer)
+      peer.inlineQueues.set(transfer.queueKey, queue)
     } else {
-      peer.bulkTransfers.set(state.transferId, state)
-      waitingBulk.add(state)
+      peer.bulkTransfers.set(transfer.transferId, transfer)
+      transitionBulk(transfer, {phase: 'pending'})
     }
     if (!deferTimer) {
-      ensureIdleTimer(state)
+      ensureIdleTimer(transfer)
     }
-    if (state.scope) {
-      const sig = state.scope[1]
+    if (transfer.scope) {
+      const sig = transfer.scope[1]
       const cancel = (): void => {
-        rejectRx(state, 'receive cancelled')
+        rejectRx(transfer, 'receive cancelled')
         drain()
       }
       if (sig.aborted) {
@@ -837,7 +1060,7 @@ export const createActionWireManager = ({
       }
       const ac = new AbortController()
       sig.addEventListener('abort', cancel, {once: true, signal: ac.signal})
-      state.unbindAbort = () => ac.abort()
+      transfer.unbindScopeAbort = () => ac.abort()
     }
     return true
   }
@@ -852,74 +1075,70 @@ export const createActionWireManager = ({
       return
     }
     const now = Date.now()
-    for (const [peerId, byType] of Array.from(preListenerQueues)) {
+    for (const peerId of Array.from(preListenerQueues.keys())) {
       if (!isFlushable()) {
         break
       }
-      const ring = byType.get(type)
-      if (!ring) {
-        continue
-      }
-      byType.delete(type)
-      if (byType.size === 0) {
-        preListenerQueues.delete(peerId)
-      }
-      for (let i = 0; i < ring.length; i++) {
-        if (!isFlushable()) {
-          const rest = ring.slice(i)
-          if (rest.length > 0) {
-            let curByType = preListenerQueues.get(peerId)
-            if (!curByType) {
-              curByType = new Map()
-              preListenerQueues.set(peerId, curByType)
+      while (isFlushable()) {
+        const byType = preListenerQueues.get(peerId)
+        const ring = byType?.get(type)
+        if (!ring || ring.length === 0) {
+          if (byType) {
+            byType.delete(type)
+            if (byType.size === 0) {
+              preListenerQueues.delete(peerId)
             }
-            const existing = curByType.get(type)
-            curByType.set(type, existing ? [...existing, ...rest] : rest)
           }
           break
         }
-        const entry = ring[i]!
-        if (now - entry.receivedAt > pendingDataTimeoutMs) {
+        if (now - ring[0]!.receivedAt > pendingDataTimeoutMs) {
+          ring.shift()
           continue
+        }
+        if (ring[0]!.admitted && !registration.receiver) {
+          break
+        }
+        const entry = ring.shift()!
+        if (ring.length === 0) {
+          byType!.delete(type)
+          if (byType!.size === 0) {
+            preListenerQueues.delete(peerId)
+          }
         }
         if (entry.message.size > payloadLimit(registration)) {
           notifyRejected(entry.message, sizeLimitMsg)
           continue
         }
-        if (entry.admitted && !registration.receiver) {
-          bufferPreListenerInline(
-            entry.message,
-            entry.data,
-            true,
-            true,
-            entry.receivedAt
-          )
-          continue
-        }
         if (
-          registration.receiver &&
-          (entry.admitted ||
-            (!registration.receiveGate &&
-              !peers.get(peerId)?.inlineQueues.has(type)))
+          entry.admitted ||
+          (registration.receiver &&
+            !registration.receiveGate &&
+            !peers.get(peerId)?.inlineQueues.has(type))
         ) {
           let payload: DataPayload
           try {
             payload = decodePayload(entry.data, entry.message.format, false)
           } catch {
+            if (byType) {
+              byType.delete(type)
+              if (byType.size === 0) {
+                preListenerQueues.delete(peerId)
+              }
+            }
             failPeer(peerId, invalidPayloadMsg)
             break
           }
           deliverPayload(registration, payload, peerId, entry.message.metadata)
         } else {
-          const state: IncomingInline = {
-            ...createAdmissionBase(entry.message),
+          const transfer: IncomingInline = {
+            ...createTransferBase(entry.message),
             kind: 'inline',
             queueKey: type,
-            data: entry.data
+            state: {phase: 'pending', data: entry.data}
           }
-          if (enqueueTransfer(state, true)) {
+          if (enqueueTransfer(transfer, true)) {
             drainInline(peerId, type)
-            ensureIdleTimer(state)
+            ensureIdleTimer(transfer)
           }
         }
       }
@@ -962,11 +1181,13 @@ export const createActionWireManager = ({
     preListenerQueues.delete(peerId)
     const peer = peers.get(peerId)
     if (peer) {
-      for (const state of peer.bulkTransfers.values()) {
-        release(state)
+      for (const transfer of Array.from(peer.bulkTransfers.values())) {
+        releaseTransfer(transfer)
       }
-      for (const queue of peer.inlineQueues.values()) {
-        queue.slice().forEach(release)
+      for (const queue of Array.from(peer.inlineQueues.values())) {
+        queue.slice().forEach(transfer => {
+          releaseTransfer(transfer)
+        })
       }
     }
     drain()
@@ -999,7 +1220,9 @@ export const createActionWireManager = ({
     signal: AbortSignal | undefined,
     transferId?: number,
     isOffer?: boolean,
-    initialDrain?: Promise<boolean> | boolean
+    initialDrain?: Promise<boolean> | boolean,
+    onBeforeSend?: () => void,
+    onSendFailed?: (err: Error) => void
   ): Promise<void> => {
     check()
     const drainRes = initialDrain ?? transport.waitForDrain(signal)
@@ -1010,10 +1233,13 @@ export const createActionWireManager = ({
       }
       check()
     }
+    onBeforeSend?.()
     try {
       transport.sendFrame(bytes, transferId, isOffer)
     } catch {
-      throw disconnectedTransferErr()
+      const err = disconnectedTransferErr()
+      onSendFailed?.(err)
+      throw err
     }
   }
 
@@ -1030,20 +1256,6 @@ export const createActionWireManager = ({
       | undefined,
     signal: AbortSignal | undefined
   ): Promise<void> => {
-    let failure: Error | null = null
-    const check = (): void => {
-      if (failure) {
-        throw failure
-      }
-      checkAborted(signal)
-      if (!transport.isOpen) {
-        throw disconnectedTransferErr()
-      }
-    }
-
-    let didSendOffer = false
-    let settledByReceiver = false
-    let lastSeen = Date.now()
     const {
       promise: permission,
       resolve: acceptOffer,
@@ -1058,40 +1270,89 @@ export const createActionWireManager = ({
     }
     outgoing.set(peerId, transfers)
 
-    let timer: ReturnType<typeof setTimeout> | null = null
+    const failTransfer = (
+      error: Error,
+      fromReceiver = false,
+      didSendOfferOverride?: boolean
+    ): void => {
+      if (isBulkSettled(bulkState)) {
+        return
+      }
+      let didSendOffer = true
+      if (bulkState.phase === 'offering') {
+        didSendOffer = bulkState.sent
+        clearTimeout(bulkState.timer)
+        bulkState = {
+          phase: 'failed',
+          error,
+          fromReceiver,
+          didSendOffer: didSendOfferOverride ?? didSendOffer
+        }
+        rejectOffer(error)
+        return
+      }
+      bulkState = {
+        phase: 'failed',
+        error,
+        fromReceiver,
+        didSendOffer: didSendOfferOverride ?? didSendOffer
+      }
+    }
+
+    let bulkState: OutgoingBulkState = {
+      phase: 'offering',
+      sent: false,
+      timer: startIdleTimer(
+        () => (bulkState.phase === 'offering' ? bulkState.lastSeen : 0),
+        () =>
+          failTransfer(makeActionError('timeout', 'action offer timed out')),
+        nextTimer => {
+          if (bulkState.phase === 'offering') {
+            bulkState.timer = nextTimer
+          } else {
+            clearTimeout(nextTimer)
+          }
+        }
+      ),
+      lastSeen: Date.now()
+    }
+    const currentBulkState = (): OutgoingBulkState => bulkState
+
+    const check = (): void => {
+      if (bulkState.phase === 'failed') {
+        throw bulkState.error
+      }
+      try {
+        checkAborted(signal)
+        if (!transport.isOpen) {
+          throw disconnectedTransferErr()
+        }
+      } catch (err) {
+        failTransfer(err as Error)
+        throw err
+      }
+    }
+
     const transferState: OutgoingTransfer = {
       accept: () => {
-        if (!timer || failure) {
-          return false
+        if (bulkState.phase === 'offering' && bulkState.sent) {
+          clearTimeout(bulkState.timer)
+          bulkState = {phase: 'streaming'}
+          acceptOffer()
+          return true
         }
-        timer = resetTimer(timer)
-        acceptOffer()
-        return true
+        return false
       },
       fail: (error, fromReceiver = false) => {
-        if (fromReceiver) {
-          settledByReceiver = true
-        }
-        failure = error
-        rejectOffer(error)
+        failTransfer(error, fromReceiver)
       },
       touch: () => {
-        if (timer) {
-          lastSeen = Date.now()
+        if (bulkState.phase === 'offering') {
+          bulkState.lastSeen = Date.now()
         }
       }
     }
     transfers.set(transferId, transferState)
-    startIdleTimer(
-      () => lastSeen,
-      () =>
-        transferState.fail(
-          makeActionError('timeout', 'action offer timed out')
-        ),
-      nextTimer => {
-        timer = nextTimer
-      }
-    )
 
     const abortCleanup = signal ? new AbortController() : null
     if (abortCleanup && signal) {
@@ -1101,7 +1362,7 @@ export const createActionWireManager = ({
           try {
             checkAborted(signal)
           } catch (error) {
-            transferState.fail(error as Error)
+            failTransfer(error as Error)
           }
         },
         {once: true, signal: abortCleanup.signal}
@@ -1123,9 +1384,17 @@ export const createActionWireManager = ({
         check,
         signal,
         transferId,
-        true
+        true,
+        undefined,
+        () => {
+          if (bulkState.phase === 'offering') {
+            bulkState.sent = true
+          }
+        },
+        err => {
+          failTransfer(err, false, false)
+        }
       )
-      didSendOffer = true
       await permission
       for (let offset = 0; offset < size; offset += txChunkSize) {
         check()
@@ -1149,18 +1418,27 @@ export const createActionWireManager = ({
         progressCb?.((offset + length) / size, peerId, metadata)
       }
       check()
+      if (currentBulkState().phase === 'streaming') {
+        bulkState = {phase: 'done'}
+      }
     } catch (error) {
+      failTransfer(error as Error)
+      const failedState = currentBulkState()
       if (
-        didSendOffer &&
-        !settledByReceiver &&
+        failedState.phase === 'failed' &&
+        failedState.didSendOffer &&
+        !failedState.fromReceiver &&
         transport.isOpen &&
         transport.bufferedAmount <= maxControlBufferedBytes
       ) {
         sendControlFrame(peerId, transport, transferId, cancelledKind)
       }
-      throw error
+      throw failedState.phase === 'failed' ? failedState.error : error
     } finally {
-      timer = resetTimer(timer)
+      const finalState = currentBulkState()
+      if (finalState.phase === 'offering') {
+        clearTimeout(finalState.timer)
+      }
       abortCleanup?.abort()
       transfers.delete(transferId)
       if (!transfers.size && outgoing.get(peerId) === transfers) {
@@ -1206,10 +1484,10 @@ export const createActionWireManager = ({
       return
     }
     if (kind === cancelledKind) {
-      const state = peers.get(peerId)?.bulkTransfers.get(id)
-      if (state) {
-        release(state)
-        state.scope?.[3]('response cancelled by sender')
+      const transfer = peers.get(peerId)?.bulkTransfers.get(id)
+      if (transfer) {
+        releaseTransfer(transfer)
+        transfer.scope?.[3]('response cancelled by sender')
       }
       drain()
       return
@@ -1219,14 +1497,15 @@ export const createActionWireManager = ({
       bytes.length >= chunkHeaderSize ? view.getFloat64(controlHeaderSize) : NaN
     const chunkData = bytes.subarray(chunkHeaderSize)
     const peer = peers.get(peerId)
-    const state = peer?.bulkTransfers.get(id)
-    if (!state) {
+    const transfer = peer?.bulkTransfers.get(id)
+    if (!transfer) {
       return
     }
-    const totalSize = state.message.size
-    const rxChunkSize = state.chunkSize
+    const totalSize = transfer.message.size
+    const rxChunkSize = transfer.chunkSize
+    const canReceiveChunks = bulkPhaseClass[transfer.state.phase].active
     if (
-      !state.accepted ||
+      !canReceiveChunks ||
       !Number.isSafeInteger(offset) ||
       offset < 0 ||
       offset >= totalSize ||
@@ -1237,51 +1516,50 @@ export const createActionWireManager = ({
       failPeer(peerId, invalidActionMsg('chunk'))
       return
     }
+
+    const rxState = beginReceivingChunks(transfer)
+    if (!rxState) {
+      return
+    }
+
     const chunkIdx = offset / rxChunkSize
     const byteIdx = chunkIdx >>> 3
     const bitMask = 1 << (chunkIdx & 7)
-    try {
-      state.data ??= new Uint8Array(totalSize)
-      state.seenChunks ??= new Uint8Array(
-        Math.ceil(Math.ceil(totalSize / rxChunkSize) / 8)
-      )
-    } catch {
-      rejectRx(state, 'unable to allocate receive buffer')
-      drain()
-      return
-    }
-    if ((state.seenChunks[byteIdx]! & bitMask) !== 0) {
+    if ((rxState.seenChunks[byteIdx]! & bitMask) !== 0) {
       failPeer(peerId, invalidActionMsg('chunk'))
       return
     }
-    state.seenChunks[byteIdx]! |= bitMask
-    state.data.set(chunkData, offset)
-    state.offset += chunkData.length
+    rxState.seenChunks[byteIdx]! |= bitMask
+    rxState.data.set(chunkData, offset)
+    rxState.offset += chunkData.length
+
     const now = Date.now()
-    state.lastSeenAt = now
+    transfer.lastSeenAt = now
     for (const queued of waitingBulk) {
       if (
-        queued.phase === phaseReady &&
+        queued.state.phase === 'queued' &&
         rxActions.get(queued.message.type)?.receiver
       ) {
         queued.lastSeenAt = now
       }
     }
-    if (state.offset === totalSize) {
-      tryBulk(state)
-      if (isCurrent(state) && peer?.activeBulk === state) {
-        peer.activeBulk = null
-        rotateWaitingForPeer(peerId)
+
+    if (rxState.offset === totalSize) {
+      const registration = rxActions.get(transfer.message.type)
+      if (registration?.receiver) {
+        complete(transfer, registration, rxState.data, false)
+      } else {
+        parkCompletedBulk(transfer)
       }
       drain()
     } else {
-      const registration = rxActions.get(state.message.type)
+      const registration = rxActions.get(transfer.message.type)
       if (registration) {
         emitRxProgress(
           registration,
-          state.offset / totalSize,
+          rxState.offset / totalSize,
           peerId,
-          state.message.metadata
+          transfer.message.metadata
         )
       }
     }
@@ -1618,15 +1896,15 @@ export const createActionWireManager = ({
         return
       }
 
-      const state: IncomingInline = {
-        ...createAdmissionBase(message, scope),
+      const transfer: IncomingInline = {
+        ...createTransferBase(message, scope),
         kind: 'inline',
         queueKey,
-        data: dataSlice.slice()
+        state: {phase: 'pending', data: dataSlice.slice()}
       }
-      if (enqueueTransfer(state, true)) {
+      if (enqueueTransfer(transfer, true)) {
         drainInline(peerId, queueKey)
-        ensureIdleTimer(state)
+        ensureIdleTimer(transfer)
       }
       return
     }
@@ -1639,17 +1917,14 @@ export const createActionWireManager = ({
     if (!resolved) {
       return
     }
-    const state: IncomingBulk = {
-      ...createAdmissionBase(message, resolved[1]),
+    const transfer: IncomingBulk = {
+      ...createTransferBase(message, resolved[1]),
       kind: 'bulk',
       transferId,
-      accepted: false,
       chunkSize: flags === 1 ? maxChunkSize : minChunkSize,
-      offset: 0,
-      data: null,
-      seenChunks: null
+      state: {phase: 'closed'}
     }
-    if (enqueueTransfer(state)) {
+    if (enqueueTransfer(transfer)) {
       drain()
     }
   }

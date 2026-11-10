@@ -6,7 +6,7 @@ import {
   verifyUserIdKey,
   verifyWithP256
 } from './identity'
-import type {PeerHandle} from './internal-types'
+import type {PeerHandle, Timeout} from './internal-types'
 import {fromBase64Url, toBase64Url} from './primitives'
 import type {DataPayload, JsonValue, UserIdentity} from './types'
 import {
@@ -21,6 +21,7 @@ import {
   toError,
   toErrorMessage,
   toJson,
+  unreachable,
   unrefTimer
 } from './utils'
 
@@ -29,6 +30,7 @@ const handshakeDisconnectErr = /*@__PURE__*/ mkErr(
   'peer disconnected during handshake'
 )
 const defaultHandshakeTimeoutMs = 10_000
+const maxBufferedHandshakeMessages = 16
 const hsStepKey = `__${libId}_id`
 const hsDomain = /*@__PURE__*/ domainTag('id-hs', 2)
 
@@ -390,19 +392,51 @@ export const createIdentityHandshake = (deps: IdentityHandshakeDeps) => {
   return {run}
 }
 
-type PendingPeerState = {
-  peer: PeerHandle
-  active: boolean
-  isInitiator: boolean
-  completedSteps: boolean
-  localPassed: boolean
-  remoteReady: boolean
-  timer: ReturnType<typeof setTimeout> | null
-  messages: HandshakePayload[]
-  waiters: Array<
-    [resolve: (payload: HandshakePayload) => void, reject: (err: Error) => void]
-  >
+type HandshakeWaiter = readonly [
+  resolve: (payload: HandshakePayload) => void,
+  reject: (err: Error) => void
+]
+
+type HandshakeQueue = {
+  readonly messages: HandshakePayload[]
+  readonly waiters: HandshakeWaiter[]
 }
+
+type HandshakePeerEntry =
+  | {
+      readonly phase: 'added'
+      readonly peer: PeerHandle
+      readonly queue: HandshakeQueue
+      readonly remoteReady: boolean
+    }
+  | {
+      readonly phase: 'running-steps'
+      readonly peer: PeerHandle
+      readonly timer: Timeout
+      readonly role: 'resolving' | 'initiator' | 'responder'
+      readonly queue: HandshakeQueue
+      readonly remoteReady: boolean
+    }
+  | {
+      readonly phase: 'awaiting-remote-ready'
+      readonly peer: PeerHandle
+      readonly timer: Timeout
+    }
+  | {
+      readonly phase: 'preparing-ready'
+      readonly peer: PeerHandle
+      readonly timer: Timeout
+      readonly remoteReady: boolean
+    }
+  | {
+      readonly phase: 'awaiting-peer-ready'
+      readonly peer: PeerHandle
+      readonly timer: Timeout
+    }
+  | {
+      readonly phase: 'active'
+      readonly peer: PeerHandle
+    }
 
 export type HandshakeManagerDeps = {
   selfIdP: Promise<string>
@@ -444,6 +478,19 @@ export type HandshakeManager = {
   getPeer: (id: string) => PeerHandle | undefined
 }
 
+const clearQueue = (queue: HandshakeQueue, error: Error): void => {
+  queue.messages.length = 0
+  for (const [, reject] of queue.waiters.splice(0)) {
+    reject(error)
+  }
+}
+
+const clearEntryTimer = (entry: HandshakePeerEntry): void => {
+  if ('timer' in entry) {
+    resetTimer(entry.timer)
+  }
+}
+
 export const createHandshakeManager = (
   deps: HandshakeManagerDeps
 ): HandshakeManager => {
@@ -460,26 +507,23 @@ export const createHandshakeManager = (
     onActivate,
     onFailure
   } = deps
-  const peerStates = new Map<string, PendingPeerState>()
+  const peerStates = new Map<string, HandshakePeerEntry>()
 
-  const getPending = (
+  const getCurrentPending = (
     id: string,
     peer?: PeerHandle
-  ): PendingPeerState | undefined => {
-    const state = peerStates.get(id)
-    return state && (!peer || state.peer === peer) && !state.active
-      ? state
-      : undefined
+  ): Exclude<HandshakePeerEntry, {phase: 'active'}> | undefined => {
+    const entry = peerStates.get(id)
+    if (!entry || entry.phase === 'active' || (peer && entry.peer !== peer)) {
+      return undefined
+    }
+    return entry
   }
 
-  const maybeActivatePeer = (id: string, peer?: PeerHandle): void => {
-    const state = getPending(id, peer)
-    if (!state || !state.localPassed || !state.remoteReady) {
-      return
-    }
-    state.active = true
-    state.timer = resetTimer(state.timer)
-    onActivate(id, state.peer)
+  const activatePeer = (id: string, entry: HandshakePeerEntry): void => {
+    clearEntryTimer(entry)
+    peerStates.set(id, {phase: 'active', peer: entry.peer})
+    onActivate(id, entry.peer)
   }
 
   const failPeerHandshake = (
@@ -487,25 +531,63 @@ export const createHandshakeManager = (
     peer: PeerHandle,
     reason: Error
   ): void => {
-    const state = peerStates.get(id)
-    if (!state || state.peer !== peer) {
+    const entry = peerStates.get(id)
+    if (!entry || entry.peer !== peer) {
       return
     }
+    clearEntryTimer(entry)
     onHandshakeError?.(id, reason)
     onFailure(id, peer, reason)
   }
 
-  const sendLocalReady = (id: string, peer: PeerHandle): void => {
-    if (!getPending(id, peer)) {
+  const beginPreparingReady = (
+    id: string,
+    peer: PeerHandle,
+    timer: Timeout,
+    remoteReady: boolean
+  ): void => {
+    // Admission re-validates ban and room capacity after async step completion.
+    if (!acquireAdmissionSlot(id, peer)) {
       return
     }
+    const current = getCurrentPending(id, peer)
+    if (!current) {
+      return
+    }
+    const nextRemoteReady =
+      remoteReady ||
+      current.phase === 'awaiting-remote-ready' ||
+      ('remoteReady' in current && current.remoteReady)
+
+    peerStates.set(id, {
+      phase: 'preparing-ready',
+      peer,
+      timer,
+      remoteReady: nextRemoteReady
+    })
 
     const finishReady = (payload?: HandshakeReadyPayload | void): void => {
-      const cur = getPending(id, peer)
-      if (!cur) {
+      const preparing = peerStates.get(id)
+      if (
+        !preparing ||
+        preparing.phase !== 'preparing-ready' ||
+        preparing.peer !== peer
+      ) {
         return
       }
-      cur.localPassed = true
+      const isRemoteReady = preparing.remoteReady
+      if (isRemoteReady) {
+        clearEntryTimer(preparing)
+        peerStates.set(id, {phase: 'active', peer})
+      } else {
+        peerStates.set(id, {
+          phase: 'awaiting-peer-ready',
+          peer,
+          timer: preparing.timer
+        })
+      }
+      // Enqueue the ready frame before firing onActivate so synchronous sends
+      // inside room.onPeerJoin land on the wire after the ready frame.
       void sendHandshakeReady(payload || '', id).catch(err =>
         failPeerHandshake(
           id,
@@ -515,7 +597,9 @@ export const createHandshakeManager = (
           )
         )
       )
-      maybeActivatePeer(id, peer)
+      if (isRemoteReady) {
+        onActivate(id, peer)
+      }
     }
 
     let prep: Promise<HandshakeReadyPayload | void> | undefined
@@ -533,64 +617,45 @@ export const createHandshakeManager = (
     finishReady()
   }
 
-  const maybeProceedToSendReady = (id: string, peer: PeerHandle): void => {
-    const state = getPending(id, peer)
-    if (
-      !state ||
-      state.localPassed ||
-      !state.completedSteps ||
-      !onLocalHandshakePassed(id, peer) ||
-      (deferResponderReady && !state.isInitiator && !state.remoteReady)
-    ) {
+  const clearPeerInternal = (id: string, error: Error): void => {
+    const entry = peerStates.get(id)
+    if (!entry) {
       return
     }
-
-    if (acquireAdmissionSlot(id, peer)) {
-      sendLocalReady(id, peer)
+    clearEntryTimer(entry)
+    if ('queue' in entry) {
+      clearQueue(entry.queue, error)
     }
+    peerStates.delete(id)
   }
 
   return {
     addPeer: (id, peer) => {
+      if (peerStates.has(id)) {
+        clearPeerInternal(id, handshakeDisconnectErr)
+      }
       peerStates.set(id, {
+        phase: 'added',
         peer,
-        active: false,
-        isInitiator: true,
-        completedSteps: false,
-        localPassed: false,
-        remoteReady: false,
-        timer: null,
-        messages: [],
-        waiters: []
+        queue: {messages: [], waiters: []},
+        remoteReady: false
       })
     },
 
-    clearPeer: (id, error) => {
-      const state = peerStates.get(id)
-
-      if (!state) {
-        return
-      }
-
-      state.timer = resetTimer(state.timer)
-      state.messages.length = 0
-      state.waiters.splice(0).forEach(([, reject]) => reject(error))
-      peerStates.delete(id)
-    },
+    clearPeer: clearPeerInternal,
 
     canReceiveFromPeer: (id, receiveWhilePending) => {
-      const state = peerStates.get(id)
-
-      return Boolean(state && (state.active || receiveWhilePending))
+      const entry = peerStates.get(id)
+      return Boolean(entry && (entry.phase === 'active' || receiveWhilePending))
     },
 
     start: (id, peer) => {
-      const state = getPending(id, peer)
-      if (!state) {
+      const existing = peerStates.get(id)
+      if (!existing || existing.phase !== 'added' || existing.peer !== peer) {
         return
       }
 
-      state.timer = setTimeout(
+      const timer = setTimeout(
         () =>
           failPeerHandshake(
             id,
@@ -599,7 +664,16 @@ export const createHandshakeManager = (
           ),
         defaultHandshakeTimeoutMs
       )
-      unrefTimer(state.timer)
+      unrefTimer(timer)
+
+      peerStates.set(id, {
+        phase: 'running-steps',
+        peer,
+        timer,
+        role: 'resolving',
+        queue: existing.queue,
+        remoteReady: existing.remoteReady
+      })
 
       const sendHandshake: HandshakeSender = async (data, metadata) => {
         if (peerStates.get(id)?.peer !== peer) {
@@ -611,24 +685,31 @@ export const createHandshakeManager = (
       const receiveHandshake: HandshakeReceiver = () =>
         new Promise<HandshakePayload>((resolve, reject) => {
           const current = peerStates.get(id)
-          if (!current || current.peer !== peer) {
+          if (
+            !current ||
+            current.peer !== peer ||
+            current.phase !== 'running-steps'
+          ) {
             reject(handshakeDisconnectErr)
             return
           }
-          const payload = current.messages.shift()
-          if (payload) {
-            resolve(payload)
-          } else {
-            current.waiters.push([resolve, reject])
+          const buffered = current.queue.messages.shift()
+          if (buffered) {
+            resolve(buffered)
+            return
           }
+          current.queue.waiters.push([resolve, reject])
         })
 
       void selfIdP
         .then(effectiveSelfId => {
           const isInitiator = effectiveSelfId < id
           const current = peerStates.get(id)
-          if (current?.peer === peer) {
-            current.isInitiator = isInitiator
+          if (current?.phase === 'running-steps' && current.peer === peer) {
+            peerStates.set(id, {
+              ...current,
+              role: isInitiator ? 'initiator' : 'responder'
+            })
           }
           return onPeerHandshake(
             id,
@@ -639,11 +720,39 @@ export const createHandshakeManager = (
           )
         })
         .then(() => {
-          const current = getPending(id, peer)
-          if (current) {
-            current.completedSteps = true
-            maybeProceedToSendReady(id, peer)
+          const current = peerStates.get(id)
+          if (
+            !current ||
+            current.phase !== 'running-steps' ||
+            current.peer !== peer
+          ) {
+            return
           }
+          clearQueue(current.queue, handshakeDisconnectErr)
+          if (!onLocalHandshakePassed(id, peer)) {
+            return
+          }
+          const latest = peerStates.get(id)
+          if (
+            !latest ||
+            latest.phase !== 'running-steps' ||
+            latest.peer !== peer
+          ) {
+            return
+          }
+          if (
+            deferResponderReady &&
+            latest.role === 'responder' &&
+            !latest.remoteReady
+          ) {
+            peerStates.set(id, {
+              phase: 'awaiting-remote-ready',
+              peer,
+              timer: latest.timer
+            })
+            return
+          }
+          beginPreparingReady(id, peer, latest.timer, latest.remoteReady)
         })
         .catch(err =>
           failPeerHandshake(id, peer, toError(err, 'handshake failed'))
@@ -651,36 +760,49 @@ export const createHandshakeManager = (
     },
 
     receiveData: (data, id, metadata) => {
-      const state = getPending(id)
-      if (!state) {
+      const entry = peerStates.get(id)
+      if (!entry || !('queue' in entry)) {
         return
       }
       const payload =
         metadata === undefined ? {data} : ({data, metadata} as HandshakePayload)
-      const pending = state.waiters.shift()
-      if (pending) {
-        pending[0](payload)
-      } else if (state.messages.length >= 16) {
+
+      const waiter = entry.queue.waiters.shift()
+      if (waiter) {
+        waiter[0](payload)
+        return
+      }
+      if (entry.queue.messages.length >= maxBufferedHandshakeMessages) {
         failPeerHandshake(
           id,
-          state.peer,
+          entry.peer,
           mkErr('too many pending handshake messages')
         )
-      } else {
-        state.messages.push(payload)
+        return
       }
+      entry.queue.messages.push(payload)
     },
 
     receiveReady: id => {
-      const state = getPending(id)
-      if (!state) {
+      const entry = peerStates.get(id)
+      if (!entry || entry.phase === 'active') {
         return
       }
-      state.remoteReady = true
-      if (deferResponderReady && !state.localPassed) {
-        maybeProceedToSendReady(id, state.peer)
+      switch (entry.phase) {
+        case 'added':
+        case 'running-steps':
+        case 'preparing-ready':
+          peerStates.set(id, {...entry, remoteReady: true})
+          return
+        case 'awaiting-remote-ready':
+          beginPreparingReady(id, entry.peer, entry.timer, true)
+          return
+        case 'awaiting-peer-ready':
+          activatePeer(id, entry)
+          return
+        default:
+          unreachable(entry)
       }
-      maybeActivatePeer(id)
     },
 
     getPeer: id => peerStates.get(id)?.peer

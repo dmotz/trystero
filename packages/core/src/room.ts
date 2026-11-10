@@ -78,6 +78,7 @@ import {
   selfCertRoomRolesErr,
   toError,
   toErrorMessage,
+  unreachable,
   warnEphemeralAdmin,
   warnNoPeer
 } from './utils'
@@ -175,19 +176,62 @@ export type RoomOptions = {
   onBeforeLeave?: () => void
 }
 
-type DirectSession = {
-  peer: PeerHandle
-  transport: PeerDataTransport
-  active: boolean
-}
+type RoomLifecycleState =
+  | {readonly phase: 'active'}
+  | {readonly phase: 'setup-failed'}
+  | {readonly phase: 'leaving'; readonly promise: Promise<void>}
+  | {readonly phase: 'left'; readonly promise: Promise<void>}
+
+type PeerTransportSession =
+  | {
+      readonly phase: 'virtual-only'
+      readonly virtual: PeerDataTransport
+    }
+  | {
+      readonly phase: 'direct-pending'
+      readonly peer: PeerHandle
+      readonly transport: PeerDataTransport
+      readonly verified: boolean
+    }
+  | {
+      readonly phase: 'virtual-upgrading'
+      readonly virtual: PeerDataTransport
+      readonly peer: PeerHandle
+      readonly transport: PeerDataTransport
+      readonly verified: boolean
+    }
+  | {
+      readonly phase: 'direct-active'
+      readonly peer: PeerHandle
+      readonly transport: PeerDataTransport
+    }
 
 type PeerEntry = {
-  direct: DirectSession | null
-  virtual: PeerDataTransport | null
+  session: PeerTransportSession
   userId?: string
-  verified: boolean
+  /** User ID last announced via onPeerJoin/onUserJoin for this peer; may lag userId before promotion. */
+  emittedUserId?: string
   deferredReady?: HandshakeReadyPayload
 }
+
+const isRoomLeavingOrLeft = (
+  state: RoomLifecycleState
+): state is Extract<RoomLifecycleState, {phase: 'leaving' | 'left'}> =>
+  state.phase === 'leaving' || state.phase === 'left'
+
+const isPendingDirectSession = (
+  session: PeerTransportSession
+): session is Extract<
+  PeerTransportSession,
+  {phase: 'direct-pending' | 'virtual-upgrading'}
+> => session.phase === 'direct-pending' || session.phase === 'virtual-upgrading'
+
+const hasVirtualSession = (
+  session: PeerTransportSession
+): session is Extract<
+  PeerTransportSession,
+  {phase: 'virtual-only' | 'virtual-upgrading'}
+> => session.phase === 'virtual-only' || session.phase === 'virtual-upgrading'
 
 export const createRoomWithBridge = <
   const TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
@@ -223,26 +267,35 @@ export const createRoomWithBridge = <
   )
   const hasRolesPlugin = Boolean(rolesSlot)
 
-  const effectiveClientId =
-    clientId ??
-    (endpointIdentity && !isPromiseLike(endpointIdentity)
-      ? endpointIdentity.peerId
-      : createIdentityClientId())
-
-  let localSelfId =
+  const syncEndpoint =
     endpointIdentity && !isPromiseLike(endpointIdentity)
-      ? endpointIdentity.peerId
-      : ''
+      ? endpointIdentity
+      : undefined
 
-  let leavePromise: Promise<void> | null = null
+  const effectiveClientId =
+    clientId ?? (syncEndpoint ? syncEndpoint.peerId : createIdentityClientId())
+
+  let localSelfId = syncEndpoint ? syncEndpoint.peerId : ''
+  let localUserId = ''
+  let roomLifecycle: RoomLifecycleState = {phase: 'active'}
   let didReportSetupError = false
   let effectiveRoomId = initialRoomId
   let rolesProvider: KernelRolesProvider | null = null
   let scaleProvider: KernelScaleProvider | null = null
   let cachedUsersSnapshot: Readonly<Record<string, UserInfo>> | null = null
+
+  const getLocalSelfId = (): string => localSelfId
+
+  const getLocalUserId = (): string => localUserId
+
+  const isLeavingOrLeft = (): boolean => isRoomLeavingOrLeft(roomLifecycle)
+
+  const canAcceptPeers = (): boolean => roomLifecycle.phase === 'active'
+
   const invalidateUsersSnapshot = (): void => {
     cachedUsersSnapshot = null
   }
+
   const pendingFlushDestroys = new Set<() => void>()
   const cleanups: Array<() => void> = []
 
@@ -266,7 +319,7 @@ export const createRoomWithBridge = <
   const [subError, emitError] = mkEv<[RoomError]>('onError')
 
   const emitRoomError = (error: KernelRoomErrorInput): void => {
-    if (!leavePromise) {
+    if (!isLeavingOrLeft()) {
       emitError({
         ...error,
         appId,
@@ -276,10 +329,11 @@ export const createRoomWithBridge = <
   }
 
   const failSetup = (error: KernelRoomErrorInput): void => {
-    if (didReportSetupError || leavePromise) {
+    if (didReportSetupError || roomLifecycle.phase !== 'active') {
       return
     }
     didReportSetupError = true
+    roomLifecycle = {phase: 'setup-failed'}
     queueMicrotask(() => {
       emitRoomError(error)
       void leave()
@@ -318,7 +372,6 @@ export const createRoomWithBridge = <
     }
   }
 
-  let localUserId = ''
   const peerEntries = new Map<string, PeerEntry>()
 
   const resolvedUserIdentityP = resolveUserIdentity(
@@ -329,6 +382,9 @@ export const createRoomWithBridge = <
   ).then(
     resolvedId => {
       localUserId = resolvedId.userId
+      if (!isLeavingOrLeft()) {
+        stateMgr?.setUserPresence(localUserId, true)
+      }
       invalidateUsersSnapshot()
       return resolvedId
     },
@@ -347,7 +403,7 @@ export const createRoomWithBridge = <
     rolesSlot?.selfAsAdmin && !selfCertifyingRoomRegex.test(initialRoomId)
       ? resolvedUserIdentityP.then(u => {
           const rid = formatSelfCertifyingRoomId(initialRoomId, u.userId)
-          if (!leavePromise) {
+          if (!isLeavingOrLeft()) {
             setEffectiveRoomId(rid)
           }
           return rid
@@ -355,54 +411,30 @@ export const createRoomWithBridge = <
       : undefined
   void effectiveRoomIdP?.catch(noOp)
 
-  const ensureEntry = (id: string): PeerEntry => {
-    let entry = peerEntries.get(id)
-    if (!entry) {
-      entry = {direct: null, virtual: null, verified: false}
-      peerEntries.set(id, entry)
-    }
-    return entry
-  }
-
-  const pruneIfDisconnected = (id: string, entry: PeerEntry): void => {
-    if (!entry.direct && !entry.virtual) {
-      peerEntries.delete(id)
-    }
-  }
-
   const isActiveEntry = (entry: PeerEntry | undefined): boolean =>
-    Boolean(entry && (entry.direct?.active || entry.virtual))
+    Boolean(entry && entry.session.phase !== 'direct-pending')
 
   const hasSessionEntry = (
     entry: PeerEntry | undefined,
     includePending: boolean
-  ): boolean =>
-    includePending
-      ? Boolean(entry && (entry.direct || entry.virtual))
-      : isActiveEntry(entry)
+  ): boolean => (includePending ? Boolean(entry) : isActiveEntry(entry))
 
-  const getPeerUserId = (id: string): string =>
-    id === localSelfId
-      ? localUserId
+  const isEntryVerified = (entry: PeerEntry): boolean =>
+    entry.session.phase === 'direct-active' ||
+    (isPendingDirectSession(entry.session) && entry.session.verified)
+
+  const getPeerUserId = (id: string): string => {
+    const selfId = getLocalSelfId()
+    return selfId && id === selfId
+      ? getLocalUserId()
       : (peerEntries.get(id)?.userId ?? scaleProvider?.getPeerUserId(id) ?? id)
+  }
 
-  const getKnownPeerUserId = (id: string): string | undefined =>
-    id === localSelfId
-      ? localUserId
+  const getKnownPeerUserId = (id: string): string | undefined => {
+    const selfId = getLocalSelfId()
+    return selfId && id === selfId
+      ? getLocalUserId() || undefined
       : (peerEntries.get(id)?.userId ?? scaleProvider?.getPeerUserId(id))
-
-  const setPeerUserId = (id: string, uid: string): void => {
-    if (!uid) {
-      return
-    }
-    const entry = peerEntries.get(id)
-    if (!entry || entry.verified) {
-      return
-    }
-    if (entry.userId !== uid) {
-      entry.userId = uid
-      invalidateUsersSnapshot()
-    }
   }
 
   const countActivePeersForUser = (
@@ -422,21 +454,78 @@ export const createRoomWithBridge = <
     return count
   }
 
+  const reconcileUserChangeOnActiveEntry = (
+    peerId: string,
+    entry: PeerEntry,
+    nextUid: string
+  ): void => {
+    const prevEmitted = entry.emittedUserId
+    if (!prevEmitted || prevEmitted === nextUid) {
+      entry.emittedUserId = nextUid
+      if (!prevEmitted && !isLeavingOrLeft()) {
+        stateMgr?.setUserPresence(nextUid, true)
+      }
+      return
+    }
+    const localUid = getLocalUserId()
+    const wasLastForPrev = countActivePeersForUser(prevEmitted, peerId) === 0
+    const isFirstForNext = countActivePeersForUser(nextUid, peerId) === 0
+    entry.emittedUserId = nextUid
+    if (!isLeavingOrLeft()) {
+      if (wasLastForPrev && (!localUid || prevEmitted !== localUid)) {
+        emitUserLeave({userId: prevEmitted, peerId})
+        stateMgr?.setUserPresence(prevEmitted, false)
+        stateMgr?.onUserLeft(prevEmitted)
+      }
+      if (isFirstForNext && (!localUid || nextUid !== localUid)) {
+        stateMgr?.setUserPresence(nextUid, true)
+        stateMgr?.onPeerJoined(peerId, nextUid, isDirectPeer(peerId))
+        emitUserJoin({
+          userId: nextUid,
+          peerId,
+          roles: getPeerRoles(peerId)
+        })
+      }
+    }
+  }
+
+  const setPeerUserId = (id: string, uid: string): void => {
+    if (!uid) {
+      return
+    }
+    const entry = peerEntries.get(id)
+    if (!entry || isEntryVerified(entry)) {
+      return
+    }
+    if (entry.userId !== uid) {
+      entry.userId = uid
+      invalidateUsersSnapshot()
+      if (isActiveEntry(entry)) {
+        reconcileUserChangeOnActiveEntry(id, entry, uid)
+      }
+    }
+  }
+
   const isDirectPeer = (id: string): boolean =>
-    Boolean(peerEntries.get(id)?.direct?.active)
+    peerEntries.get(id)?.session.phase === 'direct-active'
 
   const isPeerActive = (id: string): boolean =>
     isActiveEntry(peerEntries.get(id))
 
-  const hasAnyPeer = (id: string): boolean =>
-    hasSessionEntry(peerEntries.get(id), true)
+  const hasAnyPeer = (id: string): boolean => peerEntries.has(id)
 
   const getDirectPeer = (
     id: string,
     includePending = false
   ): PeerHandle | undefined => {
-    const direct = peerEntries.get(id)?.direct
-    return direct && (includePending || direct.active) ? direct.peer : undefined
+    const session = peerEntries.get(id)?.session
+    if (!session || session.phase === 'virtual-only') {
+      return undefined
+    }
+    if (session.phase === 'direct-active') {
+      return session.peer
+    }
+    return includePending ? session.peer : undefined
   }
 
   const getPeerIds = (includePending = false): string[] => {
@@ -451,9 +540,10 @@ export const createRoomWithBridge = <
 
   const getDirectPeerEntries = (activeOnly = true): [string, PeerHandle][] => {
     const list: [string, PeerHandle][] = []
-    for (const [id, entry] of peerEntries) {
-      if (entry.direct && (!activeOnly || entry.direct.active)) {
-        list.push([id, entry.direct.peer])
+    for (const id of peerEntries.keys()) {
+      const peer = getDirectPeer(id, !activeOnly)
+      if (peer) {
+        list.push([id, peer])
       }
     }
     return list
@@ -462,16 +552,28 @@ export const createRoomWithBridge = <
   const getDirectPeerIds = (activeOnly = true): string[] =>
     getDirectPeerEntries(activeOnly).map(pair => pair[0])
 
-  const clearVerifiedFields = (entry: PeerEntry): void => {
-    entry.verified = false
+  const resetDirectSessionOnEntry = (id: string, entry: PeerEntry): void => {
     delete entry.deferredReady
-  }
-
-  const resetDirectEntry = (id: string, entry: PeerEntry): void => {
-    entry.direct = null
-    clearVerifiedFields(entry)
-    pruneIfDisconnected(id, entry)
-    invalidateUsersSnapshot()
+    switch (entry.session.phase) {
+      case 'virtual-upgrading': {
+        entry.session = {
+          phase: 'virtual-only',
+          virtual: entry.session.virtual
+        }
+        invalidateUsersSnapshot()
+        return
+      }
+      case 'direct-pending':
+      case 'direct-active': {
+        peerEntries.delete(id)
+        invalidateUsersSnapshot()
+        return
+      }
+      case 'virtual-only':
+        return
+      default:
+        unreachable(entry.session)
+    }
   }
 
   const findPeersForUser = (uid: string, includePending: boolean): string[] => {
@@ -534,9 +636,9 @@ export const createRoomWithBridge = <
         })[0]
 
   const isPeerBanned = (id: string): boolean =>
-    Boolean(rolesProvider?.isPeerBanned(id))
+    Boolean(id && rolesProvider?.isPeerBanned(id))
 
-  const getPeerRoles = (id = localSelfId): string[] =>
+  const getPeerRoles = (id = getLocalSelfId()): string[] =>
     rolesProvider?.getPeerRoles(id) ?? frozenEmptyRoles
 
   let stateMgr: StateManager | null = null
@@ -546,13 +648,17 @@ export const createRoomWithBridge = <
     uid: string,
     isFirstForUser: boolean
   ): void => {
-    if (leavePromise) {
+    if (isLeavingOrLeft()) {
       return
+    }
+    const localUid = getLocalUserId()
+    if (isFirstForUser && (!localUid || uid !== localUid)) {
+      stateMgr?.setUserPresence(uid, true)
     }
     stateMgr?.onPeerJoined(peerId, uid, isDirectPeer(peerId))
     const roles = getPeerRoles(peerId)
     emitPeerJoin({peerId, userId: uid, roles})
-    if (isFirstForUser && uid !== localUserId) {
+    if (isFirstForUser && (!localUid || uid !== localUid)) {
       emitUserJoin({userId: uid, peerId, roles})
     }
   }
@@ -566,12 +672,14 @@ export const createRoomWithBridge = <
     if (!wasActive) {
       return
     }
+    const localUid = getLocalUserId()
     stateMgr?.onPeerDisconnected(peerId)
     emitPeerDeactivated(peerId)
-    if (!leavePromise) {
+    if (!isLeavingOrLeft()) {
       emitPeerLeave({peerId, userId: uid})
-      if (isLastForUser && uid !== localUserId) {
+      if (isLastForUser && (!localUid || uid !== localUid)) {
         emitUserLeave({userId: uid, peerId})
+        stateMgr?.setUserPresence(uid, false)
         stateMgr?.onUserLeft(uid)
       }
     }
@@ -601,13 +709,15 @@ export const createRoomWithBridge = <
 
   const scheduleFlushDestroy = (peer: PeerHandle): void => {
     let completed = false
-    let finish: () => void = noOp
-    finish = destroyAfterFlush(peer, 40, 150, () => {
+    const finishNow = (): void => {
+      cancel()
+    }
+    const cancel = destroyAfterFlush(peer, 40, 150, () => {
       completed = true
-      pendingFlushDestroys.delete(finish)
+      pendingFlushDestroys.delete(finishNow)
     })
     if (!completed) {
-      pendingFlushDestroys.add(finish)
+      pendingFlushDestroys.add(finishNow)
     }
   }
 
@@ -655,22 +765,35 @@ export const createRoomWithBridge = <
     }
   })
 
+  const getEntryTransport = (
+    id: string,
+    includePending?: boolean
+  ): PeerDataTransport | undefined => {
+    const session = peerEntries.get(id)?.session
+    if (!session) {
+      return undefined
+    }
+    switch (session.phase) {
+      case 'direct-active':
+        return session.transport
+      case 'direct-pending':
+        return includePending ? session.transport : undefined
+      case 'virtual-upgrading':
+        return includePending ? session.transport : session.virtual
+      case 'virtual-only':
+        return session.virtual
+      default:
+        return unreachable(session)
+    }
+  }
+
   const actionManager = createActionManager({
     getPeerIds,
     canReceiveFromPeer: (id, receiveWhilePending) =>
       !isPeerBanned(id) &&
       (isPeerActive(id) || hs.canReceiveFromPeer(id, receiveWhilePending)),
     onPeerError,
-    getTransport: (id, includePending) => {
-      const entry = peerEntries.get(id)
-      return entry
-        ? ((entry.direct && (includePending || entry.direct.active)
-            ? entry.direct.transport
-            : undefined) ??
-            entry.virtual ??
-            undefined)
-        : undefined
-    },
+    getTransport: getEntryTransport,
     broadcastInline: (frame, onProgress, signal) =>
       scaleProvider
         ? scaleProvider.broadcastInline(frame, onProgress, signal)
@@ -694,7 +817,7 @@ export const createRoomWithBridge = <
     resolveSendTarget,
     resolveRequestTarget,
     onUnknownType: type => {
-      if (type === '@_state' && !leavePromise) {
+      if (type === '@_state' && !isLeavingOrLeft()) {
         ensureStateManager()
       }
     },
@@ -720,51 +843,70 @@ export const createRoomWithBridge = <
 
   const [hitStatePenalty, resetStatePenalty] = createWindowCounter(512, 8)
 
-  const ensureStateManager = (): StateManager =>
-    (stateMgr ??= createStateManager({
-      appId,
-      getRoomId: () => effectiveRoomId,
-      getSelfId: () => localSelfId,
-      getLocalUserId: () => localUserId,
-      ensureReady: async () => {
-        const [user, info] = await awaitSelfState()
-        return {
-          selfId: localSelfId,
-          user,
-          roomId: info?.roomId ?? effectiveRoomId
-        }
-      },
-      hasRolesPlugin: () => hasRolesPlugin,
-      getRolesProvider: () => rolesProvider,
-      getScaleProvider: () => scaleProvider,
-      isPeerActive,
-      isPeerPendingHandshake: peerId =>
-        Boolean(hs.getPeer(peerId) && !isDirectPeer(peerId)),
-      isDirectPeer,
-      getDirectPeerIds: () => getDirectPeerIds(true),
-      isUserOnline: uid =>
-        Boolean(
-          (localUserId && uid === localUserId) ||
-          countActivePeersForUser(uid) > 0
-        ),
-      getKnownPeerUserId,
-      isPeerBanned: peerOrUserId =>
-        Boolean(peerOrUserId && isPeerBanned(peerOrUserId)),
-      getPeerRoles: peerOrUserId => getPeerRoles(peerOrUserId),
-      makeInternalAction,
-      onInvalidRecord: fromPeerId => {
-        if (!fromPeerId || fromPeerId === localSelfId) {
-          return
-        }
-        if (hitStatePenalty(fromPeerId)) {
-          resetStatePenalty(fromPeerId)
-          onPeerError(
-            fromPeerId,
-            mkViolationErr('excessive invalid state records')
+  const ensureStateManager = (): StateManager => {
+    if (!stateMgr) {
+      const created = createStateManager({
+        appId,
+        getRoomId: () => effectiveRoomId,
+        getSelfId: getLocalSelfId,
+        getLocalUserId,
+        ensureReady: async () => {
+          const [user, info] = await awaitSelfState()
+          return {
+            selfId: getLocalSelfId(),
+            user,
+            roomId: info?.roomId ?? effectiveRoomId
+          }
+        },
+        hasRolesPlugin: () => hasRolesPlugin,
+        getRolesProvider: () => rolesProvider,
+        getScaleProvider: () => scaleProvider,
+        isPeerActive,
+        isPeerPendingHandshake: peerId =>
+          Boolean(hs.getPeer(peerId) && !isDirectPeer(peerId)),
+        isDirectPeer,
+        getDirectPeerIds: () => getDirectPeerIds(true),
+        isUserOnline: uid => {
+          const localUid = getLocalUserId()
+          return Boolean(
+            (localUid && uid === localUid) || countActivePeersForUser(uid) > 0
           )
+        },
+        getKnownPeerUserId,
+        isPeerBanned: peerOrUserId =>
+          Boolean(peerOrUserId && isPeerBanned(peerOrUserId)),
+        getPeerRoles: peerOrUserId => getPeerRoles(peerOrUserId),
+        makeInternalAction,
+        onInvalidRecord: fromPeerId => {
+          const selfId = getLocalSelfId()
+          if (!fromPeerId || fromPeerId === selfId) {
+            return
+          }
+          if (hitStatePenalty(fromPeerId)) {
+            resetStatePenalty(fromPeerId)
+            onPeerError(
+              fromPeerId,
+              mkViolationErr('excessive invalid state records')
+            )
+          }
+        }
+      })
+      if (isLeavingOrLeft()) {
+        created.destroy()
+      } else {
+        if (localUserId) {
+          created.setUserPresence(localUserId, true)
+        }
+        for (const [pid, entry] of peerEntries) {
+          if (isActiveEntry(entry)) {
+            created.setUserPresence(getPeerUserId(pid), true)
+          }
         }
       }
-    }))
+      stateMgr = created
+    }
+    return stateMgr
+  }
 
   const removePeerEntry = (
     id: string
@@ -779,15 +921,19 @@ export const createRoomWithBridge = <
       return [false, false, getPeerUserId(id), undefined]
     }
     const wasActive = isActiveEntry(entry)
-    const uid = entry.userId ?? scaleProvider?.getPeerUserId(id) ?? id
-    const directPeer = entry.direct?.peer
-    const virtualTransport = entry.virtual
-    entry.direct = null
-    entry.virtual = null
+    const uid =
+      entry.emittedUserId ??
+      entry.userId ??
+      scaleProvider?.getPeerUserId(id) ??
+      id
+    const directPeer =
+      entry.session.phase === 'virtual-only' ? undefined : entry.session.peer
+    const virtualTransport = hasVirtualSession(entry.session)
+      ? entry.session.virtual
+      : null
+    peerEntries.delete(id)
     virtualTransport?.close?.()
-    clearVerifiedFields(entry)
     const isLast = wasActive && countActivePeersForUser(uid, id) === 0
-    pruneIfDisconnected(id, entry)
     if (wasActive) {
       invalidateUsersSnapshot()
     }
@@ -830,18 +976,11 @@ export const createRoomWithBridge = <
     if (
       !banned &&
       currentDirect &&
-      !isDirectPeer(id) &&
-      Boolean(existingEntry?.virtual)
+      existingEntry?.session.phase === 'virtual-upgrading'
     ) {
       clearPendingPeer(id, err)
       stateMgr?.clearPeer(id)
-      if (
-        existingEntry &&
-        existingEntry.direct?.peer === currentDirect &&
-        !existingEntry.direct.active
-      ) {
-        resetDirectEntry(id, existingEntry)
-      }
+      resetDirectSessionOnEntry(id, existingEntry)
       currentDirect.destroy()
       scaleProvider?.removeDirectPeer(id, currentDirect, err)
       onPeerLeave(id, false)
@@ -859,7 +998,7 @@ export const createRoomWithBridge = <
     emitDeactivatedEvents(id, wasActive, isLast, uid)
 
     if (directPeer) {
-      if ((banned || reason === roomFullErr) && !leavePromise) {
+      if ((banned || reason === roomFullErr) && !isLeavingOrLeft()) {
         scheduleFlushDestroy(directPeer)
       } else {
         directPeer.destroy()
@@ -871,8 +1010,13 @@ export const createRoomWithBridge = <
     }
   }
 
-  const leave = (): Promise<void> =>
-    (leavePromise ??= (async () => {
+  const leave = (): Promise<void> => {
+    if (isRoomLeavingOrLeft(roomLifecycle)) {
+      return roomLifecycle.promise
+    }
+    const {promise, resolve, reject} = Promise.withResolvers<void>()
+    roomLifecycle = {phase: 'leaving', promise}
+    ;(async () => {
       onBeforeLeave?.()
       reservedAdmissionUsers.clear()
       for (const id of getPeerIds(true)) {
@@ -880,9 +1024,14 @@ export const createRoomWithBridge = <
       }
       emitLeave()
       const leaveTargets = scaleProvider
-        ? getDirectPeerIds(false).filter(
-            id => peerEntries.get(id)?.direct?.transport.isOpen
-          )
+        ? getDirectPeerIds(false).filter(id => {
+            const session = peerEntries.get(id)?.session
+            return (
+              session &&
+              session.phase !== 'virtual-only' &&
+              session.transport.isOpen
+            )
+          })
         : undefined
       const hasOpenPeers =
         peerEntries.size > 0 && (!leaveTargets || leaveTargets.length > 0)
@@ -912,9 +1061,19 @@ export const createRoomWithBridge = <
         }
         pendingFlushDestroys.clear()
         const allPeerIds = getPeerIds(true)
-        for (const entry of peerEntries.values()) {
-          entry.direct?.peer.destroy()
-          entry.virtual?.close?.()
+        for (const id of allPeerIds) {
+          const cur = peerEntries.get(id)
+          if (!cur) {
+            continue
+          }
+          const direct =
+            cur.session.phase === 'virtual-only' ? null : cur.session.peer
+          const virtual = hasVirtualSession(cur.session)
+            ? cur.session.virtual
+            : null
+          peerEntries.delete(id)
+          direct?.destroy()
+          virtual?.close?.()
         }
         peerEntries.clear()
         invalidateUsersSnapshot()
@@ -922,6 +1081,7 @@ export const createRoomWithBridge = <
           clearSubsystems(id, roomLeftErr)
         }
       } finally {
+        roomLifecycle = {phase: 'left', promise}
         for (const fn of [
           ...cleanups,
           mediaManager.clearListeners,
@@ -936,7 +1096,9 @@ export const createRoomWithBridge = <
           onSelfLeave()
         }
       }
-    })())
+    })().then(resolve, reject)
+    return promise
+  }
 
   const pingAction = makeInternalRequestAction<string, string>('ping')
   pingAction.onRequest(() => '')
@@ -970,7 +1132,7 @@ export const createRoomWithBridge = <
     includeReserved = false,
     excludePeerId?: string
   ): Set<string> => {
-    const users = new Set<string>([localUserId])
+    const users = new Set<string>([getLocalUserId()])
     for (const [pid, entry] of peerEntries) {
       if (isActiveEntry(entry)) {
         users.add(getPeerUserId(pid))
@@ -1005,7 +1167,7 @@ export const createRoomWithBridge = <
       scaleProvider?.getPeerUserId(peerId) ??
       rejectedFullPeerUsers.get(peerId)
     return (
-      !isPeerBanned(localSelfId) &&
+      !isPeerBanned(getLocalSelfId()) &&
       !isPeerBanned(peerId) &&
       !(knownUid !== undefined && isFullForPeer(peerId, true))
     )
@@ -1088,7 +1250,7 @@ export const createRoomWithBridge = <
         !isFullForPeer(id)
       ) {
         void ensureStateManager().stageHandshakeUserState(id, data, () => {
-          if (!leavePromise && hs.getPeer(id)) {
+          if (!isLeavingOrLeft() && hs.getPeer(id)) {
             processHandshakeReady('', id)
           }
         })
@@ -1109,7 +1271,7 @@ export const createRoomWithBridge = <
       return
     }
     const entry = peerEntries.get(peerId)
-    if (!entry) {
+    if (!entry || !isPendingDirectSession(entry.session)) {
       return
     }
     entry.userId = verified.userId
@@ -1118,15 +1280,19 @@ export const createRoomWithBridge = <
       scaleProvider?.markPeerBanned(peerId)
       throw peerBannedErr
     }
-    entry.verified = true
+    const deferredReady = entry.deferredReady
+    delete entry.deferredReady
+    entry.session = {...entry.session, verified: true}
     scaleProvider?.setPeerSignPublicKey(peerId, verified.peerPubKey)
-    if (entry.deferredReady !== undefined) {
-      const readyPayload = entry.deferredReady
-      delete entry.deferredReady
+    if (deferredReady !== undefined) {
       queueMicrotask(() => {
         const cur = peerEntries.get(peerId)
-        if (cur?.verified && (!peer || getDirectPeer(peerId, true) === peer)) {
-          deliverHandshakeReady(readyPayload, peerId)
+        if (
+          cur &&
+          isEntryVerified(cur) &&
+          (!peer || getDirectPeer(peerId, true) === peer)
+        ) {
+          deliverHandshakeReady(deferredReady, peerId)
         }
       })
     }
@@ -1134,7 +1300,7 @@ export const createRoomWithBridge = <
 
   const internalKernel: InternalRoomContext = {
     get selfId() {
-      return localSelfId
+      return getLocalSelfId()
     },
     appId,
     initialRoomId,
@@ -1165,24 +1331,68 @@ export const createRoomWithBridge = <
     getRolesProvider: () => rolesProvider,
     getScaleProvider: () => scaleProvider,
     activateVirtualPeer: (peerId, transport) => {
-      if (leavePromise || isPeerBanned(peerId) || isFullForPeer(peerId, true)) {
+      if (
+        !canAcceptPeers() ||
+        isPeerBanned(peerId) ||
+        isFullForPeer(peerId, true)
+      ) {
         transport.close?.()
-        const ex = peerEntries.get(peerId)
-        if (ex) {
-          pruneIfDisconnected(peerId, ex)
-        }
         return false
       }
       if (isDirectPeer(peerId)) {
         transport.close?.()
         return true
       }
-      const entry = ensureEntry(peerId)
-      const wasActive = isActiveEntry(entry)
-      const uid = entry.userId ?? scaleProvider?.getPeerUserId(peerId) ?? peerId
-      entry.userId = uid
+      const existing = peerEntries.get(peerId)
+      const wasActive = isActiveEntry(existing)
+      const uid =
+        existing?.userId ?? scaleProvider?.getPeerUserId(peerId) ?? peerId
       const isFirst = !wasActive && countActivePeersForUser(uid, peerId) === 0
-      entry.virtual = transport
+
+      if (!existing) {
+        peerEntries.set(peerId, {
+          session: {phase: 'virtual-only', virtual: transport},
+          userId: uid,
+          emittedUserId: uid
+        })
+      } else {
+        existing.userId = uid
+        switch (existing.session.phase) {
+          case 'virtual-only': {
+            if (existing.session.virtual !== transport) {
+              existing.session.virtual.close?.()
+            }
+            existing.session = {phase: 'virtual-only', virtual: transport}
+            break
+          }
+          case 'virtual-upgrading': {
+            if (existing.session.virtual !== transport) {
+              existing.session.virtual.close?.()
+            }
+            existing.session = {
+              ...existing.session,
+              virtual: transport
+            }
+            break
+          }
+          case 'direct-pending': {
+            existing.session = {
+              phase: 'virtual-upgrading',
+              virtual: transport,
+              peer: existing.session.peer,
+              transport: existing.session.transport,
+              verified: existing.session.verified
+            }
+            existing.emittedUserId = uid
+            break
+          }
+          case 'direct-active':
+            break
+          default:
+            unreachable(existing.session)
+        }
+      }
+
       invalidateUsersSnapshot()
       if (!wasActive) {
         emitActivatedEvents(peerId, uid, isFirst)
@@ -1194,16 +1404,29 @@ export const createRoomWithBridge = <
         return
       }
       const entry = peerEntries.get(peerId)
-      if (!entry?.virtual) {
+      if (!entry || !hasVirtualSession(entry.session)) {
         return
       }
       const err = toError(reason, peerDisconnectedMsg)
-      const uid = entry.userId ?? scaleProvider?.getPeerUserId(peerId) ?? peerId
-      const vt = entry.virtual
-      entry.virtual = null
+      const uid =
+        entry.emittedUserId ??
+        entry.userId ??
+        scaleProvider?.getPeerUserId(peerId) ??
+        peerId
+      const vt = entry.session.virtual
+      if (entry.session.phase === 'virtual-upgrading') {
+        entry.session = {
+          phase: 'direct-pending',
+          peer: entry.session.peer,
+          transport: entry.session.transport,
+          verified: entry.session.verified
+        }
+        delete entry.emittedUserId
+      } else {
+        peerEntries.delete(peerId)
+      }
       vt.close?.()
       const isLast = countActivePeersForUser(uid, peerId) === 0
-      pruneIfDisconnected(peerId, entry)
       invalidateUsersSnapshot()
       if (!hasAnyPeer(peerId)) {
         clearSubsystems(peerId, err)
@@ -1263,7 +1486,7 @@ export const createRoomWithBridge = <
       return true
     },
     acquireAdmissionSlot: (id, peer) => {
-      if (getDirectPeer(id, true) !== peer || leavePromise) {
+      if (getDirectPeer(id, true) !== peer || isLeavingOrLeft()) {
         return false
       }
       return tryAdmitPeer(id, peer)
@@ -1284,15 +1507,28 @@ export const createRoomWithBridge = <
       }
       const entry = peerEntries.get(id)
       reservedAdmissionUsers.delete(id)
-      if (!entry || entry.direct?.peer !== peer) {
+      if (
+        !entry ||
+        !isPendingDirectSession(entry.session) ||
+        entry.session.peer !== peer
+      ) {
         return
       }
-      const wasActive = isActiveEntry(entry)
+      const wasActive = entry.session.phase === 'virtual-upgrading'
+      const prevVirtual =
+        entry.session.phase === 'virtual-upgrading'
+          ? entry.session.virtual
+          : null
       const uid = entry.userId ?? id
       entry.userId = uid
+      delete entry.deferredReady
       const isFirst = !wasActive && countActivePeersForUser(uid, id) === 0
-      entry.direct.active = true
-      entry.virtual = null
+      entry.session = {
+        phase: 'direct-active',
+        peer,
+        transport: entry.session.transport
+      }
+      prevVirtual?.close?.()
       invalidateUsersSnapshot()
       scaleProvider?.addDirectPeer(id, peer)
       emitPeerActivated(id, peer)
@@ -1306,8 +1542,10 @@ export const createRoomWithBridge = <
         }
       })
       if (!wasActive) {
+        entry.emittedUserId = uid
         emitActivatedEvents(id, uid, isFirst)
       } else {
+        reconcileUserChangeOnActiveEntry(id, entry, uid)
         stateMgr?.onPeerJoined(id, uid, true)
       }
     },
@@ -1323,8 +1561,7 @@ export const createRoomWithBridge = <
 
   let rolesApi: RolesPluginApi | undefined
   let scaleApi: ScalePluginApi | undefined
-  let pluginSetupError: unknown
-  let hasSetupError = false
+  let pluginSetupFailure: {error: unknown} | null = null
 
   if (rolesSlot) {
     try {
@@ -1332,8 +1569,7 @@ export const createRoomWithBridge = <
       rolesProvider = res.provider
       rolesApi = res.api
     } catch (err) {
-      hasSetupError = true
-      pluginSetupError = err
+      pluginSetupFailure = {error: err}
       failSetup({
         code: 'plugin-failed',
         plugin: 'roles',
@@ -1343,14 +1579,13 @@ export const createRoomWithBridge = <
     }
   }
 
-  if (scaleSlot && !hasSetupError) {
+  if (scaleSlot && !pluginSetupFailure) {
     try {
       const res = scaleSlot.setup(internalKernel)
       scaleProvider = res.provider
       scaleApi = res.api
     } catch (err) {
-      hasSetupError = true
-      pluginSetupError = err
+      pluginSetupFailure = {error: err}
       failSetup({
         code: 'plugin-failed',
         plugin: 'scale',
@@ -1360,8 +1595,8 @@ export const createRoomWithBridge = <
     }
   }
 
-  const roomReadyP = hasSetupError
-    ? Promise.reject(pluginSetupError)
+  const roomReadyP = pluginSetupFailure
+    ? Promise.reject(pluginSetupFailure.error)
     : all([
         localEndpointP,
         resolvedUserIdentityP,
@@ -1369,7 +1604,7 @@ export const createRoomWithBridge = <
       ]).then(noOp)
   void roomReadyP.catch(noOp)
 
-  if (scaleProvider && !hasSetupError) {
+  if (scaleProvider && !pluginSetupFailure) {
     ensureStateManager()
   }
 
@@ -1377,7 +1612,7 @@ export const createRoomWithBridge = <
     data: HandshakeReadyPayload,
     id: string
   ): void => {
-    if (leavePromise) {
+    if (isLeavingOrLeft()) {
       return
     }
     if (data && typeof data === 'object' && data.ok === false) {
@@ -1421,18 +1656,23 @@ export const createRoomWithBridge = <
   )
 
   handshakeDataAction.onMessage((data, {peerId: id, metadata}) => {
-    if (!leavePromise) {
+    if (!isLeavingOrLeft()) {
       hs.receiveData(data, id, metadata)
     }
   })
 
   handshakeReadyAction.onMessage((data, {peerId: id}) => {
-    if (leavePromise) {
+    if (isLeavingOrLeft()) {
       return
     }
     const entry = peerEntries.get(id)
-    if (!entry?.verified) {
-      if (entry && hs.getPeer(id) && !isDirectPeer(id)) {
+    if (!entry || !isEntryVerified(entry)) {
+      if (
+        entry &&
+        isPendingDirectSession(entry.session) &&
+        !entry.session.verified &&
+        hs.getPeer(id)
+      ) {
         entry.deferredReady = data
       }
       return
@@ -1441,7 +1681,7 @@ export const createRoomWithBridge = <
   })
 
   onPeer((peer, id) => {
-    if (leavePromise) {
+    if (!canAcceptPeers()) {
       peer.destroy()
       return
     }
@@ -1449,45 +1689,77 @@ export const createRoomWithBridge = <
       peer.destroy()
       return
     }
-    const existingDirect = getDirectPeer(id, true)
-    if (existingDirect) {
-      if (existingDirect === peer) {
-        return
-      }
-      const wasDirectActive = isDirectPeer(id)
-      const replacedErr = mkErr('peer replaced')
-      existingDirect.destroy()
-      clearPendingPeer(id, replacedErr)
-      if (wasDirectActive) {
-        const [wasActive, isLast, uid] = removePeerEntry(id)
-        clearSubsystems(id, replacedErr)
-        emitDeactivatedEvents(id, wasActive, isLast, uid)
-        scaleProvider?.removeDirectPeer(id, existingDirect, replacedErr)
-      } else {
-        stateMgr?.clearPeer(id)
-        const ex = peerEntries.get(id)
-        if (ex && ex.direct?.peer === existingDirect) {
-          resetDirectEntry(id, ex)
+    const existing = peerEntries.get(id)
+    if (existing) {
+      switch (existing.session.phase) {
+        case 'virtual-only':
+          stateMgr?.clearPeer(id)
+          break
+        case 'direct-pending':
+        case 'virtual-upgrading': {
+          const existingDirect = existing.session.peer
+          if (existingDirect === peer) {
+            return
+          }
+          const replacedErr = mkErr('peer replaced')
+          existingDirect.destroy()
+          clearPendingPeer(id, replacedErr)
+          stateMgr?.clearPeer(id)
+          const ex = peerEntries.get(id)
+          if (ex && getDirectPeer(id, true) === existingDirect) {
+            resetDirectSessionOnEntry(id, ex)
+          }
+          break
         }
-      }
-    } else {
-      const ex = peerEntries.get(id)
-      if (ex?.virtual) {
-        stateMgr?.clearPeer(id)
-        clearVerifiedFields(ex)
+        case 'direct-active': {
+          const existingDirect = existing.session.peer
+          if (existingDirect === peer) {
+            return
+          }
+          const replacedErr = mkErr('peer replaced')
+          existingDirect.destroy()
+          clearPendingPeer(id, replacedErr)
+          const [wasActive, isLast, uid] = removePeerEntry(id)
+          clearSubsystems(id, replacedErr)
+          emitDeactivatedEvents(id, wasActive, isLast, uid)
+          scaleProvider?.removeDirectPeer(id, existingDirect, replacedErr)
+          break
+        }
+        default:
+          unreachable(existing.session)
       }
     }
 
-    const entry = ensureEntry(id)
-    const session: DirectSession = {
-      peer,
-      transport: createDirectPeerTransport(
+    const transport = createDirectPeerTransport(peer, () => {
+      const curSession = peerEntries.get(id)?.session
+      return Boolean(
+        curSession &&
+        curSession.phase !== 'virtual-only' &&
+        curSession.transport === transport
+      )
+    })
+
+    const existingEntry = peerEntries.get(id)
+    if (existingEntry?.session.phase === 'virtual-only') {
+      delete existingEntry.deferredReady
+      existingEntry.session = {
+        phase: 'virtual-upgrading',
+        virtual: existingEntry.session.virtual,
         peer,
-        () => peerEntries.get(id)?.direct === session
-      ),
-      active: false
+        transport,
+        verified: false
+      }
+    } else {
+      peerEntries.set(id, {
+        session: {
+          phase: 'direct-pending',
+          peer,
+          transport,
+          verified: false
+        }
+      })
     }
-    entry.direct = session
+
     hs.addPeer(id, peer)
 
     peer.setHandlers({
@@ -1552,7 +1824,7 @@ export const createRoomWithBridge = <
     getSelf: async (): Promise<SelfInfo> => {
       const [user, info] = await awaitSelfState()
       return {
-        peerId: localSelfId,
+        peerId: getLocalSelfId(),
         userId: user.userId,
         identityPersistence: user.persistence ?? 'none',
         roomId: info?.roomId ?? effectiveRoomId,
@@ -1584,10 +1856,11 @@ export const createRoomWithBridge = <
       if (cachedUsersSnapshot) {
         return cachedUsersSnapshot
       }
+      const localUid = getLocalUserId()
       const raw: Record<string, {peerIds: string[]; roles: string[]}> = {}
       for (const peerId of getPeerIds(false)) {
         const userId = getPeerUserId(peerId)
-        if (userId === localUserId) {
+        if (localUid && userId === localUid) {
           continue
         }
         ;(raw[userId] ??= {
@@ -1636,11 +1909,12 @@ export const createRoomWithBridge = <
 
     onUserJoin: (handler, options) =>
       subUserJoin(handler, options, () => {
+        const localUid = getLocalUserId()
         const items: [UserJoinContext][] = []
         const seenUsers = new Set<string>()
         for (const peerId of getPeerIds(false)) {
           const userId = getPeerUserId(peerId)
-          if (userId !== localUserId && !seenUsers.has(userId)) {
+          if ((!localUid || userId !== localUid) && !seenUsers.has(userId)) {
             seenUsers.add(userId)
             items.push([
               {
@@ -1681,7 +1955,7 @@ export const createRoomWithBridge = <
     },
     canConnectPeer,
     emitError: err => {
-      if (!leavePromise) {
+      if (!isLeavingOrLeft()) {
         emitError(err)
       }
     }
