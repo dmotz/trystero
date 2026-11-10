@@ -108,9 +108,26 @@
   (while retaining single-entry ESM CDN compatibility). Because core now ships
   built-in self-certifying identity handshakes, multi-tab presence, and signed
   `makeState` / `makeUserState`, the base `joinRoom`-only bundle increases from
-  `0.26.0` to ~41 KB Brotli (~46 KB gzip) for lightweight strategies, while
-  `roles()` and `scale()` remain opt-in and tree-shake out when unused.
+  `0.26.0` to ~41–46 KB Brotli for lightweight strategies, while `roles()` (~5.2
+  KB) and `scale()` (~12.3 KB) remain opt-in and tree-shake out when unused.
   TypeScript consumers now require **TypeScript >= 5.0**.
+- ⚙️ **Explicit lifecycle & protocol state machines** - modeled multi-step async
+  lifecycles across signaling, offer leasing, relay connectivity, WebRTC peer
+  negotiation and trickle-ICE candidate flushing, peer handshakes, action wire
+  framing/admission, media stream promotion, CRDT state flushing and
+  anti-entropy sync, role authority bootstrap, and multi-hop overlay routing as
+  exhaustive discriminated state machines. Notable behavioral and race fixes:
+  `peer.isDead` now reflects data-channel closure and 5 s ICE disconnected grace
+  expiry; `sendData` rejects `'closing'` data channels; event emitters track
+  `clearEpoch` so re-entrant `clear()` during `{replay: true}` never retains
+  zombie listeners; `clearUserIdentity(appId)` invalidates concurrent IndexedDB
+  identity loads; `room` pairs `emittedUserId` across mid-session user
+  attribution updates; `makeUserState` tracks per-user `onlineEpoch` to drop
+  stale pre-leave records and wakes pacing slots during handshake; local
+  `grantRole`/`revokeRole`/`ban` issuance is serialized; Torrent scopes offer
+  pools per `(rootTopic, peerId)`; and `@trystero-p2p/ws-relay/server` releases
+  subscription quotas synchronously on `1008` policy violations and supports
+  `clientTracking: false` teardown.
 
 ### ⚠️ Breaking changes
 

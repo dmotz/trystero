@@ -64,15 +64,15 @@ streams, self-certifying `peerId`/`userId` handshakes, and signed `makeState` /
 
 | Package                            | `joinRoom` | `+ roles()` | `+ scale()` | `+ roles() + scale()` |
 | ---------------------------------- | ---------: | ----------: | ----------: | --------------------: |
-| `@trystero-p2p/ws-relay`           |   ~36.2 KB |    ~40.9 KB |    ~46.9 KB |              ~51.6 KB |
-| `@trystero-p2p/torrent`            |   ~37.0 KB |    ~41.8 KB |    ~47.5 KB |              ~52.3 KB |
-| `trystero` / `@trystero-p2p/nostr` |   ~40.8 KB |    ~45.6 KB |    ~51.4 KB |              ~56.1 KB |
-| `@trystero-p2p/firebase`           |   ~76.4 KB |    ~81.2 KB |    ~87.1 KB |              ~91.7 KB |
-| `@trystero-p2p/supabase`           |   ~80.3 KB |    ~85.0 KB |    ~91.0 KB |              ~95.5 KB |
-| `@trystero-p2p/mqtt`               |  ~116.9 KB |   ~121.8 KB |   ~127.4 KB |             ~132.1 KB |
+| `@trystero-p2p/ws-relay`           |   ~41.5 KB |    ~46.7 KB |    ~54.0 KB |              ~59.2 KB |
+| `@trystero-p2p/torrent`            |   ~42.6 KB |    ~47.8 KB |    ~55.1 KB |              ~60.3 KB |
+| `trystero` / `@trystero-p2p/nostr` |   ~46.3 KB |    ~51.5 KB |    ~58.8 KB |              ~64.1 KB |
+| `@trystero-p2p/firebase`           |   ~81.6 KB |    ~86.8 KB |    ~94.1 KB |              ~99.2 KB |
+| `@trystero-p2p/supabase`           |   ~85.8 KB |    ~91.0 KB |    ~98.2 KB |             ~103.4 KB |
+| `@trystero-p2p/mqtt`               |  ~122.0 KB |   ~127.0 KB |   ~134.3 KB |             ~139.5 KB |
 
 With a bundler (Vite, Rollup, esbuild, webpack, Next.js), you only pay for
-[`roles()`](./roles.md) (~4.7 KB) or [`scale()`](./scaling.md) (~10.6 KB) when
+[`roles()`](./roles.md) (~5.2 KB) or [`scale()`](./scaling.md) (~12.5 KB) when
 you import them. Importing directly from a single-URL ESM CDN like `esm.run`
 loads the full package entry.
 

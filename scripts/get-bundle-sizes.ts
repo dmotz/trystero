@@ -52,6 +52,50 @@ const getBrotliSize = async (filePath: string): Promise<number> => {
 
 const formatKb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`
 
+const maxBundleKb: Record<
+  (typeof strategies)[number],
+  Record<(typeof variants)[number]['name'], number>
+> = {
+  'ws-relay': {
+    core: 42.5,
+    'core+roles': 48.0,
+    'core+scale': 55.0,
+    'core+both': 60.5
+  },
+  torrent: {
+    core: 44.0,
+    'core+roles': 49.0,
+    'core+scale': 56.0,
+    'core+both': 61.5
+  },
+  nostr: {
+    core: 47.5,
+    'core+roles': 53.0,
+    'core+scale': 60.0,
+    'core+both': 65.0
+  },
+  firebase: {
+    core: 83.0,
+    'core+roles': 88.0,
+    'core+scale': 95.5,
+    'core+both': 100.5
+  },
+  supabase: {
+    core: 87.0,
+    'core+roles': 92.5,
+    'core+scale': 99.5,
+    'core+both': 104.5
+  },
+  mqtt: {
+    core: 123.0,
+    'core+roles': 128.5,
+    'core+scale': 135.5,
+    'core+both': 140.5
+  }
+}
+
+const checkBudget = process.argv.includes('--check')
+
 const tempDir = await mkdtemp(join(tmpdir(), 'trystero-bundle-sizes-'))
 const coreSourcePath = resolve('packages/core/src/index.ts')
 const coreTypesSourcePath = resolve('packages/core/src/types.ts')
@@ -103,6 +147,7 @@ try {
 
   const headers = ['strategy', ...variants.map(v => v.name)]
   const rows: string[][] = []
+  const violations: string[] = []
 
   for (const strategy of strategies) {
     const row: string[] = [strategy]
@@ -110,6 +155,12 @@ try {
       const key = `${strategy}__${variant.name.replace(/\+/g, '_')}`
       const bytes = await getBrotliSize(join(tempDir, `${key}.js`))
       row.push(formatKb(bytes))
+      const limitKb = maxBundleKb[strategy][variant.name]
+      if (checkBudget && bytes > limitKb * 1024) {
+        violations.push(
+          `${strategy} (${variant.name}): ${formatKb(bytes)} exceeds budget ${limitKb.toFixed(1)} KB`
+        )
+      }
     }
     rows.push(row)
   }
@@ -129,6 +180,14 @@ try {
   console.log(colWidths.map(w => '-'.repeat(w)).join('   '))
   for (const row of rows) {
     console.log(formatRow(row))
+  }
+
+  if (violations.length > 0) {
+    console.error('\nBundle size budget exceeded:')
+    for (const v of violations) {
+      console.error(`  - ${v}`)
+    }
+    process.exitCode = 1
   }
 } finally {
   await rm(tempDir, {recursive: true, force: true})

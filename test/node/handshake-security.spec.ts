@@ -305,7 +305,7 @@ void test('S14: signal-handler drops invalid peerIds before allocating peerState
     encryptOffer: async () => 'enc',
     isLeaving: () => false,
     checkoutOffers: async () => [],
-    claimLeasedOffer: () => {},
+    claimLeasedOffer: () => true,
     reclaimLeasedOffer: () => {},
     initPeer: (() => ({})) as never,
     connectPeer: () => {},
@@ -391,7 +391,7 @@ void test('S15: undecryptable offers allocate 0 RTCPeerConnections and announce 
     checkoutOffers: async () => [
       {peer: makeMockPeer(), offer: 'enc-offer', offerId: 'offer-id-1234'}
     ],
-    claimLeasedOffer: () => {},
+    claimLeasedOffer: () => true,
     reclaimLeasedOffer: () => {},
     initPeer: makeMockPeer as never,
     connectPeer: () => {},
@@ -579,7 +579,7 @@ void test('D2: signaling ciphertexts bind type|peerId|offerId via AAD and reject
     encryptOffer: async () => 'enc',
     isLeaving: () => false,
     checkoutOffers: async () => [],
-    claimLeasedOffer: () => {},
+    claimLeasedOffer: () => true,
     reclaimLeasedOffer: () => {},
     initPeer: (() => ({})) as never,
     connectPeer: () => {},

@@ -40,6 +40,9 @@ jobs:
       - name: Check types, lint, and formatting
         run: pnpm typecheck && pnpm lint && pnpm format
 
+      - name: Check bundle size budgets
+        run: node scripts/get-bundle-sizes.ts --check
+
       - name: Run Node test suite
         env:
           TRYSTERO_SKIP_PUBLIC_RELAYS: '1'

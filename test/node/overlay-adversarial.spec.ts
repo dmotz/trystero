@@ -484,7 +484,7 @@ void test('Solution (c): signaling door input bounds, early candidate drop befor
     },
     toCipher: async s => s,
     checkoutOffers: async () => [],
-    claimLeasedOffer: () => {},
+    claimLeasedOffer: () => true,
     reclaimLeasedOffer: () => {},
     encryptOffer: async () => 'v=0',
     initPeer: () => ({

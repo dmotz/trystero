@@ -96,7 +96,7 @@ const fixture = (t: TestContext) => {
     checkoutOffers: (async () => [
       {peer: peer(), offer: 'offer', offerId: 'fixture-offer'}
     ]) as OfferCheckoutFn,
-    claimLeasedOffer() {},
+    claimLeasedOffer: () => true,
     reclaimLeasedOffer() {},
     encryptOffer: async () => 'offer',
     initPeer: peer,
@@ -452,6 +452,7 @@ void test('untrusted serialized or non-handle peer fields and array payloads are
   let claimed = 0
   f.ctx.claimLeasedOffer = () => {
     claimed++
+    return true
   }
 
   await f.receive(

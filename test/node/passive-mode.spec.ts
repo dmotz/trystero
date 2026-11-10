@@ -6,9 +6,13 @@ import type {
   StrategyMessage,
   StrategyOnMessage
 } from '../../packages/core/src/index.ts'
-import type {PeerState} from '../../packages/core/src/internal-types.ts'
+import type {
+  PeerHandle,
+  PeerState
+} from '../../packages/core/src/internal-types.ts'
 import {
   buildSignalAad,
+  createPeerState,
   prunePeerStates
 } from '../../packages/core/src/signal-handler.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
@@ -377,69 +381,52 @@ void test(
 )
 
 void test('Trystero: prunePeerStates deletes only completely idle peer states', () => {
-  type TestPeerState = {
-    answeringPeer: MockPeer | null
-    connectedPeer: MockPeer | null
-    lastExchangeAt: number
-    offerId: string | null
-    offerInitPromise: Promise<unknown> | null
-    offerPeer: MockPeer | null
-    offerRelays: Array<{timeout: ReturnType<typeof setTimeout>}>
+  const idleState = createPeerState()
+
+  const connectedState = createPeerState()
+  connectedState.connection = {
+    phase: 'connected',
+    peer: new MockPeer() as unknown as PeerHandle,
+    unhealthySince: null
   }
-  const peerStates = new Map<string, TestPeerState>([
-    [
-      'idle',
-      {
-        answeringPeer: null,
-        connectedPeer: null,
-        lastExchangeAt: 100,
-        offerId: null,
-        offerInitPromise: null,
-        offerPeer: null,
-        offerRelays: []
-      }
-    ],
-    [
-      'connected',
-      {
-        answeringPeer: null,
-        connectedPeer: new MockPeer(),
-        lastExchangeAt: 100,
-        offerId: null,
-        offerInitPromise: null,
-        offerPeer: null,
-        offerRelays: []
-      }
-    ],
-    [
-      'retrying',
-      {
-        answeringPeer: null,
-        connectedPeer: null,
-        lastExchangeAt: 100,
-        offerId: 'offer-1',
-        offerInitPromise: null,
-        offerPeer: new MockPeer(),
-        offerRelays: [{timeout: setTimeout(() => {}, 1000)}]
-      }
-    ]
+
+  const retryTimer = setTimeout(() => {}, 1000)
+  const retryingState = createPeerState()
+  retryingState.outbound = {
+    phase: 'advertising',
+    offerId: 'offer-1',
+    peer: new MockPeer() as unknown as PeerHandle,
+    offerSdp: 'enc-offer',
+    bufferedCandidates: [],
+    expiryTimer: retryTimer
+  }
+  retryingState.relaySlots.push({
+    phase: 'retrying',
+    retryTimer,
+    sendCandidate: () => {}
+  })
+
+  const peerStates = new Map<string, PeerState>([
+    ['idle', idleState],
+    ['connected', connectedState],
+    ['retrying', retryingState]
   ])
 
   try {
-    prunePeerStates(peerStates as unknown as Map<string, PeerState>)
+    prunePeerStates(peerStates)
     assert.equal(peerStates.has('idle'), false)
     assert.equal(peerStates.has('connected'), true)
     assert.equal(peerStates.has('retrying'), true)
 
-    peerStates.get('connected')!.connectedPeer = null
-    clearTimeout(peerStates.get('retrying')!.offerRelays[0]!.timeout)
-    peerStates.get('retrying')!.offerRelays = []
-    peerStates.get('retrying')!.offerPeer = null
+    connectedState.connection = {phase: 'disconnected'}
+    clearTimeout(retryTimer)
+    retryingState.relaySlots.length = 0
+    retryingState.outbound = {phase: 'idle'}
 
-    prunePeerStates(peerStates as unknown as Map<string, PeerState>)
+    prunePeerStates(peerStates)
     assert.equal(peerStates.size, 0)
   } finally {
-    clearTimeout(peerStates.get('retrying')?.offerRelays[0]?.timeout)
+    clearTimeout(retryTimer)
   }
 })
 

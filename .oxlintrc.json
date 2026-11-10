@@ -25,6 +25,13 @@
     "prefer-spread": "error",
     "typescript/no-explicit-any": "error",
     "typescript/no-misused-promises": "error",
+    "typescript/switch-exhaustiveness-check": [
+      "error",
+      {
+        "considerDefaultExhaustiveForUnions": false,
+        "requireDefaultForNonUnion": false
+      }
+    ],
     "unicorn/no-new-array": "off"
   },
   "overrides": [
