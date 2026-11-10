@@ -237,8 +237,8 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
       werift:
-        specifier: ^0.26.0
-        version: 0.26.0
+        specifier: ^0.27.0
+        version: 0.27.0
       ws:
         specifier: ^8.22.2
         version: 8.22.2
@@ -1814,8 +1814,8 @@ packages:
     resolution: {integrity: sha512-y3bGgqKj3QBdxLbLkomlohkvsA8gdAiUQlSBJnBhfn+BPxg4bc62d8TcBW15wavDfgexCgccckhcZvywyQYPOw==}
     hasBin: true
 
-  re2js@2.9.1:
-    resolution: {integrity: sha512-JIT3bEEUZTOR2YS1walNEIfH4cF/cQeZcBUFq7ldqO6lR6g0X5CBq/S8rsa9omzZcsNf8qc36jCkWpKKtncrZg==}
+  re2js@2.10.0:
+    resolution: {integrity: sha512-/P6FNnLbHjXJMRF1dPoZoVTyHvFcuVhbDpzml9DPMlbeErYlZ18GueAaG9GhYhAm/9AN7i7Y6crmDrLX0DeJ4Q==}
     engines: {node: '>=20.0.0'}
 
   readable-stream@3.6.2:
@@ -1851,8 +1851,8 @@ packages:
   rfdc@1.4.1:
     resolution: {integrity: sha512-q1b3N5QkRUWUl7iyylaaj3kOpIT0N2i9MqIEQXP73GVsN9cw3fdx8X63cEmWhJGi2PPCF23Ijp7ktmd39rawIA==}
 
-  rolldown-plugin-dts@0.30.0:
-    resolution: {integrity: sha512-5FNezfYv5alHvrYw5Xoj4RNqbZ9F+/1jETFSohhYfRiama8tUN4mcVURmBqbZQba45t5hRdW7aSOnV6WYIj0MA==}
+  rolldown-plugin-dts@0.30.1:
+    resolution: {integrity: sha512-tCDbuPygVmJMeq+Jk5BM3DUFx/6HO3HhJxI2yfc6ngtDGH71D5Qb7wv0V1sx4PPlqOErUrzAHXo8wQcLInreRQ==}
     engines: {node: ^22.18.0 || ^24.11.0 || >=26.0.0}
     peerDependencies:
       '@volar/typescript': ~2.4.0
@@ -2058,8 +2058,8 @@ packages:
     resolution: {integrity: sha512-OqedPIGOfsDlo31UNwYbCFMSaO9m9G/0faIHj5/dZFDMFqPTcx6UwqyOy3COEaEOg/9VsGIpdqn62W5KhoKSpg==}
     engines: {node: '>=0.8.0'}
 
-  werift@0.26.0:
-    resolution: {integrity: sha512-pH8l4jmp+oNnyGG9FrqkBf8r+Tz+1oDE6rshqtMlpfUzf90rJCn/XS81yalXl58T3tnsXnNQnhwkW/nE0wbFRA==}
+  werift@0.27.0:
+    resolution: {integrity: sha512-JgFfqVXZ4s3A+VE2DxMo5QympNAnravCuQdNqQeBiKIrojtpjghYahgnl5Vc+sh0Porsx/LHODNMdZKM/JbksA==}
     engines: {node: '>=22'}
 
   widest-line@4.0.1:
@@ -2351,7 +2351,7 @@ snapshots:
       '@firebase/webchannel-wrapper': 1.0.7
       '@grpc/grpc-js': 1.9.16
       '@grpc/proto-loader': 0.7.15
-      re2js: 2.9.1
+      re2js: 2.10.0
       tslib: 2.9.1
 
   '@firebase/functions-compat@0.5.0(@firebase/app-compat@0.5.21)(@firebase/app@0.16.5)':
@@ -3512,7 +3512,7 @@ snapshots:
       minimist: 1.2.8
       strip-json-comments: 2.0.1
 
-  re2js@2.9.1: {}
+  re2js@2.10.0: {}
 
   readable-stream@3.6.2:
     dependencies:
@@ -3552,7 +3552,7 @@ snapshots:
 
   rfdc@1.4.1: {}
 
-  rolldown-plugin-dts@0.30.0(rolldown@1.3.1)(typescript@7.0.2):
+  rolldown-plugin-dts@0.30.1(rolldown@1.3.1)(typescript@7.0.2):
     dependencies:
       dts-resolver: 3.0.0
       get-tsconfig: 5.0.0-beta.6
@@ -3687,7 +3687,7 @@ snapshots:
       obug: 3.0.0
       picomatch: 4.0.7
       rolldown: 1.3.1
-      rolldown-plugin-dts: 0.30.0(rolldown@1.3.1)(typescript@7.0.2)
+      rolldown-plugin-dts: 0.30.1(rolldown@1.3.1)(typescript@7.0.2)
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
       tinyps: 0.5.2
@@ -3770,7 +3770,7 @@ snapshots:
 
   websocket-extensions@0.1.4: {}
 
-  werift@0.26.0:
+  werift@0.27.0:
     dependencies:
       buffer: 6.0.3
       mediabunny: 1.65.2

@@ -82,7 +82,7 @@
     "source-map": "^0.8.0",
     "tsdown": "^0.23.7",
     "typescript": "^7.0.2",
-    "werift": "^0.26.0",
+    "werift": "^0.27.0",
     "ws": "^8.22.2"
   },
   "devEngines": {
