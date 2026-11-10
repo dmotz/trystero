@@ -27,98 +27,61 @@ Install Trystero from npm:
 npm i trystero
 ```
 
-Or skip the build step and import straight from an ESM CDN:
+<details>
+<summary>
+(Or skip the build step and import from a script tag)
+</summary>
 
 ```html
 <script type="module">
   import {joinRoom} from 'https://esm.run/trystero'
 </script>
 ```
+</details>
 
-Join a room by name and start syncing state — here's a complete multiplayer
-cursor canvas in a dozen lines:
+Join a room with a unique app ID and room name and start syncing state. Here's a
+complete multiplayer cursor canvas in a dozen lines:
 
 ```js
 import {joinRoom} from 'trystero'
 
-// No API keys, accounts, or backend setup — pick a globally unique appId
+// No API keys, accounts, or backend setup. Just pick a globally unique appId
 // (e.g. your app's domain or 'username/app-name') and a room name
-const room = joinRoom({appId: 'pixel-party.example.com'}, 'studio-42')
+const room = joinRoom({appId: 'pixel-party.example.com'}, 'studio-49')
 
 // Give every user their own signed state slot
 const cursor = room.makeUserState('cursor', {x: 0, y: 0})
 
-window.addEventListener('pointermove', e => {
+window.addEventListener('pointermove', e =>
   cursor.set({x: e.clientX, y: e.clientY})
-})
+)
 
 cursor.onChange((pos, {userId, self, removed}) => {
-  if (self) return
-  if (removed) removeCursor(userId)
-  else drawCursor(userId, pos)
+  if (self) {
+    return
+  }
+  if (removed) {
+    removeCursor(userId)
+  } else {
+    drawCursor(userId, pos)
+  }
 })
 ```
 
 Open your page in two browsers anywhere in the world and watch the cursors move.
 
 > **Local testing tip:** Tabs in the same browser profile share your `userId`
-> automatically. Open a Private/Incognito window (or pass `identity: 'none'`)
-> when simulating a second person on one machine.
-
----
-
-## How it works (with zero backend)
-
-WebRTC lets browsers talk directly to each other, peer-to-peer, without routing
-traffic through a central server. The one catch with WebRTC has always been
-_signaling_: two browsers need a brief introduction to swap connection info
-before they can link up.
-
-Trystero handles that introduction automatically out of the box using public
-relays — nothing to deploy or configure. Once peers connect, **your app's data
-never touches a relay**: state, messages, files, and media flow straight from
-browser to browser, end-to-end encrypted.
-
-```mermaid
-flowchart LR
-  A["Browser A"] -. "1. Encrypted introduction (no app data)" .-> R["Signaling Relay"]
-  B["Browser B"] -. "1. Encrypted introduction (no app data)" .-> R
-  A <== "2. Direct E2E-encrypted WebRTC (state, events, files, media)" ==> B
-```
-
-Prefer to run discovery over your own Supabase or Firebase project, MQTT,
-BitTorrent, or a tiny self-hosted WebSocket relay? You can swap strategies with
-a one-line import change — see the
-**[Signaling & Relays guide](./docs/signaling.md)**.
-
-<details>
-  <summary>Peek under the hood: how serverless discovery and security work</summary>
-
-- **Encrypted signaling**: Connection offers (SDPs) are encrypted with
-  AES-256-GCM before touching any relay. Adding a room `password` derives the
-  key via WebCrypto `PBKDF2-SHA256` (600,000 iterations) so outsiders and relay
-  operators can't read handshakes or join the room.
-- **Self-certifying identities**: Every user (`userId`) and browser tab
-  (`peerId`) is derived from a WebCrypto ECDSA P-256 public keypair. During
-  connection setup, peers verify each other's keys against the WebRTC DTLS
-  certificate fingerprint
-  ([RFC 8827](https://www.rfc-editor.org/rfc/rfc8827.html)), preventing spoofing
-  and man-in-the-middle relays.
-- **Signed state & roles**: Updates to `makeUserState`, `makeState`, and
-  `roles()` carry cryptographic signatures and Hybrid Logical Clock timestamps,
-  allowing peers (including late joiners) to verify who wrote what without a
-  central server.
-
-</details>
+> automatically. Open a Private/Incognito window (or pass `identity: 'none'` in
+> the room config) when simulating a second person on one machine.
 
 ---
 
 ## What you can build with it
 
-### 1. Synced player & room state
+### 1. Synced user & room state
 
-Most multiplayer apps need two kinds of live state: **per-player state** that
-each participant owns (names, avatars, ready flags, cursors) and **shared room
+Most multiplayer apps need two kinds of live state: **per-user state** that each
+participant owns (names, avatars, ready flags, cursors) and **shared room
 state** for the group (a game board, round timer, or watch-party queue).
 
 Trystero builds both right onto `room`. Updates apply immediately locally,
@@ -145,7 +108,7 @@ track.onChange((next, {userId}) => {
 await track.set(prev => ({...prev, paused: false}))
 ```
 
-Using **React**? Both `makeUserState` and `makeState` plug straight into
+Using React? Both `makeUserState` and `makeState` plug straight into
 `useSyncExternalStore` — no `useEffect` glue or manual join/leave maps:
 
 ```jsx
@@ -202,7 +165,7 @@ room.onError(err => {
 ### 3. Serverless hosts, custom roles & moderation
 
 In a typical P2P app, everyone is equal — which gets awkward the moment someone
-opens DevTools in your trivia game and awards themselves a million points.
+opens DevTools in your game and awards themselves a million points.
 
 Import the tree-shakeable `roles()` plugin to create rooms with mathematically
 verified admins, custom roles (like `'dj'` or `'moderator'`), authoritative
@@ -245,22 +208,31 @@ metadata headers, and transfer progress automatically, with zero cloud storage
 bills:
 
 ```js
-// Direct browser-to-browser file sharing with size checks & progress bars
 const drop = room.makeAction('file-drop')
 
+// Optionally add a predicate too accept based on max byteLength
 drop.onReceive(({byteLength}) => byteLength <= 100 * 1024 ** 2)
+
+// Listen for progress events to show a loading bar
 drop.onReceiveProgress((pct, {metadata}) => showDownloadBar(metadata.name, pct))
+
+// When the file is done being received, save it
 drop.onMessage((bytes, {userId, metadata}) => saveFile(bytes, metadata.name))
 
+// Send a file to the room with optional metadata
 await drop.send(file, {
   metadata: {name: file.name},
   onProgress: pct => showUploadBar(pct)
 })
 
-// 1-to-1 or fan-out request/response RPC
+// Create a request action where you ask a peer for something and they provide
+// an answer
 const roll = room.makeAction('roll-check', {kind: 'request'})
+
+// Respond to roll requests from other peers
 roll.onRequest(() => Math.ceil(Math.random() * 20))
 
+// Ask a specific friendId for their roll number
 const result = await roll.request(null, {target: friendId, timeoutMs: 2000})
 ```
 
@@ -286,21 +258,21 @@ room.onUserJoin(({userId}) =>
   room.addStream(stream, {target: userId, metadata: {type: 'webcam'}})
 )
 
-room.onPeerStream((remoteStream, {userId, metadata}) => {
+// Add a video when receiving a stream from someone else
+room.onPeerStream((remoteStream, {userId, metadata}) =>
   attachVideo(userId, remoteStream, metadata.type)
-})
+)
 ```
 
 👉 **[Audio, Video & Screen Sharing guide →](./docs/media.md)**
 
 ---
 
-### 6. Scale to dozens of peers (`scale()`)
+### 6. Scale to large numbers of peers
 
 Standard WebRTC connects every browser directly to every other browser, which is
-ideal for small hangouts and matches. Building a 40-person collaborative canvas
-or a crowded party lobby? Opt into the tree-shakeable `scale()` plugin
-_(experimental)_:
+ideal for smaller hangouts and matches. Building a 100-person collaborative
+canvas or a crowded party lobby? Opt into the `scale()` plugin:
 
 ```js
 import {joinRoom, scale} from 'trystero'
@@ -308,7 +280,7 @@ import {joinRoom, scale} from 'trystero'
 const room = joinRoom({appId: 'canvas.example.com', use: [scale()]}, 'plaza')
 ```
 
-Small rooms stay in a fast direct mesh with zero extra overhead; as more people
+Small rooms stay in a fast direct mesh with zero extra overhead. As more people
 pile in, Trystero automatically forms a multi-hop gossip network so no single
 browser gets overwhelmed — while your state, action, and media code stays
 exactly the same.
