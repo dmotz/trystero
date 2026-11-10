@@ -2,6 +2,7 @@ import type {
   BaseRoomConfig,
   JoinRoom,
   StrategyContext,
+  StrategyMessage,
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext
@@ -56,7 +57,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       _getOffers,
       context
     ) => {
+      let closed = false
+
       const signalPeer = (peerTopic: string, signal: string): void => {
+        if (closed) {
+          return
+        }
         try {
           void Promise.resolve(
             publishTopic(
@@ -71,12 +77,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         }
       }
 
-      let didCleanup = false
-      const forwardMessage = (
-        topic: string,
-        msg: Parameters<typeof onMessage>[1]
-      ) => {
-        if (!didCleanup) {
+      const forwardMessage = (topic: string, msg: StrategyMessage) => {
+        if (!closed) {
           return onMessage(topic, msg, signalPeer)
         }
       }
@@ -97,13 +99,16 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           makeTopicContext(context, 'root', rootTopic, selfTopic)
         )
       } catch (err) {
-        didCleanup = true
+        closed = true
         selfCleanup()
         throw err
       }
 
       return () => {
-        didCleanup = true
+        if (closed) {
+          return
+        }
+        closed = true
         selfCleanup()
         rootCleanup()
       }

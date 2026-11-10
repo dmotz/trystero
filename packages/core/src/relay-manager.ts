@@ -1,23 +1,59 @@
-import type {BaseRoomConfig, SocketClient} from './internal-types'
+import type {BaseRoomConfig, SocketClient, Timeout} from './internal-types'
 import {
   createBoundedCache,
   mkErr,
   socketInitialFailureSymbol
 } from './primitives'
 import type {RelayConfig, RelayConnectivity} from './types'
-import {fromEntries, noOp, shuffle, strToNum} from './utils'
+import {fromEntries, noOp, shuffle, strToNum, unreachable} from './utils'
 
 const {min} = Math
 const defaultRetryMs = 3333
 const maxRetryMs = 60_000
+const socketClosedErr = /*@__PURE__*/ mkErr('relay socket closed')
 const socketRetryPeriods = /*@__PURE__*/ createBoundedCache<string, number>(256)
 
 type SocketController = [disconnect: () => void, reconnect: () => void]
+
+type SocketReadyGate = {
+  readonly promise: Promise<SocketClient>
+  readonly resolve: (value: SocketClient) => void
+  readonly reject: (reason: Error) => void
+}
+
+type SocketLifecycleState =
+  | {readonly phase: 'parked-offline'; readonly didOpen: boolean}
+  | {
+      readonly phase: 'connecting'
+      readonly socket: WebSocket
+      readonly didOpen: boolean
+    }
+  | {readonly phase: 'open'; readonly socket: WebSocket}
+  | {
+      readonly phase: 'backoff-wait'
+      readonly didOpen: boolean
+      readonly timer: Timeout
+      readonly attemptFailure: Error | null
+    }
+  | {readonly phase: 'closed'}
+
+const hasLiveSocket = (
+  s: SocketLifecycleState
+): s is Extract<SocketLifecycleState, {phase: 'connecting' | 'open'}> =>
+  s.phase === 'connecting' || s.phase === 'open'
+
+const isSocketDormant = (
+  s: SocketLifecycleState
+): s is Extract<
+  SocketLifecycleState,
+  {phase: 'backoff-wait' | 'parked-offline'}
+> => s.phase === 'backoff-wait' || s.phase === 'parked-offline'
 
 const socketControllers = /*@__PURE__*/ new Set<SocketController>()
 const socketWakeFns = /*@__PURE__*/ new WeakMap<object, () => void>()
 const defaultIsRelayClosed = (relay: object): boolean =>
   Boolean((relay as {isClosed?: boolean}).isClosed)
+
 let relayConnectivity: RelayConnectivity = 'auto'
 let isRelayOffline = false
 let stopWatchingOnline: (() => void) | null = null
@@ -105,6 +141,11 @@ export const setRelayConnectivity = (
   return relayConnectivity
 }
 
+const detachWebSocket = (socket: WebSocket): void => {
+  socket.onopen = socket.onclose = socket.onmessage = null
+  socket.close()
+}
+
 export const makeSocket = (
   url: string,
   onMessage: (data: string) => void,
@@ -115,101 +156,119 @@ export const makeSocket = (
     isClosed: false,
     send: noOp
   } as unknown as SocketClient
-  let didOpen = false
-  let isSocketOpen = false
-  let isReconnectPending = false
-  let attemptFailure: Error | null = null
-  let retryTimer: ReturnType<typeof setTimeout> | undefined
-  let resolveReady: (value: SocketClient) => void = noOp
   const failureWaiters = new Set<(err: Error | null) => void>()
+  let lifecycle: SocketLifecycleState = {
+    phase: 'parked-offline',
+    didOpen: false
+  }
 
   const settleAttempt = (err: Error | null): void => {
     failureWaiters.forEach(w => w(err))
     failureWaiters.clear()
   }
 
-  const resetReadyPromise = (): void => {
-    const {promise, resolve} = Promise.withResolvers<SocketClient>()
-    resolveReady = resolve
+  const createReadyGate = (): SocketReadyGate => {
+    const {promise, resolve, reject} = Promise.withResolvers<SocketClient>()
+    void promise.catch(noOp)
     void Object.defineProperty(promise, socketInitialFailureSymbol, {
-      value: (): Promise<Error | null> =>
-        isSocketOpen || client.isClosed || isRelayOffline
-          ? Promise.resolve(null)
-          : attemptFailure
-            ? Promise.resolve(attemptFailure)
-            : new Promise<Error | null>(res => {
-                failureWaiters.add(res)
-              }),
+      value: (): Promise<Error | null> => {
+        if (
+          lifecycle.phase === 'open' ||
+          lifecycle.phase === 'closed' ||
+          isRelayOffline
+        ) {
+          return Promise.resolve(null)
+        }
+        if (lifecycle.phase === 'backoff-wait' && lifecycle.attemptFailure) {
+          return Promise.resolve(lifecycle.attemptFailure)
+        }
+        return new Promise<Error | null>(res => {
+          failureWaiters.add(res)
+        })
+      },
       enumerable: false,
       configurable: true
     })
-    client.ready = promise
+    return {promise, resolve, reject}
   }
 
-  resetReadyPromise()
+  let readyGate = createReadyGate()
+  client.ready = readyGate.promise
+
+  const rotateReadyGateAfterDisconnect = (): void => {
+    readyGate = createReadyGate()
+    client.ready = readyGate.promise
+  }
 
   if (relayConnectivity === 'auto') {
     attachOnlineWatcher()
   }
 
-  const clearRetryTimer = (): void => {
-    if (retryTimer !== undefined) {
-      clearTimeout(retryTimer)
-      retryTimer = undefined
-    }
-  }
-
-  const markDisconnected = (): void => {
-    if (isSocketOpen) {
-      isSocketOpen = false
-      if (!client.isClosed) {
-        resetReadyPromise()
-      }
-    }
-  }
-
-  const closeSocket = (): void => {
-    const socket = client.socket
-    markDisconnected()
-    if (socket) {
-      socket.onopen = socket.onclose = socket.onmessage = null
-      socket.close()
-    }
-  }
+  const getDidOpen = (
+    state: Exclude<SocketLifecycleState, {phase: 'closed'}>
+  ): boolean => (state.phase === 'open' ? true : state.didOpen)
 
   const init = (): void => {
-    if (client.isClosed || isRelayOffline) {
-      return
+    switch (lifecycle.phase) {
+      case 'closed':
+      case 'connecting':
+      case 'open':
+        return
+      case 'backoff-wait':
+        clearTimeout(lifecycle.timer)
+        if (isRelayOffline) {
+          lifecycle = {phase: 'parked-offline', didOpen: lifecycle.didOpen}
+          return
+        }
+        break
+      case 'parked-offline':
+        if (isRelayOffline) {
+          return
+        }
+        break
+      default:
+        unreachable(lifecycle)
     }
-    clearRetryTimer()
-    isReconnectPending = false
-    attemptFailure = null
 
+    const didOpen = lifecycle.didOpen
     const socket = new WebSocket(url)
     client.socket = socket
     client.url = socket.url ?? url
+    lifecycle = {phase: 'connecting', socket, didOpen}
 
     socket.onclose = () => {
-      if (client.isClosed || isReconnectPending || client.socket !== socket) {
+      if (!hasLiveSocket(lifecycle) || lifecycle.socket !== socket) {
         return
       }
-      const wasOpen = isSocketOpen
-      markDisconnected()
-      isReconnectPending = true
+      const wasOpen = lifecycle.phase === 'open'
+      const nextDidOpen = getDidOpen(lifecycle)
+      client.send = noOp
+      if (wasOpen) {
+        rotateReadyGateAfterDisconnect()
+      }
       if (isRelayOffline) {
+        lifecycle = {phase: 'parked-offline', didOpen: nextDidOpen}
         if (!wasOpen) {
           settleAttempt(null)
         }
         return
       }
-      if (!wasOpen) {
-        attemptFailure = mkErr(`failed to connect to relay ${client.url}`)
+      const attemptFailure = wasOpen
+        ? null
+        : mkErr(`failed to connect to relay ${client.url}`)
+      if (attemptFailure) {
         settleAttempt(attemptFailure)
       }
       const period = socketRetryPeriods.get(url) ?? defaultRetryMs
       socketRetryPeriods.set(url, period)
-      retryTimer = setTimeout(init, Math.random() * period)
+      const timer = setTimeout(init, Math.random() * period)
       socketRetryPeriods.set(url, min(period * 2, maxRetryMs))
+      lifecycle = {
+        phase: 'backoff-wait',
+        didOpen: nextDidOpen,
+        timer,
+        attemptFailure
+      }
     }
 
     socket.onmessage = e => {
@@ -221,15 +280,13 @@ export const makeSocket = (
     }
 
     socket.onopen = () => {
-      if (client.isClosed || client.socket !== socket) {
+      if (lifecycle.phase !== 'connecting' || lifecycle.socket !== socket) {
         return
       }
-      const isReconnect = didOpen
-      didOpen = true
-      isSocketOpen = true
-      attemptFailure = null
+      const isReconnect = lifecycle.didOpen
+      lifecycle = {phase: 'open', socket}
       settleAttempt(null)
-      resolveReady(client)
+      readyGate.resolve(client)
       socketRetryPeriods.set(url, defaultRetryMs)
       if (isReconnect) {
         onReconnect?.()
@@ -245,48 +302,81 @@ export const makeSocket = (
 
   const controller: SocketController = [
     () => {
-      if (!client.isClosed) {
-        clearRetryTimer()
-        attemptFailure = null
-        settleAttempt(null)
-        if (!isReconnectPending) {
-          isReconnectPending = true
-          closeSocket()
+      switch (lifecycle.phase) {
+        case 'closed':
+        case 'parked-offline':
+          return
+        case 'backoff-wait': {
+          clearTimeout(lifecycle.timer)
+          lifecycle = {phase: 'parked-offline', didOpen: lifecycle.didOpen}
+          settleAttempt(null)
+          return
         }
+        case 'connecting':
+        case 'open': {
+          const wasOpen = lifecycle.phase === 'open'
+          const didOpen = getDidOpen(lifecycle)
+          const activeSocket = lifecycle.socket
+          client.send = noOp
+          lifecycle = {phase: 'parked-offline', didOpen}
+          if (wasOpen) {
+            rotateReadyGateAfterDisconnect()
+          }
+          settleAttempt(null)
+          detachWebSocket(activeSocket)
+          return
+        }
+        default:
+          unreachable(lifecycle)
       }
     },
     () => {
-      if (!client.isClosed) {
-        socketRetryPeriods.set(url, defaultRetryMs)
-        clearRetryTimer()
-        if (isReconnectPending) {
-          init()
-        }
+      if (lifecycle.phase === 'closed') {
+        return
+      }
+      socketRetryPeriods.set(url, defaultRetryMs)
+      if (isSocketDormant(lifecycle)) {
+        init()
       }
     }
   ]
 
   socketControllers.add(controller)
   socketWakeFns.set(client, () => {
-    if (!client.isClosed && !isRelayOffline && isReconnectPending) {
+    if (!isRelayOffline && isSocketDormant(lifecycle)) {
       controller[1]()
     }
   })
 
   client.close = () => {
+    if (lifecycle.phase === 'closed') {
+      return
+    }
+    const prev = lifecycle
     client.isClosed = true
-    attemptFailure = null
+    client.send = noOp
+    lifecycle = {phase: 'closed'}
     settleAttempt(null)
+    readyGate.reject(socketClosedErr)
     socketControllers.delete(controller)
     socketWakeFns.delete(client)
     socketRetryPeriods.delete(url)
-    clearRetryTimer()
-    closeSocket()
+    switch (prev.phase) {
+      case 'parked-offline':
+        break
+      case 'backoff-wait':
+        clearTimeout(prev.timer)
+        break
+      case 'connecting':
+      case 'open':
+        detachWebSocket(prev.socket)
+        break
+      default:
+        unreachable(prev)
+    }
   }
 
-  if (isRelayOffline) {
-    isReconnectPending = true
-  } else {
+  if (!isRelayOffline) {
     init()
   }
 
@@ -336,29 +426,30 @@ export const createRelayManager = <TRelay extends object>(
   evict: (relay: TRelay) => void
   getSockets: () => Record<string, WebSocket>
 } => {
-  const relays = new Map<string, TRelay>()
+  const pooledByKey = new Map<string, TRelay>()
   const relayKeys = new WeakMap<TRelay, string>()
   const leaseCounts = new WeakMap<TRelay, number>()
+  const closedRelays = new WeakSet<TRelay>()
   const checkClosed = isRelayClosed ?? defaultIsRelayClosed
 
-  const evict = (relay: TRelay): void => {
+  const unpool = (relay: TRelay): void => {
     const key = relayKeys.get(relay)
-    if (key !== undefined && relays.get(key) === relay) {
-      relays.delete(key)
+    if (key !== undefined && pooledByKey.get(key) === relay) {
+      pooledByKey.delete(key)
     }
-    leaseCounts.delete(relay)
   }
 
   return {
     register: (key, createRelay) => {
-      let relay = relays.get(key)
+      let relay = pooledByKey.get(key)
       if (relay && checkClosed(relay)) {
-        evict(relay)
+        unpool(relay)
+        leaseCounts.delete(relay)
         relay = undefined
       }
       if (!relay) {
         relay = createRelay()
-        relays.set(key, relay)
+        pooledByKey.set(key, relay)
         relayKeys.set(relay, key)
       } else {
         socketWakeFns.get(relay)?.()
@@ -388,23 +479,27 @@ export const createRelayManager = <TRelay extends object>(
           return
         }
         released = true
-        if (!leaseCounts.has(relay)) {
+        const prev = leaseCounts.get(relay)
+        if (!prev || prev <= 0) {
           return
         }
-        const next = (leaseCounts.get(relay) ?? 1) - 1
-        if (next > 0) {
-          leaseCounts.set(relay, next)
+        if (prev > 1) {
+          leaseCounts.set(relay, prev - 1)
           return
         }
-        evict(relay)
-        closeRelay?.(relay)
+        leaseCounts.delete(relay)
+        unpool(relay)
+        if (!closedRelays.has(relay) && !checkClosed(relay)) {
+          closedRelays.add(relay)
+          closeRelay?.(relay)
+        }
       })
       return leasedP
     },
-    evict,
+    evict: unpool,
     getSockets: () =>
       fromEntries(
-        [...relays.entries()].flatMap(([key, relay]) => {
+        [...pooledByKey.entries()].flatMap(([key, relay]) => {
           const socket = checkClosed(relay) ? undefined : getSocket(relay)
           return socket ? [[key, socket]] : []
         })

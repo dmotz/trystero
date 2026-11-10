@@ -7,7 +7,8 @@ import type {
   PeerState,
   Signal,
   StrategyAdapter,
-  StrategyContext
+  StrategyContext,
+  Timeout
 } from './internal-types'
 import {createOfferManager} from './offer-manager'
 import initPeer from './peer'
@@ -45,12 +46,51 @@ import {
   resetTimer,
   toErrorMessage,
   topicPath,
+  unreachable,
   unrefTimer,
   warn
 } from './utils'
 
 const announceIntervalMs = 5_333
 const announceWarmupIntervalsMs = [233, 533, 1_333] as const
+
+type RoomRegistrySlot =
+  | {readonly phase: 'occupied'; readonly room: Room}
+  | {readonly phase: 'leaving'; readonly finalizeCleanup: () => void}
+
+type StrategyRoomState =
+  | {readonly phase: 'active'}
+  | {readonly phase: 'leaving-flush'}
+  | {readonly phase: 'left'; readonly relaysStopped: boolean}
+
+type RelayHealthReportState = 'unconfirmed' | 'healthy' | 'error-reported'
+
+type RelaySubscriptionState =
+  | {readonly phase: 'booting'}
+  | {readonly phase: 'boot-failed'}
+  | {readonly phase: 'subscribing'}
+  | {readonly phase: 'subscribed'; readonly unsub: () => void}
+  | {readonly phase: 'closed'}
+
+type InitialAnnounceOutcome = 'pending' | 'succeeded' | 'failed'
+
+type RelayAnnounceState =
+  | {readonly phase: 'waiting'}
+  | {readonly phase: 'active'; timer: Timeout | null}
+  | {readonly phase: 'closed'}
+
+type RelaySlot<TRelay> = {
+  readonly rawItem: unknown
+  readonly relayP: Promise<TRelay>
+  leaseReleased: boolean
+  subscription: RelaySubscriptionState
+  announce: RelayAnnounceState
+  gen: number
+  intervalMs: number
+  attempts: number
+  errors: number
+  initial: InitialAnnounceOutcome
+}
 
 const mergeDefaultConfig = <T extends object>(
   defaults: Partial<T>,
@@ -84,8 +124,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
   announce
 }: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> => {
   const clientId = createIdentityClientId()
-  const occupiedRooms = new Map<string, Map<string, Room>>()
-  const leavingRoomCleanups = new Map<string, Map<string, () => void>>()
+  const roomRegistry = new Map<string, Map<string, RoomRegistrySlot>>()
 
   return (<
     const TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
@@ -134,60 +173,63 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
     validateIdentityConfig(effectiveConfig)
 
-    if (occupiedRooms.get(appId)?.has(roomId)) {
+    const existingSlot = roomRegistry.get(appId)?.get(roomId)
+    if (existingSlot?.phase === 'occupied') {
       throw mkErr(`already joined room "${roomId}" for appId "${appId}"`)
     }
+    if (existingSlot?.phase === 'leaving') {
+      existingSlot.finalizeCleanup()
+    }
 
-    leavingRoomCleanups.get(appId)?.get(roomId)?.()
-
-    let didLeaveRoom = false
-    let isLeavingRoom = false
-    let didReportRelayError = false
+    let roomState: StrategyRoomState = {phase: 'active'}
+    let relayHealthState: RelayHealthReportState = 'unconfirmed'
     let effectiveRoomId = roomId
     let resolvedSelfId: string | undefined
     let onPeerConnect = noOp as (peer: PeerHandle, peerId: string) => void
     let reannounceAfterDisconnect = noOp
     let stopRelays = noOp
 
+    const isRoomInactive = (): boolean => roomState.phase !== 'active'
+
     const peerStates = new Map<string, PeerState>()
     const announceIntervals: number[] = []
-    const announceTimeouts: Array<ReturnType<typeof setTimeout> | undefined> =
-      []
-    const healthySubscribedRelays = new Set<number>()
     const topicFor = (rid: string): string => topicPath(libName, appId, rid)
 
-    const deleteRoomSlot = <T>(
-      map: Map<string, Map<string, T>>,
-      target: T
+    const deleteRegistrySlotMatching = (
+      predicate: (slot: RoomRegistrySlot) => boolean
     ): void => {
-      const appMap = map.get(appId)
+      const appMap = roomRegistry.get(appId)
       if (!appMap) {
         return
       }
-      if (appMap.get(roomId) === target) {
+      const initialSlot = appMap.get(roomId)
+      if (initialSlot && predicate(initialSlot)) {
         appMap.delete(roomId)
       }
-      if (
-        effectiveRoomId !== roomId &&
-        appMap.get(effectiveRoomId) === target
-      ) {
-        appMap.delete(effectiveRoomId)
+      if (effectiveRoomId !== roomId) {
+        const effectiveSlot = appMap.get(effectiveRoomId)
+        if (effectiveSlot && predicate(effectiveSlot)) {
+          appMap.delete(effectiveRoomId)
+        }
       }
       if (appMap.size === 0) {
-        map.delete(appId)
+        roomRegistry.delete(appId)
       }
     }
 
     const cleanupRoom = (): void => {
-      if (didLeaveRoom) {
+      if (roomState.phase === 'left') {
         return
       }
 
-      didLeaveRoom = true
+      roomState = {phase: 'left', relaysStopped: false}
       onPeerConnect = noOp
 
-      deleteRoomSlot(occupiedRooms, joinedRoom)
-      deleteRoomSlot(leavingRoomCleanups, cleanupRoom)
+      deleteRegistrySlotMatching(
+        slot =>
+          (slot.phase === 'occupied' && slot.room === joinedRoom) ||
+          (slot.phase === 'leaving' && slot.finalizeCleanup === cleanupRoom)
+      )
 
       for (const state of peerStates.values()) {
         if (state.connectedPeer && !state.connectedPeer.isDead) {
@@ -200,20 +242,29 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
         resetOfferState(state)
         resetAnsweringState(state)
-        state.connectedPeer = null
-        state.unhealthySince = null
+        state.connection = {phase: 'disconnected'}
       }
       peerStates.clear()
 
       stopRelays()
     }
 
+    const cancelAllAnnounceTimers = (slots: RelaySlot<TRelay>[]): void => {
+      for (const slot of slots) {
+        if (slot.announce.phase === 'active') {
+          slot.announce.timer = resetTimer(slot.announce.timer)
+        }
+      }
+    }
+
+    let relaySlots: RelaySlot<TRelay>[] = []
+
     const [joinedRoom, bridge] = createRoomWithBridge(
       f => {
         onPeerConnect = f
       },
       (id, shouldReannounce = true) => {
-        if (didLeaveRoom) {
+        if (roomState.phase === 'left') {
           return
         }
 
@@ -250,14 +301,32 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           ? {}
           : {maxReceiveBytes: effectiveConfig.maxReceiveBytes}),
         onBeforeLeave: () => {
-          isLeavingRoom = true
-          announceTimeouts.forEach(resetTimer)
-          announceTimeouts.length = 0
-          deleteRoomSlot(occupiedRooms, joinedRoom)
-          const appCleanups = getOrCreateAppMap(leavingRoomCleanups, appId)
-          appCleanups.set(roomId, cleanupRoom)
+          if (roomState.phase === 'active') {
+            roomState = {phase: 'leaving-flush'}
+          }
+          cancelAllAnnounceTimers(relaySlots)
+          const appSlots = getOrCreateAppMap(roomRegistry, appId)
+          const leavingSlot: RoomRegistrySlot = {
+            phase: 'leaving',
+            finalizeCleanup: cleanupRoom
+          }
+          const curInitial = appSlots.get(roomId)
+          if (
+            !curInitial ||
+            curInitial.phase !== 'occupied' ||
+            curInitial.room === joinedRoom
+          ) {
+            appSlots.set(roomId, leavingSlot)
+          }
           if (effectiveRoomId !== roomId) {
-            appCleanups.set(effectiveRoomId, cleanupRoom)
+            const curEffective = appSlots.get(effectiveRoomId)
+            if (
+              !curEffective ||
+              curEffective.phase !== 'occupied' ||
+              curEffective.room === joinedRoom
+            ) {
+              appSlots.set(effectiveRoomId, leavingSlot)
+            }
           }
         }
       }
@@ -268,7 +337,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       void selfIdP.catch(noOp)
 
       const emitError = (error: RoomError): void => {
-        if (!didLeaveRoom) {
+        if (roomState.phase !== 'left') {
           bridge.emitError(error)
         }
       }
@@ -283,9 +352,15 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       const effectiveRoomIdP = bridge.effectiveRoomIdP?.then(rid => {
         effectiveRoomId = rid
         strategyContext.roomId = rid
-        if (rid !== roomId && !didLeaveRoom && !isLeavingRoom) {
-          leavingRoomCleanups.get(appId)?.get(rid)?.()
-          getOrCreateAppMap(occupiedRooms, appId).set(rid, joinedRoom)
+        if (rid !== roomId && roomState.phase === 'active') {
+          const appSlots = getOrCreateAppMap(roomRegistry, appId)
+          const existingEffective = appSlots.get(rid)
+          if (existingEffective?.phase === 'leaving') {
+            existingEffective.finalizeCleanup()
+          }
+          if (!appSlots.has(rid)) {
+            appSlots.set(rid, {phase: 'occupied', room: joinedRoom})
+          }
         }
         return rid
       })
@@ -333,7 +408,8 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
       const toPlain = withKey(decrypt)
       const toCipher = withKey(encrypt)
-      let reannounceOnDisconnect = false
+      let disconnectReannounceEnabled = false
+      let disconnectReannounceQueued = false
       const {
         checkout: checkoutOffers,
         getOffers,
@@ -357,7 +433,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
 
       const connectPeer = (peer: PeerHandle, peerId: string): void => {
-        if (didLeaveRoom || isLeavingRoom) {
+        if (isRoomInactive()) {
           peer.destroy()
           return
         }
@@ -387,12 +463,12 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       const isPassive = Boolean(effectiveConfig.passive)
       let syncOverlayNeighbors = noOp
       let requeueAnnounce = noOp
-      let disconnectReannounceQueued = false
+
       reannounceAfterDisconnect = () => {
         syncOverlayNeighbors()
         if (
           isPassive ||
-          !reannounceOnDisconnect ||
+          !disconnectReannounceEnabled ||
           disconnectReannounceQueued
         ) {
           return
@@ -401,14 +477,14 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         disconnectReannounceQueued = true
         queueMicrotask(() => {
           disconnectReannounceQueued = false
-          if (!didLeaveRoom && !isLeavingRoom) {
+          if (roomState.phase === 'active') {
             requeueAnnounce()
           }
         })
       }
 
       const disconnectPeer = (peer: PeerHandle, peerId: string): void => {
-        if (didLeaveRoom) {
+        if (roomState.phase === 'left') {
           return
         }
 
@@ -432,7 +508,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         selfTopicP,
         toPlain,
         toCipher,
-        isLeaving: () => didLeaveRoom || isLeavingRoom,
+        isLeaving: isRoomInactive,
         onError: emitError,
         checkoutOffers,
         claimLeasedOffer,
@@ -461,7 +537,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
       syncOverlayNeighbors = () => {
         const scaleProvider = bridge.getScaleProvider()
-        if (didLeaveRoom || isLeavingRoom || isPassive || !scaleProvider) {
+        if (isRoomInactive() || isPassive || !scaleProvider) {
           return
         }
         for (const targetId of scaleProvider.getTargetNeighbors()) {
@@ -471,56 +547,64 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
 
       const initRes = init(effectiveConfig)
       const rawInitItems = Array.isArray(initRes) ? initRes : [initRes]
-      const initPromises: Promise<TRelay>[] = rawInitItems.map(value => {
-        const p = Promise.resolve(value)
-        void p.catch(noOp)
-        return p
+      relaySlots = rawInitItems.map(rawItem => {
+        const relayP = Promise.resolve(rawItem)
+        void relayP.catch(noOp)
+        return {
+          rawItem,
+          relayP,
+          leaseReleased: false,
+          subscription: {phase: 'booting'},
+          announce: {phase: 'waiting'},
+          gen: 0,
+          intervalMs: announceIntervalMs,
+          attempts: 0,
+          errors: 0,
+          initial: 'pending' as InitialAnnounceOutcome
+        }
       })
-      const resolvedUnsubs: Array<(() => void) | undefined> = []
-      const subscribingInFlight: boolean[] = []
-      let didStopRelays = false
+
+      const releaseSlotLease = (slot: RelaySlot<TRelay>): void => {
+        if (!slot.leaseReleased) {
+          slot.leaseReleased = true
+          releaseRelayLease(slot.rawItem)
+        }
+      }
 
       stopRelays = () => {
-        if (didStopRelays) {
+        if (roomState.phase === 'left' && roomState.relaysStopped) {
           return
         }
-        didStopRelays = true
-        announceTimeouts.forEach(resetTimer)
-        healthySubscribedRelays.clear()
-        for (let i = 0; i < rawInitItems.length; i++) {
-          const unsub = resolvedUnsubs[i]
-          resolvedUnsubs[i] = undefined
-          unsub?.()
-          if (!subscribingInFlight[i]) {
-            releaseRelayLease(rawInitItems[i])
+        roomState = {phase: 'left', relaysStopped: true}
+        cancelAllAnnounceTimers(relaySlots)
+        for (const slot of relaySlots) {
+          const prevSub = slot.subscription
+          slot.subscription = {phase: 'closed'}
+          slot.gen += 1
+          slot.announce = {phase: 'closed'}
+          if (prevSub.phase === 'subscribed') {
+            prevSub.unsub()
+          }
+          if (prevSub.phase !== 'subscribing') {
+            releaseSlotLease(slot)
           }
         }
         destroyOffers()
       }
 
-      // Only explicit numeric relay pacing overrides the signaling retry default.
-      const announceScheduleIntervals = initPromises.map(
-        () => announceIntervalMs
-      )
-      const announceAttemptCounts = initPromises.map(() => 0)
-      const announceErrorStreaks = initPromises.map(() => 0)
-      const announceGenerations = initPromises.map(() => 0)
+      const totalRelays = relaySlots.length
 
-      const totalRelays = initPromises.length
-      const failedBootRelays = new Set<number>()
-      let anyRelayBootHealthy = false
       const reportAllRelaysFailed = (cause: unknown): void => {
         if (
-          didReportRelayError ||
+          relayHealthState === 'error-reported' ||
           bridge.hasSetupFailed() ||
-          didLeaveRoom ||
-          isLeavingRoom
+          isRoomInactive()
         ) {
           return
         }
-        didReportRelayError = true
+        relayHealthState = 'error-reported'
         queueMicrotask(() => {
-          if (!didLeaveRoom && !isLeavingRoom && !bridge.hasSetupFailed()) {
+          if (!isRoomInactive() && !bridge.hasSetupFailed()) {
             emitError({
               code: 'relay-failed',
               message: toErrorMessage(cause, 'all signaling relays failed'),
@@ -531,53 +615,80 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
           }
         })
       }
-      const markRelayFailed = (i: number, err: unknown): void => {
-        if (anyRelayBootHealthy || failedBootRelays.has(i)) {
-          return
-        }
-        failedBootRelays.add(i)
-        if (totalRelays > 0 && failedBootRelays.size === totalRelays) {
+
+      const maybeReportAllBootFailed = (err: unknown): void => {
+        if (
+          relayHealthState === 'unconfirmed' &&
+          totalRelays > 0 &&
+          relaySlots.every(s => s.subscription.phase === 'boot-failed')
+        ) {
           reportAllRelaysFailed(err)
         }
       }
 
-      initPromises.forEach((relayP, i) => {
+      const markRelayBootFailed = (
+        slot: RelaySlot<TRelay>,
+        err: unknown
+      ): void => {
+        switch (slot.subscription.phase) {
+          case 'booting':
+          case 'subscribing':
+            slot.subscription = {phase: 'boot-failed'}
+            maybeReportAllBootFailed(err)
+            return
+          case 'subscribed':
+          case 'closed':
+          case 'boot-failed':
+            return
+          default:
+            unreachable(slot.subscription)
+        }
+      }
+
+      relaySlots.forEach(slot => {
         const getInitialFailure = (
-          relayP as Promise<TRelay> & {
+          slot.relayP as Promise<TRelay> & {
             [socketInitialFailureSymbol]?: () => Promise<Error | null>
           }
         )[socketInitialFailureSymbol]
         if (typeof getInitialFailure === 'function') {
           void getInitialFailure().then(err => {
             if (err) {
-              markRelayFailed(i, err)
+              markRelayBootFailed(slot, err)
             }
           })
         }
       })
 
-      const unsubFns = initPromises.map(async (relayP, i) => {
+      const unsubFns = relaySlots.map(async (slot, i) => {
         let rootTopic: string
         let selfTopic: string
         try {
           ;[rootTopic, selfTopic] = await all([rootTopicP, selfTopicP])
         } catch {
+          slot.subscription = {phase: 'closed'}
+          releaseSlotLease(slot)
           return noOp
         }
-        if (didStopRelays || didLeaveRoom || isLeavingRoom) {
+        if (isRoomInactive()) {
+          slot.subscription = {phase: 'closed'}
+          releaseSlotLease(slot)
           return noOp
         }
         let relay: TRelay
         try {
-          relay = await relayP
+          relay = await slot.relayP
         } catch (err) {
-          markRelayFailed(i, err)
+          markRelayBootFailed(slot, err)
+          releaseSlotLease(slot)
           return noOp
         }
-        if (didStopRelays || didLeaveRoom || isLeavingRoom) {
+        if (isRoomInactive()) {
+          slot.subscription = {phase: 'closed'}
+          releaseSlotLease(slot)
           return noOp
         }
-        subscribingInFlight[i] = true
+        slot.subscription = {phase: 'subscribing'}
         try {
           const unsub = await subscribe(
             relay,
@@ -592,55 +703,57 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
               ),
             strategyContext
           )
-          if (didStopRelays || didLeaveRoom || isLeavingRoom) {
+          // Re-read slot.subscription across the await (stopRelays may have closed it).
+          const isClosedAfterAwait = (s: {
+            readonly subscription: RelaySubscriptionState
+          }): boolean => s.subscription.phase === 'closed'
+          if (isRoomInactive() || isClosedAfterAwait(slot)) {
             unsub()
-            if (didStopRelays) {
-              releaseRelayLease(rawInitItems[i])
-            }
+            slot.subscription = {phase: 'closed'}
+            releaseSlotLease(slot)
             return noOp
           }
-          resolvedUnsubs[i] = unsub
-          failedBootRelays.delete(i)
-          anyRelayBootHealthy = true
-          healthySubscribedRelays.add(i)
+          slot.subscription = {phase: 'subscribed', unsub}
+          if (relayHealthState === 'unconfirmed') {
+            relayHealthState = 'healthy'
+          }
           return unsub
         } catch (err) {
-          if (didStopRelays) {
-            releaseRelayLease(rawInitItems[i])
-          }
-          markRelayFailed(i, err)
+          slot.subscription = {phase: 'boot-failed'}
+          releaseSlotLease(slot)
+          maybeReportAllBootFailed(err)
           return noOp
-        } finally {
-          subscribingInFlight[i] = false
         }
       })
 
-      const settledAnnounces = new Set<number>()
-      let anyInitialAnnounceSucceeded = false
-
       if (!isPassive) {
         void all([rootTopicP, selfTopicP]).then(([rootTopic, selfTopic]) => {
-          if (didLeaveRoom || isLeavingRoom) {
+          if (isRoomInactive()) {
             return
           }
 
+          const isSlotActive = (
+            slot: {readonly announce: RelayAnnounceState; readonly gen: number},
+            gen: number
+          ): boolean =>
+            !isRoomInactive() &&
+            slot.announce.phase === 'active' &&
+            slot.gen === gen
+
           const queueAnnounce = async (
             relay: TRelay,
+            slot: RelaySlot<TRelay>,
             i: number,
             gen: number
           ): Promise<void> => {
-            if (
-              didLeaveRoom ||
-              isLeavingRoom ||
-              announceGenerations[i] !== gen
-            ) {
+            if (!isSlotActive(slot, gen)) {
               return
             }
 
             let announceResult: Awaited<
               ReturnType<StrategyAdapter<TRelay, TConfig>['announce']>
             > = undefined
-            const isInitialAnnounce = !settledAnnounces.has(i)
+            const isInitial = slot.initial === 'pending'
 
             try {
               announceResult = await announce(
@@ -649,122 +762,131 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
                 selfTopic,
                 strategyContext
               )
-              announceErrorStreaks[i] = 0
-              if (isInitialAnnounce) {
-                anyInitialAnnounceSucceeded = true
-                settledAnnounces.add(i)
+              slot.errors = 0
+              if (isInitial) {
+                slot.initial = 'succeeded'
               }
             } catch (error) {
-              if (
-                didLeaveRoom ||
-                isLeavingRoom ||
-                announceGenerations[i] !== gen
-              ) {
+              if (isRoomInactive() || slot.announce.phase === 'closed') {
                 return
               }
 
-              const errorStreak = announceErrorStreaks[i] ?? 0
-
               if (
-                errorStreak === 0 &&
+                slot.errors === 0 &&
                 effectiveConfig.relayConfig?.warnOnRelayFailure !== false
               ) {
                 warn(`announce failed - ${toErrorMessage(error, '')}`)
               }
 
-              announceErrorStreaks[i] = errorStreak + 1
-              if (isInitialAnnounce) {
-                settledAnnounces.add(i)
-                if (
-                  !anyInitialAnnounceSucceeded &&
+              slot.errors += 1
+              if (isInitial) {
+                slot.initial = 'failed'
+                const anyInitialSucceeded = relaySlots.some(
+                  s => s.initial === 'succeeded'
+                )
+                const allSettledOrBootFailed =
                   totalRelays > 0 &&
-                  new Set([...settledAnnounces, ...failedBootRelays]).size >=
-                    totalRelays
-                ) {
+                  relaySlots.every(
+                    s =>
+                      s.subscription.phase === 'boot-failed' ||
+                      (s.announce.phase !== 'waiting' &&
+                        s.initial !== 'pending')
+                  )
+                if (!anyInitialSucceeded && allSettledOrBootFailed) {
                   reportAllRelaysFailed(error)
                 }
               }
             }
 
-            if (
-              didLeaveRoom ||
-              isLeavingRoom ||
-              announceGenerations[i] !== gen
-            ) {
+            if (!isSlotActive(slot, gen)) {
               return
             }
 
+            // Only explicit numeric relay pacing overrides the signaling retry default.
             if (typeof announceResult === 'number') {
               announceIntervals[i] = announceResult
-              announceScheduleIntervals[i] = announceResult
+              slot.intervalMs = announceResult
             } else if (
               typeof announceResult === 'object' &&
               announceResult !== null
             ) {
               if ('stopAnnouncing' in announceResult) {
+                slot.announce = {phase: 'closed'}
                 return
               }
-              announceScheduleIntervals[i] = announceResult.nextAnnounceMs
-              reannounceOnDisconnect ||=
+              slot.intervalMs = announceResult.nextAnnounceMs
+              disconnectReannounceEnabled ||=
                 announceResult.reannounceOnDisconnect === true
             }
 
-            const announceAttempt = announceAttemptCounts[i] ?? 0
-            announceAttemptCounts[i] = announceAttempt + 1
-            const currentInterval =
-              announceScheduleIntervals[i] ?? announceIntervalMs
+            const attempt = slot.attempts++
             const warmupDelay =
-              announceWarmupIntervalsMs[announceAttempt] ??
-              (announceAttempt === 3 && typeof announceResult === 'object'
+              announceWarmupIntervalsMs[attempt] ??
+              (attempt === 3 && typeof announceResult === 'object'
                 ? announceIntervalMs
                 : undefined)
-            const nextAnnounceDelayMs =
+            const delayMs =
               typeof warmupDelay === 'number'
-                ? Math.min(currentInterval, warmupDelay)
-                : currentInterval
+                ? Math.min(slot.intervalMs, warmupDelay)
+                : slot.intervalMs
 
             const timer = setTimeout(() => {
-              void queueAnnounce(relay, i, gen)
-            }, nextAnnounceDelayMs)
+              if (
+                slot.announce.phase === 'active' &&
+                slot.announce.timer === timer
+              ) {
+                slot.announce.timer = null
+              }
+              void queueAnnounce(relay, slot, i, gen)
+            }, delayMs)
             unrefTimer(timer)
-            announceTimeouts[i] = timer
-          }
-
-          requeueAnnounce = () => {
-            announceTimeouts.forEach(resetTimer)
-            announceTimeouts.length = 0
-
-            for (const i of healthySubscribedRelays) {
-              const nextGen = (announceGenerations[i] ?? 0) + 1
-              announceGenerations[i] = nextGen
-              void initPromises[i]?.then(relay => {
-                if (
-                  relay &&
-                  !didLeaveRoom &&
-                  !isLeavingRoom &&
-                  announceGenerations[i] === nextGen
-                ) {
-                  announceAttemptCounts[i] = 0
-                  void queueAnnounce(relay, i, nextGen)
-                }
-              }, noOp)
+            if (slot.announce.phase === 'active') {
+              slot.announce.timer = timer
+            } else {
+              clearTimeout(timer)
             }
           }
 
-          unsubFns.forEach((didSub, i) => {
-            void didSub.then(cleanup => {
-              if (didLeaveRoom || isLeavingRoom || cleanup === noOp) {
+          requeueAnnounce = () => {
+            cancelAllAnnounceTimers(relaySlots)
+
+            relaySlots.forEach((slot, i) => {
+              if (
+                slot.subscription.phase !== 'subscribed' ||
+                slot.announce.phase === 'closed'
+              ) {
                 return
               }
-              const gen = announceGenerations[i] ?? 0
-              void initPromises[i]?.then(relay => {
-                if (
-                  relay &&
-                  !didLeaveRoom &&
-                  !isLeavingRoom &&
-                  announceGenerations[i] === gen
-                ) {
-                  void queueAnnounce(relay, i, gen)
+              const nextGen = ++slot.gen
+              slot.attempts = 0
+              slot.announce = {phase: 'active', timer: null}
+
+              void slot.relayP.then(relay => {
+                if (relay && isSlotActive(slot, nextGen)) {
+                  void queueAnnounce(relay, slot, i, nextGen)
+                }
+              }, noOp)
+            })
+          }
+
+          unsubFns.forEach((didSub, i) => {
+            const slot = relaySlots[i]
+            if (!slot) {
+              return
+            }
+            void didSub.then(cleanup => {
+              if (
+                isRoomInactive() ||
+                cleanup === noOp ||
+                slot.announce.phase !== 'waiting'
+              ) {
+                return
+              }
+              const {gen} = slot
+              slot.announce = {phase: 'active', timer: null}
+              void slot.relayP.then(relay => {
+                if (relay && isSlotActive(slot, gen)) {
+                  void queueAnnounce(relay, slot, i, gen)
                 }
               }, noOp)
             }, noOp)
@@ -773,17 +895,20 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       }
 
       bridge.setOnScaleTargetsChanged(targetIds => {
-        if (!didLeaveRoom && !isLeavingRoom && !isPassive) {
+        if (!isRoomInactive() && !isPassive) {
           for (const targetId of targetIds) {
             dialPeer(targetId)
           }
         }
       })
 
-      getOrCreateAppMap(occupiedRooms, appId).set(roomId, joinedRoom)
+      getOrCreateAppMap(roomRegistry, appId).set(roomId, {
+        phase: 'occupied',
+        room: joinedRoom
+      })
       return joinedRoom as RoomWithPlugins<TPlugins>
     } catch (err) {
-      didLeaveRoom = true
+      roomState = {phase: 'left', relaysStopped: false}
       stopRelays()
       void joinedRoom.leave().catch(noOp)
       throw err

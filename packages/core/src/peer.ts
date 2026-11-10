@@ -1,9 +1,15 @@
 import {
   maxBulkFrameBytes,
-  maxRoomFrameBytes,
   maxQueuedDataFrames,
+  maxRoomFrameBytes,
   pendingDataTimeoutMs
 } from './data-limits'
+import type {
+  BaseRoomConfig,
+  PeerHandle,
+  Signal,
+  Timeout
+} from './internal-types'
 import {
   all,
   alloc,
@@ -13,15 +19,10 @@ import {
   peerDisconnectedMsg,
   resetTimer,
   toError,
+  unreachable,
   unrefTimer,
   warn
 } from './utils'
-import type {
-  BaseRoomConfig,
-  PeerHandle,
-  PeerHandlers,
-  Signal
-} from './internal-types'
 
 const iceTimeout = 15_000
 const iceCandidateSettleMs = 150
@@ -40,6 +41,26 @@ type SdpDescription = {
   sdp: string
 }
 
+type PeerLifecycleState =
+  | {readonly phase: 'open'}
+  | {readonly phase: 'disconnected-grace'; readonly timer: Timeout}
+  | {readonly phase: 'closed'}
+
+type NegotiationState =
+  | {readonly phase: 'idle'}
+  | {readonly phase: 'making-offer'; readonly gen: number}
+  | {readonly phase: 'applying-remote-answer'}
+
+type InboundDataChannelState =
+  | {readonly phase: 'unbound-idle'}
+  | {
+      readonly phase: 'unbound-buffering'
+      readonly queue: ArrayBuffer[]
+      readonly deadlineTimer: Timeout
+    }
+  | {readonly phase: 'bound'; readonly handler: (data: ArrayBuffer) => void}
+  | {readonly phase: 'closed'}
+
 export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   const {trickleIce, rtcConfig, rtcPolyfill, turnConfig} = config
   const iceServers = [
@@ -51,15 +72,16 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     iceServers
   })
 
-  const handlers: PeerHandlers = {}
+  let connectHandler: (() => void) | undefined
+  let closeHandler: (() => void) | undefined
+  let errorHandler: ((err: Error) => void) | undefined
+
   const pendingIceGathering = new Set<() => void>()
-  const pendingSignals: Signal[] = []
-  const pendingData: ArrayBuffer[] = []
-  let pendingDataTimer: ReturnType<typeof setTimeout> | null = null
   const shouldTrickleIce = trickleIce !== false
   const pendingRemoteCandidates: RTCIceCandidateInit[] = []
-  const pendingStreams: MediaStream[] = []
+  let activeCandidateFlush: Promise<void> | null = null
   const streamSenders = new WeakMap<MediaStream, Set<RTCRtpSender>>()
+
   const trackSender = (stream: MediaStream, sender: RTCRtpSender): void => {
     let senders = streamSenders.get(stream)
     if (!senders) {
@@ -68,63 +90,112 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     }
     senders.add(sender)
   }
-  let resolveInitialOffer: ((signal: Signal | void) => void) | undefined
-  let makingOffer = false
-  let isSettingRemoteAnswerPending = false
+
+  let lifecycle: PeerLifecycleState = {phase: 'open'}
+  let negotiation: NegotiationState = {phase: 'idle'}
+  let offerGeneration = 0
+  let dataState: InboundDataChannelState = {phase: 'unbound-idle'}
+  let signalHandler: ((signal: Signal) => void) | undefined
+  const pendingSignals: Signal[] = []
+  let streamHandler: ((stream: MediaStream) => void) | undefined
+  const pendingStreams: MediaStream[] = []
   let dataChannel: RTCDataChannel | null = null
-  let disconnectedCloseTimer: ReturnType<typeof setTimeout> | null = null
-  let didEmitClose = false
+
+  let settledOffer: Signal | undefined
+  let resolveInitialOffer: ((signal: Signal | void) => void) | null = null
+  const initialOfferP = initiator
+    ? new Promise<Signal | void>(resolve => {
+        resolveInitialOffer = resolve
+      })
+    : undefined
 
   const settleInitialOffer = (signal?: Signal): void => {
     if (resolveInitialOffer) {
-      resolveInitialOffer(signal)
-      resolveInitialOffer = undefined
+      const resolve = resolveInitialOffer
+      resolveInitialOffer = null
+      settledOffer = signal
+      resolve(signal)
     }
   }
 
-  const clearDisconnectedCloseTimer = (): null =>
-    (disconnectedCloseTimer = resetTimer(disconnectedCloseTimer))
+  const clearDisconnectedGrace = (): void => {
+    if (lifecycle.phase === 'disconnected-grace') {
+      resetTimer(lifecycle.timer)
+      lifecycle = {phase: 'open'}
+    }
+  }
 
   const emitClose = (): void => {
-    if (didEmitClose) {
+    if (lifecycle.phase === 'closed') {
       return
     }
+    if (lifecycle.phase === 'disconnected-grace') {
+      resetTimer(lifecycle.timer)
+    }
+    lifecycle = {phase: 'closed'}
+    offerGeneration += 1
+    negotiation = {phase: 'idle'}
+    settleInitialOffer()
 
-    didEmitClose = true
+    if (dataState.phase === 'unbound-buffering') {
+      resetTimer(dataState.deadlineTimer)
+      dataState.queue.length = 0
+    }
+    dataState = {phase: 'closed'}
+    signalHandler = undefined
+    pendingSignals.length = 0
+    streamHandler = undefined
+    pendingStreams.length = 0
+    pendingRemoteCandidates.length = 0
     pendingIceGathering.forEach(finish => finish())
-    pendingDataTimer = resetTimer(pendingDataTimer)
-    pendingData.length = 0
-    clearDisconnectedCloseTimer()
-    handlers.close?.()
+    closeHandler?.()
+  }
+
+  const isClosed = (): boolean => {
+    if (lifecycle.phase !== 'closed' && pc.connectionState === 'closed') {
+      emitClose()
+    }
+    return lifecycle.phase === 'closed'
   }
 
   const emitSignal = (signal: Signal): void => {
+    if (isClosed()) {
+      return
+    }
     if (signal.type === offerType) {
+      const wasInitialOfferPending = resolveInitialOffer !== null
       settleInitialOffer(signal)
       // getOffer() already hands pre-connection offers to the signaling strategy.
-      if (!handlers.signal && !pc.remoteDescription) {
+      if (wasInitialOfferPending && !signalHandler && !pc.remoteDescription) {
         return
       }
     }
 
-    if (handlers.signal) {
-      handlers.signal(signal)
+    if (signalHandler) {
+      signalHandler(signal)
     } else {
       pendingSignals.push(signal)
     }
   }
 
   const appendSignalHandler = (handler: (signal: Signal) => void): void => {
-    const previousSignalHandler = handlers.signal
-
-    handlers.signal = signal => {
-      previousSignalHandler?.(signal)
-      handler(signal)
+    if (isClosed()) {
+      return
     }
-
-    if (pendingSignals.length > 0) {
-      const queuedSignals = pendingSignals.splice(0)
-      queuedSignals.forEach(signal => handlers.signal?.(signal))
+    if (signalHandler) {
+      const prev = signalHandler
+      signalHandler = sig => {
+        prev(sig)
+        handler(sig)
+      }
+      return
+    }
+    signalHandler = handler
+    for (const queued of pendingSignals.splice(0)) {
+      if (isClosed() || !signalHandler) {
+        break
+      }
+      signalHandler(queued)
     }
   }
 
@@ -178,45 +249,80 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   }
 
   const queueRemoteCandidate = (candidate: RTCIceCandidateInit): void => {
+    if (isClosed()) {
+      return
+    }
     if (pendingRemoteCandidates.length >= maxPendingRemoteCandidates) {
       pendingRemoteCandidates.shift()
     }
     pendingRemoteCandidates.push(candidate)
   }
 
+  const flushPendingRemoteCandidates = async (): Promise<void> => {
+    if (isClosed() || !pc.remoteDescription) {
+      return
+    }
+    if (activeCandidateFlush) {
+      await activeCandidateFlush
+      if (isClosed() || !pc.remoteDescription) {
+        return
+      }
+    }
+    if (!pendingRemoteCandidates.length) {
+      return
+    }
+    const runFlush = (async () => {
+      const stillPending: RTCIceCandidateInit[] = []
+      try {
+        while (
+          !isClosed() &&
+          pc.remoteDescription &&
+          pendingRemoteCandidates.length > 0
+        ) {
+          const remoteUfrag = getRemoteUfrag()
+          for (const candidate of pendingRemoteCandidates.splice(0)) {
+            if (isClosed()) {
+              return
+            }
+            if (
+              remoteUfrag &&
+              candidate.usernameFragment &&
+              candidate.usernameFragment !== remoteUfrag
+            ) {
+              continue
+            }
+            if (
+              !canApplyRemoteCandidate(candidate) ||
+              !(await addIceCandidateSafe(candidate))
+            ) {
+              stillPending.push(candidate)
+            }
+          }
+        }
+      } finally {
+        if (!isClosed() && stillPending.length > 0) {
+          const tail = pendingRemoteCandidates.splice(0)
+          for (const item of [...stillPending, ...tail]) {
+            queueRemoteCandidate(item)
+          }
+        }
+        activeCandidateFlush = null
+      }
+    })()
+    activeCandidateFlush = runFlush
+    await runFlush
+  }
+
   const addRemoteCandidate = async (
     candidate: RTCIceCandidateInit
   ): Promise<void> => {
-    if (
-      !canApplyRemoteCandidate(candidate) ||
-      !(await addIceCandidateSafe(candidate))
-    ) {
+    if (activeCandidateFlush || !canApplyRemoteCandidate(candidate)) {
       queueRemoteCandidate(candidate)
-    }
-  }
-
-  const flushPendingRemoteCandidates = async (): Promise<void> => {
-    if (!pc.remoteDescription || !pendingRemoteCandidates.length) {
       return
     }
-    const remoteUfrag = getRemoteUfrag()
-    const stillPending: RTCIceCandidateInit[] = []
-    for (const candidate of pendingRemoteCandidates.splice(0)) {
-      if (
-        remoteUfrag &&
-        candidate.usernameFragment &&
-        candidate.usernameFragment !== remoteUfrag
-      ) {
-        continue
-      }
-      if (
-        !canApplyRemoteCandidate(candidate) ||
-        !(await addIceCandidateSafe(candidate))
-      ) {
-        stillPending.push(candidate)
-      }
+    if (!(await addIceCandidateSafe(candidate))) {
+      queueRemoteCandidate(candidate)
     }
-    stillPending.forEach(queueRemoteCandidate)
   }
 
   const setupDataChannel = (channel: RTCDataChannel): void => {
@@ -229,38 +335,60 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       emitClose()
     }
     channel.onmessage = e => {
-      const data = e.data as ArrayBuffer
-      if (didEmitClose) {
+      if (dataChannel !== channel || dataState.phase === 'closed') {
         return
       }
+      const data = e.data as ArrayBuffer
+      const maxFrameBytes =
+        dataState.phase === 'bound' ? maxBulkFrameBytes : maxRoomFrameBytes
       if (
         (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) ||
-        data.byteLength >
-          (handlers.data ? maxBulkFrameBytes : maxRoomFrameBytes)
+        data.byteLength > maxFrameBytes
       ) {
         failData()
         return
       }
 
-      if (handlers.data) {
-        handlers.data(data)
-      } else {
-        if (pendingData.length >= maxQueuedDataFrames) {
-          failData()
-          return
+      switch (dataState.phase) {
+        case 'bound':
+          dataState.handler(data)
+          break
+        case 'unbound-idle': {
+          const deadlineTimer = setTimeout(failData, pendingDataTimeoutMs)
+          unrefTimer(deadlineTimer)
+          dataState = {
+            phase: 'unbound-buffering',
+            queue: [data],
+            deadlineTimer
+          }
+          break
         }
-        if (!pendingDataTimer) {
-          pendingDataTimer = setTimeout(failData, pendingDataTimeoutMs)
-          unrefTimer(pendingDataTimer)
+        case 'unbound-buffering': {
+          if (dataState.queue.length >= maxQueuedDataFrames) {
+            failData()
+            return
+          }
+          dataState.queue.push(data)
+          break
         }
-        pendingData.push(data)
+        default:
+          unreachable(dataState)
       }
     }
-    channel.onopen = () => handlers.connect?.()
-    channel.onclose = emitClose
+    channel.onopen = () => {
+      if (dataChannel === channel && !isClosed()) {
+        connectHandler?.()
+      }
+    }
+    channel.onclose = () => {
+      if (dataChannel === channel) {
+        emitClose()
+      }
+    }
     channel.onerror = ({error}) => {
       if (
-        didEmitClose ||
+        dataChannel !== channel ||
+        isClosed() ||
         (error?.errorDetail === 'sctp-failure' &&
           (error.sctpCauseCode === 12 ||
             /^User-Initiated Abort\b/.test(error.message)))
@@ -268,7 +396,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
         return
       }
 
-      handlers.error?.(toError(error, 'data channel error'))
+      errorHandler?.(toError(error, 'data channel error'))
     }
   }
 
@@ -280,13 +408,18 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     : expectsStunCandidate
       ? /\btyp (?:srflx|relay|prflx)\b/
       : /\btyp (?:host|srflx|relay|prflx)\b/
+
   const waitForIceGathering = async (
     peerConnection: RTCPeerConnection
   ): Promise<SdpDescription> => {
     await new Promise<void>(resolve => {
-      let timeout: ReturnType<typeof setTimeout> | null = null
-      let settleTimeout: ReturnType<typeof setTimeout> | null = null
+      let done = false
+      let settleTimeout: Timeout | null = null
       const finish = (): void => {
+        if (done) {
+          return
+        }
+        done = true
         resetTimer(timeout)
         resetTimer(settleTimeout)
         peerConnection.removeEventListener(iceStateEvent, checkState)
@@ -295,6 +428,9 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
         resolve()
       }
       const scheduleSettle = (candidateLine = ''): void => {
+        if (done) {
+          return
+        }
         const sdp = `${peerConnection.localDescription?.sdp ?? ''}\n${candidateLine}`
         // Nontrickle peers cannot use candidates gathered after signaling.
         if (targetCandidatePattern.test(sdp)) {
@@ -304,7 +440,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
         }
       }
       const checkState = (): void => {
-        if (peerConnection.iceGatheringState === 'complete' || didEmitClose) {
+        if (peerConnection.iceGatheringState === 'complete' || isClosed()) {
           finish()
         } else {
           scheduleSettle()
@@ -318,9 +454,9 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
           finish()
         }
       }
-      pendingIceGathering.add(finish)
-      timeout = setTimeout(finish, iceTimeout)
+      const timeout = setTimeout(finish, iceTimeout)
       unrefTimer(timeout)
+      pendingIceGathering.add(finish)
       peerConnection.addEventListener(iceStateEvent, checkState)
       peerConnection.addEventListener(iceCandidateEvent, onCandidate)
       checkState()
@@ -331,11 +467,17 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   const readLocalDescription = (): SdpDescription | Promise<SdpDescription> =>
     shouldTrickleIce ? localDescriptionSignal(pc) : waitForIceGathering(pc)
 
-  const emitLocalDescriptionSignal = async (): Promise<SdpDescription> => {
+  const emitLocalDescriptionSignal = async (
+    expectedGen?: number
+  ): Promise<SdpDescription | undefined> => {
     const signal = await readLocalDescription()
-    if (!didEmitClose) {
-      emitSignal(signal)
+    if (
+      isClosed() ||
+      (expectedGen !== undefined && offerGeneration !== expectedGen)
+    ) {
+      return undefined
     }
+    emitSignal(signal)
     return signal
   }
 
@@ -344,6 +486,14 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     setupDataChannel(dataChannel)
   } else {
     pc.ondatachannel = ({channel}) => {
+      if (dataChannel && dataChannel !== channel) {
+        dataChannel.onopen =
+          dataChannel.onclose =
+          dataChannel.onmessage =
+          dataChannel.onerror =
+            null
+        dataChannel.close()
+      }
       dataChannel = channel
       setupDataChannel(channel)
     }
@@ -351,26 +501,34 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
   const createOffer = async (): Promise<Signal | void> => {
     if (
-      pc.connectionState === 'closed' ||
-      makingOffer ||
+      isClosed() ||
+      negotiation.phase !== 'idle' ||
       pc.signalingState !== 'stable'
     ) {
-      if (pc.connectionState === 'closed') {
+      if (isClosed()) {
         settleInitialOffer()
       }
       return
     }
 
+    const gen = ++offerGeneration
+    negotiation = {phase: 'making-offer', gen}
     try {
-      makingOffer = true
       await pc.setLocalDescription()
-      const offer = await emitLocalDescriptionSignal()
-      return offer
+      if (isClosed() || offerGeneration !== gen) {
+        return
+      }
+      return await emitLocalDescriptionSignal(gen)
     } catch (err) {
+      if (offerGeneration !== gen) {
+        return
+      }
       settleInitialOffer()
-      handlers.error?.(toError(err, 'failed to create local offer'))
+      errorHandler?.(toError(err, 'failed to create local offer'))
     } finally {
-      makingOffer = false
+      if (negotiation.phase === 'making-offer' && negotiation.gen === gen) {
+        negotiation = {phase: 'idle'}
+      }
     }
   }
 
@@ -379,7 +537,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   }
 
   pc.onicecandidate = ({candidate}) => {
-    if (!shouldTrickleIce || !candidate) {
+    if (!shouldTrickleIce || !candidate || isClosed()) {
       return
     }
 
@@ -398,11 +556,15 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       sdp: JSON.stringify(candidatePayload)
     })
   }
+
   const isDisconnectedState = (): boolean =>
     pc.connectionState === 'disconnected' ||
     pc.iceConnectionState === 'disconnected'
 
-  const handleConnectionStateChange = () => {
+  const handleConnectionStateChange = (): void => {
+    if (lifecycle.phase === 'closed') {
+      return
+    }
     const cs = pc.connectionState
     const is = pc.iceConnectionState
     if (
@@ -422,18 +584,22 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       is === 'completed' ||
       is === 'checking'
     ) {
-      clearDisconnectedCloseTimer()
+      clearDisconnectedGrace()
       return
     }
 
-    if (isDisconnectedState() && !disconnectedCloseTimer) {
-      disconnectedCloseTimer = setTimeout(() => {
-        disconnectedCloseTimer = null
+    if (isDisconnectedState() && lifecycle.phase === 'open') {
+      const timer = setTimeout(() => {
+        if (lifecycle.phase !== 'disconnected-grace') {
+          return
+        }
+        lifecycle = {phase: 'open'}
         if (isDisconnectedState()) {
           emitClose()
         }
       }, disconnectedCloseDelayMs)
-      unrefTimer(disconnectedCloseTimer)
+      unrefTimer(timer)
+      lifecycle = {phase: 'disconnected-grace', timer}
     }
   }
 
@@ -442,32 +608,22 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
   pc.ontrack = e => {
     const stream = e.streams[0]
-
-    if (stream) {
-      if (!handlers.stream) {
+    if (stream && !isClosed()) {
+      if (streamHandler) {
+        streamHandler(stream)
+      } else {
         pendingStreams.push(stream)
-        return
       }
-
-      handlers.stream(stream)
     }
-  }
-  let offerPromise: Promise<Signal | void>
-  if (initiator) {
-    const deferred = Promise.withResolvers<Signal | void>()
-    resolveInitialOffer = deferred.resolve
-    offerPromise = deferred.promise
-  } else {
-    offerPromise = Promise.resolve()
   }
 
   if (initiator) {
     queueMicrotask(() => {
       if (
-        !makingOffer &&
+        !isClosed() &&
+        negotiation.phase === 'idle' &&
         pc.signalingState === 'stable' &&
-        !pc.localDescription &&
-        pc.connectionState !== 'closed'
+        !pc.localDescription
       ) {
         void pc.onnegotiationneeded?.(new Event('negotiationneeded'))
       }
@@ -482,26 +638,28 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     },
 
     get isDead(): boolean {
-      return pc.connectionState === 'closed'
+      return isClosed()
     },
 
     getOffer: async (): Promise<Signal | void> => {
       if (!initiator) {
-        return
+        return undefined
       }
-
-      if (resolveInitialOffer) {
-        return offerPromise
+      if (resolveInitialOffer !== null) {
+        return initialOfferP
       }
-
-      if (pc.localDescription?.type === offerType) {
-        return readLocalDescription()
+      if (settledOffer && !pc.remoteDescription) {
+        return settledOffer
       }
-
-      return offerPromise
+      return pc.localDescription?.type === offerType
+        ? readLocalDescription()
+        : settledOffer
     },
 
     async signal(sdp: Signal): Promise<Signal | void> {
+      if (isClosed()) {
+        return
+      }
       if (sdp.type === candidateType) {
         if (sdp.sdp.length > maxRemoteCandidateSdpLength) {
           return
@@ -514,7 +672,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
             await addRemoteCandidate(candidate)
           }
         } catch (err) {
-          handlers.error?.(toError(err, 'failed to parse remote candidate'))
+          errorHandler?.(toError(err, 'failed to parse remote candidate'))
         }
 
         return
@@ -532,11 +690,17 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
         if (sdp.type === offerType) {
           const isCollision =
-            makingOffer ||
-            (pc.signalingState !== 'stable' && !isSettingRemoteAnswerPending)
+            negotiation.phase === 'making-offer' ||
+            (pc.signalingState !== 'stable' &&
+              negotiation.phase !== 'applying-remote-answer')
 
           if (isCollision && initiator) {
             return
+          }
+
+          offerGeneration += 1
+          if (negotiation.phase === 'making-offer') {
+            negotiation = {phase: 'idle'}
           }
 
           if (isCollision && pc.signalingState !== 'stable') {
@@ -550,61 +714,98 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
           await flushPendingRemoteCandidates()
           await pc.setLocalDescription()
-          const answer = await emitLocalDescriptionSignal()
-
-          return answer
+          return await emitLocalDescriptionSignal()
         }
 
         if (sdp.type === answerType) {
-          isSettingRemoteAnswerPending = true
+          negotiation = {phase: 'applying-remote-answer'}
 
           try {
             await pc.setRemoteDescription(rtcSdp)
             await flushPendingRemoteCandidates()
           } finally {
-            isSettingRemoteAnswerPending = false
+            if (negotiation.phase === 'applying-remote-answer') {
+              negotiation = {phase: 'idle'}
+            }
           }
         }
       } catch (err) {
-        handlers.error?.(toError(err, 'failed to apply remote signal'))
+        if (!isClosed()) {
+          errorHandler?.(toError(err, 'failed to apply remote signal'))
+        }
       }
     },
 
     sendData: data => {
       if (
-        pc.connectionState === 'closed' ||
-        dataChannel?.readyState === 'closed'
+        isClosed() ||
+        !dataChannel ||
+        dataChannel.readyState === 'closing' ||
+        dataChannel.readyState === 'closed'
       ) {
         throw mkErr(peerDisconnectedMsg)
       }
-      dataChannel?.send(data as unknown as never)
+      dataChannel.send(data as unknown as never)
     },
 
     destroy: () => {
-      clearDisconnectedCloseTimer()
+      clearDisconnectedGrace()
       settleInitialOffer()
       dataChannel?.close()
-      pc.close()
-      makingOffer = false
-      isSettingRemoteAnswerPending = false
+      if (pc.connectionState !== 'closed') {
+        pc.close()
+      }
       emitClose()
     },
 
     setHandlers: newHandlers => {
-      const {signal, ...restHandlers} = newHandlers
-      Object.assign(handlers, restHandlers)
-
-      if (handlers.data && pendingData.length > 0) {
-        pendingDataTimer = resetTimer(pendingDataTimer)
-        pendingData.splice(0).forEach(data => handlers.data?.(data))
+      if ('connect' in newHandlers) {
+        connectHandler = newHandlers.connect
+      }
+      if ('close' in newHandlers) {
+        closeHandler = newHandlers.close
+      }
+      if ('error' in newHandlers) {
+        errorHandler = newHandlers.error
       }
 
-      if (signal) {
-        appendSignalHandler(signal)
+      if ('data' in newHandlers && dataState.phase !== 'closed') {
+        const nextDataHandler = newHandlers.data
+        if (nextDataHandler) {
+          let queuedData: ArrayBuffer[] = []
+          if (dataState.phase === 'unbound-buffering') {
+            resetTimer(dataState.deadlineTimer)
+            queuedData = dataState.queue.splice(0)
+          }
+          dataState = {phase: 'bound', handler: nextDataHandler}
+          for (const frame of queuedData) {
+            if (dataState.phase !== 'bound') {
+              break
+            }
+            dataState.handler(frame)
+          }
+        } else {
+          if (dataState.phase === 'unbound-buffering') {
+            resetTimer(dataState.deadlineTimer)
+          }
+          dataState = {phase: 'unbound-idle'}
+        }
       }
 
-      if (handlers.stream && pendingStreams.length > 0) {
-        pendingStreams.splice(0).forEach(stream => handlers.stream?.(stream))
+      if (newHandlers.signal) {
+        appendSignalHandler(newHandlers.signal)
+      }
+
+      if ('stream' in newHandlers && !isClosed()) {
+        streamHandler = newHandlers.stream
+        if (streamHandler) {
+          for (const stream of pendingStreams.splice(0)) {
+            if (isClosed() || !streamHandler) {
+              break
+            }
+            streamHandler(stream)
+          }
+        }
       }
     },
 

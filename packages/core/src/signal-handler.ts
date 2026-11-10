@@ -5,9 +5,11 @@ import type {
   OfferRecord,
   PeerHandle,
   PeerState,
+  RelayOfferSlotState,
   Signal,
   SignalContext,
-  SignalPeer
+  SignalPeer,
+  Timeout
 } from './internal-types'
 import {
   all,
@@ -23,6 +25,7 @@ import {
   resetTimer,
   toJson,
   topicPath,
+  unreachable,
   unrefTimer
 } from './utils'
 
@@ -164,7 +167,96 @@ const offerTtl = 57_333
 const offerIdSize = 12
 const disconnectedPeerGraceMs = 7_533
 const answeringTtlMs = 23_333
-const offerRelayPlaceholder = 'offer-placeholder'
+
+const isSlotAnnounceable = (slot: RelayOfferSlotState | undefined): boolean =>
+  !slot || slot.phase === 'exhausted'
+
+const hasCandidateSender = (
+  slot: RelayOfferSlotState | undefined
+): slot is Extract<RelayOfferSlotState, {phase: 'retrying' | 'exhausted'}> =>
+  slot?.phase === 'retrying' || slot?.phase === 'exhausted'
+
+const clearRelaySlots = (
+  slots: Array<RelayOfferSlotState | undefined>
+): void => {
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i]
+    if (slot?.phase === 'retrying') {
+      resetTimer(slot.retryTimer)
+    }
+    slots[i] = undefined
+  }
+  slots.length = 0
+}
+
+const freezeRelayRetriesKeepSenders = (
+  slots: Array<RelayOfferSlotState | undefined>
+): void => {
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i]
+    if (!slot) {
+      continue
+    }
+    switch (slot.phase) {
+      case 'reserved':
+        slots[i] = undefined
+        break
+      case 'retrying':
+        resetTimer(slot.retryTimer)
+        slots[i] = {phase: 'exhausted', sendCandidate: slot.sendCandidate}
+        break
+      case 'exhausted':
+        break
+      default:
+        unreachable(slot)
+    }
+  }
+}
+
+const clearOfferRelaySlot = (state: PeerState, relayId: number): void => {
+  const current = state.relaySlots[relayId]
+  if (!current) {
+    return
+  }
+  if (current.phase === 'retrying') {
+    resetTimer(current.retryTimer)
+  }
+  state.relaySlots[relayId] = undefined
+}
+
+const clearOfferRelayIfReserved = (
+  state: PeerState | undefined,
+  relayId: number
+): void => {
+  if (state?.relaySlots[relayId]?.phase === 'reserved') {
+    state.relaySlots[relayId] = undefined
+  }
+}
+
+const hasLiveOutboundOffer = (
+  state: PeerState,
+  peer?: PeerHandle,
+  offerId?: string
+): state is PeerState & {
+  outbound: Extract<PeerState['outbound'], {phase: 'advertising' | 'answered'}>
+} =>
+  (state.outbound.phase === 'advertising' ||
+    state.outbound.phase === 'answered') &&
+  (!peer || state.outbound.peer === peer) &&
+  (offerId === undefined || state.outbound.offerId === offerId)
+
+const hasOutboundActivity = (state: PeerState): boolean => {
+  switch (state.outbound.phase) {
+    case 'idle':
+      return state.relaySlots.some(Boolean)
+    case 'allocating':
+    case 'advertising':
+    case 'answered':
+      return true
+    default:
+      return unreachable(state.outbound)
+  }
+}
 
 const countPendingPeerConnections = (
   peerStates: Map<string, PeerState>,
@@ -172,28 +264,30 @@ const countPendingPeerConnections = (
 ): number => {
   let count = 0
   for (const [id, s] of peerStates) {
-    if (id === excludePeerId || s.connectedPeer) {
+    if (id === excludePeerId || s.connection.phase === 'connected') {
       continue
     }
-    if ((s.offerPeer && !s.offerPeer.isDead) || s.offerInitPromise) {
+    if (
+      s.outbound.phase === 'allocating' ||
+      (hasLiveOutboundOffer(s) && !s.outbound.peer.isDead)
+    ) {
       count++
     }
-    if (s.answeringPeer && !s.answeringPeer.isDead) {
+    if (s.inbound.phase === 'answering' && !s.inbound.peer.isDead) {
       count++
     }
   }
   return count
 }
 
+const isPeerStateIdle = (s: PeerState): boolean =>
+  s.connection.phase === 'disconnected' &&
+  s.inbound.phase === 'idle' &&
+  !hasOutboundActivity(s)
+
 export const prunePeerStates = (peerStates: Map<string, PeerState>): void => {
   for (const [peerId, s] of peerStates) {
-    if (
-      !s.connectedPeer &&
-      !s.answeringPeer &&
-      !s.offerInitPromise &&
-      !s.offerPeer &&
-      !s.offerRelays.some(Boolean)
-    ) {
+    if (isPeerStateIdle(s)) {
       peerStates.delete(peerId)
     }
   }
@@ -202,10 +296,6 @@ export const prunePeerStates = (peerStates: Map<string, PeerState>): void => {
 const counterAnnounceTimestamps = /*@__PURE__*/ new WeakMap<
   PeerState,
   Array<number | undefined>
->()
-const dialBackoffByState = /*@__PURE__*/ new WeakMap<
-  PeerState,
-  [attempts: number, nextAllowedAt: number]
 >()
 
 const destroyAlive = (peer: PeerHandle | null | undefined): void => {
@@ -216,14 +306,14 @@ const destroyAlive = (peer: PeerHandle | null | undefined): void => {
 
 export const resetAnsweringState = (state: PeerState): void => {
   counterAnnounceTimestamps.delete(state)
-  state.answeringExpiryTimer = resetTimer(state.answeringExpiryTimer)
-  state.answeringPeer = null
-  state.didSendAnswer = false
-  state.answerReplay = null
+  if (state.inbound.phase === 'answering') {
+    resetTimer(state.inbound.expiryTimer)
+  }
+  state.inbound = {phase: 'idle'}
 }
 
 const clearAnswering = (state: PeerState, peer: PeerHandle): void => {
-  if (state.answeringPeer === peer) {
+  if (state.inbound.phase === 'answering' && state.inbound.peer === peer) {
     resetAnsweringState(state)
     if (state.connectedPeer !== peer) {
       destroyAlive(peer)
@@ -235,68 +325,75 @@ export const markPeerConnected = (
   state: PeerState,
   physical: PeerHandle
 ): void => {
-  if (state.answeringPeer !== physical) {
-    destroyAlive(state.answeringPeer)
+  if (state.inbound.phase === 'answering' && state.inbound.peer !== physical) {
+    destroyAlive(state.inbound.peer)
   }
-  dialBackoffByState.delete(state)
   resetAnsweringState(state)
-  state.connectedPeer = physical
-  state.unhealthySince = null
+  state.connection = {
+    phase: 'connected',
+    peer: physical,
+    unhealthySince: null
+  }
 }
 
 export const detachConnectedPeer = (
   state: PeerState | undefined,
   physical: PeerHandle
 ): void => {
-  if (state?.connectedPeer === physical) {
-    state.connectedPeer = null
-    state.unhealthySince = null
+  if (
+    state?.connection.phase === 'connected' &&
+    state.connection.peer === physical
+  ) {
+    state.connection = {phase: 'disconnected'}
   }
 }
 
 export const clearConnectedPeer = (state: PeerState): void => {
-  if (!state.connectedPeer) {
+  if (state.connection.phase !== 'connected') {
     return
   }
-  destroyAlive(state.connectedPeer)
-  state.connectedPeer = null
-  state.unhealthySince = null
-}
-
-const clearOfferRelay = (state: PeerState, relayId: number): void => {
-  state.offerRetryTimers[relayId] = resetTimer(state.offerRetryTimers[relayId])
-  if (state.offerRelays[relayId]) {
-    state.offerRelays[relayId] = undefined
-  }
-}
-
-const clearOfferRelayIfPlaceholder = (
-  state: PeerState | undefined,
-  relayId: number
-): void => {
-  if (state?.offerRelays[relayId] === offerRelayPlaceholder) {
-    clearOfferRelay(state, relayId)
-  }
+  const {peer} = state.connection
+  state.connection = {phase: 'disconnected'}
+  destroyAlive(peer)
 }
 
 export const resetOfferState = (state: PeerState): void => {
   counterAnnounceTimestamps.delete(state)
-  state.offerExpiryTimer = resetTimer(state.offerExpiryTimer)
-  state.offerInitPromise = null
-  state.offerRelays.forEach((_, relayId) => clearOfferRelay(state, relayId))
-  state.offerRelays = []
-  state.offerCandidateSenders = []
-  state.offerRetryTimers = []
-  state.bufferedOfferCandidates = []
-  if (state.offerPeer !== state.connectedPeer) {
-    destroyAlive(state.offerPeer)
+  clearRelaySlots(state.relaySlots)
+  switch (state.outbound.phase) {
+    case 'idle':
+    case 'allocating':
+      break
+    case 'advertising':
+    case 'answered':
+      resetTimer(state.outbound.expiryTimer)
+      if (state.outbound.peer !== state.connectedPeer) {
+        destroyAlive(state.outbound.peer)
+      }
+      break
+    default:
+      unreachable(state.outbound)
   }
-  state.offerPeer = null
-  state.offerId = null
-  state.offerSdp = null
-  state.offerAnswered = false
-  state.didReportConnectFailure = false
+  state.outbound = {phase: 'idle'}
+  state.didReportFailure = false
 }
+
+export const createPeerState = (): PeerState => ({
+  outbound: {phase: 'idle'},
+  inbound: {phase: 'idle'},
+  connection: {phase: 'disconnected'},
+  relaySlots: [],
+  didReportFailure: false,
+  get offerPeer(): PeerHandle | null {
+    return hasLiveOutboundOffer(this) ? this.outbound.peer : null
+  },
+  get answeringPeer(): PeerHandle | null {
+    return this.inbound.phase === 'answering' ? this.inbound.peer : null
+  },
+  get connectedPeer(): PeerHandle | null {
+    return this.connection.phase === 'connected' ? this.connection.peer : null
+  }
+})
 
 export const getState = (
   peerStates: Map<string, PeerState>,
@@ -310,11 +407,11 @@ export const getState = (
     let evictKey: string | undefined
     let fallbackKey: string | undefined
     for (const [k, s] of peerStates) {
-      if (!s.connectedPeer && !s.answeringPeer && !s.offerPeer) {
+      if (isPeerStateIdle(s)) {
         evictKey = k
         break
       }
-      if (fallbackKey === undefined && !s.connectedPeer) {
+      if (fallbackKey === undefined && s.connection.phase === 'disconnected') {
         fallbackKey = k
       }
     }
@@ -329,25 +426,7 @@ export const getState = (
       peerStates.delete(targetKey)
     }
   }
-  const created: PeerState = {
-    offerPeer: null,
-    offerId: null,
-    offerInitPromise: null,
-    offerRelays: [],
-    connectedPeer: null,
-    answeringPeer: null,
-    offerSdp: null,
-    offerAnswered: false,
-    offerCandidateSenders: [],
-    bufferedOfferCandidates: [],
-    offerRetryTimers: [],
-    offerExpiryTimer: null,
-    unhealthySince: null,
-    answeringExpiryTimer: null,
-    didSendAnswer: false,
-    answerReplay: null,
-    didReportConnectFailure: false
-  }
+  const created = createPeerState()
   peerStates.set(peerId, created)
   return created
 }
@@ -389,6 +468,11 @@ export const createSignalHandler = (
 
   const relaySignalPeers: Array<SignalPeer | undefined> = []
   const recentDecryptErrors = createBoundedCache<string, number>(512)
+  const dialBackoffs = createBoundedCache<
+    string,
+    [attempts: number, nextAllowedAt: number]
+  >(512)
+  const inFlightOfferDecrypts = new Map<string, Promise<Signal | null>>()
 
   const getSelfId = (): Promise<string> => selfIdP
 
@@ -399,10 +483,14 @@ export const createSignalHandler = (
     countPendingPeerConnections(peerStates, peerId) >= maxPendingPeerConnections
 
   const reportSdpFailure = (state: PeerState, peerId: string): void => {
-    if (isLeaving() || state.connectedPeer || state.didReportConnectFailure) {
+    if (
+      isLeaving() ||
+      state.connection.phase === 'connected' ||
+      state.didReportFailure
+    ) {
       return
     }
-    state.didReportConnectFailure = true
+    state.didReportFailure = true
     const turnConfigured = hasTurnServer(config)
     onError?.({
       code: 'peer-connect-failed',
@@ -441,45 +529,52 @@ export const createSignalHandler = (
     })
   }
 
-  const scheduleAnsweringExpiry = (
-    state: PeerState,
+  const createAnsweringExpiryTimer = (
     peerId: string,
     peer: PeerHandle
-  ): void => {
-    resetTimer(state.answeringExpiryTimer)
-    state.answeringExpiryTimer = setTimeout(() => {
+  ): Timeout => {
+    const timer = setTimeout(() => {
       const current = peerStates.get(peerId)
-      if (!current || current.connectedPeer || current.answeringPeer !== peer) {
+      if (
+        !current ||
+        current.connection.phase === 'connected' ||
+        current.inbound.phase !== 'answering' ||
+        current.inbound.peer !== peer
+      ) {
         return
       }
-      if (current.didSendAnswer) {
+      if (current.inbound.didSendAnswer) {
         reportSdpFailure(current, peerId)
       }
       clearAnswering(current, peer)
       prunePeerStates(peerStates)
     }, answeringTtlMs)
-    unrefTimer(state.answeringExpiryTimer)
+    unrefTimer(timer)
+    return timer
   }
 
-  const scheduleOfferExpiry = (
-    state: PeerState,
+  const createOfferExpiryTimer = (
     peerId: string,
+    offerId: string,
     ttlMs = offerTtl
-  ): void => {
-    resetTimer(state.offerExpiryTimer)
-    const offerId = state.offerId
-    state.offerExpiryTimer = setTimeout(() => {
+  ): Timeout => {
+    const timer = setTimeout(() => {
       const current = peerStates.get(peerId)
-      if (!current || current.connectedPeer || current.offerId !== offerId) {
+      if (
+        !current ||
+        current.connection.phase === 'connected' ||
+        !hasLiveOutboundOffer(current, undefined, offerId)
+      ) {
         return
       }
-      if (current.offerAnswered) {
+      if (current.outbound.phase === 'answered') {
         reportSdpFailure(current, peerId)
       }
       resetOfferState(current)
       prunePeerStates(peerStates)
     }, ttlMs)
-    unrefTimer(state.offerExpiryTimer)
+    unrefTimer(timer)
+    return timer
   }
 
   const bindOfferPeerHandlers = (
@@ -489,8 +584,8 @@ export const createSignalHandler = (
     onSignal?: (signal: Signal) => void
   ): void => {
     const onClosedOrError = (): void => {
-      if (state.offerPeer === peer && !state.connectedPeer) {
-        if (state.offerAnswered) {
+      if (state.offerPeer === peer && state.connection.phase !== 'connected') {
+        if (state.outbound.phase === 'answered') {
           reportSdpFailure(state, peerId)
         }
         resetOfferState(state)
@@ -500,7 +595,10 @@ export const createSignalHandler = (
     }
 
     peer.setHandlers({
-      connect: () => connectPeer(peer, peerId),
+      connect: () => {
+        dialBackoffs.delete(peerId)
+        connectPeer(peer, peerId)
+      },
       ...(onSignal ? {signal: onSignal} : {}),
       close: onClosedOrError,
       error: onClosedOrError
@@ -510,19 +608,35 @@ export const createSignalHandler = (
   const ensureOffer = (
     state: PeerState,
     peerId: string
-  ): NonNullable<PeerState['offerInitPromise']> => {
-    if (state.offerPeer && state.offerId && state.offerSdp) {
-      return Promise.resolve([state.offerPeer, state.offerSdp, state.offerId])
+  ): Promise<[peer: PeerHandle, offer: string, offerId: string] | null> => {
+    switch (state.outbound.phase) {
+      case 'advertising':
+        return Promise.resolve([
+          state.outbound.peer,
+          state.outbound.offerSdp,
+          state.outbound.offerId
+        ])
+      case 'allocating':
+        return state.outbound.promise
+      case 'answered':
+        return Promise.resolve(null)
+      case 'idle':
+        break
+      default:
+        return unreachable(state.outbound)
     }
-    if (state.offerInitPromise) {
-      return state.offerInitPromise
-    }
+
     if (atPendingCap(peerId)) {
       return Promise.resolve(null)
     }
 
-    const allocateOffer = async (): NonNullable<
-      PeerState['offerInitPromise']
+    const isAllocCanceled = (): boolean =>
+      isLeaving() ||
+      state.outbound.phase !== 'allocating' ||
+      state.outbound.promise !== pending
+
+    const allocateOffer = async (): Promise<
+      [peer: PeerHandle, offer: string, offerId: string] | null
     > => {
       const localSelfId = getSelfIdNow() ?? (await getSelfId())
       let firstOffer: OfferRecord | undefined
@@ -536,48 +650,98 @@ export const createSignalHandler = (
           )
         )[0]
       } catch (error) {
-        if (isLeaving() || state.offerInitPromise !== pending) {
+        if (isAllocCanceled()) {
           return null
         }
         throw error
       }
 
       if (!firstOffer) {
+        if (isAllocCanceled()) {
+          return null
+        }
         throw mkErr('failed to allocate offer peer')
       }
 
       const {peer, offer} = firstOffer
       const offerId = firstOffer.offerId || genId(offerIdSize)
-      if (isLeaving() || state.offerInitPromise !== pending) {
+      if (isAllocCanceled()) {
         peer.destroy()
         return null
       }
 
-      state.offerPeer = peer
-      state.offerId = offerId
-      state.offerSdp = offer
-      state.offerAnswered = false
-      state.didReportConnectFailure = false
-      state.bufferedOfferCandidates = []
+      const bufferedCandidates: Signal[] = []
+      const expiryTimer = createOfferExpiryTimer(peerId, offerId)
+      state.didReportFailure = false
+      state.outbound = {
+        phase: 'advertising',
+        peer,
+        offerId,
+        offerSdp: offer,
+        expiryTimer,
+        bufferedCandidates
+      }
 
       bindOfferPeerHandlers(state, peerId, peer, signal => {
-        if (state.offerPeer === peer) {
-          state.bufferedOfferCandidates.push(signal)
-          state.offerCandidateSenders.forEach(sendSignal =>
-            sendSignal?.(signal)
-          )
+        if (
+          state.connection.phase !== 'connected' &&
+          hasLiveOutboundOffer(state, peer, offerId)
+        ) {
+          state.outbound.bufferedCandidates.push(signal)
+          for (const slot of state.relaySlots) {
+            if (hasCandidateSender(slot)) {
+              slot.sendCandidate(signal)
+            }
+          }
         }
       })
-      scheduleOfferExpiry(state, peerId)
       return [peer, offer, offerId]
     }
 
     const pending = allocateOffer().finally(() => {
-      if (state.offerInitPromise === pending) {
-        state.offerInitPromise = null
+      if (
+        state.outbound.phase === 'allocating' &&
+        state.outbound.promise === pending
+      ) {
+        state.outbound = {phase: 'idle'}
       }
     })
-    return (state.offerInitPromise = pending)
+    state.outbound = {phase: 'allocating', promise: pending}
+    return pending
+  }
+
+  const transitionOutboundToAnswered = (
+    state: PeerState,
+    peerId: string,
+    peer: PeerHandle,
+    offerId: string
+  ): void => {
+    let bufferedCandidates: Signal[] = []
+    if (hasLiveOutboundOffer(state)) {
+      resetTimer(state.outbound.expiryTimer)
+      if (state.outbound.peer === peer && state.outbound.offerId === offerId) {
+        bufferedCandidates = state.outbound.bufferedCandidates
+        freezeRelayRetriesKeepSenders(state.relaySlots)
+      } else {
+        clearRelaySlots(state.relaySlots)
+        if (state.connectedPeer !== state.outbound.peer) {
+          destroyAlive(state.outbound.peer)
+        }
+      }
+    } else {
+      clearRelaySlots(state.relaySlots)
+    }
+    state.outbound = {
+      phase: 'answered',
+      peer,
+      offerId,
+      expiryTimer: createOfferExpiryTimer(
+        peerId,
+        offerId,
+        offerPostAnswerTtlMs
+      ),
+      bufferedCandidates
+    }
   }
 
   const handleAnnouncement = async (
@@ -589,14 +753,14 @@ export const createSignalHandler = (
     const state = peerStates.get(peerId)
     if (
       !state ||
-      state.connectedPeer ||
-      state.answeringPeer ||
-      state.offerAnswered
+      state.connection.phase === 'connected' ||
+      state.inbound.phase !== 'idle' ||
+      state.outbound.phase === 'answered'
     ) {
-      clearOfferRelayIfPlaceholder(state, relayId)
+      clearOfferRelayIfReserved(state, relayId)
       return
     }
-    if (state.offerRelays[relayId] !== offerRelayPlaceholder) {
+    if (state.relaySlots[relayId]?.phase !== 'reserved') {
       return
     }
 
@@ -610,54 +774,86 @@ export const createSignalHandler = (
         getSelfId()
       ])
     } catch (err) {
-      clearOfferRelayIfPlaceholder(state, relayId)
+      clearOfferRelayIfReserved(state, relayId)
       prunePeerStates(peerStates)
       throw err
     }
 
     if (!offerInfo) {
-      clearOfferRelayIfPlaceholder(state, relayId)
+      clearOfferRelayIfReserved(state, relayId)
       return
     }
     if (isLeaving()) {
       resetOfferState(state)
       return
     }
+    const isStateConnected = (s: PeerState): boolean =>
+      s.connection.phase === 'connected'
     if (
-      state.connectedPeer ||
-      state.answeringPeer ||
-      state.offerAnswered ||
-      state.offerRelays[relayId] !== offerRelayPlaceholder
+      isStateConnected(state) ||
+      state.inbound.phase !== 'idle' ||
+      state.outbound.phase !== 'advertising' ||
+      state.relaySlots[relayId]?.phase !== 'reserved'
     ) {
-      clearOfferRelayIfPlaceholder(state, relayId)
+      clearOfferRelayIfReserved(state, relayId)
       return
     }
 
     const [offerPeer, offerSdp, offerId] = offerInfo
-    state.offerRetryTimers[relayId] = resetTimer(
-      state.offerRetryTimers[relayId]
-    )
-    state.offerRelays[relayId] = true
+    const sendCandidate = (signal: Signal): void => {
+      if (
+        isLeaving() ||
+        state.connection.phase === 'connected' ||
+        !hasLiveOutboundOffer(state, offerPeer, offerId) ||
+        signal.type !== candidateType
+      ) {
+        return
+      }
+      void toCipher(signal, localSelfId, offerId)
+        .then(enc => {
+          if (
+            !isLeaving() &&
+            state.connection.phase !== 'connected' &&
+            hasLiveOutboundOffer(state, offerPeer, offerId)
+          ) {
+            void signalPeer(
+              peerTopic,
+              toJson({peerId: localSelfId, offerId, candidate: enc.sdp})
+            )
+          }
+        })
+        .catch(noOp)
+    }
 
     const retryTimer = setTimeout(
       () => {
         if (
           retryAttempt >= 2 ||
           isLeaving() ||
-          state.connectedPeer ||
-          state.answeringPeer ||
-          state.offerAnswered ||
-          state.offerPeer !== offerPeer ||
-          state.offerId !== offerId
+          state.connection.phase === 'connected' ||
+          state.inbound.phase !== 'idle' ||
+          state.outbound.phase !== 'advertising' ||
+          state.outbound.peer !== offerPeer ||
+          state.outbound.offerId !== offerId
         ) {
           const cur = peerStates.get(peerId)
-          if (cur && !cur.connectedPeer && cur.offerRelays[relayId]) {
-            clearOfferRelay(cur, relayId)
+          if (cur && cur.connection.phase !== 'connected') {
+            if (
+              retryAttempt >= 2 &&
+              hasLiveOutboundOffer(cur, offerPeer, offerId)
+            ) {
+              cur.relaySlots[relayId] = {
+                phase: 'exhausted',
+                sendCandidate
+              }
+            } else {
+              clearOfferRelaySlot(cur, relayId)
+            }
             prunePeerStates(peerStates)
           }
           return
         }
-        state.offerRelays[relayId] = offerRelayPlaceholder
+        state.relaySlots[relayId] = {phase: 'reserved'}
         void handleAnnouncement(
           relayId,
           peerId,
@@ -674,45 +870,18 @@ export const createSignalHandler = (
         : (announceIntervals[relayId] ?? announceIntervalMs) * 0.9
     )
     unrefTimer(retryTimer)
-    state.offerRetryTimers[relayId] = retryTimer
-
-    let didSendOffer = false
-    state.offerCandidateSenders[relayId] = signal => {
-      if (
-        !didSendOffer ||
-        isLeaving() ||
-        state.connectedPeer ||
-        state.offerPeer !== offerPeer ||
-        state.offerId !== offerId ||
-        signal.type !== candidateType
-      ) {
-        return
-      }
-      void toCipher(signal, localSelfId, offerId)
-        .then(enc => {
-          if (
-            !isLeaving() &&
-            !state.connectedPeer &&
-            state.offerPeer === offerPeer &&
-            state.offerId === offerId
-          ) {
-            void signalPeer(
-              peerTopic,
-              toJson({peerId: localSelfId, offerId, candidate: enc.sdp})
-            )
-          }
-        })
-        .catch(noOp)
-    }
 
     void signalPeer(
       peerTopic,
       toJson({peerId: localSelfId, offerId, offer: offerSdp})
     )
-    didSendOffer = true
-    state.bufferedOfferCandidates.forEach(signal =>
-      state.offerCandidateSenders[relayId]?.(signal)
-    )
+
+    state.relaySlots[relayId] = {
+      phase: 'retrying',
+      retryTimer,
+      sendCandidate
+    }
+    state.outbound.bufferedCandidates.forEach(sendCandidate)
   }
 
   const replayExistingAnswerIfMatch = async (
@@ -723,30 +892,55 @@ export const createSignalHandler = (
     offerId: string,
     signalPeer: SignalPeer
   ): Promise<void> => {
-    const replay = state.answerReplay
-    const lastSentAt = replay?.lastSentAt[relayId]
     if (
-      state.answeringPeer &&
-      !state.answeringPeer.isDead &&
-      replay &&
-      replay.offer === offer &&
-      replay.offerId === offerId &&
-      (lastSentAt === undefined || Date.now() - lastSentAt >= 1_000)
+      state.inbound.phase !== 'answering' ||
+      state.inbound.peer.isDead ||
+      state.inbound.replay.offer !== offer ||
+      state.inbound.replay.offerId !== offerId
     ) {
-      replay.lastSentAt[relayId] = Date.now()
-      const peerTopic = await peerTopicOf(peerId)
-      if (
-        !isLeaving() &&
-        state.answerReplay === replay &&
-        !state.connectedPeer
-      ) {
-        const send = (message: string): void => {
-          void signalPeer(peerTopic, message)
-        }
-        replay.relays[relayId] = send
-        replay.messages.forEach(send)
-      }
+      return
     }
+    const {replay} = state.inbound
+    const lastSentAt = replay.lastSentAt[relayId]
+    if (lastSentAt !== undefined && Date.now() - lastSentAt < 1_000) {
+      return
+    }
+    replay.lastSentAt[relayId] = Date.now()
+    const peerTopic = await peerTopicOf(peerId)
+    if (
+      !isLeaving() &&
+      state.connection.phase !== 'connected' &&
+      state.inbound.phase === 'answering' &&
+      state.inbound.replay === replay
+    ) {
+      const send = (message: string): void => {
+        void signalPeer(peerTopic, message)
+      }
+      replay.relays[relayId] = send
+      replay.messages.forEach(send)
+    }
+  }
+
+  const decryptOfferDeduped = (
+    peerId: string,
+    offer: string,
+    offerId: string
+  ): Promise<Signal | null> => {
+    const key = `${peerId}|${offerId}|${offer}`
+    const existing = inFlightOfferDecrypts.get(key)
+    if (existing) {
+      return existing
+    }
+    const task = toPlain({type: 'offer', sdp: offer}, peerId, offerId)
+      .catch(err => {
+        reportDecryptErr(peerId, 'offer', err)
+        return null
+      })
+      .finally(() => {
+        inFlightOfferDecrypts.delete(key)
+      })
+    inFlightOfferDecrypts.set(key, task)
+    return task
   }
 
   const handleOffer = async (
@@ -767,7 +961,8 @@ export const createSignalHandler = (
     const existingState = peerStates.get(peerId)
     if (
       existingState &&
-      (existingState.answeringPeer || existingState.offerAnswered)
+      (existingState.inbound.phase === 'answering' ||
+        existingState.outbound.phase === 'answered')
     ) {
       return replayExistingAnswerIfMatch(
         existingState,
@@ -781,7 +976,7 @@ export const createSignalHandler = (
 
     if (
       existingState &&
-      (existingState.offerPeer || existingState.offerRelays.some(Boolean)) &&
+      hasOutboundActivity(existingState) &&
       localSelfId < peerId
     ) {
       return
@@ -791,23 +986,19 @@ export const createSignalHandler = (
       return
     }
 
-    let plainOffer: Signal
-    try {
-      plainOffer = await toPlain({type: 'offer', sdp: offer}, peerId, offerId)
-    } catch (err) {
-      reportDecryptErr(peerId, 'offer', err)
-      return
-    }
-
-    if (isLeaving()) {
+    const plainOffer = await decryptOfferDeduped(peerId, offer, offerId)
+    if (!plainOffer || isLeaving()) {
       return
     }
 
     const state = getState(peerStates, peerId)
-    if (state.connectedPeer) {
+    if (state.connection.phase === 'connected') {
       return
     }
-    if (state.answeringPeer || state.offerAnswered) {
+    if (
+      state.inbound.phase === 'answering' ||
+      state.outbound.phase === 'answered'
+    ) {
       return replayExistingAnswerIfMatch(
         state,
         relayId,
@@ -818,7 +1009,7 @@ export const createSignalHandler = (
       )
     }
 
-    if (state.offerPeer || state.offerRelays.some(Boolean)) {
+    if (hasOutboundActivity(state)) {
       if (localSelfId < peerId) {
         return
       }
@@ -839,17 +1030,34 @@ export const createSignalHandler = (
       relays: []
     }
     replay.lastSentAt[relayId] = Date.now()
-    state.answeringPeer = answerPeer
-    state.didSendAnswer = false
-    state.answerReplay = replay
-    state.didReportConnectFailure = false
-    scheduleAnsweringExpiry(state, peerId, answerPeer)
+    const expiryTimer = createAnsweringExpiryTimer(peerId, answerPeer)
+    let preAnswerCandidates: Signal[] | null = []
+    state.didReportFailure = false
+    state.inbound = {
+      phase: 'answering',
+      peer: answerPeer,
+      offerId,
+      expiryTimer,
+      didSendAnswer: false,
+      replay
+    }
+
+    const isActiveAnswering = (
+      s: PeerState
+    ): s is PeerState & {
+      inbound: Extract<PeerState['inbound'], {phase: 'answering'}>
+    } =>
+      !isLeaving() &&
+      s.inbound.phase === 'answering' &&
+      s.inbound.peer === answerPeer &&
+      !answerPeer.isDead
 
     const onClosedOrError = (): void => {
       if (
-        state.answeringPeer === answerPeer &&
-        !state.connectedPeer &&
-        state.didSendAnswer
+        state.inbound.phase === 'answering' &&
+        state.inbound.peer === answerPeer &&
+        state.connection.phase !== 'connected' &&
+        state.inbound.didSendAnswer
       ) {
         reportSdpFailure(state, peerId)
       }
@@ -859,7 +1067,10 @@ export const createSignalHandler = (
     }
 
     answerPeer.setHandlers({
-      connect: () => connectPeer(answerPeer, peerId),
+      connect: () => {
+        dialBackoffs.delete(peerId)
+        connectPeer(answerPeer, peerId)
+      },
       close: onClosedOrError,
       error: onClosedOrError
     })
@@ -871,7 +1082,7 @@ export const createSignalHandler = (
     }
 
     const peerTopic = await peerTopicOf(peerId)
-    if (isLeaving() || state.answerReplay !== replay) {
+    if (!isActiveAnswering(state) || state.inbound.replay !== replay) {
       return
     }
 
@@ -879,23 +1090,16 @@ export const createSignalHandler = (
       void signalPeer(peerTopic, message)
     }
 
-    const pendingCandidates: Signal[] = []
-    let didSendAnswer = false
+    let publishQueue: Promise<void> = Promise.resolve()
 
-    const publishAnswerSignal = (signal: Signal): void => {
-      void toCipher(signal, localSelfId, offerId)
-        .then(enc => {
-          if (
-            isLeaving() ||
-            state.answeringPeer !== answerPeer ||
-            answerPeer.isDead
-          ) {
+    const enqueueEncryptedPublish = (signal: Signal): void => {
+      publishQueue = publishQueue
+        .then(async () => {
+          const enc = await toCipher(signal, localSelfId, offerId)
+          if (!isActiveAnswering(state)) {
             return
           }
           const isAnswer = signal.type === 'answer'
-          if (isAnswer) {
-            state.didSendAnswer = true
-          }
           const message = toJson({
             peerId: localSelfId,
             offerId,
@@ -909,9 +1113,11 @@ export const createSignalHandler = (
               send(message)
             }
           })
-          if (isAnswer && !didSendAnswer) {
-            didSendAnswer = true
-            pendingCandidates.splice(0).forEach(publishAnswerSignal)
+          if (isAnswer && preAnswerCandidates) {
+            state.inbound.didSendAnswer = true
+            const queued = preAnswerCandidates
+            preAnswerCandidates = null
+            queued.forEach(enqueueEncryptedPublish)
           }
         })
         .catch(noOp)
@@ -920,17 +1126,15 @@ export const createSignalHandler = (
     answerPeer.setHandlers({
       signal: signal => {
         if (
-          isLeaving() ||
-          state.answeringPeer !== answerPeer ||
-          answerPeer.isDead ||
+          !isActiveAnswering(state) ||
           (signal.type !== 'answer' && signal.type !== candidateType)
         ) {
           return
         }
-        if (signal.type === candidateType && !didSendAnswer) {
-          pendingCandidates.push(signal)
+        if (signal.type === candidateType && preAnswerCandidates) {
+          preAnswerCandidates.push(signal)
         } else {
-          publishAnswerSignal(signal)
+          enqueueEncryptedPublish(signal)
         }
       }
     })
@@ -967,10 +1171,11 @@ export const createSignalHandler = (
     const targetPeer =
       peer && !peer.isDead
         ? peer
-        : currentState?.offerPeer && currentState.offerId === offerId
-          ? currentState.offerPeer
-          : currentState?.answerReplay?.offerId === offerId
-            ? currentState.answeringPeer
+        : currentState && hasLiveOutboundOffer(currentState, undefined, offerId)
+          ? currentState.outbound.peer
+          : currentState?.inbound.phase === 'answering' &&
+              currentState.inbound.offerId === offerId
+            ? currentState.inbound.peer
             : null
 
     if (targetPeer && !targetPeer.isDead) {
@@ -996,7 +1201,10 @@ export const createSignalHandler = (
         destroyAlive(peer)
       } else {
         const currentState = peerStates.get(peerId)
-        if (currentState?.offerId === offerId) {
+        if (
+          currentState &&
+          hasLiveOutboundOffer(currentState, undefined, offerId)
+        ) {
           resetOfferState(currentState)
         }
       }
@@ -1020,28 +1228,28 @@ export const createSignalHandler = (
     }
 
     if (peer) {
+      if (!claimLeasedOffer(peer) || peer.isDead) {
+        destroyAlive(peer)
+        return
+      }
       const state = getState(peerStates, peerId)
-      claimLeasedOffer(peer)
 
       if (
-        state.connectedPeer ||
-        state.offerAnswered ||
-        (state.answeringPeer &&
-          !state.answeringPeer.isDead &&
+        state.connection.phase === 'connected' ||
+        state.outbound.phase === 'answered' ||
+        (state.inbound.phase === 'answering' &&
+          !state.inbound.peer.isDead &&
           localSelfId > peerId)
       ) {
         peer.destroy()
         return
       }
-      if (state.answeringPeer) {
-        clearAnswering(state, state.answeringPeer)
+      if (state.inbound.phase === 'answering') {
+        clearAnswering(state, state.inbound.peer)
       }
 
       resetOfferState(state)
-      state.offerPeer = peer
-      state.offerId = offerId
-      state.offerAnswered = true
-      scheduleOfferExpiry(state, peerId, offerPostAnswerTtlMs)
+      transitionOutboundToAnswered(state, peerId, peer, offerId)
       bindOfferPeerHandlers(state, peerId, peer)
       void peer.signal(plainAnswer)
       return
@@ -1050,18 +1258,16 @@ export const createSignalHandler = (
     const state = peerStates.get(peerId)
     if (
       !state ||
-      !state.offerPeer ||
-      state.offerAnswered ||
-      !state.offerId ||
-      offerId !== state.offerId ||
-      state.offerPeer.isDead
+      state.outbound.phase !== 'advertising' ||
+      state.outbound.offerId !== offerId ||
+      state.outbound.peer.isDead
     ) {
       return
     }
 
-    state.offerAnswered = true
-    scheduleOfferExpiry(state, peerId, offerPostAnswerTtlMs)
-    void state.offerPeer.signal(plainAnswer)
+    const offerPeer = state.outbound.peer
+    transitionOutboundToAnswered(state, peerId, offerPeer, offerId)
+    void offerPeer.signal(plainAnswer)
   }
 
   const sendDirectPing = (
@@ -1073,9 +1279,9 @@ export const createSignalHandler = (
     peerTopicOf(peerId).then(peerSelfTopic => {
       if (
         !isLeaving() &&
-        !state.connectedPeer &&
-        !state.answeringPeer &&
-        !state.offerAnswered
+        state.connection.phase !== 'connected' &&
+        state.inbound.phase === 'idle' &&
+        state.outbound.phase !== 'answered'
       ) {
         void signalPeer(peerSelfTopic, toJson({peerId: localSelfId}))
       }
@@ -1120,21 +1326,18 @@ export const createSignalHandler = (
           onPeerDiscovered?.(peerId, relayId, signalPeer)
 
           const state = peerStates.get(peerId)
-          const connectedPeer = state?.connectedPeer
-          if (connectedPeer && state) {
-            const health = getConnectedPeerHealth(connectedPeer)
+          if (state?.connection.phase === 'connected') {
+            const health = getConnectedPeerHealth(state.connection.peer)
             if (health === 'live') {
-              state.unhealthySince = null
+              state.connection.unhealthySince = null
               return
             }
             if (health === 'stale') {
               clearConnectedPeer(state)
             } else {
               const nowMs = Date.now()
-              if (
-                nowMs - (state.unhealthySince ??= nowMs) <
-                disconnectedPeerGraceMs
-              ) {
+              const since = (state.connection.unhealthySince ??= nowMs)
+              if (nowMs - since < disconnectedPeerGraceMs) {
                 return
               }
               clearConnectedPeer(state)
@@ -1151,9 +1354,9 @@ export const createSignalHandler = (
 
             const announceState = getState(peerStates, peerId)
             if (
-              announceState.answeringPeer ||
-              announceState.connectedPeer ||
-              announceState.offerAnswered
+              announceState.inbound.phase !== 'idle' ||
+              announceState.connection.phase === 'connected' ||
+              announceState.outbound.phase === 'answered'
             ) {
               return
             }
@@ -1178,8 +1381,8 @@ export const createSignalHandler = (
               return
             }
 
-            if (!announceState.offerRelays[relayId]) {
-              announceState.offerRelays[relayId] = offerRelayPlaceholder
+            if (isSlotAnnounceable(announceState.relaySlots[relayId])) {
+              announceState.relaySlots[relayId] = {phase: 'reserved'}
               await handleAnnouncement(relayId, peerId, signalPeer)
             }
             return
@@ -1220,21 +1423,20 @@ export const createSignalHandler = (
           }
           const state = getState(peerStates, peerId)
           if (
-            state.connectedPeer ||
-            state.answeringPeer ||
-            state.offerAnswered ||
-            state.offerPeer ||
+            state.connection.phase === 'connected' ||
+            state.inbound.phase !== 'idle' ||
+            state.outbound.phase !== 'idle' ||
             !relaySignalPeers.some(Boolean)
           ) {
             return
           }
           const now = Date.now()
-          const backoff = dialBackoffByState.get(state)
+          const backoff = dialBackoffs.get(peerId)
           if (backoff && now < backoff[1]) {
             return
           }
           const attempts = (backoff?.[0] ?? 0) + 1
-          dialBackoffByState.set(state, [
+          dialBackoffs.set(peerId, [
             attempts,
             now + Math.min(60_000, 2_000 * 2 ** (attempts - 1))
           ])
@@ -1243,8 +1445,11 @@ export const createSignalHandler = (
               return
             }
             if (localSelfId < peerId) {
-              if (!state.offerRelays[relayId]) {
-                state.offerRelays[relayId] = offerRelayPlaceholder
+              if (
+                state.outbound.phase !== 'answered' &&
+                isSlotAnnounceable(state.relaySlots[relayId])
+              ) {
+                state.relaySlots[relayId] = {phase: 'reserved'}
                 void handleAnnouncement(relayId, peerId, signalPeer).catch(
                   err => {
                     if (!isLeaving()) {

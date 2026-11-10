@@ -1,9 +1,27 @@
-import type {OfferCheckoutFn, OfferRecord, PeerHandle} from './internal-types'
-import {all, alloc, genId, mkErr, resetTimer, unrefTimer} from './utils'
+import type {
+  OfferCheckoutFn,
+  OfferRecord,
+  PeerHandle,
+  Timeout
+} from './internal-types'
+import {
+  all,
+  alloc,
+  genId,
+  mkErr,
+  resetTimer,
+  unreachable,
+  unrefTimer
+} from './utils'
 
 const offerLeaseTtlMs = 180_000
 const defaultOfferIdSize = 20
 const offerRoomLeftErr = /*@__PURE__*/ mkErr('room left while preparing offer')
+
+type LeaseEntryState =
+  | {readonly phase: 'leased'; readonly timer: Timeout}
+  | {readonly phase: 'claimed'}
+  | {readonly phase: 'closed'}
 
 export type OfferManager = {
   checkout: OfferCheckoutFn
@@ -11,7 +29,7 @@ export type OfferManager = {
     n: number,
     encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>
   ) => Promise<OfferRecord[]>
-  claimLeased: (peer: PeerHandle) => void
+  claimLeased: (peer: PeerHandle) => boolean
   reclaimLeased: (peer: PeerHandle) => void
   destroy: () => void
 }
@@ -19,21 +37,46 @@ export type OfferManager = {
 export const createOfferManager = (
   makeOffer: () => PeerHandle
 ): OfferManager => {
-  const leased = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
+  const leaseStates = new WeakMap<PeerHandle, LeaseEntryState>()
+  const activeLeases = new Set<PeerHandle>()
   let destroyed = false
 
-  const claimLeased = (peer: PeerHandle): void => {
-    const timer = leased.get(peer)
-    if (timer) {
-      resetTimer(timer)
-      leased.delete(peer)
+  const closeLease = (peer: PeerHandle): void => {
+    const entry = leaseStates.get(peer)
+    if (entry?.phase === 'leased') {
+      resetTimer(entry.timer)
+    }
+    activeLeases.delete(peer)
+    leaseStates.set(peer, {phase: 'closed'})
+    peer.destroy()
+  }
+
+  const claimLeased = (peer: PeerHandle): boolean => {
+    if (destroyed || peer.isDead) {
+      return false
+    }
+    const entry = leaseStates.get(peer)
+    if (!entry) {
+      return true
+    }
+    switch (entry.phase) {
+      case 'leased':
+        resetTimer(entry.timer)
+        activeLeases.delete(peer)
+        leaseStates.set(peer, {phase: 'claimed'})
+        return true
+      case 'claimed':
+        return true
+      case 'closed':
+        return false
+      default:
+        return unreachable(entry)
     }
   }
 
   const reclaimLeased = (peer: PeerHandle): void => {
-    if (leased.has(peer)) {
-      claimLeased(peer)
-      peer.destroy()
+    if (leaseStates.get(peer)?.phase === 'leased') {
+      closeLease(peer)
     }
   }
 
@@ -56,16 +99,20 @@ export const createOfferManager = (
         }
         if (leaseOffers) {
           const timer = setTimeout(() => {
-            leased.delete(peer)
-            peer.destroy()
+            if (leaseStates.get(peer)?.phase === 'leased') {
+              closeLease(peer)
+            }
           }, offerLeaseTtlMs)
           unrefTimer(timer)
-          leased.set(peer, timer)
+          leaseStates.set(peer, {phase: 'leased', timer})
+          activeLeases.add(peer)
           return {
             peer,
             offer,
             offerId,
-            claim: () => claimLeased(peer),
+            claim: () => {
+              claimLeased(peer)
+            },
             reclaim: () => reclaimLeased(peer)
           }
         }
@@ -87,12 +134,13 @@ export const createOfferManager = (
     claimLeased,
     reclaimLeased,
     destroy: () => {
+      if (destroyed) {
+        return
+      }
       destroyed = true
-      leased.forEach((timer, peer) => {
-        resetTimer(timer)
-        peer.destroy()
-      })
-      leased.clear()
+      for (const peer of Array.from(activeLeases)) {
+        closeLease(peer)
+      }
     }
   }
 }
