@@ -1,6 +1,7 @@
 import {ecdsaSign} from './crypto'
 import {domainTag, encodeBytes, libId, mkErr} from './primitives'
 import type {UserIdentity} from './types'
+import {unreachable} from './utils'
 
 export type StoredIdbIdentityRecord = {
   userId: string
@@ -48,6 +49,11 @@ const idbGetRecord = (
     req.onerror = () => reject(req.error ?? idbErr('get'))
   })
 
+type TxState<T> =
+  | {readonly phase: 'pending'}
+  | {readonly phase: 'staged'; readonly value: T}
+  | {readonly phase: 'done'}
+
 const idbWriteTx = <T>(
   db: IDBDatabase,
   run: (store: IDBObjectStore, setResult: (val: T) => void) => void,
@@ -55,24 +61,64 @@ const idbWriteTx = <T>(
 ): Promise<T> =>
   new Promise((resolve, reject) => {
     const tx = db.transaction(idbStoreName, 'readwrite')
-    let result!: T
-    let settled = false
-    const fail = (err: unknown): void => {
-      if (!settled) {
-        settled = true
-        reject(err instanceof Error ? err : (tx.error ?? idbErr(op)))
+    let state: TxState<T>
+
+    const stageResult = (value: T): void => {
+      switch (state.phase) {
+        case 'pending':
+        case 'staged':
+          state = {phase: 'staged', value}
+          return
+        case 'done':
+          return
+        default:
+          unreachable(state)
       }
     }
+
+    const fail = (err: unknown): void => {
+      switch (state.phase) {
+        case 'pending':
+        case 'staged':
+          state = {phase: 'done'}
+          reject(err instanceof Error ? err : (tx.error ?? idbErr(op)))
+          return
+        case 'done':
+          return
+        default:
+          unreachable(state)
+      }
+    }
+
+    state = {phase: 'pending'}
+
     tx.oncomplete = () => {
-      if (!settled) {
-        settled = true
-        resolve(result)
+      switch (state.phase) {
+        case 'staged': {
+          const {value} = state
+          state = {phase: 'done'}
+          resolve(value)
+          return
+        }
+        case 'pending':
+          state = {phase: 'done'}
+          reject(idbErr(op))
+          return
+        case 'done':
+          return
+        default:
+          unreachable(state)
       }
     }
     tx.onabort = () => fail(tx.error)
-    run(tx.objectStore(idbStoreName), val => {
-      result = val
-    })
+    tx.onerror = event =>
+      fail((event?.target as IDBRequest | null)?.error ?? tx.error)
+
+    try {
+      run(tx.objectStore(idbStoreName), stageResult)
+    } catch (err) {
+      fail(err)
+    }
   })
 
 const idbPutRecord = (
@@ -87,6 +133,28 @@ const idbPutRecord = (
       store.put(candidate, appId)
     },
     'put'
+  )
+
+const checkThenAddIdbRecord = (
+  db: IDBDatabase,
+  idbKey: string,
+  candidate: StoredIdbIdentityRecord
+): Promise<readonly [record: StoredIdbIdentityRecord, wasExisting: boolean]> =>
+  idbWriteTx(
+    db,
+    (store, setResult) => {
+      const getReq = store.get(idbKey)
+      getReq.onsuccess = () => {
+        const found = getReq.result as StoredIdbIdentityRecord | undefined
+        if (found !== undefined) {
+          setResult([found, true])
+          return
+        }
+        setResult([candidate, false])
+        store.add(candidate, idbKey)
+      }
+    },
+    'add'
   )
 
 const isValidStoredIdbRecord = async (
@@ -161,7 +229,7 @@ export const loadOrCreateIdbIdentity = (
   ) => boolean | Promise<boolean>
 ): Promise<UserIdentity> =>
   withNavigatorLock(idbKey, async db => {
-    const ensureValid = async (
+    const validateOrRepair = async (
       rec: StoredIdbIdentityRecord
     ): Promise<StoredIdbIdentityRecord> =>
       (await isValidStoredIdbRecord(rec, verifyUserIdKey, verifyWithP256))
@@ -170,33 +238,18 @@ export const loadOrCreateIdbIdentity = (
 
     const existing = await idbGetRecord(db, idbKey)
     if (existing !== undefined) {
-      return buildUserIdentityFromIdbRecord(await ensureValid(existing))
+      return buildUserIdentityFromIdbRecord(await validateOrRepair(existing))
     }
 
     const candidate = await generateRecord()
-    const outcome = await idbWriteTx<
-      | {added: true; rec: StoredIdbIdentityRecord}
-      | {added: false; rec: StoredIdbIdentityRecord}
-    >(
+    const [record, wasExisting] = await checkThenAddIdbRecord(
       db,
-      (store, setResult) => {
-        const getReq = store.get(idbKey)
-        getReq.onsuccess = () => {
-          const found = getReq.result as StoredIdbIdentityRecord | undefined
-          if (found !== undefined) {
-            setResult({added: false, rec: found})
-            return
-          }
-          setResult({added: true, rec: candidate})
-          store.add(candidate, idbKey)
-        }
-      },
-      'add'
+      idbKey,
+      candidate
     )
-    const resolved = outcome.added
-      ? outcome.rec
-      : await ensureValid(outcome.rec)
-    return buildUserIdentityFromIdbRecord(resolved)
+    return buildUserIdentityFromIdbRecord(
+      wasExisting ? await validateOrRepair(record) : record
+    )
   })
 
 export const deleteIdbIdentity = (appId: string): Promise<void> =>

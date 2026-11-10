@@ -384,25 +384,29 @@ const verifyWithP256Async = async (
     rec.verifyKey,
     sigBytes as BufferSource,
     snapshot as BufferSource
-  )
-    .then(
-      ok => {
-        if (ok) {
-          verifiedSigPayloads.set(cacheKey, snapshot)
+  ).then(
+    ok => {
+      if (ok) {
+        verifiedSigPayloads.set(cacheKey, snapshot)
+        if (inFlightSigVerifies.get(cacheKey)?.[1] === promise) {
+          inFlightSigVerifies.delete(cacheKey)
         }
-        return ok
-      },
-      () => false
-    )
-    .finally(() => {
+        return true
+      }
       if (inFlightSigVerifies.get(cacheKey)?.[1] === promise) {
         inFlightSigVerifies.delete(cacheKey)
       }
-    })
+      return false
+    },
+    () => {
+      if (inFlightSigVerifies.get(cacheKey)?.[1] === promise) {
+        inFlightSigVerifies.delete(cacheKey)
+      }
+      return false
+    }
+  )
 
-  if (!inFlight) {
-    inFlightSigVerifies.set(cacheKey, [snapshot, promise])
-  }
+  inFlightSigVerifies.set(cacheKey, [snapshot, promise])
   return promise
 }
 
@@ -463,7 +467,22 @@ const generateP256KeyMaterial = async (
   return [keyPair, rawJwk, rec]
 }
 
-const appIdentityEpoch = new Map<string, number>()
+const defaultAppKey = '__default__'
+const maxEpochResolveRetries = 8
+
+const normalizeAppId = (appId?: string): string => appId || defaultAppKey
+
+type AppIdentityController = {
+  epoch: number
+  inFlightLoad: {
+    readonly epoch: number
+    readonly promise: Promise<UserIdentity>
+  } | null
+  opTail: Promise<unknown>
+}
+
+// Unbounded by design: keyed by appId (typically 1 per page) so monotonic epoch never resets.
+const appControllers = /*@__PURE__*/ new Map<string, AppIdentityController>()
 const appEndpointCache = /*@__PURE__*/ createBoundedCache<
   string,
   Promise<EndpointIdentity>
@@ -473,14 +492,37 @@ const runtimeUserIdentityBySlot = /*@__PURE__*/ createBoundedCache<
   Promise<UserIdentity>
 >()
 
+const getAppController = (appKey: string): AppIdentityController => {
+  let ctrl = appControllers.get(appKey)
+  if (!ctrl) {
+    ctrl = {
+      epoch: 0,
+      inFlightLoad: null,
+      opTail: Promise.resolve()
+    }
+    appControllers.set(appKey, ctrl)
+  }
+  return ctrl
+}
+
+const enqueueControllerOp = <T>(
+  ctrl: AppIdentityController,
+  fn: () => Promise<T>
+): Promise<T> => {
+  const next = ctrl.opTail.catch(noOp).then(fn)
+  ctrl.opTail = next.catch(noOp)
+  return next
+}
+
 let nextIdentityClientSeq = 0
 export const createIdentityClientId = (): string =>
   `c${++nextIdentityClientSeq}`
 
-const slotForApp = (appId?: string, clientId = ''): string => {
-  const normalizedApp = appId || '__default__'
-  return `${clientId}\0${appIdentityEpoch.get(normalizedApp) ?? 0}\0${normalizedApp}`
-}
+const slotForAppKey = (
+  appKey: string,
+  clientId = '',
+  epoch = getAppController(appKey).epoch
+): string => `${clientId}\0${epoch}\0${appKey}`
 
 export const createEndpointIdentity = (): Promise<EndpointIdentity> =>
   generateP256KeyMaterial(false).then(([keyPair, , rec]) => ({
@@ -496,7 +538,8 @@ export const getDefaultEndpointIdentity = (
   appId?: string,
   clientId?: string
 ): Promise<EndpointIdentity> => {
-  const slot = slotForApp(appId, clientId)
+  const appKey = normalizeAppId(appId)
+  const slot = slotForAppKey(appKey, clientId)
   const existing = appEndpointCache.get(slot)
   if (existing) {
     return existing
@@ -782,16 +825,19 @@ export const validateIdentityConfig = (config?: {identity?: unknown}): void => {
   throw invalidCustomIdentityErr
 }
 
-const getOrCreateRuntimeUserIdentity = (
-  appId?: string,
-  clientId?: string
+const getOrCreateEphemeralIdentity = (
+  appKey: string,
+  clientId = '',
+  epoch = getAppController(appKey).epoch
 ): Promise<UserIdentity> => {
-  const slot = slotForApp(appId, clientId)
+  const slot = slotForAppKey(appKey, clientId, epoch)
   const existing = runtimeUserIdentityBySlot.get(slot)
   if (existing) {
     return existing
   }
-  const created = createNonExtractableUserIdentity()
+  const created = createNonExtractableUserIdentity().then(id =>
+    withPersistence(id, 'none')
+  )
   created.catch(() => {
     if (runtimeUserIdentityBySlot.get(slot) === created) {
       runtimeUserIdentityBySlot.delete(slot)
@@ -801,28 +847,21 @@ const getOrCreateRuntimeUserIdentity = (
   return created
 }
 
-const inflightLocalLoadByApp = new Map<string, Promise<UserIdentity>>()
-const localOpTailByApp = new Map<string, Promise<unknown>>()
+const epochSupersededErr = /*@__PURE__*/ mkErr(
+  'identity epoch superseded by clearUserIdentity'
+)
 
-const enqueueLocalOp = <T>(appId: string, fn: () => Promise<T>): Promise<T> => {
-  const prev = localOpTailByApp.get(appId)
-  const promise = (prev ? prev.catch(noOp).then(fn) : fn()).finally(() => {
-    if (localOpTailByApp.get(appId) === promise) {
-      localOpTailByApp.delete(appId)
+const startAppLocalLoad = (
+  appKey: string,
+  ctrl: AppIdentityController,
+  targetEpoch: number
+): Promise<UserIdentity> => {
+  const promise = enqueueControllerOp(ctrl, async () => {
+    if (ctrl.epoch !== targetEpoch) {
+      throw epochSupersededErr
     }
-  })
-  localOpTailByApp.set(appId, promise)
-  return promise
-}
-
-const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
-  const inflight = inflightLocalLoadByApp.get(appId)
-  if (inflight) {
-    return inflight
-  }
-  const promise = enqueueLocalOp(appId, async () => {
     const id = await loadOrCreateIdbIdentity(
-      appId,
+      appKey,
       generateNonExtractableIdbRecord,
       verifyUserIdKey,
       verifyWithP256
@@ -830,32 +869,26 @@ const loadOrCreateLocalIdentity = (appId: string): Promise<UserIdentity> => {
     trustedUserIdentities.add(id)
     return withPersistence(id, 'local')
   }).finally(() => {
-    if (inflightLocalLoadByApp.get(appId) === promise) {
-      inflightLocalLoadByApp.delete(appId)
+    if (ctrl.inFlightLoad?.promise === promise) {
+      ctrl.inFlightLoad = null
     }
   })
-  inflightLocalLoadByApp.set(appId, promise)
+  ctrl.inFlightLoad = {epoch: targetEpoch, promise}
   return promise
-}
-
-const bumpAppIdentityEpoch = (appId: string): void => {
-  const normalizedApp = appId || '__default__'
-  appIdentityEpoch.set(
-    normalizedApp,
-    (appIdentityEpoch.get(normalizedApp) ?? 0) + 1
-  )
 }
 
 export const clearUserIdentity = async (appId: string): Promise<void> => {
   if (typeof appId !== 'string' || !appId.trim()) {
     throw requiredErr('clearUserIdentity: appId')
   }
-  inflightLocalLoadByApp.delete(appId)
-  bumpAppIdentityEpoch(appId)
+  const appKey = normalizeAppId(appId)
+  const ctrl = getAppController(appKey)
+  ctrl.epoch += 1
+  ctrl.inFlightLoad = null
 
-  return enqueueLocalOp(appId, async () => {
+  return enqueueControllerOp(ctrl, async () => {
     if (hasIndexedDB()) {
-      await deleteIdbIdentity(appId)
+      await deleteIdbIdentity(appKey)
     }
   })
 }
@@ -875,32 +908,41 @@ export const resolveUserIdentity = async (
     return coerceCustomUserIdentity(raw)
   }
 
+  const appKey = normalizeAppId(appId)
+  const ctrl = getAppController(appKey)
   const mode: UserIdentityPersistence =
     raw === 'none' || raw === 'local' ? raw : hasIndexedDB() ? 'local' : 'none'
 
-  const fallbackToNone = async (
-    shouldWarn?: boolean
-  ): Promise<UserIdentity> => {
-    if (shouldWarn) {
-      warn("IndexedDB unavailable; falling back to identity: 'none'")
-    }
-    return withPersistence(
-      await getOrCreateRuntimeUserIdentity(appId, clientId),
-      'none'
-    )
-  }
-
   if (mode === 'none') {
-    return fallbackToNone()
+    return getOrCreateEphemeralIdentity(appKey, clientId, ctrl.epoch)
   }
   if (!hasIndexedDB()) {
-    return fallbackToNone(true)
+    warn("IndexedDB unavailable; falling back to identity: 'none'")
+    return getOrCreateEphemeralIdentity(appKey, clientId, ctrl.epoch)
   }
-  try {
-    return await loadOrCreateLocalIdentity(appId)
-  } catch {
-    return fallbackToNone(true)
+
+  for (let attempt = 0; attempt < maxEpochResolveRetries; attempt++) {
+    const targetEpoch = ctrl.epoch
+    const loadPromise =
+      ctrl.inFlightLoad?.epoch === targetEpoch
+        ? ctrl.inFlightLoad.promise
+        : startAppLocalLoad(appKey, ctrl, targetEpoch)
+
+    try {
+      const resolved = await loadPromise
+      if (ctrl.epoch === targetEpoch) {
+        return resolved
+      }
+    } catch {
+      if (ctrl.epoch !== targetEpoch) {
+        continue
+      }
+      warn("IndexedDB unavailable; falling back to identity: 'none'")
+      return getOrCreateEphemeralIdentity(appKey, clientId, targetEpoch)
+    }
   }
+
+  return getOrCreateEphemeralIdentity(appKey, clientId, ctrl.epoch)
 }
 
 export const userEndpointProofPayload = (params: {

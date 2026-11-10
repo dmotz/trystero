@@ -1,4 +1,5 @@
-import {cmpStr, resetTimer, unrefTimer} from './utils'
+import type {Timeout} from './internal-types'
+import {cmpStr, resetTimer, unreachable, unrefTimer} from './utils'
 
 const defaultFanout = 2
 const defaultPullTimeoutMs = 1_500
@@ -39,6 +40,24 @@ export type AntiEntropySync = {
   destroy: () => void
 }
 
+type PeerPullState =
+  | {
+      readonly phase: 'in-flight'
+      readonly pullId: symbol
+      readonly timer: Timeout
+      readonly pages: number
+      readonly staleDigest: boolean
+    }
+  | {readonly phase: 'completed'}
+  | {readonly phase: 'cooldown'; readonly until: number}
+
+type SchedulerPhase = 'active' | 'repull-queued' | 'closed'
+
+const occupiesFanoutSlot = (
+  state: PeerPullState
+): state is Extract<PeerPullState, {phase: 'in-flight' | 'completed'}> =>
+  state.phase === 'in-flight' || state.phase === 'completed'
+
 export const createAntiEntropySync = ({
   fanout = defaultFanout,
   pullTimeoutMs = defaultPullTimeoutMs,
@@ -50,31 +69,65 @@ export const createAntiEntropySync = ({
   sendPull
 }: AntiEntropySyncOptions): AntiEntropySync => {
   const seed = crypto.getRandomValues(new Uint32Array(1))[0]!
-  const completedPeers = new Set<string>()
-  const cooldownUntil = new Map<string, number>()
-  const inFlightPulls = new Map<
-    string,
-    {timer: ReturnType<typeof setTimeout>; pages: number}
-  >()
-  let repullQueued = false
-  let destroyed = false
+  const peerStates = new Map<string, PeerPullState>()
+  let schedulerPhase: SchedulerPhase = 'active'
   let periodicCursor = 0
 
-  const clearPullTimer = (peerId: string): void => {
-    const pull = inFlightPulls.get(peerId)
-    if (pull) {
-      resetTimer(pull.timer)
-      inFlightPulls.delete(peerId)
+  const countCompleted = (): number => {
+    let count = 0
+    for (const state of peerStates.values()) {
+      if (state.phase === 'completed') {
+        count++
+      }
+    }
+    return count
+  }
+
+  const countActiveOrCompleted = (): number => {
+    let count = 0
+    for (const state of peerStates.values()) {
+      if (occupiesFanoutSlot(state)) {
+        count++
+      }
+    }
+    return count
+  }
+
+  const hasInFlight = (): boolean => {
+    for (const state of peerStates.values()) {
+      if (state.phase === 'in-flight') {
+        return true
+      }
+    }
+    return false
+  }
+
+  const clearPeerState = (peerId: string): void => {
+    const cur = peerStates.get(peerId)
+    if (!cur) {
+      return
+    }
+    switch (cur.phase) {
+      case 'in-flight':
+        resetTimer(cur.timer)
+        peerStates.delete(peerId)
+        return
+      case 'completed':
+      case 'cooldown':
+        peerStates.delete(peerId)
+        return
+      default:
+        unreachable(cur)
     }
   }
 
   const isCoolingDown = (peerId: string, now: number): boolean => {
-    const exp = cooldownUntil.get(peerId)
-    if (exp === undefined) {
+    const cur = peerStates.get(peerId)
+    if (cur?.phase !== 'cooldown') {
       return false
     }
-    if (now >= exp) {
-      cooldownUntil.delete(peerId)
+    if (now >= cur.until) {
+      peerStates.delete(peerId)
       return false
     }
     return true
@@ -91,79 +144,146 @@ export const createAntiEntropySync = ({
       .map(([id]) => id)
   }
 
-  const startPull = (peerId: string, cursor?: string, pages = 0): void => {
+  const transitionFailedPull = (peerId: string, pullId: symbol): void => {
+    const cur = peerStates.get(peerId)
     if (
-      destroyed ||
+      schedulerPhase === 'closed' ||
+      cur?.phase !== 'in-flight' ||
+      cur.pullId !== pullId
+    ) {
+      return
+    }
+    resetTimer(cur.timer)
+    if (isPeerSendable(peerId)) {
+      peerStates.set(peerId, {
+        phase: 'cooldown',
+        until: Date.now() + timeoutCooldownMs
+      })
+    } else {
+      peerStates.delete(peerId)
+    }
+    if (countCompleted() < fanout) {
+      fillFanout()
+    }
+  }
+
+  const makePullTimer = (peerId: string, pullId: symbol): Timeout => {
+    const timer = setTimeout(
+      () => transitionFailedPull(peerId, pullId),
+      pullTimeoutMs
+    )
+    unrefTimer(timer)
+    return timer
+  }
+
+  const startPull = (
+    peerId: string,
+    cursor?: string,
+    pages = 0,
+    preserveStaleDigest = false
+  ): boolean => {
+    if (
+      schedulerPhase === 'closed' ||
       !canSync() ||
       pages >= maxPages ||
       !isPeerSendable(peerId)
     ) {
-      clearPullTimer(peerId)
-      return
+      clearPeerState(peerId)
+      return false
     }
-    clearPullTimer(peerId)
-    const timer = setTimeout(() => {
-      inFlightPulls.delete(peerId)
-      cooldownUntil.set(peerId, Date.now() + timeoutCooldownMs)
-      if (!destroyed && completedPeers.size < fanout) {
-        fillFanout()
-      }
-    }, pullTimeoutMs)
-    unrefTimer(timer)
-    inFlightPulls.set(peerId, {timer, pages: pages + 1})
+    const prev = peerStates.get(peerId)
+    if (prev?.phase === 'in-flight') {
+      resetTimer(prev.timer)
+    }
+    const pullId = Symbol()
+    const timer = makePullTimer(peerId, pullId)
+    peerStates.set(peerId, {
+      phase: 'in-flight',
+      pullId,
+      timer,
+      pages: pages + 1,
+      staleDigest: preserveStaleDigest
+    })
 
     void Promise.resolve()
       .then(() => sendPull(peerId, cursor))
-      .catch(() => clearPullTimer(peerId))
+      .catch(() => transitionFailedPull(peerId, pullId))
+    return true
   }
 
   const fillFanout = (): void => {
-    if (destroyed || !canSync()) {
+    if (schedulerPhase === 'closed' || !canSync()) {
       return
     }
+    let activeOrCompleted = countActiveOrCompleted()
     for (const candidate of selectRankedPeers()) {
-      if (completedPeers.size + inFlightPulls.size >= fanout) {
+      if (activeOrCompleted >= fanout) {
         break
       }
-      if (!completedPeers.has(candidate) && !inFlightPulls.has(candidate)) {
-        startPull(candidate)
+      if (!peerStates.has(candidate) && startPull(candidate)) {
+        activeOrCompleted++
       }
     }
   }
 
   const pullPeer = (peerId: string, force = false): void => {
-    if (
-      destroyed ||
-      !canSync() ||
-      inFlightPulls.has(peerId) ||
-      (!force && completedPeers.has(peerId))
-    ) {
+    if (schedulerPhase === 'closed' || !canSync()) {
       return
     }
-    cooldownUntil.delete(peerId)
-    startPull(peerId)
+    const cur = peerStates.get(peerId)
+    if (!cur) {
+      startPull(peerId)
+      return
+    }
+    switch (cur.phase) {
+      case 'in-flight':
+        if (force && !cur.staleDigest) {
+          peerStates.set(peerId, {...cur, staleDigest: true})
+        }
+        return
+      case 'completed':
+        if (force) {
+          startPull(peerId)
+        }
+        return
+      case 'cooldown':
+        startPull(peerId)
+        return
+      default:
+        unreachable(cur)
+    }
   }
 
   const onSyncPage = (fromPeerId: string, nextCursor?: string): void => {
-    const pull = inFlightPulls.get(fromPeerId)
-    if (!pull) {
+    const cur = peerStates.get(fromPeerId)
+    if (schedulerPhase === 'closed' || cur?.phase !== 'in-flight') {
       return
     }
-    cooldownUntil.delete(fromPeerId)
-    if (nextCursor && pull.pages < maxPages) {
-      startPull(fromPeerId, nextCursor, pull.pages)
+    if (nextCursor && cur.pages < maxPages) {
+      startPull(fromPeerId, nextCursor, cur.pages, cur.staleDigest)
       return
     }
-    clearPullTimer(fromPeerId)
-    completedPeers.add(fromPeerId)
+    resetTimer(cur.timer)
+    if (cur.staleDigest) {
+      peerStates.delete(fromPeerId)
+      startPull(fromPeerId)
+      return
+    }
+    peerStates.set(fromPeerId, {phase: 'completed'})
   }
 
   const onPeerJoined = (peerId: string, forcePull = false): void => {
-    if (destroyed) {
+    if (schedulerPhase === 'closed') {
       return
     }
-    cooldownUntil.delete(peerId)
-    completedPeers.delete(peerId)
+    const cur = peerStates.get(peerId)
+    if (cur?.phase === 'in-flight') {
+      if (!cur.staleDigest) {
+        peerStates.set(peerId, {...cur, staleDigest: true})
+      }
+    } else {
+      peerStates.delete(peerId)
+    }
     if (forcePull) {
       pullPeer(peerId, true)
     }
@@ -171,32 +291,49 @@ export const createAntiEntropySync = ({
   }
 
   const onPeerDisconnected = (peerId: string): void => {
-    clearPullTimer(peerId)
-    cooldownUntil.delete(peerId)
-    completedPeers.delete(peerId)
-    if (!destroyed && completedPeers.size < fanout) {
+    clearPeerState(peerId)
+    if (schedulerPhase !== 'closed' && countCompleted() < fanout) {
       fillFanout()
     }
   }
 
   const scheduleRepull = (): void => {
-    if (repullQueued || destroyed || getDirectPeers().length === 0) {
+    if (schedulerPhase !== 'active' || getDirectPeers().length === 0) {
       return
     }
-    repullQueued = true
+    schedulerPhase = 'repull-queued'
     queueMicrotask(() => {
-      repullQueued = false
-      if (!destroyed && canSync()) {
-        completedPeers.clear()
-        fillFanout()
+      if (schedulerPhase !== 'repull-queued') {
+        return
       }
+      schedulerPhase = 'active'
+      if (!canSync()) {
+        return
+      }
+      for (const [pid, state] of peerStates) {
+        switch (state.phase) {
+          case 'completed':
+            peerStates.delete(pid)
+            break
+          case 'in-flight':
+            if (!state.staleDigest) {
+              peerStates.set(pid, {...state, staleDigest: true})
+            }
+            break
+          case 'cooldown':
+            break
+          default:
+            unreachable(state)
+        }
+      }
+      fillFanout()
     })
   }
 
   const periodicTimer =
     periodicIntervalMs > 0
       ? setInterval(() => {
-          if (destroyed || !canSync() || inFlightPulls.size > 0) {
+          if (schedulerPhase === 'closed' || !canSync() || hasInFlight()) {
             return
           }
           let ranked = selectRankedPeers()
@@ -213,14 +350,16 @@ export const createAntiEntropySync = ({
   unrefTimer(periodicTimer)
 
   const destroy = (): void => {
-    destroyed = true
+    schedulerPhase = 'closed'
     if (periodicTimer !== undefined) {
       clearInterval(periodicTimer)
     }
-    inFlightPulls.forEach(pull => resetTimer(pull.timer))
-    inFlightPulls.clear()
-    cooldownUntil.clear()
-    completedPeers.clear()
+    for (const state of peerStates.values()) {
+      if (state.phase === 'in-flight') {
+        resetTimer(state.timer)
+      }
+    }
+    peerStates.clear()
   }
 
   return {
@@ -229,7 +368,7 @@ export const createAntiEntropySync = ({
     onPeerJoined,
     onPeerDisconnected,
     scheduleRepull,
-    isPullInFlight: peerId => inFlightPulls.has(peerId),
+    isPullInFlight: peerId => peerStates.get(peerId)?.phase === 'in-flight',
     destroy
   }
 }

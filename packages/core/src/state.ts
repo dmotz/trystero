@@ -11,7 +11,8 @@ import type {
   InternalAction,
   KernelRolesProvider,
   KernelScaleProvider,
-  TargetPeers
+  TargetPeers,
+  Timeout
 } from './internal-types'
 import {isValidSignalPeerId} from './signal-handler'
 import {
@@ -64,6 +65,7 @@ import {
   noOp,
   requiresRolesErr,
   toJson,
+  unreachable,
   unrefTimer,
   validateRoleCertificateShape
 } from './utils'
@@ -277,9 +279,26 @@ type PendingOp = {
   optimisticGen?: number
   prevalidatedJson?: string
   prevalidatedBytes?: number
+  urgent?: boolean
+  promise: Promise<void>
   resolve: () => void
   reject: (err: unknown) => void
 }
+
+type SlotFlushState =
+  | {readonly phase: 'idle'}
+  | {
+      readonly phase: 'pacing'
+      readonly flushPromise: Promise<void>
+      readonly wake: () => void
+    }
+  | {
+      readonly phase: 'stepping'
+      readonly flushPromise: Promise<void>
+      readonly stepPromise: Promise<void>
+      signingHlc: Hlc | null
+      readonly activeOps: PendingOp[]
+    }
 
 type SlotEntry = {
   rec: AuthoritativeStateRecord
@@ -301,12 +320,8 @@ type SlotBase = {
   clearListeners: () => void
   api: unknown
   ops: PendingOp[]
-  flushPromise: Promise<void> | null
-  stepPromise: Promise<void> | null
-  inFlightHlc: Hlc | null
+  flushState: SlotFlushState
   lastBroadcastAt: number
-  skipNextPace: boolean
-  wakePace: (() => void) | null
 }
 
 type SharedSlot = SlotBase & {
@@ -386,6 +401,7 @@ export type StateManager = {
     payload: {p: Record<string, string>; r: unknown[]},
     onReady?: () => void
   ) => Promise<void>
+  setUserPresence: (userId: string, online: boolean) => void
   onPeerJoined: (peerId: string, userId: string, isDirect: boolean) => void
   onPeerDisconnected: (peerId: string) => void
   onUserLeft: (userId: string) => void
@@ -523,6 +539,8 @@ export const createStateManager = ({
     string,
     Map<string, StagedUserItem>
   >(128)
+  const onlineEpoch = new Map<string, number>()
+  const activeOnlineUsers = new Set<string>()
   const pendingJoinWaiters = new Map<
     string,
     {promise: Promise<boolean>; resolve: (ok: boolean) => void; count: number}
@@ -530,6 +548,64 @@ export const createStateManager = ({
   const clock = createMonotonicClock()
 
   let destroyed = false
+  const isDestroyed = (): boolean => destroyed
+
+  const isPeerLiveOrPending = (peerId: string): boolean =>
+    isPeerActive(peerId) || Boolean(isPeerPendingHandshake?.(peerId))
+
+  const getOnlineEpoch = (uid: string): number => onlineEpoch.get(uid) ?? 0
+
+  const bumpOnlineEpoch = (uid: string): void => {
+    if (!uid) {
+      return
+    }
+    const next = getOnlineEpoch(uid) + 1
+    if (!onlineEpoch.has(uid) && onlineEpoch.size >= 4_096) {
+      for (const k of onlineEpoch.keys()) {
+        if (!activeOnlineUsers.has(k) && !isUserOnline(k)) {
+          onlineEpoch.delete(k)
+          break
+        }
+      }
+    }
+    onlineEpoch.set(uid, next)
+  }
+
+  const setUserPresence = (userId: string, online: boolean): void => {
+    if (isDestroyed() || !userId) {
+      return
+    }
+    if (online) {
+      if (!activeOnlineUsers.has(userId)) {
+        activeOnlineUsers.add(userId)
+        bumpOnlineEpoch(userId)
+      }
+    } else if (activeOnlineUsers.delete(userId)) {
+      bumpOnlineEpoch(userId)
+    }
+  }
+
+  const setSlotOptimistic = (slot: Slot, next: OptimisticLocalState): void => {
+    slot.optimistic = next
+    slot.snapshot = null
+  }
+
+  const clearSlotOptimistic = (slot: Slot): void => {
+    if (slot.optimistic !== null) {
+      slot.optimistic = null
+      slot.snapshot = null
+    }
+  }
+
+  const enqueuePendingOp = (
+    slot: Slot,
+    fields: Omit<PendingOp, 'promise' | 'resolve' | 'reject'>
+  ): Promise<void> => {
+    const {promise, resolve, reject} = Promise.withResolvers<void>()
+    slot.ops.push({...fields, promise, resolve, reject})
+    void flushSlot(slot)
+    return promise
+  }
 
   const isScaleActive = (): boolean => Boolean(getScaleProvider?.())
 
@@ -571,7 +647,7 @@ export const createStateManager = ({
     } catch {
       return null
     }
-    return destroyed || !isPeerActive(peerId) || isPeerBanned(peerId)
+    return isDestroyed() || !isPeerActive(peerId) || isPeerBanned(peerId)
       ? null
       : roomId
   }
@@ -824,6 +900,9 @@ export const createStateManager = ({
     allowStageOffline = false,
     silentCommit = false
   ): SlotEntry | null => {
+    if (isDestroyed()) {
+      return null
+    }
     const key = slot.kind === 's' ? '' : rec.userId
     if (slot.kind === 'u' && !isUserOnline(key)) {
       if (allowStageOffline) {
@@ -846,10 +925,10 @@ export const createStateManager = ({
       isLocalTarget &&
       slot.optimistic !== null &&
       (slot.ops.length > 0 ||
-        (slot.stepPromise !== null &&
+        (slot.flushState.phase === 'stepping' &&
           compareHlc(
             rec.hlc,
-            slot.inFlightHlc ?? [slot.optimistic.timestamp, 0]
+            slot.flushState.signingHlc ?? [slot.optimistic.timestamp, 0]
           ) <= 0)) &&
       rec.hlc[0] <= Date.now() + stateMaxFutureSkewMs
 
@@ -869,8 +948,8 @@ export const createStateManager = ({
         slot.optimistic!.prev = slot.initialValue
         return next
       }
-      if (!skipValidate && isLocalTarget && slot.optimistic !== null) {
-        slot.optimistic = null
+      if (!skipValidate && isLocalTarget) {
+        clearSlotOptimistic(slot)
       }
       slot.snapshot = null
       if (!silentCommit && curLive) {
@@ -918,8 +997,8 @@ export const createStateManager = ({
         slot.optimistic!.prev = nextVal
         return next
       }
-      if (!skipValidate && slot.optimistic !== null) {
-        slot.optimistic = null
+      if (!skipValidate) {
+        clearSlotOptimistic(slot)
       }
       slot.snapshot = null
       if (!silentCommit) {
@@ -955,8 +1034,8 @@ export const createStateManager = ({
       slot.optimistic!.prev = nextVal
       return next
     }
-    if (!skipValidate && isLocalTarget && slot.optimistic !== null) {
-      slot.optimistic = null
+    if (!skipValidate && isLocalTarget) {
+      clearSlotOptimistic(slot)
     }
     slot.snapshot = null
     if (!silentCommit) {
@@ -968,12 +1047,23 @@ export const createStateManager = ({
     return next
   }
 
+  type UserIngressSnapshot = {
+    readonly startedOnline: boolean
+    readonly startEpoch: number
+  }
+
+  const captureUserIngress = (uid: string): UserIngressSnapshot => ({
+    startedOnline: isUserOnline(uid),
+    startEpoch: getOnlineEpoch(uid)
+  })
+
   const applyIncoming = async (
     rawRec: AuthoritativeStateRecord,
     fromPeerId: string | undefined,
-    allowStageOffline = false
+    allowStageOffline = false,
+    ingressSnapshot?: UserIngressSnapshot
   ): Promise<SlotEntry | null> => {
-    if (destroyed) {
+    if (isDestroyed()) {
       return null
     }
     const parsed = validateAndMeasureRecord(rawRec, maxAllowedStateBytes)
@@ -992,7 +1082,11 @@ export const createStateManager = ({
       return null
     }
     const entryKey = slot.kind === 's' ? '' : parsed.rec.userId
-    if (slot.kind === 's' || isUserOnline(entryKey)) {
+    const {startedOnline, startEpoch} =
+      slot.kind === 'u'
+        ? (ingressSnapshot ?? captureUserIngress(entryKey))
+        : {startedOnline: true, startEpoch: 0}
+    if (slot.kind === 's' || startedOnline) {
       const curRaw = slot.entries.get(entryKey)
       if (curRaw && compareStateRecords(parsed.rec, curRaw.rec) <= 0) {
         return null
@@ -1007,12 +1101,29 @@ export const createStateManager = ({
       slot.requiredRoles,
       fromPeerId
     )
+    if (isDestroyed()) {
+      return null
+    }
     if (verified === 'invalid') {
       onInvalidRecord?.(fromPeerId)
       return null
     }
-    if (verified === 'drop') {
+    if (verified === 'drop' || isPeerBanned(verified.rec.userId)) {
       return null
+    }
+    if (slot.kind === 'u') {
+      const curEpoch = getOnlineEpoch(entryKey)
+      if (startedOnline) {
+        if (curEpoch !== startEpoch) {
+          return null
+        }
+      } else {
+        const joinedOnceWithoutLeaving =
+          isUserOnline(entryKey) && curEpoch === startEpoch + 1
+        if (curEpoch !== startEpoch && !joinedOnceWithoutLeaving) {
+          return null
+        }
+      }
     }
     return commitEntry(
       slot,
@@ -1020,7 +1131,9 @@ export const createStateManager = ({
       verified.roles,
       verified.bytes,
       false,
-      allowStageOffline
+      allowStageOffline &&
+        !startedOnline &&
+        getOnlineEpoch(entryKey) === startEpoch
     )
   }
 
@@ -1069,7 +1182,7 @@ export const createStateManager = ({
     nextCursor?: string,
     forwarded = false
   ): void => {
-    if (!stateAction || destroyed || !isPeerActive(peerId)) {
+    if (!stateAction || isDestroyed() || !isPeerActive(peerId)) {
       return
     }
     const sendSyncMsg = (
@@ -1114,7 +1227,9 @@ export const createStateManager = ({
     if (curR.length > 0) {
       chunks.push([curP, curR])
     }
-    chunks.forEach(([p, r], i) => sendSyncMsg(p, r, i === chunks.length - 1))
+    chunks.forEach(([p, r], i) => {
+      sendSyncMsg(p, r, i === chunks.length - 1)
+    })
   }
 
   const forwardAppliedToDirectOthers = (
@@ -1140,7 +1255,7 @@ export const createStateManager = ({
     getDirectPeers: getDirectPeerIds,
     isPeerSendable: isDirectSendable,
     sendPull: async (peerId, cursor) => {
-      if (!stateAction || destroyed || !isDirectSendable(peerId)) {
+      if (!stateAction || isDestroyed() || !isDirectSendable(peerId)) {
         return
       }
       const msg: StateControlMessage = {
@@ -1167,7 +1282,7 @@ export const createStateManager = ({
     }
 
     stateAction.onMessage((raw, {peerId: fromPeerId}) => {
-      if (destroyed || isPeerBanned(fromPeerId) || !isObj(raw)) {
+      if (isDestroyed() || isPeerBanned(fromPeerId) || !isObj(raw)) {
         return
       }
       const msg = raw as unknown as StateControlMessage
@@ -1175,6 +1290,9 @@ export const createStateManager = ({
         if (!liveRateLimiter.consume(fromPeerId)) {
           return
         }
+        const rawUid =
+          isObj(msg.r) && isStr(msg.r['userId']) ? msg.r['userId'] : undefined
+        const ingress = rawUid ? captureUserIngress(rawUid) : undefined
         runWhenReady(fromPeerId, async roomId => {
           const rec = fromWireRecord(msg.r, appId, roomId)
           if (!rec) {
@@ -1188,7 +1306,7 @@ export const createStateManager = ({
               return
             }
           }
-          await applyIncoming(rec, fromPeerId, true)
+          await applyIncoming(rec, fromPeerId, true, ingress)
         })
         return
       }
@@ -1313,11 +1431,24 @@ export const createStateManager = ({
           antiEntropy.onSyncPage(fromPeerId, msg.n)
         }
         const pubMap = msg.p as Record<string, unknown>
+        const ingressByUid = new Map<string, UserIngressSnapshot>()
+        for (const wireRec of msg.r) {
+          if (
+            isObj(wireRec) &&
+            wireRec['k'] === 'u' &&
+            isStr(wireRec['userId'])
+          ) {
+            const uid = wireRec['userId']
+            if (!ingressByUid.has(uid)) {
+              ingressByUid.set(uid, captureUserIngress(uid))
+            }
+          }
+        }
 
         runWhenReady(fromPeerId, async roomId => {
           const newlyApplied: AuthoritativeStateRecord[] = []
           for (const wireRec of msg.r) {
-            if (destroyed || isPeerBanned(fromPeerId)) {
+            if (isDestroyed() || isPeerBanned(fromPeerId)) {
               return
             }
             const fullRec = fromWireRecord(wireRec, appId, roomId, pubMap)
@@ -1325,7 +1456,12 @@ export const createStateManager = ({
               onInvalidRecord?.(fromPeerId)
               return
             }
-            const applied = await applyIncoming(fullRec, fromPeerId, true)
+            const applied = await applyIncoming(
+              fullRec,
+              fromPeerId,
+              true,
+              fullRec.k === 'u' ? ingressByUid.get(fullRec.userId) : undefined
+            )
             if (applied) {
               newlyApplied.push(applied.rec)
             }
@@ -1354,6 +1490,12 @@ export const createStateManager = ({
     return [null, [...getPeerRoles(uid)]]
   }
 
+  const resolveOps = (ops: PendingOp[]): void => {
+    for (const op of ops) {
+      op.resolve()
+    }
+  }
+
   const rejectOps = (ops: PendingOp[], err: unknown): void => {
     for (const op of ops) {
       op.reject(err)
@@ -1365,8 +1507,7 @@ export const createStateManager = ({
       return
     }
     const prevOpt = slot.optimistic
-    slot.optimistic = null
-    slot.snapshot = null
+    clearSlotOptimistic(slot)
     const now = Date.now()
     const selfId = getSelfId()
     const roles = uid ? [...getPeerRoles(uid)] : []
@@ -1403,32 +1544,18 @@ export const createStateManager = ({
     }
   }
 
-  const waitForSlotPace = (slot: Slot): Promise<void> | void => {
-    if (
-      slot.skipNextPace ||
-      !Number.isFinite(slot.lastBroadcastAt) ||
-      destroyed
-    ) {
-      slot.skipNextPace = false
+  const settleAbortedOrFailedBatch = (
+    slot: Slot,
+    ops: PendingOp[],
+    err: unknown,
+    uid: string
+  ): void => {
+    if (isDestroyed()) {
+      resolveOps(ops)
       return
     }
-    const waitMs = Math.min(
-      minSlotBroadcastIntervalMs,
-      minSlotBroadcastIntervalMs - (performance.now() - slot.lastBroadcastAt)
-    )
-    if (waitMs <= 0) {
-      return
-    }
-    return new Promise<void>(resolve => {
-      const finish = (): void => {
-        slot.wakePace = null
-        clearTimeout(timer)
-        resolve()
-      }
-      const timer = setTimeout(finish, waitMs)
-      unrefTimer(timer)
-      slot.wakePace = finish
-    })
+    rollbackOptimisticIfIdle(slot, uid)
+    rejectOps(ops, err)
   }
 
   const measureErr = (slot: Slot, cand: JsonValue, code: 0 | 1): Error =>
@@ -1439,23 +1566,68 @@ export const createStateManager = ({
         )
 
   const flushSlot = (slot: Slot): Promise<void> => {
-    if (slot.flushPromise) {
-      return slot.flushPromise
+    switch (slot.flushState.phase) {
+      case 'pacing':
+      case 'stepping':
+        return slot.flushState.flushPromise
+      case 'idle':
+        break
+      default:
+        return unreachable(slot.flushState)
     }
-    const p = (async () => {
+
+    const {promise: flushPromise, resolve: doneFlush} =
+      Promise.withResolvers<void>()
+
+    void (async () => {
       try {
-        while (slot.ops.length > 0) {
-          const paceWait = waitForSlotPace(slot)
-          if (paceWait) {
-            await paceWait
+        while (!isDestroyed() && slot.ops.length > 0) {
+          const skipPace =
+            slot.ops.some(op => Boolean(op.urgent)) ||
+            !Number.isFinite(slot.lastBroadcastAt) ||
+            isDestroyed()
+          if (!skipPace) {
+            const waitMs = Math.min(
+              minSlotBroadcastIntervalMs,
+              minSlotBroadcastIntervalMs -
+                (performance.now() - slot.lastBroadcastAt)
+            )
+            if (waitMs > 0) {
+              await new Promise<void>(resolve => {
+                let finished = false
+                const finish = (): void => {
+                  if (finished) {
+                    return
+                  }
+                  finished = true
+                  clearTimeout(timer)
+                  resolve()
+                }
+                const timer = setTimeout(finish, waitMs)
+                unrefTimer(timer)
+                slot.flushState = {
+                  phase: 'pacing',
+                  flushPromise,
+                  wake: finish
+                }
+              })
+            }
           }
-          if (slot.ops.length === 0) {
+          if (isDestroyed() || slot.ops.length === 0) {
             break
           }
 
           const {promise: stepPromise, resolve: doneStep} =
             Promise.withResolvers<void>()
-          slot.stepPromise = stepPromise
+          const stepState: Extract<SlotFlushState, {phase: 'stepping'}> = {
+            phase: 'stepping',
+            flushPromise,
+            stepPromise,
+            signingHlc: null,
+            activeOps: []
+          }
+          slot.flushState = stepState
+
           try {
             let readySelfId: string
             let readyUser: UserIdentity
@@ -1468,16 +1640,28 @@ export const createStateManager = ({
                 user: readyUser,
                 roomId: readyRoomId
               } = await ensureReady())
+              if (isDestroyed()) {
+                resolveOps(slot.ops.splice(0))
+                break
+              }
               ;[authCert, authRoles] = await obtainWriteAuth(
                 slot.requiredRoles,
                 slot.namespace,
                 readyUser.userId
               )
             } catch (err) {
-              const failed = slot.ops.splice(0)
-              rollbackOptimisticIfIdle(slot, getLocalUserId())
-              rejectOps(failed, err)
+              settleAbortedOrFailedBatch(
+                slot,
+                slot.ops.splice(0),
+                err,
+                getLocalUserId()
+              )
               continue
+            }
+
+            if (isDestroyed()) {
+              resolveOps(slot.ops.splice(0))
+              break
             }
 
             if (authCert) {
@@ -1488,6 +1672,7 @@ export const createStateManager = ({
             if (!remainingOps.length) {
               continue
             }
+            stepState.activeOps.push(...remainingOps)
             const uid = readyUser.userId
             const entryKey = slot.kind === 's' ? '' : uid
 
@@ -1496,6 +1681,11 @@ export const createStateManager = ({
               attempt < maxFlushRetries && remainingOps.length > 0;
               attempt++
             ) {
+              if (isDestroyed()) {
+                resolveOps(remainingOps)
+                remainingOps = []
+                break
+              }
               const curRaw = slot.entries.get(entryKey)
               const curLive = curRaw && !curRaw.rec.del ? curRaw : undefined
               let simVal = curLive ? curLive.value : slot.initialValue
@@ -1626,7 +1816,7 @@ export const createStateManager = ({
                   minHlcVal,
                   allowedSkewMs
                 )
-                slot.inFlightHlc = nextHlcVal
+                stepState.signingHlc = nextHlcVal
                 rec = await signStateRecord(
                   readyUser.sign,
                   readyUser.signPubJwk,
@@ -1644,19 +1834,16 @@ export const createStateManager = ({
                   finalCanonJson
                 )
               } catch (err) {
-                rollbackOptimisticIfIdle(slot, uid)
-                rejectOps(accepted, err)
+                settleAbortedOrFailedBatch(slot, accepted, err, uid)
                 remainingOps = []
                 break
               } finally {
-                slot.inFlightHlc = null
+                stepState.signingHlc = null
               }
 
-              if (destroyed) {
-                slot.optimistic = null
-                for (const op of accepted) {
-                  op.resolve()
-                }
+              if (isDestroyed()) {
+                clearSlotOptimistic(slot)
+                resolveOps(accepted)
                 remainingOps = []
                 break
               }
@@ -1680,9 +1867,7 @@ export const createStateManager = ({
                   continue
                 }
                 rollbackOptimisticIfIdle(slot, uid)
-                for (const op of accepted) {
-                  op.resolve()
-                }
+                resolveOps(accepted)
                 remainingOps = []
                 break
               }
@@ -1695,7 +1880,7 @@ export const createStateManager = ({
                 slot.optimistic !== null &&
                 slot.optimistic.gen > lastGen
               if (wasCurrentOptimistic) {
-                slot.optimistic = null
+                clearSlotOptimistic(slot)
               }
               if (
                 commitEntry(
@@ -1711,33 +1896,33 @@ export const createStateManager = ({
                 slot.lastBroadcastAt = performance.now()
                 broadcastLiveRecord(rec)
               }
-              for (const op of accepted) {
-                op.resolve()
-              }
+              resolveOps(accepted)
               remainingOps = []
               break
             }
 
             if (remainingOps.length > 0) {
-              rollbackOptimisticIfIdle(slot, uid)
-              rejectOps(
+              settleAbortedOrFailedBatch(
+                slot,
                 remainingOps,
                 mkErr(
                   `concurrent state contention exceeded for "${slot.namespace}"`
-                )
+                ),
+                uid
               )
             }
           } finally {
-            slot.stepPromise = null
+            stepState.activeOps.length = 0
             doneStep()
           }
         }
       } finally {
-        slot.flushPromise = null
+        slot.flushState = {phase: 'idle'}
+        doneFlush()
       }
     })()
-    slot.flushPromise = p
-    return p
+
+    return flushPromise
   }
 
   const getEffectiveLocalValue = (slot: Slot): JsonValue => {
@@ -1756,7 +1941,7 @@ export const createStateManager = ({
   const resolveOptimisticMode = (
     slot: Slot
   ): 'noop' | 'sync' | 'defer' | Error => {
-    if (destroyed) {
+    if (isDestroyed()) {
       return 'noop'
     }
     const localUid = getLocalUserId()
@@ -1804,10 +1989,7 @@ export const createStateManager = ({
       return Promise.reject(mode)
     }
     if (mode === 'defer') {
-      return new Promise<void>((resolve, reject) => {
-        slot.ops.push({del, next, resolve, reject})
-        void flushSlot(slot)
-      })
+      return enqueuePendingOp(slot, {del, next})
     }
 
     const localUid = getLocalUserId()
@@ -1824,15 +2006,14 @@ export const createStateManager = ({
         ? !slot.optimistic.del
         : Boolean(localUid && getLiveEntry(slot, localUid))
       const gen = ++slot.optGen
-      slot.optimistic = {
+      setSlotOptimistic(slot, {
         gen,
         del: true,
         value: slot.initialValue,
         prev: prevVal,
         bytes: tombstoneBytes,
         timestamp: now
-      }
-      slot.snapshot = null
+      })
       if (wasLive && slot.kind === 'u') {
         slot.emit(undefined, {
           ...mkCtxBase(prevVal, selfId, localUid, roles, now),
@@ -1841,16 +2022,11 @@ export const createStateManager = ({
           removed: true
         })
       }
-      return new Promise<void>((resolve, reject) => {
-        slot.ops.push({
-          del: true,
-          next: undefined,
-          optimisticGen: gen,
-          prevalidatedBytes: tombstoneBytes,
-          resolve,
-          reject
-        })
-        void flushSlot(slot)
+      return enqueuePendingOp(slot, {
+        del: true,
+        next: undefined,
+        optimisticGen: gen,
+        prevalidatedBytes: tombstoneBytes
       })
     }
 
@@ -1893,15 +2069,14 @@ export const createStateManager = ({
     }
 
     const gen = ++slot.optGen
-    slot.optimistic = {
+    setSlotOptimistic(slot, {
       gen,
       del: false,
       value: cand,
       prev: prevVal,
       bytes,
       timestamp: now
-    }
-    slot.snapshot = null
+    })
     if (slot.kind === 's') {
       slot.emit(cand, baseCtx)
     } else {
@@ -1914,19 +2089,14 @@ export const createStateManager = ({
     }
     const curEntryKey = slot.kind === 's' ? '' : localUid
     const baseSig = slot.entries.get(curEntryKey)?.rec.sig
-    return new Promise<void>((resolve, reject) => {
-      slot.ops.push({
-        del: false,
-        next: cand,
-        ...(typeof next === 'function' ? {updater: next} : {}),
-        ...(baseSig !== undefined ? {baseSig} : {}),
-        optimisticGen: gen,
-        prevalidatedJson: json,
-        prevalidatedBytes: bytes,
-        resolve,
-        reject
-      })
-      void flushSlot(slot)
+    return enqueuePendingOp(slot, {
+      del: false,
+      next: cand,
+      ...(typeof next === 'function' ? {updater: next} : {}),
+      ...(baseSig !== undefined ? {baseSig} : {}),
+      optimisticGen: gen,
+      prevalidatedJson: json,
+      prevalidatedBytes: bytes
     })
   }
 
@@ -1948,18 +2118,16 @@ export const createStateManager = ({
     clearListeners,
     api: null,
     ops: [],
-    flushPromise: null,
-    stepPromise: null,
-    inFlightHlc: null,
-    lastBroadcastAt: -Infinity,
-    skipNextPace: false,
-    wakePace: null
+    flushState: {phase: 'idle'},
+    lastBroadcastAt: -Infinity
   })
 
   const registerSlot = <T>(mapKey: string, slot: Slot, api: T): T => {
     slot.api = api
-    slots.set(mapKey, slot)
-    antiEntropy.scheduleRepull()
+    if (!isDestroyed()) {
+      slots.set(mapKey, slot)
+      antiEntropy.scheduleRepull()
+    }
     return api
   }
 
@@ -2222,7 +2390,7 @@ export const createStateManager = ({
   const prepareHandshakeReady = (
     peerId: string
   ): Promise<HandshakeStatePayload | undefined> | undefined => {
-    if (destroyed) {
+    if (isDestroyed() || !isPeerLiveOrPending(peerId) || isPeerBanned(peerId)) {
       return undefined
     }
     const localUid = getLocalUserId()
@@ -2230,7 +2398,7 @@ export const createStateManager = ({
     for (const slot of slots.values()) {
       if (
         slot.kind === 'u' &&
-        (slot.stepPromise ||
+        (slot.flushState.phase !== 'idle' ||
           slot.ops.length > 0 ||
           Boolean(localUid && getLiveEntry(slot, localUid)))
       ) {
@@ -2245,21 +2413,38 @@ export const createStateManager = ({
       try {
         const steps: Promise<void>[] = []
         for (const slot of slots.values()) {
-          if (slot.kind === 'u') {
-            if (slot.ops.length > 0) {
-              slot.skipNextPace = true
-              slot.wakePace?.()
-              if (!slot.stepPromise) {
+          if (slot.kind !== 'u') {
+            continue
+          }
+          const hasQueuedOps = slot.ops.length > 0
+          if (hasQueuedOps) {
+            for (const op of slot.ops) {
+              op.urgent = true
+              steps.push(op.promise.then(noOp, noOp))
+            }
+          }
+          switch (slot.flushState.phase) {
+            case 'pacing':
+              if (hasQueuedOps) {
+                slot.flushState.wake()
+              }
+              break
+            case 'idle':
+              if (hasQueuedOps) {
                 void flushSlot(slot)
               }
-            }
-            if (slot.stepPromise) {
-              steps.push(slot.stepPromise)
-            }
+              break
+            case 'stepping':
+              if (!hasQueuedOps) {
+                steps.push(slot.flushState.stepPromise)
+              }
+              break
+            default:
+              unreachable(slot.flushState)
           }
         }
         if (steps.length > 0) {
-          let timer: ReturnType<typeof setTimeout> | undefined
+          let timer: Timeout | undefined
           await Promise.race([
             Promise.allSettled(steps),
             new Promise<void>(r => {
@@ -2272,7 +2457,12 @@ export const createStateManager = ({
           }
         }
         const uid = getLocalUserId()
-        if (!uid || destroyed || isPeerBanned(peerId)) {
+        if (
+          !uid ||
+          isDestroyed() ||
+          !isPeerLiveOrPending(peerId) ||
+          isPeerBanned(peerId)
+        ) {
           return undefined
         }
         const p: Record<string, string> = {}
@@ -2309,6 +2499,9 @@ export const createStateManager = ({
     })()
   }
 
+  const shouldAbortStaging = (peerId: string): boolean =>
+    isDestroyed() || !isPeerLiveOrPending(peerId) || isPeerBanned(peerId)
+
   const stageHandshakeUserState = async (
     fromPeerId: string,
     payload: {p: Record<string, string>; r: unknown[]},
@@ -2319,8 +2512,8 @@ export const createStateManager = ({
         !isObj(payload.p) ||
         !Array.isArray(payload.r) ||
         payload.r.length > maxUserStateNamespacesPerUser
-      if (destroyed || isPeerBanned(fromPeerId) || badShape) {
-        if (!destroyed && badShape) {
+      if (shouldAbortStaging(fromPeerId) || badShape) {
+        if (!isDestroyed() && badShape) {
           onInvalidRecord?.(fromPeerId)
         }
         return
@@ -2331,13 +2524,16 @@ export const createStateManager = ({
       } catch {
         return
       }
+      if (shouldAbortStaging(fromPeerId)) {
+        return
+      }
       const pubMap = payload.p as Record<string, unknown>
       const knownUid = getKnownPeerUserId(fromPeerId)
       const staged: StagedUserItem[] = []
       let totalBytes = 0
       const now = Date.now()
       for (const wireRec of payload.r) {
-        if (destroyed || isPeerBanned(fromPeerId)) {
+        if (shouldAbortStaging(fromPeerId)) {
           return
         }
         const rec = fromWireRecord(wireRec, appId, roomId, pubMap)
@@ -2361,6 +2557,9 @@ export const createStateManager = ({
           slot.requiredRoles,
           fromPeerId
         )
+        if (shouldAbortStaging(fromPeerId)) {
+          return
+        }
         if (res === 'invalid') {
           onInvalidRecord?.(fromPeerId)
           return
@@ -2380,7 +2579,7 @@ export const createStateManager = ({
           seenAt: now
         })
       }
-      if (!destroyed && !isPeerBanned(fromPeerId) && staged.length > 0) {
+      if (!shouldAbortStaging(fromPeerId) && staged.length > 0) {
         stagedHandshake.set(fromPeerId, staged)
       }
     } finally {
@@ -2393,7 +2592,7 @@ export const createStateManager = ({
     alreadySent?: ReadonlySet<string>
   ): void => {
     const localUid = getLocalUserId()
-    if (!localUid || !stateAction) {
+    if (!localUid || !stateAction || isDestroyed()) {
       return
     }
     const localRecords: AuthoritativeStateRecord[] = []
@@ -2425,7 +2624,7 @@ export const createStateManager = ({
     userId: string,
     isDirect: boolean
   ): void => {
-    if (destroyed) {
+    if (isDestroyed()) {
       return
     }
     const alreadySent = sentHandshakeSigs.get(peerId)
@@ -2488,7 +2687,7 @@ export const createStateManager = ({
   }
 
   const onUserLeft = (userId: string): void => {
-    if (destroyed || isUserOnline(userId)) {
+    if (isDestroyed() || isUserOnline(userId)) {
       return
     }
     pendingOfflineUserRecs.delete(userId)
@@ -2504,17 +2703,17 @@ export const createStateManager = ({
   }
 
   const purgeBannedUser = (bannedUid: string): void => {
-    if (destroyed) {
+    if (isDestroyed()) {
       return
     }
+    setUserPresence(bannedUid, false)
     pendingOfflineUserRecs.delete(bannedUid)
     const localUid = getLocalUserId()
     const now = Date.now()
     let evictedShared = false
     for (const slot of slots.values()) {
-      if (localUid && bannedUid === localUid && slot.optimistic) {
-        slot.optimistic = null
-        slot.snapshot = null
+      if (localUid && bannedUid === localUid) {
+        clearSlotOptimistic(slot)
       }
       const key = slot.kind === 's' ? '' : bannedUid
       const entry = slot.entries.get(key)
@@ -2531,17 +2730,38 @@ export const createStateManager = ({
   }
 
   const destroy = (): void => {
+    if (destroyed) {
+      return
+    }
     destroyed = true
     antiEntropy.destroy()
     stagedHandshake.clear()
     sentHandshakeSigs.clear()
     pendingOfflineUserRecs.clear()
+    activeOnlineUsers.clear()
+    onlineEpoch.clear()
     liveRateLimiter.clear()
     pendingJoinWaiters.forEach(waiter => waiter.resolve(false))
     pendingJoinWaiters.clear()
     slots.forEach(slot => {
-      slot.optimistic = null
-      slot.wakePace?.()
+      clearSlotOptimistic(slot)
+      const queuedOps = slot.ops.splice(0)
+      let inFlightOps: PendingOp[] = []
+      switch (slot.flushState.phase) {
+        case 'pacing':
+          slot.flushState.wake()
+          slot.flushState = {phase: 'idle'}
+          break
+        case 'stepping':
+          inFlightOps = slot.flushState.activeOps.splice(0)
+          break
+        case 'idle':
+          break
+        default:
+          unreachable(slot.flushState)
+      }
+      resolveOps(inFlightOps)
+      resolveOps(queuedOps)
       slot.clearListeners()
     })
   }
@@ -2553,6 +2773,7 @@ export const createStateManager = ({
       Boolean(await applyIncoming(rec, fromPeerId)),
     prepareHandshakeReady,
     stageHandshakeUserState,
+    setUserPresence,
     onPeerJoined,
     onPeerDisconnected,
     onUserLeft,
