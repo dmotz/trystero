@@ -37,6 +37,7 @@ npm i trystero
   import {joinRoom} from 'https://esm.run/trystero'
 </script>
 ```
+
 </details>
 
 Join a room with a unique app ID and room name and start syncing state. Here's a
@@ -309,6 +310,45 @@ room.makeState('pattern', {bpm: 120, steps: []})
 ```
 
 👉 **[Running in Node, Bun & Deno guide →](./docs/server-side.md)**
+
+---
+
+## How does Trystero connect users with no backend?
+
+WebRTC lets browsers talk directly to each other, peer-to-peer, without routing
+traffic through a central server. The one catch with WebRTC has always been
+_signaling_: two browsers need a brief introduction to swap connection info
+before they can link up.
+
+Trystero handles that introduction automatically out of the box using public
+relays — nothing to deploy or configure. Once peers connect, **your app's data
+never touches a relay**: state, messages, files, and media flow straight from
+browser to browser, end-to-end encrypted.
+
+Prefer to run your own signaling relay with Supabase, Firebase, MQTT,
+BitTorrent, or a tiny self-hosted WebSocket relay? You can swap strategies with
+a one-line import change — see the
+**[Signaling & Relays guide](./docs/signaling.md)**.
+
+<details>
+  <summary>Peek under the hood: how serverless discovery and security work</summary>
+
+- **Encrypted signaling**: Connection offers (SDPs) are encrypted with
+  AES-256-GCM before touching any relay. Adding a room `password` derives the
+  key via WebCrypto `PBKDF2-SHA256` (600,000 iterations) so outsiders and relay
+  operators can't read handshakes or join the room.
+- **Self-certifying identities**: Every user (`userId`) and browser tab
+  (`peerId`) is derived from a WebCrypto ECDSA P-256 public keypair. During
+  connection setup, peers verify each other's keys against the WebRTC DTLS
+  certificate fingerprint
+  ([RFC 8827](https://www.rfc-editor.org/rfc/rfc8827.html)), preventing spoofing
+  and man-in-the-middle relays.
+- **Signed state & roles**: Updates to `makeUserState`, `makeState`, and
+  `roles()` carry cryptographic signatures and Hybrid Logical Clock timestamps,
+  allowing peers (including late joiners) to verify who wrote what without a
+  central server.
+
+</details>
 
 ---
 
