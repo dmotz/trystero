@@ -1,5 +1,5 @@
 import {signRoomAuth} from '../crypto'
-import type {PeerHandle} from '../internal-types'
+import type {PeerHandle, Timeout} from '../internal-types'
 import type {PeerDataTransport} from '../peer-transport'
 import {isValidSignalPeerId} from '../signal-handler'
 import {createTokenBucketLimiter} from '../signed-record'
@@ -14,6 +14,7 @@ import {
   peerDisconnectedErr,
   resetTimer,
   toJson,
+  unreachable,
   unrefTimer
 } from '../utils'
 import {isPeerUsable} from './crypto-frame'
@@ -34,6 +35,24 @@ const isolatedDialGraceMs = 1_500
 export const defaultRequiredPeerIdleTtlMs = 60_000
 export const defaultQuarantineTtlMs = 30_000
 
+type VirtualPeerState =
+  | {readonly phase: 'none'}
+  | {readonly phase: 'routed-awaiting-descriptor'}
+  | {readonly phase: 'capacity-rejected'}
+  | {readonly phase: 'active'; readonly transport: PeerDataTransport}
+
+type OverlayPeer = {
+  readonly state: VirtualPeerState
+  readonly hadRoute: boolean
+  readonly grace: Timeout | null
+}
+
+const idlePeer: OverlayPeer = {
+  state: {phase: 'none'},
+  hadRoute: false,
+  grace: null
+}
+
 export type OverlayRouterDeps = {
   appId: string
   password: string
@@ -51,6 +70,9 @@ export type OverlayRouterDeps = {
   getDirectPeerCount: () => number
   isPeerBanned: (peerId: string) => boolean
   createVirtualTransport: (peerId: string) => PeerDataTransport
+  onVirtualTransportDetached?:
+    | ((peerId: string, transport: PeerDataTransport) => void)
+    | undefined
   onVirtualPeerJoin: (peerId: string, transport: PeerDataTransport) => unknown
   onVirtualPeerLeave: (peerId: string, reason?: Error) => void
   onVirtualPeerReady?: ((peerId: string) => void) | undefined
@@ -123,68 +145,81 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     getDirectPeerCount,
     isPeerBanned,
     createVirtualTransport,
+    onVirtualTransportDetached,
     onVirtualPeerJoin,
     onVirtualPeerLeave,
     onVirtualPeerReady
   } = deps
 
-  const virtualTransports = new Map<string, PeerDataTransport>()
-  const capacityRejectedPeers = new Set<string>()
-  const hadRoutePeers = new Set<string>()
+  const peers = new Map<string, OverlayPeer>()
+  const virtualTransportsView = new Map<string, PeerDataTransport>()
   const everConfirmedNeighbors = new Map<string, Set<string>>()
-  const unreachableTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const discoveredCandidates = createBoundedCache<string, true>(
     maxDiscoveredCandidates
   )
   const quarantinedPeers = createBoundedCache<string, number>(
     maxDiscoveredCandidates
   )
-  const localRequiredPeers = new Map<string, number>()
-  const mediaPinnedPeers = new Set<string>()
+  const directRequirements = new Map<string, number>()
   const connectLimiter = createTokenBucketLimiter(0.5, 2, 512)
 
   let routes: Record<string, TopologyRoute> = {}
   let topologyVersion = 0
   let hasCompletedInitialBootstrap = false
   let firstDiscoveryAt = 0
+  let derivedSalt = ''
+  let saltToken = 0
+  let isRecomputing = false
+
   let cachedTargetsVersion = -1
   let cachedEffectiveTargets: Set<string> | null = null
   let targetsChangedCallback: ((targetPeerIds: string[]) => void) | null = null
   let targetsNotifyScheduled = false
 
-  let passwordTopologySalt = ''
-  let passwordSaltToken = 0
+  const setPeer = (peerId: string, patch: Partial<OverlayPeer>): void => {
+    const prev = peers.get(peerId) ?? idlePeer
+    const next: OverlayPeer = {...prev, ...patch}
+    if (prev.grace && prev.grace !== next.grace) {
+      resetTimer(prev.grace)
+    }
+    switch (next.state.phase) {
+      case 'active':
+        virtualTransportsView.set(peerId, next.state.transport)
+        break
+      case 'none':
+      case 'routed-awaiting-descriptor':
+      case 'capacity-rejected':
+        virtualTransportsView.delete(peerId)
+        break
+      default:
+        unreachable(next.state)
+    }
+    if (next.state.phase === 'none' && !next.hadRoute && !next.grace) {
+      peers.delete(peerId)
+      return
+    }
+    peers.set(peerId, next)
+  }
+
+  const hasCapacityRejectedPeers = (): boolean => {
+    for (const rec of peers.values()) {
+      if (rec.state.phase === 'capacity-rejected') {
+        return true
+      }
+    }
+    return false
+  }
+
+  const isPeerCapacityRejected = (peerId: string): boolean =>
+    peers.get(peerId)?.state.phase === 'capacity-rejected'
 
   const getRoomSalt = (): string => {
     const roomId = getRoomId()
-    return passwordTopologySalt
-      ? toJson([appId, roomId, passwordTopologySalt])
+    return derivedSalt
+      ? toJson([appId, roomId, derivedSalt])
       : appId || roomId
         ? toJson([appId, roomId])
         : ''
-  }
-
-  const refreshPasswordSalt = (): void => {
-    const token = ++passwordSaltToken
-    if (!password) {
-      passwordTopologySalt = ''
-      return
-    }
-    const targetRoomId = getRoomId()
-    void signRoomAuth(password, appId, targetRoomId, '@topology', 0)
-      .then(salt => {
-        if (
-          !isDestroyed() &&
-          token === passwordSaltToken &&
-          getRoomId() === targetRoomId &&
-          passwordTopologySalt !== salt
-        ) {
-          passwordTopologySalt = salt
-          recomputeTopologyAndRoutes()
-          scheduleTargetsNotification()
-        }
-      })
-      .catch(noOp)
   }
 
   const isPeerQuarantined = (peerId: string): boolean => {
@@ -226,9 +261,9 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
 
   const pruneExpiredRequiredPeers = (now: number = Date.now()): void => {
     let changed = false
-    for (const [peerId, expiresAt] of localRequiredPeers.entries()) {
-      if (!mediaPinnedPeers.has(peerId) && now > expiresAt) {
-        localRequiredPeers.delete(peerId)
+    for (const [peerId, expiresAt] of directRequirements.entries()) {
+      if (now > expiresAt) {
+        directRequirements.delete(peerId)
         changed = true
       }
     }
@@ -238,15 +273,12 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
   }
 
   const isRequiredDirectPeer = (peerId: string): boolean => {
-    if (mediaPinnedPeers.has(peerId)) {
-      return true
-    }
-    const expiresAt = localRequiredPeers.get(peerId)
+    const expiresAt = directRequirements.get(peerId)
     if (expiresAt === undefined) {
       return false
     }
     if (Date.now() > expiresAt) {
-      localRequiredPeers.delete(peerId)
+      directRequirements.delete(peerId)
       topologyVersion++
       return false
     }
@@ -255,11 +287,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
 
   const getActiveRequiredPeers = (): Set<string> => {
     pruneExpiredRequiredPeers()
-    const out = new Set<string>(mediaPinnedPeers)
-    for (const id of localRequiredPeers.keys()) {
-      out.add(id)
-    }
-    return out
+    return new Set<string>(directRequirements.keys())
   }
 
   const capRoster = (base: Set<string>): Set<string> => {
@@ -301,6 +329,10 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       hasCompletedInitialBootstrap = true
       topologyVersion++
     }
+    const selfId = getSelfId()
+    if (!selfId) {
+      return getActiveRequiredPeers()
+    }
     if (cachedEffectiveTargets && cachedTargetsVersion === topologyVersion) {
       return cachedEffectiveTargets
     }
@@ -309,7 +341,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       ? knownRoster
       : new Set<string>([...knownRoster, ...discoveredCandidates.keys()])
     const targets = computeTargetNeighbors(
-      getSelfId(),
+      selfId,
       capRoster(rawRoster),
       maxDirectPeers,
       getRoomSalt()
@@ -349,21 +381,29 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     }
     const now = Date.now()
     pruneExpiredRequiredPeers(now)
-    const wasActive =
-      mediaPinnedPeers.has(peerId) || localRequiredPeers.has(peerId)
+    const existing = directRequirements.get(peerId)
+    if (existing === Infinity) {
+      if (dial && !isDirectPeer(peerId)) {
+        targetsChangedCallback?.([peerId])
+      }
+      return
+    }
     if (
-      !localRequiredPeers.has(peerId) &&
-      localRequiredPeers.size >= maxLocalRequiredPeers
+      existing === undefined &&
+      directRequirements.size >= maxLocalRequiredPeers
     ) {
-      for (const candidate of localRequiredPeers.keys()) {
-        if (!mediaPinnedPeers.has(candidate)) {
-          localRequiredPeers.delete(candidate)
+      for (const [candidate, exp] of directRequirements.entries()) {
+        if (exp < Infinity) {
+          directRequirements.delete(candidate)
           break
         }
       }
     }
-    localRequiredPeers.set(peerId, now + requiredPeerIdleTtlMs)
-    if (!wasActive) {
+    if (existing !== undefined) {
+      directRequirements.delete(peerId)
+    }
+    directRequirements.set(peerId, now + requiredPeerIdleTtlMs)
+    if (existing === undefined) {
       topologyVersion++
     }
     if (dial && !isDirectPeer(peerId)) {
@@ -375,18 +415,18 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     if (!isValidSignalPeerId(peerId) || peerId === getSelfId()) {
       return
     }
+    const existing = directRequirements.get(peerId)
     if (pinned) {
       if (!isAllowedTargetPeer(peerId)) {
         return
       }
-      const had = mediaPinnedPeers.has(peerId)
-      mediaPinnedPeers.add(peerId)
-      localRequiredPeers.set(peerId, Date.now() + requiredPeerIdleTtlMs)
-      if (!had) {
+      if (existing !== Infinity) {
+        directRequirements.set(peerId, Infinity)
         topologyVersion++
       }
-    } else if (mediaPinnedPeers.delete(peerId)) {
-      localRequiredPeers.set(peerId, Date.now() + requiredPeerIdleTtlMs)
+    } else if (existing === Infinity) {
+      directRequirements.delete(peerId)
+      directRequirements.set(peerId, Date.now() + requiredPeerIdleTtlMs)
       topologyVersion++
     }
   }
@@ -420,23 +460,40 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
   }
 
   const clearUnreachableTimer = (peerId: string): void => {
-    const timer = unreachableTimers.get(peerId)
-    if (timer) {
-      resetTimer(timer)
-      unreachableTimers.delete(peerId)
+    if (peers.get(peerId)?.grace) {
+      setPeer(peerId, {grace: null})
     }
   }
 
+  const clearCapacityRejected = (peerId?: string): void => {
+    const clearOne = (id: string, rec: OverlayPeer | undefined): void => {
+      if (rec?.state.phase === 'capacity-rejected') {
+        setPeer(id, {
+          state: rec.hadRoute
+            ? {phase: 'routed-awaiting-descriptor'}
+            : {phase: 'none'},
+          grace: null
+        })
+      }
+    }
+    if (peerId === undefined) {
+      for (const [id, rec] of Array.from(peers.entries())) {
+        clearOne(id, rec)
+      }
+      return
+    }
+    clearOne(peerId, peers.get(peerId))
+  }
+
   const purgeConnectionPolicyPeer = (peerId: string): void => {
-    localRequiredPeers.delete(peerId)
-    mediaPinnedPeers.delete(peerId)
+    directRequirements.delete(peerId)
     discoveredCandidates.delete(peerId)
     topologyVersion++
   }
 
   const purgePeerRoutingState = (peerId: string): void => {
     purgeConnectionPolicyPeer(peerId)
-    hadRoutePeers.delete(peerId)
+    setPeer(peerId, idlePeer)
     everConfirmedNeighbors.delete(peerId)
     for (const set of everConfirmedNeighbors.values()) {
       set.delete(peerId)
@@ -444,32 +501,41 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     topologyVersion++
   }
 
-  const closeVirtualTransport = (peerId: string): boolean => {
-    const existing = virtualTransports.get(peerId)
+  const closeVirtualTransport = (
+    peerId: string
+  ): {closed: boolean; hadCapacityRejected: boolean} => {
+    const existing = virtualTransportsView.get(peerId)
     if (!existing) {
-      return false
+      return {closed: false, hadCapacityRejected: false}
     }
-    capacityRejectedPeers.clear()
+    const hadCapacityRejected = hasCapacityRejectedPeers()
+    clearCapacityRejected()
+    setPeer(peerId, {state: {phase: 'none'}, grace: null})
     existing.close?.()
-    virtualTransports.delete(peerId)
-    return true
+    return {closed: true, hadCapacityRejected}
   }
 
   const deactivateVirtualPeerNow = (peerId: string, reason: Error): void => {
-    clearUnreachableTimer(peerId)
-    hadRoutePeers.delete(peerId)
-    if (closeVirtualTransport(peerId)) {
-      onVirtualPeerLeave(peerId, reason)
+    const {closed, hadCapacityRejected} = closeVirtualTransport(peerId)
+    setPeer(peerId, idlePeer)
+    if (!closed) {
+      return
+    }
+    onVirtualPeerLeave(peerId, reason)
+    if (hadCapacityRejected && !isRecomputing && !isDestroyed()) {
+      recomputeTopologyAndRoutes()
     }
   }
 
   const evictVirtualPeerNow = (peerId: string, reason: Error): void => {
-    clearUnreachableTimer(peerId)
-    const closed = closeVirtualTransport(peerId)
+    const {closed, hadCapacityRejected} = closeVirtualTransport(peerId)
     descriptors.purgePeer(peerId)
     purgePeerRoutingState(peerId)
     if (closed) {
       onVirtualPeerLeave(peerId, reason)
+      if (hadCapacityRejected && !isRecomputing && !isDestroyed()) {
+        recomputeTopologyAndRoutes()
+      }
     }
   }
 
@@ -532,10 +598,13 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     const vTransport = createVirtualTransport(peerId)
     if (onVirtualPeerJoin(peerId, vTransport) === false) {
       vTransport.close?.()
-      virtualTransports.delete(peerId)
-      capacityRejectedPeers.add(peerId)
+      setPeer(peerId, {state: {phase: 'capacity-rejected'}, grace: null})
       return false
     }
+    setPeer(peerId, {
+      state: {phase: 'active', transport: vTransport},
+      grace: null
+    })
     return true
   }
 
@@ -543,11 +612,18 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     origin: string,
     fromPeerId: string
   ): boolean => {
-    if (isDirectPeer(origin) || virtualTransports.has(origin)) {
+    if (isDirectPeer(origin)) {
+      return true
+    }
+    if (virtualTransportsView.has(origin)) {
+      if (!routes[origin]) {
+        routes[origin] = {nextHop: fromPeerId, hops: 2}
+      }
+      setPeer(origin, {hadRoute: true, grace: null})
       return true
     }
     if (
-      capacityRejectedPeers.has(origin) ||
+      isPeerCapacityRejected(origin) ||
       isPeerBanned(origin) ||
       isPeerQuarantined(origin)
     ) {
@@ -558,6 +634,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     if (!routes[origin]) {
       routes[origin] = {nextHop: fromPeerId, hops: 2}
     }
+    setPeer(origin, {hadRoute: true, grace: null})
     return admitVirtualPeer(origin)
   }
 
@@ -588,103 +665,124 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     if (isDestroyed()) {
       return
     }
-    const selfId = getSelfId()
-    topologyVersion++
-    descriptors.setLocalAdjacency(getDirectPeerIds())
-    if (!hasCompletedInitialBootstrap && descriptors.hasConvergedComponent()) {
-      hasCompletedInitialBootstrap = true
-    }
-    const adjacency = descriptors.getAdjacency()
+    const prevRecomputing = isRecomputing
+    isRecomputing = true
+    try {
+      const selfId = getSelfId()
+      topologyVersion++
+      descriptors.setLocalAdjacency(getDirectPeerIds())
+      if (
+        !hasCompletedInitialBootstrap &&
+        descriptors.hasConvergedComponent()
+      ) {
+        hasCompletedInitialBootstrap = true
+      }
+      const adjacency = descriptors.getAdjacency()
 
-    for (const [u, uNeighbors] of adjacency.entries()) {
-      for (const v of uNeighbors) {
-        if (adjacency.get(v)?.has(u)) {
-          addMapSet(everConfirmedNeighbors, u, v)
+      for (const [u, uNeighbors] of adjacency.entries()) {
+        for (const v of uNeighbors) {
+          if (adjacency.get(v)?.has(u)) {
+            addMapSet(everConfirmedNeighbors, u, v)
+          }
         }
       }
-    }
 
-    routes = computeShortestPathRoutes(
-      selfId,
-      adjacency,
-      getDirectPeerIds(),
-      currentMaxHops()
-    )
+      routes = computeShortestPathRoutes(
+        selfId,
+        adjacency,
+        getDirectPeerIds(),
+        currentMaxHops()
+      )
 
-    for (const peerId of keys(routes)) {
-      if (peerId === selfId || isPeerQuarantined(peerId)) {
-        continue
-      }
-      hadRoutePeers.add(peerId)
-      clearUnreachableTimer(peerId)
-      if (
-        !isDirectPeer(peerId) &&
-        descriptors.hasDescriptor(peerId) &&
-        !capacityRejectedPeers.has(peerId)
-      ) {
-        if (!virtualTransports.has(peerId) && !admitVirtualPeer(peerId)) {
+      for (const peerId of keys(routes)) {
+        if (peerId === selfId || isPeerQuarantined(peerId)) {
+          continue
+        }
+        if (isDirectPeer(peerId)) {
+          setPeer(peerId, {state: {phase: 'none'}, hadRoute: true, grace: null})
+          continue
+        }
+        setPeer(peerId, {hadRoute: true, grace: null})
+        const curState = peers.get(peerId)?.state
+        if (curState?.phase === 'capacity-rejected') {
+          continue
+        }
+        if (!descriptors.hasDescriptor(peerId)) {
+          if (curState?.phase !== 'active') {
+            setPeer(peerId, {state: {phase: 'routed-awaiting-descriptor'}})
+          }
+          continue
+        }
+        if (curState?.phase !== 'active' && !admitVirtualPeer(peerId)) {
           continue
         }
         if (descriptors.getDescriptor(peerId)?.encPubKey) {
           onVirtualPeerReady?.(peerId)
         }
       }
-    }
 
-    for (const peerId of new Set(virtualTransports.keys()).union(
-      hadRoutePeers
-    )) {
-      if (peerId === selfId || isDirectPeer(peerId) || routes[peerId]) {
-        continue
-      }
-      const desc = descriptors.getDescriptor(peerId)
-      const confirmedSet = everConfirmedNeighbors.get(peerId)
-      let anyConfirmedNeighborDropped = false
-      const allKnownNeighborsDropped = Boolean(
-        desc &&
-        desc.neighbors.length > 0 &&
-        confirmedSet &&
-        confirmedSet.size > 0 &&
-        desc.neighbors.every(n => {
-          if (!confirmedSet.has(n)) {
-            return false
-          }
-          if (n === selfId) {
-            if (!isDirectPeer(peerId)) {
+      for (const peerId of Array.from(peers.keys())) {
+        if (peerId === selfId || isDirectPeer(peerId) || routes[peerId]) {
+          continue
+        }
+        const cur = peers.get(peerId)
+        if (!cur) {
+          continue
+        }
+
+        const desc = descriptors.getDescriptor(peerId)
+        const confirmedSet = everConfirmedNeighbors.get(peerId)
+        let anyConfirmedNeighborDropped = false
+        const allKnownNeighborsDropped = Boolean(
+          desc &&
+          desc.neighbors.length > 0 &&
+          confirmedSet &&
+          confirmedSet.size > 0 &&
+          desc.neighbors.every(n => {
+            if (!confirmedSet.has(n)) {
+              return false
+            }
+            if (n === selfId) {
+              if (!isDirectPeer(peerId)) {
+                anyConfirmedNeighborDropped = true
+                return true
+              }
+              return false
+            }
+            const nDesc = descriptors.getDescriptor(n)
+            if (nDesc && !nDesc.neighbors.includes(peerId)) {
               anyConfirmedNeighborDropped = true
               return true
             }
-            return false
-          }
-          const nDesc = descriptors.getDescriptor(n)
-          if (nDesc && !nDesc.neighbors.includes(peerId)) {
-            anyConfirmedNeighborDropped = true
-            return true
-          }
-          return !isDirectPeer(n) && !routes[n]
-        }) &&
-        anyConfirmedNeighborDropped
-      )
+            return !isDirectPeer(n) && !routes[n]
+          }) &&
+          anyConfirmedNeighborDropped
+        )
 
-      if (allKnownNeighborsDropped) {
-        if (desc) {
-          descriptors.markLeft(peerId, desc.seq)
+        if (allKnownNeighborsDropped) {
+          if (desc) {
+            descriptors.markLeft(peerId, desc.seq)
+          }
+          evictVirtualPeerNow(peerId, peerDisconnectedErr)
+        } else if (!cur.grace) {
+          const timer = setTimeout(() => {
+            if (peers.get(peerId)?.grace === timer) {
+              setPeer(peerId, {grace: null})
+            }
+            if (!isDestroyed() && !isDirectPeer(peerId) && !routes[peerId]) {
+              deactivateVirtualPeerNow(peerId, peerDisconnectedErr)
+            }
+          }, unreachableGraceMs)
+          unrefTimer(timer)
+          setPeer(peerId, {grace: timer})
         }
-        evictVirtualPeerNow(peerId, peerDisconnectedErr)
-      } else if (!unreachableTimers.has(peerId)) {
-        const timer = setTimeout(() => {
-          unreachableTimers.delete(peerId)
-          if (!isDestroyed() && !isDirectPeer(peerId) && !routes[peerId]) {
-            deactivateVirtualPeerNow(peerId, peerDisconnectedErr)
-          }
-        }, unreachableGraceMs)
-        unrefTimer(timer)
-        unreachableTimers.set(peerId, timer)
       }
-    }
 
-    if (targetsChangedCallback) {
-      scheduleTargetsNotification()
+      if (targetsChangedCallback) {
+        scheduleTargetsNotification()
+      }
+    } finally {
+      isRecomputing = prevRecomputing
     }
   }
 
@@ -702,6 +800,9 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       return false
     }
     const selfId = getSelfId()
+    if (!selfId) {
+      return false
+    }
     const wantLower = selfId < peerId
     const bridgeSalt = toJson([
       getRoomSalt(),
@@ -716,7 +817,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     ])
     let betterCount = 0
     for (const id of candidates) {
-      if (id === selfId) {
+      if (!id || id === selfId) {
         continue
       }
       if (wantLower ? !(id < peerId) : !(id > peerId)) {
@@ -734,6 +835,30 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       }
     }
     return true
+  }
+
+  const refreshPasswordSalt = (): void => {
+    const token = ++saltToken
+    derivedSalt = ''
+    if (!password) {
+      return
+    }
+    const targetRoomId = getRoomId()
+    void signRoomAuth(password, appId, targetRoomId, '@topology', 0)
+      .then(salt => {
+        if (
+          isDestroyed() ||
+          saltToken !== token ||
+          getRoomId() !== targetRoomId ||
+          !salt
+        ) {
+          return
+        }
+        derivedSalt = salt
+        recomputeTopologyAndRoutes()
+        scheduleTargetsNotification()
+      })
+      .catch(noOp)
   }
 
   refreshPasswordSalt()
@@ -807,7 +932,7 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
         hasCompletedInitialBootstrap &&
         !routes[peerId] &&
         !descriptors.hasLeft(peerId) &&
-        !capacityRejectedPeers.has(peerId) &&
+        !isPeerCapacityRejected(peerId) &&
         isDesignatedComponentBridge(peerId, directCount)
       ) {
         return true
@@ -834,26 +959,33 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
       }
       return out
     },
-    isVirtualPeer: peerId => virtualTransports.has(peerId),
-    getVirtualPeerIds: () => virtualTransports.keys(),
-    getVirtualPeerCount: () => virtualTransports.size,
-    getVirtualTransport: peerId => virtualTransports.get(peerId),
+    isVirtualPeer: peerId => virtualTransportsView.has(peerId),
+    getVirtualPeerIds: () => virtualTransportsView.keys(),
+    getVirtualPeerCount: () => virtualTransportsView.size,
+    getVirtualTransport: peerId => virtualTransportsView.get(peerId),
     setVirtualTransport: (peerId, transport) => {
-      virtualTransports.set(peerId, transport)
+      setPeer(peerId, {
+        state: {phase: 'active', transport},
+        ...(routes[peerId] ? {hadRoute: true} : {}),
+        grace: null
+      })
     },
     detachVirtualTransport: (peerId, transport) => {
-      if (!transport || virtualTransports.get(peerId) === transport) {
-        virtualTransports.delete(peerId)
+      const curTransport = virtualTransportsView.get(peerId)
+      if (!curTransport) {
+        if (transport) {
+          onVirtualTransportDetached?.(peerId, transport)
+        }
+        return
       }
+      if (transport && curTransport !== transport) {
+        return
+      }
+      onVirtualTransportDetached?.(peerId, curTransport)
+      setPeer(peerId, {state: {phase: 'none'}, grace: null})
     },
     clearUnreachableTimer,
-    clearCapacityRejected: peerId => {
-      if (peerId === undefined) {
-        capacityRejectedPeers.clear()
-      } else {
-        capacityRejectedPeers.delete(peerId)
-      }
-    },
+    clearCapacityRejected,
     ensureOriginVirtualPeer,
     recomputeTopologyAndRoutes,
     deactivateVirtualPeerNow,
@@ -865,26 +997,32 @@ export const createOverlayRouter = (deps: OverlayRouterDeps): OverlayRouter => {
     purgePeerRoutingState,
     refreshPasswordSalt,
     resetForRoomIdChange: () => {
-      capacityRejectedPeers.clear()
+      for (const [id, rec] of Array.from(peers.entries())) {
+        const vt = rec.state.phase === 'active' ? rec.state.transport : null
+        setPeer(id, idlePeer)
+        vt?.close?.()
+      }
+      routes = {}
+      everConfirmedNeighbors.clear()
       quarantinedPeers.clear()
-      localRequiredPeers.clear()
-      mediaPinnedPeers.clear()
+      directRequirements.clear()
       hasCompletedInitialBootstrap = false
       firstDiscoveryAt = 0
       topologyVersion++
     },
     destroy: () => {
-      unreachableTimers.forEach(resetTimer)
-      virtualTransports.forEach(v => v.close?.())
-      unreachableTimers.clear()
-      virtualTransports.clear()
-      capacityRejectedPeers.clear()
-      quarantinedPeers.clear()
-      hadRoutePeers.clear()
+      ++saltToken
+      derivedSalt = ''
+      for (const [id, rec] of Array.from(peers.entries())) {
+        const vt = rec.state.phase === 'active' ? rec.state.transport : null
+        setPeer(id, idlePeer)
+        vt?.close?.()
+      }
+      routes = {}
       everConfirmedNeighbors.clear()
       discoveredCandidates.clear()
-      localRequiredPeers.clear()
-      mediaPinnedPeers.clear()
+      quarantinedPeers.clear()
+      directRequirements.clear()
       connectLimiter.clear()
     }
   }

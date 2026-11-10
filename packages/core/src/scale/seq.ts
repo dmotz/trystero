@@ -13,6 +13,16 @@ const lastLocalSeqByRoomPeer = /*@__PURE__*/ createBoundedCache<
   [descSeq: number, pktSeq: number]
 >(4_096)
 
+type QueueBucket = {
+  tail: Promise<void>
+  depth: number
+}
+
+type PeerQueueBinding = {
+  key: string
+  count: number
+}
+
 export type OverlaySequencerDeps = {
   getAppId: () => string
   getRoomId: () => string
@@ -37,24 +47,29 @@ export const createOverlaySequencer = (
 ): OverlaySequencer => {
   let descSeq = 0
   let pktSeq = 0
-  let didInitFloor = false
+  let flooredSelfId = ''
+  let queueEpoch = 0
 
-  const saveSeqs = (
-    id: string = deps.getSelfId(),
-    initFloor?: boolean
-  ): void => {
+  const ensureFloor = (id: string): void => {
+    if (!id || flooredSelfId === id) {
+      return
+    }
+    flooredSelfId = id
+    const key = `${deps.getAppId()}\0${deps.getRoomId()}\0${id}`
+    const prev = lastLocalSeqByRoomPeer.get(key)
+    if (prev) {
+      descSeq = Math.max(descSeq, prev[0] + 1_024)
+      pktSeq = Math.max(pktSeq, prev[1] + 1_024)
+    }
+  }
+
+  const persistSeqs = (id: string = deps.getSelfId()): void => {
     if (!id) {
       return
     }
+    ensureFloor(id)
     const key = `${deps.getAppId()}\0${deps.getRoomId()}\0${id}`
     const prev = lastLocalSeqByRoomPeer.get(key)
-    if (initFloor && !didInitFloor) {
-      didInitFloor = true
-      if (prev) {
-        descSeq = Math.max(descSeq, prev[0] + 1_024)
-        pktSeq = Math.max(pktSeq, prev[1] + 1_024)
-      }
-    }
     lastLocalSeqByRoomPeer.set(key, [
       Math.max(descSeq, prev?.[0] ?? 0),
       Math.max(pktSeq, prev?.[1] ?? 0)
@@ -66,57 +81,84 @@ export const createOverlaySequencer = (
     deps.isPinnedOrigin
   )
   const seenMsgIds = createBoundedSet<string>(4_096)
-  const peerQueues = new Map<string, Promise<void>>()
-  const peerQueueDepths = new Map<string, number>()
+  const queueBuckets = new Map<string, QueueBucket>()
+  const peerQueueBindings = new Map<string, PeerQueueBinding>()
 
   return {
-    syncSeqFloor: id => saveSeqs(id, true),
+    syncSeqFloor: id => persistSeqs(id ?? deps.getSelfId()),
     resetFloor: () => {
-      didInitFloor = false
-      saveSeqs(deps.getSelfId(), true)
+      flooredSelfId = ''
+      persistSeqs(deps.getSelfId())
     },
     nextDescSeq: () => {
+      const id = deps.getSelfId()
+      ensureFloor(id)
       descSeq++
-      saveSeqs()
+      persistSeqs(id)
       return descSeq
     },
     nextPktSeq: () => {
+      const id = deps.getSelfId()
+      ensureFloor(id)
       pktSeq++
-      saveSeqs()
+      persistSeqs(id)
       return pktSeq
     },
     peekPktSeq: () => pktSeq,
     originReplay,
     seenMsgIds,
     enqueuePeerTask: (peerId, fn) => {
-      const qKey =
-        peerQueues.has(peerId) || peerQueues.size < maxTrackedOrigins
+      const existingBinding = peerQueueBindings.get(peerId)
+      const qKey = existingBinding
+        ? existingBinding.key
+        : queueBuckets.has(peerId) || queueBuckets.size < maxTrackedOrigins
           ? peerId
           : `overflow:${hash32(peerId) & 63}`
-      const depth = peerQueueDepths.get(qKey) ?? 0
-      if (depth >= maxQueuedTasksPerPeer) {
+      let bucket = queueBuckets.get(qKey)
+      if (bucket && bucket.depth >= maxQueuedTasksPerPeer) {
         return
       }
-      peerQueueDepths.set(qKey, depth + 1)
-      const next = (peerQueues.get(qKey) ?? Promise.resolve())
+      if (!bucket) {
+        bucket = {tail: Promise.resolve(), depth: 0}
+        queueBuckets.set(qKey, bucket)
+      }
+      const activeBucket = bucket
+      const activeBinding = existingBinding ?? {key: qKey, count: 0}
+      if (!existingBinding) {
+        peerQueueBindings.set(peerId, activeBinding)
+      }
+      activeBucket.depth++
+      activeBinding.count++
+      const epoch = queueEpoch
+      const next = activeBucket.tail
         .then(fn)
         .catch(noOp)
         .finally(() => {
-          const nextDepth = (peerQueueDepths.get(qKey) ?? 1) - 1
-          if (nextDepth <= 0) {
-            peerQueueDepths.delete(qKey)
-          } else {
-            peerQueueDepths.set(qKey, nextDepth)
+          if (epoch !== queueEpoch) {
+            return
           }
-          if (peerQueues.get(qKey) === next) {
-            peerQueues.delete(qKey)
+          activeBinding.count--
+          if (
+            activeBinding.count <= 0 &&
+            peerQueueBindings.get(peerId) === activeBinding
+          ) {
+            peerQueueBindings.delete(peerId)
+          }
+          activeBucket.depth--
+          if (
+            activeBucket.depth <= 0 &&
+            queueBuckets.get(qKey) === activeBucket &&
+            activeBucket.tail === next
+          ) {
+            queueBuckets.delete(qKey)
           }
         })
-      peerQueues.set(qKey, next)
+      activeBucket.tail = next
     },
     clear: () => {
-      peerQueues.clear()
-      peerQueueDepths.clear()
+      queueEpoch++
+      queueBuckets.clear()
+      peerQueueBindings.clear()
       originReplay.clear()
       seenMsgIds.clear()
     }

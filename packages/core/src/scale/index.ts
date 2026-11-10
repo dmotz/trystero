@@ -2,17 +2,44 @@ import type {
   InternalRoomContext,
   KernelScaleProvider,
   PeerHandle,
-  ScalePluginSlot
+  ScalePluginSlot,
+  Timeout
 } from '../internal-types'
 import {pluginSlotSymbol} from '../primitives'
 import type {RoomPlugin, ScaleConfig, ScalePluginApi} from '../types'
-import {mkErr, noOp, peerDisconnectedErr, toError, unrefTimer} from '../utils'
+import {
+  mkErr,
+  noOp,
+  peerBannedErr,
+  peerDisconnectedErr,
+  resetTimer,
+  toError,
+  unreachable,
+  unrefTimer
+} from '../utils'
 import {createOverlayManager} from './manager'
 import {normalizeTopologyConfig} from './topology'
 
 export * from './topology'
 export * from './crypto-frame'
 export * from './manager'
+
+type MediaPromotionBase = {
+  readonly token: symbol
+  readonly promise: Promise<PeerHandle>
+  readonly resolve: (peer: PeerHandle) => void
+  readonly reject: (reason: Error) => void
+  readonly timeoutTimer: Timeout
+}
+
+type MediaPromotionEntry =
+  | (MediaPromotionBase & {
+      readonly phase: 'awaiting-ack'
+      readonly fallbackDialTimer: Timeout
+    })
+  | (MediaPromotionBase & {
+      readonly phase: 'dialing'
+    })
 
 export const scale = (
   config?: ScaleConfig
@@ -22,17 +49,54 @@ export const scale = (
   const setup = (
     kernel: InternalRoomContext
   ): {provider: KernelScaleProvider; api: ScalePluginApi} => {
-    const pendingMediaPeers = new Map<
-      string,
-      [
-        promise: Promise<PeerHandle>,
-        resolve: (peer: PeerHandle) => void,
-        reject: (reason: Error) => void
-      ]
-    >()
+    const pendingMediaPeers = new Map<string, MediaPromotionEntry>()
     const mediaControlAction = kernel.makeInternalAction<{
       op: 'connect' | 'ack'
     }>('mctrl')
+
+    const takePromotion = (
+      id: string,
+      token?: symbol
+    ): MediaPromotionEntry | undefined => {
+      const entry = pendingMediaPeers.get(id)
+      if (!entry || (token !== undefined && entry.token !== token)) {
+        return undefined
+      }
+      pendingMediaPeers.delete(id)
+      resetTimer(entry.timeoutTimer)
+      switch (entry.phase) {
+        case 'awaiting-ack':
+          resetTimer(entry.fallbackDialTimer)
+          break
+        case 'dialing':
+          break
+        default:
+          unreachable(entry)
+      }
+      return entry
+    }
+
+    const resolvePromotion = (
+      id: string,
+      peer: PeerHandle,
+      token?: symbol
+    ): void => {
+      takePromotion(id, token)?.resolve(peer)
+    }
+
+    const rejectPromotion = (
+      id: string,
+      reason: Error,
+      token?: symbol
+    ): void => {
+      takePromotion(id, token)?.reject(reason)
+    }
+
+    const rejectAllPromotions = (reason: Error): void => {
+      for (const [id, entry] of Array.from(pendingMediaPeers.entries())) {
+        rejectPromotion(id, reason, entry.token)
+      }
+    }
 
     const manager = createOverlayManager({
       selfId: kernel.selfId,
@@ -70,38 +134,78 @@ export const scale = (
         })
     })
 
+    const transitionPromotionToDialing = (
+      id: string,
+      expectedToken?: symbol
+    ): void => {
+      const entry = pendingMediaPeers.get(id)
+      if (
+        !entry ||
+        (expectedToken !== undefined && entry.token !== expectedToken)
+      ) {
+        return
+      }
+      switch (entry.phase) {
+        case 'awaiting-ack':
+          resetTimer(entry.fallbackDialTimer)
+          pendingMediaPeers.set(id, {
+            phase: 'dialing',
+            token: entry.token,
+            promise: entry.promise,
+            resolve: entry.resolve,
+            reject: entry.reject,
+            timeoutTimer: entry.timeoutTimer
+          })
+          break
+        case 'dialing':
+          break
+        default:
+          unreachable(entry)
+      }
+      if (!manager.isDirectPeer(id)) {
+        manager.requireDirectPeer(id)
+      }
+    }
+
     const prepareMediaPeer = (id: string): Promise<PeerHandle> => {
       const existingDirect = kernel.getPeerHandle(id, false)
       if (existingDirect && manager.isDirectPeer(id)) {
+        resolvePromotion(id, existingDirect)
         return Promise.resolve(existingDirect)
       }
       const pending = pendingMediaPeers.get(id)
       if (pending) {
-        return pending[0]
+        return pending.promise
       }
+      const token = Symbol()
       const {promise, resolve, reject} = Promise.withResolvers<PeerHandle>()
-      const timer = setTimeout(
-        () => reject(mkErr('timed out connecting media peer')),
-        10_000
-      )
-      unrefTimer(timer)
+      const timeoutTimer = setTimeout(() => {
+        rejectPromotion(id, mkErr('timed out connecting media peer'), token)
+      }, 10_000)
+      unrefTimer(timeoutTimer)
       const fallbackDialTimer = setTimeout(() => {
-        if (pendingMediaPeers.has(id) && !manager.isDirectPeer(id)) {
-          manager.requireDirectPeer(id)
-        }
+        transitionPromotionToDialing(id, token)
       }, 150)
       unrefTimer(fallbackDialTimer)
-      const settled = promise.finally(() => {
-        clearTimeout(timer)
-        clearTimeout(fallbackDialTimer)
-        pendingMediaPeers.delete(id)
+      pendingMediaPeers.set(id, {
+        phase: 'awaiting-ack',
+        token,
+        promise,
+        resolve,
+        reject,
+        timeoutTimer,
+        fallbackDialTimer
       })
-      pendingMediaPeers.set(id, [settled, resolve, reject])
       manager.requireDirectPeer(id, {dial: false})
-      void mediaControlAction
-        .send({op: 'connect'}, {target: id})
-        .catch(err => reject(toError(err, 'failed connecting media peer')))
-      return settled
+      void mediaControlAction.send({op: 'connect'}, {target: id}).catch(err => {
+        const direct = kernel.getPeerHandle(id, false)
+        if (direct && manager.isDirectPeer(id)) {
+          resolvePromotion(id, direct, token)
+          return
+        }
+        rejectPromotion(id, toError(err, 'failed connecting media peer'), token)
+      })
+      return promise
     }
 
     mediaControlAction.onMessage((msg, {peerId: id}) => {
@@ -109,22 +213,19 @@ export const scale = (
         if (manager.acceptMediaConnectRequest(id)) {
           void mediaControlAction.send({op: 'ack'}, {target: id}).catch(noOp)
         }
-      } else if (msg?.op === 'ack' && pendingMediaPeers.has(id)) {
-        manager.requireDirectPeer(id)
+      } else if (msg?.op === 'ack') {
+        transitionPromotionToDialing(id)
       }
     })
 
     kernel.onPeerActivated((id, peer) => {
-      pendingMediaPeers.get(id)?.[1](peer)
+      resolvePromotion(id, peer)
     })
     kernel.onPeerDeactivated(id => {
-      pendingMediaPeers.get(id)?.[2](peerDisconnectedErr)
+      rejectPromotion(id, peerDisconnectedErr)
     })
     kernel.onLeave(() => {
-      for (const pending of pendingMediaPeers.values()) {
-        pending[2](peerDisconnectedErr)
-      }
-      pendingMediaPeers.clear()
+      rejectAllPromotions(peerDisconnectedErr)
     })
 
     const provider: KernelScaleProvider = {
@@ -136,7 +237,7 @@ export const scale = (
       addDirectPeer: manager.addDirectPeer,
       removeDirectPeer: (peerId, peer, reason) => {
         if (reason) {
-          pendingMediaPeers.get(peerId)?.[2](reason)
+          rejectPromotion(peerId, reason)
         }
         manager.removeDirectPeer(peerId, peer, reason)
       },
@@ -152,11 +253,17 @@ export const scale = (
       getTargetNeighbors: manager.getTargetNeighbors,
       setOnTargetsChanged: manager.setOnTargetsChanged,
       announceLeave: manager.announceLeave,
-      destroy: manager.destroy,
+      destroy: () => {
+        rejectAllPromotions(peerDisconnectedErr)
+        manager.destroy()
+      },
       getPeerUserId: manager.getPeerUserId,
       setPeerSignPublicKey: manager.setPeerSignPublicKey,
       setLocalRoleCertificate: manager.setLocalRoleCertificate,
-      markPeerBanned: manager.markPeerBanned,
+      markPeerBanned: peerId => {
+        rejectPromotion(peerId, peerBannedErr)
+        manager.markPeerBanned(peerId)
+      },
       unmarkPeerBanned: manager.unmarkPeerBanned,
       isPeerBanned: manager.isPeerBanned,
       registerActionAuthority: manager.registerActionAuthority

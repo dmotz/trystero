@@ -20,6 +20,7 @@ import {
   isStr,
   noOp,
   peerDisconnectedErr,
+  unreachable,
   validateRoleCertificateShape
 } from '../utils'
 import {
@@ -48,6 +49,36 @@ import {maxAllowedHops} from './topology'
 const maxQueuedUnicastBeforeBackpressure = 4
 const maxBufferedEarlyOrigins = 64
 const maxBufferedEarlyFramesPerOrigin = 8
+
+type PairwiseKeyEntry = {
+  readonly roomId: string
+  readonly encPubKey: string
+  readonly keyPromise: Promise<CryptoKey>
+}
+
+type OutboundUnicastState = {
+  readonly token: symbol
+  tail: Promise<void>
+  depth: number
+}
+
+type VirtualTransportPhase = 'active' | 'detached' | 'closed'
+
+type VirtualTransportControl = {
+  getState: () => VirtualTransportPhase
+  markDetached: () => void
+}
+
+type BufferedEarlyFrame = readonly [
+  fromPeerId: string,
+  frame: UnpackedOverlayFrame
+]
+
+type OriginBufferEntry = {
+  early: BufferedEarlyFrame[]
+  replayToken: symbol | null
+  verified: ArrayBuffer[]
+}
 
 export type OverlayDataPlaneDeps = {
   appId: string
@@ -80,6 +111,11 @@ export type OverlayDataPlaneDeps = {
 
 export type OverlayDataPlane = {
   createVirtualTransport: (peerId: string) => PeerDataTransport
+  onVirtualTransportDetached: (
+    peerId: string,
+    transport: PeerDataTransport
+  ) => void
+  hasBufferedFrames: (origin: string) => boolean
   broadcastInline: (
     frame: Uint8Array,
     onProgress?: (peerId: string) => void,
@@ -125,20 +161,15 @@ export const createOverlayDataPlane = (
     onDeliverData
   } = deps
 
-  const derivedPairwiseKeys = createBoundedCache<string, Promise<CryptoKey>>(
-    512
-  )
-  const pairwiseKeyIdByPeer = new Map<string, string>()
-  const outboundUnicastQueues = new Map<string, Promise<void>>()
-  const outboundQueueDepth = new Map<string, number>()
-  const pendingVerifiedBroadcasts = createBoundedCache<string, ArrayBuffer[]>(
+  const pairwiseKeys = createBoundedCache<string, PairwiseKeyEntry>(512)
+  const outboundUnicastByPeer = new Map<string, OutboundUnicastState>()
+  const originBuffers = createBoundedCache<string, OriginBufferEntry>(
     maxBufferedEarlyOrigins
   )
-  const pendingEarlyFrames = createBoundedCache<
-    string,
-    Array<[fromPeerId: string, frame: UnpackedOverlayFrame]>
-  >(maxBufferedEarlyOrigins)
-  const replayingEarlyOrigins = new Set<string>()
+  const virtualTransportControls = new WeakMap<
+    PeerDataTransport,
+    VirtualTransportControl
+  >()
   // Tracks per-message inbound/outbound neighbor hops for transit unicasts (bounded
   // to <= 4 outbound attempts) so packets reroute around newly dead hops during the
   // <= 1.2s window before topology recomputation without looping on a single edge.
@@ -147,17 +178,15 @@ export const createOverlayDataPlane = (
     {inbound: Set<string>; outbound: Set<string>}
   >(4_096)
 
+  let roomEpoch = 0
+
   const failSig = (): false => {
     stats.signatureFailures++
     return false
   }
 
   const invalidatePairwiseKey = (peerId: string): void => {
-    const keyId = pairwiseKeyIdByPeer.get(peerId)
-    if (keyId !== undefined) {
-      derivedPairwiseKeys.delete(keyId)
-      pairwiseKeyIdByPeer.delete(peerId)
-    }
+    pairwiseKeys.delete(peerId)
   }
 
   const getPairwiseKey = (remotePeerId: string): Promise<CryptoKey> | null => {
@@ -169,42 +198,37 @@ export const createOverlayDataPlane = (
       return null
     }
     const curRoomId = getRoomId()
-    const cacheKey = `${curRoomId}\0${remotePeerId}\0${remoteKey}`
-    const prevKey = pairwiseKeyIdByPeer.get(remotePeerId)
-    if (prevKey && prevKey !== cacheKey) {
-      derivedPairwiseKeys.delete(prevKey)
+    const existing = pairwiseKeys.get(remotePeerId)
+    if (
+      existing &&
+      existing.roomId === curRoomId &&
+      existing.encPubKey === remoteKey
+    ) {
+      return existing.keyPromise
     }
-    pairwiseKeyIdByPeer.set(remotePeerId, cacheKey)
 
-    let cached = derivedPairwiseKeys.get(cacheKey)
-    if (!cached) {
-      cached = loadLocalCryptoIdentity().then(id =>
-        derivePairwiseAesKey(
-          id.encPrivateKey,
-          remoteUncompressed,
-          appId,
-          curRoomId,
-          id.peerId,
-          remotePeerId
-        )
+    const keyPromise = loadLocalCryptoIdentity().then(id =>
+      derivePairwiseAesKey(
+        id.encPrivateKey,
+        remoteUncompressed,
+        appId,
+        curRoomId,
+        id.peerId,
+        remotePeerId
       )
-      cached.catch(() => {
-        if (derivedPairwiseKeys.get(cacheKey) === cached) {
-          derivedPairwiseKeys.delete(cacheKey)
-        }
-      })
-      derivedPairwiseKeys.set(cacheKey, cached)
+    )
+    const entry: PairwiseKeyEntry = {
+      roomId: curRoomId,
+      encPubKey: remoteKey,
+      keyPromise
     }
-    return cached
-  }
-
-  const signPacket = async (
-    canonicalHeader: string,
-    payload: Uint8Array
-  ): Promise<string> => {
-    const id = await loadLocalCryptoIdentity()
-    syncSelfIdFromIdentity(id.peerId)
-    return signOverlayPayload(id.signPrivateKey, canonicalHeader, payload)
+    pairwiseKeys.set(remotePeerId, entry)
+    void keyPromise.catch(() => {
+      if (pairwiseKeys.get(remotePeerId) === entry) {
+        pairwiseKeys.delete(remotePeerId)
+      }
+    })
+    return keyPromise
   }
 
   const verifyPacketSig = async (
@@ -234,13 +258,30 @@ export const createOverlayDataPlane = (
     return Boolean(hop && sendToDirectNeighbor(hop, packet))
   }
 
+  const trySendDirect = (targetPeerId: string, frame: Uint8Array): boolean => {
+    if (
+      isDirectPeer(targetPeerId) &&
+      sendToDirectNeighbor(targetPeerId, frame)
+    ) {
+      stats.messagesSent++
+      return true
+    }
+    return false
+  }
+
+  const isOriginInvalid = (origin: string, expectedEpoch: number): boolean =>
+    isDestroyed() ||
+    expectedEpoch !== roomEpoch ||
+    descriptors.hasLeft(origin) ||
+    isPeerBanned(origin)
+
   const sendUnicastInternal = (
     targetPeerId: string,
     frame: Uint8Array,
     promoteDirect: boolean,
     strict: boolean
   ): void => {
-    if (isDestroyed()) {
+    if (isOriginInvalid(targetPeerId, roomEpoch)) {
       if (strict) {
         throw peerDisconnectedErr
       }
@@ -248,85 +289,111 @@ export const createOverlayDataPlane = (
     }
 
     const router = getRouter()
-    const hasPendingQueue = (outboundQueueDepth.get(targetPeerId) ?? 0) > 0
-    if (!hasPendingQueue && isDirectPeer(targetPeerId)) {
-      if (sendToDirectNeighbor(targetPeerId, frame)) {
-        stats.messagesSent++
-        return
-      }
+    const existingState = outboundUnicastByPeer.get(targetPeerId)
+    if (
+      !(existingState && existingState.depth > 0) &&
+      trySendDirect(targetPeerId, frame)
+    ) {
+      return
     }
 
     if (promoteDirect) {
       router.requireDirectPeer(targetPeerId, true)
     }
 
-    const pairwiseKeyP = getPairwiseKey(targetPeerId)
-    if (!pairwiseKeyP || !router.resolveHealthyNextHopId(targetPeerId)) {
-      if (strict) {
-        throw peerDisconnectedErr
+    if (!isDirectPeer(targetPeerId)) {
+      const initialKeyP = getPairwiseKey(targetPeerId)
+      if (!initialKeyP || !router.resolveHealthyNextHopId(targetPeerId)) {
+        if (strict) {
+          throw peerDisconnectedErr
+        }
+        return
       }
-      return
     }
 
-    const curSelfId = getSelfId()
-    const curRoomId = getRoomId()
-    const pktSeq = seq.nextPktSeq()
-    const msgId = `${curSelfId}:${pktSeq}:${genId(8)}`
-    seq.originReplay.record(curSelfId, pktSeq)
-    seq.seenMsgIds.add(msgId)
-
+    const enqueuedEpoch = roomEpoch
     const frameCopy = frame.slice()
-    outboundQueueDepth.set(
-      targetPeerId,
-      (outboundQueueDepth.get(targetPeerId) ?? 0) + 1
-    )
-    const prevQueue =
-      outboundUnicastQueues.get(targetPeerId) ?? Promise.resolve()
-    const nextQueue = prevQueue
+    let state = outboundUnicastByPeer.get(targetPeerId)
+    if (!state) {
+      state = {
+        token: Symbol(),
+        tail: Promise.resolve(),
+        depth: 0
+      }
+      outboundUnicastByPeer.set(targetPeerId, state)
+    }
+    const stateRef = state
+    stateRef.depth++
+
+    const isStillActive = (): boolean =>
+      !isOriginInvalid(targetPeerId, enqueuedEpoch) &&
+      outboundUnicastByPeer.get(targetPeerId)?.token === stateRef.token
+
+    const nextTail = stateRef.tail
       .then(async () => {
-        if (isDestroyed()) {
-          return
-        }
-        if (
-          isDirectPeer(targetPeerId) &&
-          sendToDirectNeighbor(targetPeerId, frameCopy)
-        ) {
-          stats.messagesSent++
+        if (!isStillActive() || trySendDirect(targetPeerId, frameCopy)) {
           return
         }
 
-        const latestKeyP = getPairwiseKey(targetPeerId) ?? pairwiseKeyP
-        const ts = Date.now()
-        let payloadToSend: Uint8Array
-        let ivB64: string
-        let canonical: string
+        const latestKeyP = getPairwiseKey(targetPeerId)
+        if (!latestKeyP) {
+          return
+        }
 
+        let aesKey: CryptoKey
+        let localId: CryptoIdentity
         try {
-          const aesKey = await latestKeyP
-          const iv = crypto.getRandomValues(new Uint8Array(12))
-          ivB64 = toBase64Url(iv)
-          canonical = canonicalUnicastHeader(
-            curSelfId,
-            targetPeerId,
-            msgId,
-            ivB64,
-            pktSeq,
-            ts,
-            appId,
-            curRoomId
-          )
+          ;[aesKey, localId] = await Promise.all([
+            latestKeyP,
+            loadLocalCryptoIdentity()
+          ])
+        } catch {
+          return
+        }
+        syncSelfIdFromIdentity(localId.peerId)
+        if (!isStillActive() || trySendDirect(targetPeerId, frameCopy)) {
+          return
+        }
+
+        const curSelfId = getSelfId()
+        const curRoomId = getRoomId()
+        const pktSeq = seq.nextPktSeq()
+        const msgId = `${curSelfId}:${pktSeq}:${genId(8)}`
+        seq.originReplay.record(curSelfId, pktSeq)
+        seq.seenMsgIds.add(msgId)
+
+        const ts = Date.now()
+        const iv = crypto.getRandomValues(new Uint8Array(12))
+        const ivB64 = toBase64Url(iv)
+        const canonical = canonicalUnicastHeader(
+          curSelfId,
+          targetPeerId,
+          msgId,
+          ivB64,
+          pktSeq,
+          ts,
+          appId,
+          curRoomId
+        )
+
+        let payloadToSend: Uint8Array
+        let sig: string
+        try {
           payloadToSend = await encryptUnicastPayload(
             aesKey,
             iv,
             canonical,
             frameCopy
           )
+          sig = await signOverlayPayload(
+            localId.signPrivateKey,
+            canonical,
+            payloadToSend
+          )
         } catch {
           return
         }
-
-        const sig = await signPacket(canonical, payloadToSend)
-        if (isDestroyed()) {
+        if (!isStillActive() || trySendDirect(targetPeerId, frameCopy)) {
           return
         }
         const packet = packOverlayBinary(
@@ -349,34 +416,49 @@ export const createOverlayDataPlane = (
       })
       .catch(noOp)
       .finally(() => {
-        const nextDepth = (outboundQueueDepth.get(targetPeerId) ?? 1) - 1
-        if (nextDepth <= 0) {
-          outboundQueueDepth.delete(targetPeerId)
-        } else {
-          outboundQueueDepth.set(targetPeerId, nextDepth)
+        if (outboundUnicastByPeer.get(targetPeerId)?.token !== stateRef.token) {
+          return
         }
-        if (outboundUnicastQueues.get(targetPeerId) === nextQueue) {
-          outboundUnicastQueues.delete(targetPeerId)
+        stateRef.depth--
+        if (stateRef.depth <= 0 && stateRef.tail === nextTail) {
+          outboundUnicastByPeer.delete(targetPeerId)
         }
       })
-    outboundUnicastQueues.set(targetPeerId, nextQueue)
+    stateRef.tail = nextTail
   }
 
   const createVirtualTransport = (peerId: string): PeerDataTransport => {
     const router = getRouter()
     const existing = router.getVirtualTransport(peerId)
-    if (existing && existing.isOpen) {
+    const existingControl = existing
+      ? virtualTransportControls.get(existing)
+      : undefined
+    if (
+      existing &&
+      existingControl &&
+      existingControl.getState() === 'active'
+    ) {
       return existing
     }
 
-    let closed = false
+    let state: VirtualTransportPhase = 'active'
 
-    const isReachable = (): boolean =>
-      !closed &&
-      !isDestroyed() &&
-      !isPeerBanned(peerId) &&
-      !descriptors.hasLeft(peerId) &&
-      Boolean(router.resolveHealthyNextHopId(peerId))
+    const isReachable = (): boolean => {
+      if (isOriginInvalid(peerId, roomEpoch)) {
+        return false
+      }
+      switch (state) {
+        case 'active':
+          return Boolean(router.resolveHealthyNextHopId(peerId))
+        // Allow in-flight chunked transfers started on a virtual transport to seamlessly
+        // finish over a newly upgraded direct DataChannel after virtual detachment/close.
+        case 'detached':
+        case 'closed':
+          return isDirectPeer(peerId) && isPeerUsable(getDirectPeer(peerId))
+        default:
+          return unreachable(state)
+      }
+    }
 
     const transport: PeerDataTransport = {
       get isOpen(): boolean {
@@ -404,10 +486,10 @@ export const createOverlayDataPlane = (
         }
         const hop = router.resolveHealthyNextHopId(peerId)
         const hopChannel = hop ? getDirectPeer(hop)?.channel : null
-        const depth = outboundQueueDepth.get(peerId) ?? 0
+        const outState = outboundUnicastByPeer.get(peerId)
         const queuePromise =
-          depth >= maxQueuedUnicastBeforeBackpressure
-            ? outboundUnicastQueues.get(peerId)
+          outState && outState.depth >= maxQueuedUnicastBeforeBackpressure
+            ? outState.tail
             : undefined
         const channelNeedsWait = Boolean(
           hopChannel &&
@@ -460,30 +542,46 @@ export const createOverlayDataPlane = (
         })()
       },
       close: () => {
-        if (closed) {
+        if (state === 'closed') {
           return
         }
-        closed = true
+        state = 'closed'
         router.detachVirtualTransport(peerId, transport)
       }
     }
 
+    virtualTransportControls.set(transport, {
+      getState: () => state,
+      markDetached: () => {
+        if (state === 'active') {
+          state = 'detached'
+        }
+      }
+    })
     router.setVirtualTransport(peerId, transport)
     return transport
   }
 
+  const ensureOriginBuffer = (origin: string): OriginBufferEntry => {
+    let entry = originBuffers.get(origin)
+    if (!entry) {
+      entry = {early: [], replayToken: null, verified: []}
+      originBuffers.set(origin, entry)
+    }
+    return entry
+  }
+
   const flushBufferedForOrigin = (origin: string): void => {
-    const buffered = pendingVerifiedBroadcasts.get(origin)
-    if (!buffered || !buffered.length) {
+    const entry = originBuffers.get(origin)
+    if (!entry || entry.verified.length === 0) {
       return
     }
-    pendingVerifiedBroadcasts.delete(origin)
-    for (const buf of buffered) {
-      if (
-        isDestroyed() ||
-        isPeerBanned(origin) ||
-        descriptors.hasLeft(origin)
-      ) {
+    const broadcasts = entry.verified.splice(0)
+    if (entry.early.length === 0 && entry.replayToken === null) {
+      originBuffers.delete(origin)
+    }
+    for (const buf of broadcasts) {
+      if (isOriginInvalid(origin, roomEpoch)) {
         break
       }
       stats.messagesReceived++
@@ -496,13 +594,22 @@ export const createOverlayDataPlane = (
     fromPeerId: string,
     frame: UnpackedOverlayFrame
   ): void => {
-    let queue = pendingEarlyFrames.get(origin)
-    if (!queue) {
-      queue = []
-      pendingEarlyFrames.set(origin, queue)
+    const entry = ensureOriginBuffer(origin)
+    if (entry.early.length < maxBufferedEarlyFramesPerOrigin) {
+      entry.early.push([
+        fromPeerId,
+        [frame[0], frame[1], frame[2], frame[3].slice()]
+      ])
     }
-    if (queue.length < maxBufferedEarlyFramesPerOrigin) {
-      queue.push([fromPeerId, [frame[0], frame[1], frame[2], frame[3].slice()]])
+  }
+
+  const bufferVerifiedBroadcast = (
+    origin: string,
+    payload: Uint8Array
+  ): void => {
+    const entry = ensureOriginBuffer(origin)
+    if (entry.verified.length < maxBufferedEarlyFramesPerOrigin) {
+      entry.verified.push(payload.slice().buffer)
     }
   }
 
@@ -542,11 +649,12 @@ export const createOverlayDataPlane = (
       return false
     }
     const router = getRouter()
+    const expectedEpoch = roomEpoch
 
     return (async (): Promise<boolean> => {
       const id = await loadLocalCryptoIdentity()
       syncSelfIdFromIdentity(id.peerId)
-      if (isDestroyed() || signal?.aborted) {
+      if (isDestroyed() || signal?.aborted || expectedEpoch !== roomEpoch) {
         return false
       }
 
@@ -569,7 +677,7 @@ export const createOverlayDataPlane = (
         ),
         frame
       )
-      if (isDestroyed() || signal?.aborted) {
+      if (isDestroyed() || signal?.aborted || expectedEpoch !== roomEpoch) {
         return false
       }
       const sentCount = forwardBroadcastPacket(
@@ -605,6 +713,7 @@ export const createOverlayDataPlane = (
     const ttl = Math.min(rawTtl, maxAllowedHops)
     const curSelfId = getSelfId()
     const curRoomId = getRoomId()
+    const expectedEpoch = roomEpoch
     const origin = isStr(header['o']) ? header['o'] : ''
     const pktSeq = header['q']
     const msgId = isStr(header['m']) ? header['m'] : ''
@@ -645,8 +754,16 @@ export const createOverlayDataPlane = (
     }
 
     const signPubKey = descriptors.getSignPubKey(origin)
-    if (!signPubKey || (!isReplay && pendingEarlyFrames.has(origin))) {
-      bufferEarlyUnverifiedFrame(origin, fromPeerId, frame)
+    const bufEntry = originBuffers.get(origin)
+    if (
+      !signPubKey ||
+      (!isReplay &&
+        bufEntry &&
+        (bufEntry.early.length > 0 || bufEntry.replayToken !== null))
+    ) {
+      if (!isReplay) {
+        bufferEarlyUnverifiedFrame(origin, fromPeerId, frame)
+      }
       return
     }
 
@@ -679,7 +796,7 @@ export const createOverlayDataPlane = (
         payload,
         sig
       )
-      if (!valid || isDestroyed() || descriptors.hasLeft(origin)) {
+      if (!valid || isOriginInvalid(origin, expectedEpoch)) {
         return
       }
 
@@ -698,7 +815,7 @@ export const createOverlayDataPlane = (
             requiredRoles,
             inlineCert
           )
-          if (!allowed || isDestroyed()) {
+          if (!allowed || isOriginInvalid(origin, expectedEpoch)) {
             return
           }
         }
@@ -718,15 +835,8 @@ export const createOverlayDataPlane = (
           stats.messagesReceived++
           onDeliverData(origin, payload.slice().buffer)
         }
-      } else {
-        let queue = pendingVerifiedBroadcasts.get(origin)
-        if (!queue) {
-          queue = []
-          pendingVerifiedBroadcasts.set(origin, queue)
-        }
-        if (queue.length < maxBufferedEarlyFramesPerOrigin) {
-          queue.push(payload.slice().buffer)
-        }
+      } else if (!router.isPeerQuarantined(origin)) {
+        bufferVerifiedBroadcast(origin, payload)
       }
 
       if (
@@ -788,6 +898,7 @@ export const createOverlayDataPlane = (
             sig
           )) ||
           isDestroyed() ||
+          expectedEpoch !== roomEpoch ||
           descriptors.hasLeft(origin) ||
           descriptors.hasLeft(dest)
         ) {
@@ -837,15 +948,16 @@ export const createOverlayDataPlane = (
       if (
         router.isPeerQuarantined(origin) ||
         !(await verifyPacketSig(origin, signPubKey, canonical, payload, sig)) ||
-        isDestroyed() ||
-        descriptors.hasLeft(origin)
+        isOriginInvalid(origin, expectedEpoch)
       ) {
         return
       }
 
       const pairwiseKeyP = getPairwiseKey(origin)
       if (!pairwiseKeyP) {
-        bufferEarlyUnverifiedFrame(origin, fromPeerId, frame)
+        if (!isReplay && !descriptors.hasDescriptor(origin)) {
+          bufferEarlyUnverifiedFrame(origin, fromPeerId, frame)
+        }
         return
       }
       let plainPayload: Uint8Array
@@ -860,11 +972,21 @@ export const createOverlayDataPlane = (
         failSig()
         return
       }
-
       if (
-        !commitPacketReplay() ||
-        !router.ensureOriginVirtualPeer(origin, fromPeerId)
+        isOriginInvalid(origin, expectedEpoch) ||
+        router.isPeerQuarantined(origin)
       ) {
+        return
+      }
+
+      if (seq.originReplay.has(origin, pktSeq) || seq.seenMsgIds.has(msgId)) {
+        stats.duplicatesDropped++
+        return
+      }
+      if (!router.ensureOriginVirtualPeer(origin, fromPeerId)) {
+        return
+      }
+      if (!commitPacketReplay()) {
         return
       }
       flushBufferedForOrigin(origin)
@@ -876,6 +998,15 @@ export const createOverlayDataPlane = (
 
   return {
     createVirtualTransport,
+    onVirtualTransportDetached: (_peerId, transport) => {
+      virtualTransportControls.get(transport)?.markDetached()
+    },
+    hasBufferedFrames: origin => {
+      const entry = originBuffers.get(origin)
+      return Boolean(
+        entry && (entry.early.length > 0 || entry.verified.length > 0)
+      )
+    },
     broadcastInline,
     sendUnicast: (targetPeerId, frame) => {
       const isChunkedAction =
@@ -887,25 +1018,51 @@ export const createOverlayDataPlane = (
     handleOverlayBinary,
     flushBufferedForOrigin,
     replayEarlyFramesForOrigin: origin => {
-      const early = pendingEarlyFrames.get(origin)
-      if (!early || !early.length) {
-        pendingEarlyFrames.delete(origin)
+      const current = originBuffers.get(origin)
+      if (!current || current.replayToken !== null) {
         return
       }
-      if (replayingEarlyOrigins.has(origin)) {
+      if (current.early.length === 0) {
+        if (current.verified.length === 0) {
+          originBuffers.delete(origin)
+        }
         return
       }
-      replayingEarlyOrigins.add(origin)
+      const token = Symbol()
+      const replayEpoch = roomEpoch
+      current.replayToken = token
       const drainNext = (): void => {
-        const cur = pendingEarlyFrames.get(origin)
-        const item = cur?.shift()
+        const active = originBuffers.get(origin)
+        if (!active || active.replayToken !== token) {
+          return
+        }
+        if (isDestroyed() || replayEpoch !== roomEpoch) {
+          active.early.length = 0
+          active.replayToken = null
+          if (active.verified.length === 0) {
+            originBuffers.delete(origin)
+          }
+          return
+        }
+        const item = active.early.shift()
         if (!item) {
-          pendingEarlyFrames.delete(origin)
-          replayingEarlyOrigins.delete(origin)
+          active.replayToken = null
+          if (active.verified.length === 0) {
+            originBuffers.delete(origin)
+          }
           return
         }
         seq.enqueuePeerTask(item[0], async () => {
           try {
+            const latest = originBuffers.get(origin)
+            if (
+              !latest ||
+              latest.replayToken !== token ||
+              isDestroyed() ||
+              replayEpoch !== roomEpoch
+            ) {
+              return
+            }
             await handleOverlayBinary(item[0], item[1], true)
           } finally {
             drainNext()
@@ -917,26 +1074,21 @@ export const createOverlayDataPlane = (
     invalidatePairwiseKey,
     purgePeerDataState: peerId => {
       invalidatePairwiseKey(peerId)
-      pendingVerifiedBroadcasts.delete(peerId)
-      pendingEarlyFrames.delete(peerId)
-      replayingEarlyOrigins.delete(peerId)
+      outboundUnicastByPeer.delete(peerId)
+      originBuffers.delete(peerId)
     },
     resetRoomCryptoState: () => {
-      derivedPairwiseKeys.clear()
-      pairwiseKeyIdByPeer.clear()
-      pendingVerifiedBroadcasts.clear()
-      pendingEarlyFrames.clear()
-      replayingEarlyOrigins.clear()
+      roomEpoch++
+      pairwiseKeys.clear()
+      outboundUnicastByPeer.clear()
+      originBuffers.clear()
       forwardedUnicastEdges.clear()
     },
     destroy: () => {
-      derivedPairwiseKeys.clear()
-      pairwiseKeyIdByPeer.clear()
-      outboundUnicastQueues.clear()
-      outboundQueueDepth.clear()
-      pendingVerifiedBroadcasts.clear()
-      pendingEarlyFrames.clear()
-      replayingEarlyOrigins.clear()
+      roomEpoch++
+      pairwiseKeys.clear()
+      outboundUnicastByPeer.clear()
+      originBuffers.clear()
       forwardedUnicastEdges.clear()
     }
   }

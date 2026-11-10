@@ -22,7 +22,8 @@ import {
   noOp,
   peerBannedErr,
   peerDisconnectedErr,
-  peerLeftRoomErr
+  peerLeftRoomErr,
+  unreachable
 } from '../utils'
 import {
   canonicalLeaveHeader,
@@ -54,6 +55,15 @@ import {
 } from './topology'
 
 const emptyBytes = /*@__PURE__*/ new Uint8Array(0)
+const maxBufferedPreDirectPeers = 256
+const maxBufferedPreDirectFramesPerPeer = 32
+
+type ManagerLifecycle = 'active' | 'leaving' | 'closed'
+
+type NeighborSlotState =
+  | {readonly phase: 'buffered'; readonly frames: ArrayBuffer[]}
+  | {readonly phase: 'direct'; readonly peer: PeerHandle}
+  | {readonly phase: 'banned'}
 
 export type OverlayManagerDeps = {
   selfId?: string
@@ -127,6 +137,49 @@ export type OverlayManager = {
   setRoomId: (effectiveRoomId: string) => void
 }
 
+const createNeighborSlots = () => {
+  const slots = new Map<string, NeighborSlotState>()
+  const direct = new Map<string, PeerHandle>()
+  let buffered = 0
+  return {
+    get: (id: string): NeighborSlotState | undefined => slots.get(id),
+    entries: () => slots.entries(),
+    directPeers: direct as ReadonlyMap<string, PeerHandle>,
+    bufferedCount: (): number => buffered,
+    clear: (): void => {
+      slots.clear()
+      direct.clear()
+      buffered = 0
+    },
+    transition: (peerId: string, next: NeighborSlotState | null): void => {
+      const prev = slots.get(peerId)
+      if (prev?.phase === 'buffered') {
+        buffered--
+      }
+      if (next === null) {
+        slots.delete(peerId)
+        direct.delete(peerId)
+        return
+      }
+      switch (next.phase) {
+        case 'buffered':
+          buffered++
+          direct.delete(peerId)
+          break
+        case 'direct':
+          direct.set(peerId, next.peer)
+          break
+        case 'banned':
+          direct.delete(peerId)
+          break
+        default:
+          unreachable(next)
+      }
+      slots.set(peerId, next)
+    }
+  }
+}
+
 export const createOverlayManager = ({
   selfId: initialSelfId,
   appId = '',
@@ -150,12 +203,18 @@ export const createOverlayManager = ({
   const config = normalizeTopologyConfig(rawConfig)
   let selfId = initialSelfId ?? ''
   let roomId = initialRoomId
-  let isDestroyed = false
+  let lifecycle: ManagerLifecycle = 'active'
+  let localCryptoIdentityP: Promise<CryptoIdentity> | null = null
 
-  const directPeers = new Map<string, PeerHandle>()
-  const pendingFramesByPeer = new Map<string, ArrayBuffer[]>()
-  const bannedPeers = new Set<string>()
+  const neighbors = createNeighborSlots()
+  const activeDirectPeers = neighbors.directPeers
+  const transitionNeighborSlot = neighbors.transition
   const actionAuthorities = new Map<string, string[]>()
+
+  const isDestroyed = (): boolean => lifecycle === 'closed'
+
+  const isPeerBanned = (id: string): boolean =>
+    neighbors.get(id)?.phase === 'banned'
 
   const stats: TopologyStats = {
     messagesSent: 0,
@@ -169,7 +228,7 @@ export const createOverlayManager = ({
   if (getLocalUserIdentity) {
     void Promise.resolve(getLocalUserIdentity())
       .then(u => {
-        if (u?.userId) {
+        if (u?.userId && !isDestroyed()) {
           localUserId = u.userId
         }
       })
@@ -177,7 +236,7 @@ export const createOverlayManager = ({
   }
 
   const sendToDirectNeighbor = (peerId: string, frame: Uint8Array): boolean => {
-    const peer = directPeers.get(peerId)
+    const peer = activeDirectPeers.get(peerId)
     if (!isPeerUsable(peer)) {
       return false
     }
@@ -190,7 +249,7 @@ export const createOverlayManager = ({
   }
 
   const hasUsableDirectPeer = (): boolean => {
-    for (const peer of directPeers.values()) {
+    for (const peer of activeDirectPeers.values()) {
       if (isPeerUsable(peer)) {
         return true
       }
@@ -202,7 +261,8 @@ export const createOverlayManager = ({
     getAppId: () => appId,
     getRoomId: () => roomId,
     getSelfId: () => selfId,
-    isPinnedOrigin: k => directPeers.has(k) || descriptors.hasDescriptor(k)
+    isPinnedOrigin: k =>
+      activeDirectPeers.has(k) || descriptors.hasDescriptor(k)
   })
   if (selfId) {
     seq.syncSeqFloor(selfId)
@@ -210,10 +270,13 @@ export const createOverlayManager = ({
 
   const syncSelfIdFromIdentity = (peerId: string): void => {
     if (!initialSelfId && peerId && peerId !== selfId) {
-      descriptors.deleteKnownPeer(selfId)
+      const prevSelfId = selfId
       selfId = peerId
-      descriptors.addKnownPeer(selfId)
-      router?.bumpTopologyVersion()
+      descriptors?.syncSelfIdChange(prevSelfId, selfId)
+      seq.syncSeqFloor(selfId)
+      router?.recomputeTopologyAndRoutes()
+      router?.scheduleTargetsNotification()
+      return
     }
     seq.syncSeqFloor(selfId)
   }
@@ -221,16 +284,21 @@ export const createOverlayManager = ({
   if (getLocalEndpointIdentity) {
     void Promise.resolve(getLocalEndpointIdentity())
       .then(ep => {
-        if (ep?.peerId) {
+        if (ep?.peerId && !isDestroyed()) {
           syncSelfIdFromIdentity(ep.peerId)
         }
       })
       .catch(noOp)
   }
 
-  let localCryptoIdentityP: Promise<CryptoIdentity> | null = null
+  const maybePublishDescriptor = (): void => {
+    if (lifecycle === 'active' && activeDirectPeers.size > 0) {
+      void descriptors.publishLocalDescriptor().catch(noOp)
+    }
+  }
+
   const loadLocalCryptoIdentity = (): Promise<CryptoIdentity> =>
-    (localCryptoIdentityP ??= (async () => {
+    (localCryptoIdentityP ??= (async (): Promise<CryptoIdentity> => {
       const [endpointId, encPair] = await all([
         getLocalEndpointIdentity
           ? Promise.resolve(getLocalEndpointIdentity())
@@ -245,23 +313,19 @@ export const createOverlayManager = ({
         encPair.publicKey
       )
       syncSelfIdFromIdentity(endpointId.peerId)
-      const res: CryptoIdentity = {
+      const identity: CryptoIdentity = {
         peerId: endpointId.peerId,
         signPrivateKey: endpointId.signPrivateKey,
         signPubKey: jwkToCompactPub(endpointId.signPubJwk),
         encPrivateKey: encPair.privateKey,
         encPubKey: jwkToCompactPub(rawEncPubJwk)
       }
-      if (!isDestroyed && directPeers.size > 0) {
-        void descriptors.publishLocalDescriptor().catch(noOp)
-      }
-      return res
+      maybePublishDescriptor()
+      return identity
     })().catch(err => {
       localCryptoIdentityP = null
       throw err
     }))
-
-  const isPeerBanned = (id: string): boolean => bannedPeers.has(id)
 
   const descriptors = createDescriptorStore({
     appId,
@@ -269,17 +333,18 @@ export const createOverlayManager = ({
     descriptorTtlMs,
     maxUsers,
     seq,
-    isDestroyed: () => isDestroyed,
+    isDestroyed,
+    canPublish: () => lifecycle === 'active',
     getSelfId: () => selfId,
     getRoomId: () => roomId,
     getLocalUserId: () => localUserId,
     getLocalUserIdentity,
     loadLocalCryptoIdentity,
     syncSelfIdFromIdentity,
-    isDirectPeer: id => directPeers.has(id),
+    isDirectPeer: id => activeDirectPeers.has(id),
     isVirtualPeer: id => router.isVirtualPeer(id),
-    getDirectPeerIds: () => directPeers.keys(),
-    getDirectPeerCount: () => directPeers.size,
+    getDirectPeerIds: () => activeDirectPeers.keys(),
+    getDirectPeerCount: () => activeDirectPeers.size,
     getDiscoveredCandidateCount: () => router.getDiscoveredCandidateCount(),
     computeEffectiveTargets: () => router.computeEffectiveTargets(),
     sendToDirectNeighbor,
@@ -298,6 +363,7 @@ export const createOverlayManager = ({
       }
       dataPlane.replayEarlyFramesForOrigin(peerId)
     },
+    hasBufferedFramesForOrigin: peerId => dataPlane.hasBufferedFrames(peerId),
     onPeerDescriptorCert,
     onError
   })
@@ -308,15 +374,15 @@ export const createOverlayManager = ({
     descriptors,
     getRouter: () => router,
     stats,
-    isDestroyed: () => isDestroyed,
+    isDestroyed,
     getSelfId: () => selfId,
     getRoomId: () => roomId,
     loadLocalCryptoIdentity,
     syncSelfIdFromIdentity,
-    getDirectPeer: id => directPeers.get(id),
-    isDirectPeer: id => directPeers.has(id),
-    getDirectPeerIds: () => directPeers.keys(),
-    getDirectPeerCount: () => directPeers.size,
+    getDirectPeer: id => activeDirectPeers.get(id),
+    isDirectPeer: id => activeDirectPeers.has(id),
+    getDirectPeerIds: () => activeDirectPeers.keys(),
+    getDirectPeerCount: () => activeDirectPeers.size,
     hasUsableDirectPeer,
     sendToDirectNeighbor,
     isPeerBanned,
@@ -333,22 +399,24 @@ export const createOverlayManager = ({
     requiredPeerIdleTtlMs,
     quarantineTtlMs,
     descriptors,
-    isDestroyed: () => isDestroyed,
+    isDestroyed,
     getSelfId: () => selfId,
     getRoomId: () => roomId,
-    getDirectPeer: id => directPeers.get(id),
-    isDirectPeer: id => directPeers.has(id),
-    getDirectPeerIds: () => directPeers.keys(),
-    getDirectPeerCount: () => directPeers.size,
-    isPeerBanned: id => bannedPeers.has(id),
+    getDirectPeer: id => activeDirectPeers.get(id),
+    isDirectPeer: id => activeDirectPeers.has(id),
+    getDirectPeerIds: () => activeDirectPeers.keys(),
+    getDirectPeerCount: () => activeDirectPeers.size,
+    isPeerBanned,
     createVirtualTransport: id => dataPlane.createVirtualTransport(id),
+    onVirtualTransportDetached: (id, transport) =>
+      dataPlane.onVirtualTransportDetached(id, transport),
     onVirtualPeerJoin,
     onVirtualPeerLeave,
     onVirtualPeerReady: id => dataPlane.flushBufferedForOrigin(id)
   })
 
   void loadLocalCryptoIdentity().catch(err => {
-    if (!isDestroyed) {
+    if (!isDestroyed()) {
       onError?.(err)
     }
   })
@@ -359,15 +427,33 @@ export const createOverlayManager = ({
     dataPlane.purgePeerDataState(peerId)
   }
 
+  const applyPeerBan = (peerId: string): void => {
+    const wasDirect = neighbors.get(peerId)?.phase === 'direct'
+    transitionNeighborSlot(peerId, {phase: 'banned'})
+    if (wasDirect) {
+      router.clearCapacityRejected()
+    }
+    router.purgeConnectionPolicyPeer(peerId)
+    descriptors.markLeft(
+      peerId,
+      descriptors.getDescriptor(peerId)?.seq ?? Number.MAX_SAFE_INTEGER
+    )
+    router.purgePeerRoutingState(peerId)
+    dataPlane.purgePeerDataState(peerId)
+    router.evictVirtualPeerNow(peerId, peerBannedErr)
+    router.recomputeTopologyAndRoutes()
+    maybePublishDescriptor()
+  }
+
   const isOverlayFrame = (data: ArrayBuffer): boolean =>
     data.byteLength >= 2 &&
     new Uint8Array(data, 0, 1)[0] === overlayFrameVersion
 
   const handleOverlayFrame = (fromPeerId: string, data: ArrayBuffer): void => {
-    if (data.byteLength > maxRoomFrameBytes) {
+    if (isDestroyed() || data.byteLength > maxRoomFrameBytes) {
       return
     }
-    if (bannedPeers.has(fromPeerId)) {
+    if (isPeerBanned(fromPeerId)) {
       stats.signatureFailures++
       return
     }
@@ -406,28 +492,56 @@ export const createOverlayManager = ({
       if (!isOverlayFrame(data)) {
         return false
       }
-      if (data.byteLength > maxRoomFrameBytes) {
+      if (isDestroyed() || data.byteLength > maxRoomFrameBytes) {
         return true
       }
-      if (!directPeers.has(fromPeerId)) {
-        let q = pendingFramesByPeer.get(fromPeerId)
-        if (!q) {
-          q = []
-          pendingFramesByPeer.set(fromPeerId, q)
+      const slot = neighbors.get(fromPeerId)
+      if (!slot) {
+        if (neighbors.bufferedCount() >= maxBufferedPreDirectPeers) {
+          for (const [id, candidate] of neighbors.entries()) {
+            if (candidate.phase === 'buffered') {
+              transitionNeighborSlot(id, null)
+              break
+            }
+          }
         }
-        if (q.length < 32) {
-          q.push(data.slice(0))
-        }
+        transitionNeighborSlot(fromPeerId, {
+          phase: 'buffered',
+          frames: [data.slice(0)]
+        })
         return true
       }
-      handleOverlayFrame(fromPeerId, data)
-      return true
+      switch (slot.phase) {
+        case 'banned':
+          stats.signatureFailures++
+          return true
+        case 'direct':
+          handleOverlayFrame(fromPeerId, data)
+          return true
+        case 'buffered':
+          if (slot.frames.length < maxBufferedPreDirectFramesPerPeer) {
+            slot.frames.push(data.slice(0))
+          }
+          return true
+        default:
+          return unreachable(slot)
+      }
     },
     addDirectPeer: (peerId, peer) => {
-      router.clearQuarantined(peerId)
-      if (!router.isAllowedTargetPeer(peerId)) {
+      if (isDestroyed()) {
         return
       }
+      router.clearQuarantined(peerId)
+      const prevSlot = neighbors.get(peerId)
+      if (!router.isAllowedTargetPeer(peerId)) {
+        if (prevSlot?.phase === 'buffered') {
+          transitionNeighborSlot(peerId, null)
+        }
+        return
+      }
+      const queuedFrames =
+        prevSlot?.phase === 'buffered' ? prevSlot.frames : undefined
+
       descriptors.clearLeft(peerId)
       router.clearCapacityRejected(peerId)
       descriptors.addKnownPeer(peerId)
@@ -435,76 +549,102 @@ export const createOverlayManager = ({
       router.clearUnreachableTimer(peerId)
 
       router.detachVirtualTransport(peerId)
-      directPeers.set(peerId, peer)
+      transitionNeighborSlot(peerId, {phase: 'direct', peer})
       router.recomputeTopologyAndRoutes()
 
-      const queued = pendingFramesByPeer.get(peerId)
-      if (queued) {
-        pendingFramesByPeer.delete(peerId)
-        for (const frame of queued) {
+      if (queuedFrames) {
+        for (const frame of queuedFrames) {
+          if (neighbors.get(peerId)?.phase !== 'direct') {
+            break
+          }
           handleOverlayFrame(peerId, frame)
         }
       }
 
-      descriptors.sendInitialKnownDescriptors(peerId)
+      if (lifecycle === 'active' && neighbors.get(peerId)?.phase === 'direct') {
+        descriptors.sendInitialKnownDescriptors(peerId)
+      }
     },
     removeDirectPeer: (peerId, peer, reason) => {
-      const current = directPeers.get(peerId)
-      if (!current || (peer && current !== peer)) {
-        if (!current) {
-          pendingFramesByPeer.delete(peerId)
-          const existingVTransport = router.getVirtualTransport(peerId)
-          if (peer) {
-            if (existingVTransport && router.getRoute(peerId)) {
-              onVirtualPeerJoin(peerId, existingVTransport)
-            } else if (!existingVTransport) {
-              if (!descriptors.hasDescriptor(peerId)) {
-                purgePeerFromGraph(peerId)
-              }
-              router.recomputeTopologyAndRoutes()
-            }
-          } else {
-            const desc = descriptors.getDescriptor(peerId)
-            if (reason === peerLeftRoomErr || reason === peerBannedErr) {
-              if (reason === peerLeftRoomErr) {
-                descriptors.markLeft(peerId, desc?.seq ?? 0)
-              }
-              dataPlane.purgePeerDataState(peerId)
-              router.evictVirtualPeerNow(peerId, reason)
-              router.recomputeTopologyAndRoutes()
-            } else {
-              const violation = isProtocolViolation(reason)
-              if (violation) {
-                router.quarantinePeer(peerId)
-              }
-              router.deactivateVirtualPeerNow(
-                peerId,
-                reason ?? peerDisconnectedErr
-              )
-              if (violation) {
-                router.recomputeTopologyAndRoutes()
-              }
-            }
+      if (isDestroyed()) {
+        return
+      }
+      if (reason === peerBannedErr) {
+        applyPeerBan(peerId)
+        return
+      }
+      const slot = neighbors.get(peerId)
+      if (slot?.phase === 'banned') {
+        return
+      }
+      if (slot?.phase === 'direct' && peer && slot.peer !== peer) {
+        return
+      }
+
+      if (slot?.phase !== 'direct') {
+        if (slot?.phase === 'buffered') {
+          transitionNeighborSlot(peerId, null)
+        }
+        const violation = isProtocolViolation(reason)
+        if (peer) {
+          if (violation) {
+            router.quarantinePeer(peerId)
+            dataPlane.purgePeerDataState(peerId)
+            router.deactivateVirtualPeerNow(peerId, reason!)
+            router.recomputeTopologyAndRoutes()
+            return
           }
+          const existingVTransport = router.getVirtualTransport(peerId)
+          if (existingVTransport && router.getRoute(peerId)) {
+            onVirtualPeerJoin(peerId, existingVTransport)
+          } else if (!existingVTransport) {
+            if (!descriptors.hasDescriptor(peerId)) {
+              purgePeerFromGraph(peerId)
+            }
+            router.recomputeTopologyAndRoutes()
+          }
+          return
+        }
+
+        if (reason === peerLeftRoomErr) {
+          descriptors.markLeft(
+            peerId,
+            descriptors.getDescriptor(peerId)?.seq ?? 0
+          )
+          dataPlane.purgePeerDataState(peerId)
+          router.evictVirtualPeerNow(peerId, reason)
+          router.recomputeTopologyAndRoutes()
+          return
+        }
+        if (violation) {
+          router.quarantinePeer(peerId)
+          dataPlane.purgePeerDataState(peerId)
+        }
+        router.deactivateVirtualPeerNow(peerId, reason ?? peerDisconnectedErr)
+        if (violation) {
+          router.recomputeTopologyAndRoutes()
         }
         return
       }
 
-      pendingFramesByPeer.delete(peerId)
-      directPeers.delete(peerId)
+      transitionNeighborSlot(peerId, null)
       router.clearCapacityRejected()
       router.bumpTopologyVersion()
+      if (isProtocolViolation(reason)) {
+        router.quarantinePeer(peerId)
+      }
       descriptors.markLeft(peerId)
       purgePeerFromGraph(peerId)
-      router.recomputeTopologyAndRoutes()
-      if (directPeers.size > 0) {
-        void descriptors.publishLocalDescriptor().catch(noOp)
+      if (reason === peerLeftRoomErr) {
+        router.evictVirtualPeerNow(peerId, reason)
       }
+      router.recomputeTopologyAndRoutes()
+      maybePublishDescriptor()
     },
-    isDirectPeer: peerId => directPeers.has(peerId),
+    isDirectPeer: peerId => activeDirectPeers.has(peerId),
     isVirtualPeer: peerId => router.isVirtualPeer(peerId),
     canBroadcastDirectMesh: () =>
-      directPeers.size === 0 ||
+      activeDirectPeers.size === 0 ||
       (router.getVirtualPeerCount() === 0 &&
         descriptors.hasConvergedDirectMesh()),
     getRoute: peerId => router.getRoute(peerId),
@@ -519,19 +659,26 @@ export const createOverlayManager = ({
     getTargetNeighbors: router.getTargetNeighbors,
     setOnTargetsChanged: router.setOnTargetsChanged,
     announceLeave: async () => {
-      if (isDestroyed || !directPeers.size) {
+      if (lifecycle !== 'active') {
+        return
+      }
+      lifecycle = 'leaving'
+      if (!activeDirectPeers.size) {
         return
       }
       const leaveSeq = seq.nextDescSeq()
       try {
         const id = await loadLocalCryptoIdentity()
         syncSelfIdFromIdentity(id.peerId)
+        if (isDestroyed() || !selfId) {
+          return
+        }
         const sig = await signOverlayPayload(
           id.signPrivateKey,
           canonicalLeaveHeader(selfId, leaveSeq, appId, roomId),
           emptyBytes
         )
-        if (isDestroyed) {
+        if (isDestroyed() || !activeDirectPeers.size) {
           return
         }
         const packet = packOverlayControl({
@@ -540,7 +687,7 @@ export const createOverlayManager = ({
           seq: leaveSeq,
           sig
         })
-        for (const neighborId of directPeers.keys()) {
+        for (const neighborId of activeDirectPeers.keys()) {
           sendToDirectNeighbor(neighborId, packet)
         }
       } catch {
@@ -548,18 +695,19 @@ export const createOverlayManager = ({
       }
     },
     destroy: () => {
-      isDestroyed = true
+      if (lifecycle === 'closed') {
+        return
+      }
+      lifecycle = 'closed'
       descriptors.destroy()
       router.destroy()
       dataPlane.destroy()
       seq.clear()
-      pendingFramesByPeer.clear()
-      directPeers.clear()
-      bannedPeers.clear()
+      neighbors.clear()
       actionAuthorities.clear()
     },
     getSnapshot: () => {
-      const directPeerIds = [...directPeers.keys()].sort()
+      const directPeerIds = [...activeDirectPeers.keys()].sort()
       return {
         peerId: selfId,
         directPeerIds,
@@ -576,28 +724,21 @@ export const createOverlayManager = ({
     setPeerSignPublicKey: descriptors.setPeerSignPublicKey,
     setLocalRoleCertificate: descriptors.setLocalRoleCertificate,
     markPeerBanned: peerId => {
-      bannedPeers.add(peerId)
-      router.purgeConnectionPolicyPeer(peerId)
-      descriptors.markLeft(
-        peerId,
-        descriptors.getDescriptor(peerId)?.seq ?? Number.MAX_SAFE_INTEGER
-      )
-      dataPlane.invalidatePairwiseKey(peerId)
-      router.evictVirtualPeerNow(peerId, peerBannedErr)
-      router.recomputeTopologyAndRoutes()
-      if (directPeers.size > 0) {
-        void descriptors.publishLocalDescriptor().catch(noOp)
-      }
-    },
-    unmarkPeerBanned: peerId => {
-      if (!bannedPeers.delete(peerId)) {
+      if (isDestroyed()) {
         return
       }
+      applyPeerBan(peerId)
+    },
+    unmarkPeerBanned: peerId => {
+      if (isDestroyed() || neighbors.get(peerId)?.phase !== 'banned') {
+        return
+      }
+      transitionNeighborSlot(peerId, null)
       descriptors.clearLeft(peerId)
       router.bumpTopologyVersion()
       router.recomputeTopologyAndRoutes()
     },
-    isPeerBanned: peerId => bannedPeers.has(peerId),
+    isPeerBanned,
     registerActionAuthority: (actionType, roles) => {
       if (roles.length > 0) {
         actionAuthorities.set(actionType, [...roles])
@@ -606,22 +747,28 @@ export const createOverlayManager = ({
       }
     },
     setRoomId: effectiveRoomId => {
-      if (effectiveRoomId && effectiveRoomId !== roomId) {
-        roomId = effectiveRoomId
-        router.refreshPasswordSalt()
-        seq.resetFloor()
-        dataPlane.resetRoomCryptoState()
-        router.resetForRoomIdChange()
-        for (const existingPeerId of Array.from(descriptors.getKnownRoster())) {
-          if (existingPeerId !== selfId) {
-            router.evictVirtualPeerNow(existingPeerId, peerDisconnectedErr)
-          }
-        }
-        router.recomputeTopologyAndRoutes()
-        if (directPeers.size > 0) {
-          void descriptors.publishLocalDescriptor().catch(noOp)
+      if (isDestroyed() || !effectiveRoomId || effectiveRoomId === roomId) {
+        return
+      }
+      roomId = effectiveRoomId
+
+      for (const vPeerId of Array.from(router.getVirtualPeerIds())) {
+        if (!activeDirectPeers.has(vPeerId)) {
+          dataPlane.purgePeerDataState(vPeerId)
+          router.evictVirtualPeerNow(vPeerId, peerDisconnectedErr)
         }
       }
+
+      seq.originReplay.clear()
+      seq.seenMsgIds.clear()
+      seq.resetFloor()
+
+      descriptors.resetForRoomIdChange(activeDirectPeers.keys())
+      dataPlane.resetRoomCryptoState()
+      router.resetForRoomIdChange()
+      router.refreshPasswordSalt()
+      router.recomputeTopologyAndRoutes()
+      maybePublishDescriptor()
     }
   }
 }
