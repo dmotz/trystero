@@ -4,6 +4,16 @@
 
 ### Improvements
 
+- 🪪 **Persistent user identities & multi-tab presence (`userId`)** - every
+  participant gets an unforgeable `userId` alongside each tab's `peerId`
+  (`await room.getSelf()`), persisted across browser reloads and open tabs by
+  default (`identity: 'local'`). Pass `identity: 'none'` for throwaway IDs,
+  reset saved browser identity with `clearUserIdentity(appId)`, or bring
+  portable keys across devices and servers with `createUserIdentity()`,
+  `exportUserIdentity()`, and `importUserIdentity()`. Track unique users instead
+  of individual tabs with `room.onUserJoin()`, `room.onUserLeave()`, and
+  `room.getUsers()`, and pass either a `userId` or `peerId` to `target` /
+  `targets` across actions, media, `ping()`, and moderation.
 - 🗂️ **Synced per-user & shared room state (`makeUserState` & `makeState`)** -
   built-in JSON state primitives that apply local updates synchronously, support
   custom `validate(next, context)` rules, and plug directly into React's
@@ -25,33 +35,23 @@
   `makeUserState`, and `makeAction` accept `{roles}` to restrict who can write
   or send (`makeState` defaults to admin-only writes when `roles()` is enabled;
   pass `roles: '*'` to allow everyone).
-- 🪪 **Persistent user identities & multi-tab presence (`userId`)** - every
-  participant gets an unforgeable `userId` alongside each tab's `peerId`
-  (`await room.getSelf()`), persisted across browser reloads and open tabs by
-  default (`identity: 'local'`). Pass `identity: 'none'` for throwaway IDs,
-  reset saved browser identity with `clearUserIdentity(appId)`, or bring
-  portable keys across devices and servers with `createUserIdentity()`,
-  `exportUserIdentity()`, and `importUserIdentity()`. Track unique users instead
-  of individual tabs with `room.onUserJoin()`, `room.onUserLeave()`, and
-  `room.getUsers()`, and pass either a `userId` or `peerId` to `target` /
-  `targets` across actions, media, `ping()`, and moderation.
+- 🕸️ **Large-room scaling (`scale()`)** - pass `use: [scale({maxDirectPeers?})]`
+  to `joinRoom()` to scale rooms to dozens of peers without changing your state,
+  action, or media code (with `room.getTopology()` to inspect active connections
+  and routes).
+- 🚪 **Room size limits (`maxUsers`)** - cap how many unique users can join a
+  room (`joinRoom({appId, maxUsers: 2}, roomId)`); extra joiners are rejected
+  with `{code: 'room-full'}` on `room.onError()`.
 - 🔔 **Composable event subscriptions** - room, action, and state `on*()`
   methods now support multiple independent listeners, return an `unsubscribe()`
   function, and accept `{once, signal}` options plus `{replay: true}` to emit
   already-active users, peers, streams, roles, or state to late subscribers.
-- 🚪 **Room size limits (`maxUsers`)** - cap how many unique users can join a
-  room (`joinRoom({appId, maxUsers: 2}, roomId)`); extra joiners are rejected
-  with `{code: 'room-full'}` on `room.onError()`.
 - 🚨 **Structured error handling (`room.onError` & `ActionError`)** -
   `room.onError()` emits typed `RoomError` codes (`'room-full'`, `'banned'`,
   `'decrypt-failed'`, `'peer-connect-failed'`, `'relay-failed'`, etc.), and
   rejected `action.send()` / `action.request()` calls expose a typed
   `ActionError` (`err.kind`:
   `'timeout' | 'disconnected' | 'aborted' | 'rejected'`).
-- 🕸️ **Large-room scaling (`scale()`)** - pass `use: [scale({maxDirectPeers?})]`
-  to `joinRoom()` to scale rooms to dozens of peers without changing your state,
-  action, or media code (with `room.getTopology()` to inspect active connections
-  and routes).
 
 ### ⚠️ Breaking changes
 
