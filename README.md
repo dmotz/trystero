@@ -369,6 +369,4 @@ Dive deeper into any feature or browse the full API:
 
 ---
 
-
-
 Trystero by [Dan Motzenbecker](https://oxism.com)
