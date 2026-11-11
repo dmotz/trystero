@@ -4,18 +4,15 @@
 
 👉 **[Try it live on trystero.dev](https://trystero.dev)** 👈
 
-Turning a weekend web project into a multiplayer app usually means a detour into
-backend land: spinning up WebSocket servers, wiring up user accounts, managing
-database state, and paying to keep something running just so two browsers can
-say hello.
+Making your app work with multiple users usually means a detour into setting up
+servers, auth, billing, databases, etc. — all so two browsers can say hello.
 
-**Trystero skips the server entirely.** Import it into any static site, join a
-room by name, and browsers discover each other automatically and connect
-directly over fast, end-to-end encrypted WebRTC. Out of the box, you get
-verified user identities, synced player and room state, host permissions, RPC,
-chunked file transfers, and live audio/video — so you can ship a real
-multiplayer game or collaborative tool from GitHub Pages, Neocities, or a single
-HTML file.
+**Trystero skips the backend entirely.** Import the library, join a room by
+name, and browsers discover each other automatically and connect directly over
+fast, end-to-end encrypted WebRTC. Out of the box, you get verified user
+identities, synced user and room state, host permissions, RPC, chunked file
+transfers, and live audio/video. The web was meant to be decentralized and
+Trystero makes it easy to build apps where data flows without middlemen.
 
 ---
 
@@ -372,12 +369,6 @@ Dive deeper into any feature or browse the full API:
 
 ---
 
-## Community
 
-Curious what people are tinkering on? Check out projects built by the community
-in **[awesome-trystero](https://github.com/jeremyckahn/awesome-trystero)**, or
-take it for a spin on **[trystero.dev](https://trystero.dev)**.
-
----
 
 Trystero by [Dan Motzenbecker](https://oxism.com)
