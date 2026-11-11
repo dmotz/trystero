@@ -317,14 +317,14 @@ traffic through a central server. The one catch with WebRTC has always been
 _signaling_: two browsers need a brief introduction to swap connection info
 before they can link up.
 
-Trystero handles that introduction automatically out of the box using public
-relays — nothing to deploy or configure. Once peers connect, **your app's data
-never touches a relay**: state, messages, files, and media flow straight from
-browser to browser, end-to-end encrypted.
+Trystero handles that introduction automatically out of the box using
+decentralized public relays — nothing to deploy or configure. Once peers
+connect, **your app's data never touches a relay**: state, messages, files, and
+media flow straight from browser to browser, end-to-end encrypted.
 
-Prefer to run your own signaling relay with Supabase, Firebase, MQTT,
-BitTorrent, or a tiny self-hosted WebSocket relay? You can swap strategies with
-a one-line import change — see the
+Prefer to run your own signaling setup with Nostr, MQTT, BitTorrent, Supabase,
+Firebase, or a tiny self-hosted WebSocket relay? You can swap strategies with a
+one-line import change — see the
 **[Signaling & Relays guide](./docs/signaling.md)**.
 
 <details>
