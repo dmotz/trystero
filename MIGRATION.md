@@ -2,10 +2,10 @@
 
 [← Back to README](./README.md) · [Full API Reference](./docs/api.md)
 
-Trystero **0.27.0** is a major upgrade that brings **unforgeable user
-identities**, **multi-tab presence**, **synced player & room state**,
-**serverless room admins & moderation**, and **multi-hop room scaling** to every
-signaling strategy out of the box.
+Trystero 0.27.0 is a major upgrade that brings unforgeable user identities,
+multi-tab presence, synced player & room state, serverless room admins &
+moderation, and multi-hop room scaling to every signaling strategy out of the
+box.
 
 ---
 
