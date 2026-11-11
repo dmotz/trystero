@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/torrent",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Simple, serverless WebRTC (via Torrent)",
   "keywords": [
     "bittorrent",
@@ -25,10 +25,16 @@
     "email": "dan@oxism.com",
     "url": "https://oxism.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmotz/trystero.git",
+    "directory": "packages/torrent"
+  },
   "files": [
     "dist"
   ],
   "type": "module",
+  "sideEffects": false,
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
@@ -36,5 +42,8 @@
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

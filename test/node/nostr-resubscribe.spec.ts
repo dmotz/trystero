@@ -1,16 +1,17 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {joinRoom} from '../../packages/nostr/src/index.ts'
+
+type SdpInit = {type: string; sdp?: string}
 
 class MockDataChannel {
   readyState = 'connecting'
   binaryType = 'arraybuffer'
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((event: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((event: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
@@ -25,19 +26,19 @@ class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  onconnectionstatechange = null
-  listeners = {}
+  localDescription: SdpInit | null = null
+  onconnectionstatechange: (() => void) | null = null
+  listeners: Record<string, Set<() => void>> = {}
 
   createDataChannel() {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: () => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: () => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -47,7 +48,7 @@ class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: SdpInit) {
     if (description?.type === 'rollback') {
       this.signalingState = 'stable'
       return
@@ -88,19 +89,19 @@ void test(
     const realSetTimeout = globalThis.setTimeout
     const tick = (ms = 0) => new Promise(res => realSetTimeout(res, ms))
 
-    const sockets = []
+    const sockets: ControlledSocket[] = []
     let allowClose = true
-    const stubbedTimers = []
+    const stubbedTimers: Array<() => void> = []
 
     class ControlledSocket {
       url = ''
       readyState = 0
-      onopen = null
-      onclose = null
-      onmessage = null
-      sent = []
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onmessage: ((event: {data: string}) => void) | null = null
+      sent: string[] = []
 
-      constructor(url) {
+      constructor(url: string) {
         this.url = url
         sockets.push(this)
       }
@@ -119,7 +120,7 @@ void test(
         this.onclose?.()
       }
 
-      send(data) {
+      send(data: string) {
         this.sent.push(data)
       }
 
@@ -131,11 +132,11 @@ void test(
     // makeSocket has no injection seam for WebSocket or its retry timer; the
     // setTimeout shim queues every timer so the jittered reconnect and batched
     // flushBatch (scheduled with setTimeout(0)) can be fired on demand.
-    globalThis.WebSocket = ControlledSocket
-    globalThis.setTimeout = fn => {
+    globalThis.WebSocket = ControlledSocket as unknown as typeof WebSocket
+    globalThis.setTimeout = ((fn: () => void) => {
       stubbedTimers.push(fn)
       return stubbedTimers.length - 1
-    }
+    }) as unknown as typeof setTimeout
 
     const drainTimers = (limit = 100) => {
       let count = 0
@@ -153,17 +154,34 @@ void test(
       }
     }
 
-    const isReqFrame = frame =>
+    const isReqFrame = (frame: unknown): frame is string =>
       typeof frame === 'string' && frame.startsWith('["REQ"')
 
-    let room
+    const waitForSocketFrame = async (
+      socket: ControlledSocket,
+      predicate: (frame: string) => boolean,
+      timeoutMs = 5_000
+    ): Promise<void> => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        drainTimers()
+        if (socket.sent.some(predicate)) {
+          return
+        }
+        await tick(10)
+      }
+      drainTimers()
+    }
+
+    let room: ReturnType<typeof joinRoom> | undefined
     try {
       room = joinRoom(
         {
           appId: `trystero-nostr-resubscribe-${Date.now()}`,
           password: 'resubscribe-test',
           relayConfig: {urls: [`ws://test-nostr-${Date.now()}`], redundancy: 1},
-          rtcPolyfill: MockRTCPeerConnection
+          rtcPolyfill:
+            MockRTCPeerConnection as unknown as typeof RTCPeerConnection
         },
         'r'
       )
@@ -171,12 +189,10 @@ void test(
       await tick(0)
       assert.equal(sockets.length, 1, 'expected one socket to be created')
 
-      const first = sockets[0]
+      const first = sockets[0]!
       first.open()
       // Let the subscribe chain resolve and queue the batched flushBatch.
-      await tick(50)
-      drainTimers()
-      await tick(50)
+      await waitForSocketFrame(first, isReqFrame)
 
       const reqOnFirst = first.sent.filter(isReqFrame)
       assert.ok(
@@ -192,7 +208,7 @@ void test(
         'expected a reconnect to be scheduled after the socket closed'
       )
       drainTimers()
-      await tick(50)
+      await tick(20)
 
       assert.equal(
         sockets.length,
@@ -200,11 +216,9 @@ void test(
         'expected the retry to create a new socket'
       )
 
-      const second = sockets[1]
+      const second = sockets[1]!
       second.open()
-      await tick(50)
-      drainTimers()
-      await tick(50)
+      await waitForSocketFrame(second, frame => frame.startsWith('["EVENT"'))
 
       const reqOnSecond = second.sent.filter(isReqFrame)
       assert.ok(

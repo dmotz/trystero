@@ -1,49 +1,34 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
 import {MockRTCPeerConnection} from './peer-harness.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
-import initPeer from '../../packages/core/src/peer.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
-import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
+import initPeer, {defaultIceServers} from '../../packages/core/src/peer.ts'
 
-void test('a prewarmed offer does not replay and destroy its connected room peer', async t => {
+void test('a prewarmed offer does not replay when signal handler is attached', async t => {
   const peer = initPeer(true, {
     appId: 'prewarmed-offer-test',
     rtcPolyfill: MockRTCPeerConnection as never
   })
-  const manager = new SharedPeerManager()
-  let joins = 0
-  const room = manager.registerRoom(
-    'prewarmed-offer-test',
-    'room',
-    Promise.resolve('room-token'),
-    {
-      active: true,
-      onPeer: proxy => {
-        joins++
-        proxy.setHandlers({signal: () => {}})
-      },
-      onDetach: () => {}
-    }
-  )
   t.after(() => {
-    room.leave()
     peer.destroy()
   })
 
   const offer = await peer.getOffer()
   assert.ok(offer)
   assert.equal(offer.type, 'offer')
-  room.connect('remote', peer, 60_000)
-  assert.equal(joins, 1)
+  const replayedSignals: unknown[] = []
+  peer.setHandlers({signal: signal => replayedSignals.push(signal)})
   assert.equal(peer.isDead, false)
+  assert.deepEqual(replayedSignals, [])
 })
 
-void test('unanswered offer restarts preserve the pending data channel without rollback', async t => {
+void test('repeated unanswered getOffer calls preserve the pending data channel without rollback, and post-answer negotiation emits a fresh offer', async t => {
   class TrackingRTCPeerConnection extends MockRTCPeerConnection {
     rollbacks = 0
 
-    async setLocalDescription(description) {
+    override async setLocalDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       if (description?.type === 'rollback') {
         this.rollbacks++
       }
@@ -56,55 +41,62 @@ void test('unanswered offer restarts preserve the pending data channel without r
     rtcPolyfill: TrackingRTCPeerConnection as never
   })
   t.after(() => peer.destroy())
+  assert.equal('restartIce' in peer, false)
   const pc = peer.connection as unknown as TrackingRTCPeerConnection
 
-  await peer.getOffer()
+  const initialOffer = await peer.getOffer()
+  assert.ok(initialOffer)
   assert.equal(pc.signalingState, 'have-local-offer')
   assert.equal(pc.remoteDescription, null)
-  await peer.getOffer(true)
+  const repeatedOffer = await peer.getOffer()
+  assert.deepEqual(repeatedOffer, initialOffer)
   assert.equal(pc.rollbacks, 0)
   assert.equal(pc.signalingState, 'have-local-offer')
 
+  const renegotiatedOffers: Array<{type: string; sdp: string}> = []
+  peer.setHandlers({
+    signal: signal => {
+      if (signal.type === 'offer') {
+        renegotiatedOffers.push(signal)
+      }
+    }
+  })
+
   await peer.signal({type: 'answer', sdp: 'mock-answer'})
   assert.equal(pc.signalingState, 'stable')
-  await peer.getOffer(true)
-  await peer.getOffer(true)
-  assert.equal(pc.rollbacks, 1)
+  pc.onnegotiationneeded?.()
+  await flushMicrotasks()
+  assert.equal(renegotiatedOffers.length, 1)
+  assert.notEqual(renegotiatedOffers[0]!.sdp, initialOffer.sdp)
+  assert.equal(pc.rollbacks, 0)
 })
 
-void test('a restarted prewarmed offer does not queue in pendingSignals or destroy its shared peer', async t => {
+void test('repeated prewarmed getOffer calls do not queue in pendingSignals and non-initiator getOffer returns undefined', async t => {
   const peer = initPeer(true, {
     appId: 'restarted-prewarmed-offer-test',
     rtcPolyfill: MockRTCPeerConnection as never
   })
-  const manager = new SharedPeerManager()
-  let joins = 0
-  const replayedSignals: unknown[] = []
-  const room = manager.registerRoom(
-    'restarted-prewarmed-offer-test',
-    'room',
-    Promise.resolve('room-token'),
-    {
-      active: true,
-      onPeer: proxy => {
-        joins++
-        proxy.setHandlers({signal: signal => replayedSignals.push(signal)})
-      },
-      onDetach: () => {}
-    }
-  )
+  const responder = initPeer(false, {
+    appId: 'restarted-prewarmed-offer-test',
+    rtcPolyfill: MockRTCPeerConnection as never
+  })
   t.after(() => {
-    room.leave()
     peer.destroy()
+    responder.destroy()
   })
 
-  await peer.getOffer()
-  const restarted = await peer.getOffer(true)
-  assert.ok(restarted)
-  assert.equal(restarted.type, 'offer')
+  assert.equal('restartIce' in responder, false)
+  assert.equal(await responder.getOffer(), undefined)
 
-  room.connect('remote', peer, 60_000)
-  assert.equal(joins, 1)
+  const first = await peer.getOffer()
+  const repeated = await peer.getOffer()
+  assert.ok(first)
+  assert.ok(repeated)
+  assert.equal(repeated.type, 'offer')
+  assert.equal(repeated.sdp, first.sdp)
+
+  const replayedSignals: unknown[] = []
+  peer.setHandlers({signal: signal => replayedSignals.push(signal)})
   assert.equal(peer.isDead, false)
   assert.deepEqual(replayedSignals, [])
 })
@@ -142,7 +134,10 @@ void test('non-trickle offer resolves once gathered candidates settle without wa
   class StalledGatheringRTCPeerConnection extends MockRTCPeerConnection {
     override iceGatheringState = 'gathering'
 
-    override async setLocalDescription(description) {
+    override async setLocalDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       const nextDescription = description ?? (await this.createOffer())
       this.localDescription = {
         type: nextDescription.type,
@@ -156,7 +151,7 @@ void test('non-trickle offer resolves once gathered candidates settle without wa
           'candidate:2 1 udp 1677729535 203.0.113.5 50000 typ srflx raddr 0.0.0.0 rport 0'
         this.localDescription = {
           type: 'offer',
-          sdp: `${this.localDescription.sdp}a=${candidateLine}\r\n`
+          sdp: `${this.localDescription!.sdp}a=${candidateLine}\r\n`
         }
         this.listeners['icecandidate']?.forEach(listener =>
           listener({candidate: {candidate: candidateLine}})
@@ -186,9 +181,9 @@ void test('non-trickle offer resolves once gathered candidates settle without wa
 })
 
 void test('polite peer glare offer while makingOffer in stable state answers without invalid rollback', async t => {
-  let resolveCreateOffer:
+  let resolveCreateOffer = null as
     | ((offer: {type: string; sdp: string}) => void)
-    | null = null
+    | null
 
   class PoliteGlareRTCPeerConnection extends MockRTCPeerConnection {
     answersCreated = 0
@@ -204,13 +199,21 @@ void test('polite peer glare offer while makingOffer in stable state answers wit
       return {type: 'answer', sdp: 'polite-answer'}
     }
 
-    override async setRemoteDescription(description) {
+    override async setRemoteDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       this.remoteDescription = description
+        ? {type: description.type, sdp: description.sdp ?? ''}
+        : null
       this.signalingState =
         description?.type === 'offer' ? 'have-remote-offer' : 'stable'
     }
 
-    override async setLocalDescription(description) {
+    override async setLocalDescription(description?: {
+      type: string
+      sdp?: string
+    }) {
       if (
         description?.type === 'rollback' &&
         this.signalingState === 'stable'
@@ -285,7 +288,10 @@ void test('queued remote candidates drop stale ufrags and evict oldest entries a
   class CandidateTrackingRTCPeerConnection extends MockRTCPeerConnection {
     addedCandidates: Array<{candidate: string; usernameFragment?: string}> = []
 
-    async addIceCandidate(candidate) {
+    async addIceCandidate(candidate: {
+      candidate: string
+      usernameFragment?: string
+    }) {
       this.addedCandidates.push(candidate)
     }
   }
@@ -326,7 +332,7 @@ void test('queued remote candidates drop stale ufrags and evict oldest entries a
   assert.ok(
     pc.addedCandidates.every(c => c.usernameFragment === 'active-ufrag')
   )
-  assert.match(pc.addedCandidates[0].candidate, /^candidate:132 /)
+  assert.match(pc.addedCandidates[0]!.candidate, /^candidate:132 /)
   assert.match(pc.addedCandidates.at(-1)!.candidate, /^candidate:259 /)
 })
 
@@ -377,8 +383,8 @@ for (const server of ['stun', 'turn'] as const) {
       const pc = peer.connection as unknown as GatheringConnection
       const candidateType = server === 'turn' ? 'relay' : 'srflx'
       const candidate = `candidate:2 1 udp 1 203.0.113.1 6000 typ ${candidateType}`
-      pc.localDescription.sdp += `a=${candidate}\r\n`
-      pc.listeners['icecandidate'].forEach(fn => fn({candidate: {candidate}}))
+      pc.localDescription!.sdp += `a=${candidate}\r\n`
+      pc.listeners['icecandidate']!.forEach(fn => fn({candidate: {candidate}}))
       t.mock.timers.tick(150)
       await flushMicrotasks()
       assert.equal(settled, true)
@@ -386,8 +392,8 @@ for (const server of ['stun', 'turn'] as const) {
       assert.ok(offer)
       assert.equal(offer.type, type)
       assert.ok(offer.sdp.includes(`typ ${candidateType}`))
-      assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
-      assert.equal(pc.listeners['icecandidate'].size, 0)
+      assert.equal(pc.listeners['icegatheringstatechange']!.size, 0)
+      assert.equal(pc.listeners['icecandidate']!.size, 0)
     })
   }
 }
@@ -428,8 +434,8 @@ for (const localOnly of [false, true]) {
     assert.ok(offer)
     assert.match(offer.sdp, /typ host/)
     const pc = peer.connection as unknown as GatheringConnection
-    assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
-    assert.equal(pc.listeners['icecandidate'].size, 0)
+    assert.equal(pc.listeners['icegatheringstatechange']!.size, 0)
+    assert.equal(pc.listeners['icecandidate']!.size, 0)
   })
 }
 
@@ -457,12 +463,71 @@ for (const exit of ['timeout', 'destroy', 'complete'] as const) {
       peer.destroy()
     } else {
       pc.iceGatheringState = 'complete'
-      pc.listeners['icegatheringstatechange'].forEach(fn => fn())
+      pc.listeners['icegatheringstatechange']!.forEach(fn => fn())
     }
     await flushMicrotasks()
     assert.equal(settled, true)
-    assert.equal(pc.listeners['icegatheringstatechange'].size, 0)
-    assert.equal(pc.listeners['icecandidate'].size, 0)
+    assert.equal(pc.listeners['icegatheringstatechange']!.size, 0)
+    assert.equal(pc.listeners['icecandidate']!.size, 0)
     await offering
   })
 }
+
+void test('merges turnConfig into rtcConfig.iceServers across all configuration combinations', () => {
+  const myStun = {urls: 'stun:custom.stun.test:3478'}
+  const turn = {
+    urls: 'turn:relay.test:3478',
+    username: 'u',
+    credential: 'p'
+  }
+
+  class ConfigCapturingRTCPeerConnection extends MockRTCPeerConnection {
+    rtcConfig: RTCConfiguration
+
+    constructor(rtcConfig: RTCConfiguration) {
+      super()
+      this.rtcConfig = rtcConfig
+    }
+  }
+
+  const cases = [
+    {
+      config: {},
+      expected: {iceServers: defaultIceServers}
+    },
+    {
+      config: {turnConfig: [turn]},
+      expected: {iceServers: [...defaultIceServers, turn]}
+    },
+    {
+      config: {rtcConfig: {iceServers: [myStun]}},
+      expected: {iceServers: [myStun]}
+    },
+    {
+      config: {rtcConfig: {iceServers: [myStun]}, turnConfig: [turn]},
+      expected: {iceServers: [myStun, turn]}
+    },
+    {
+      config: {
+        rtcConfig: {iceServers: [], iceTransportPolicy: 'relay' as const},
+        turnConfig: [turn]
+      },
+      expected: {iceServers: [turn], iceTransportPolicy: 'relay'}
+    },
+    {
+      config: {turnConfig: []},
+      expected: {iceServers: defaultIceServers}
+    }
+  ]
+
+  for (const {config, expected} of cases) {
+    const peer = initPeer(true, {
+      appId: 'ice-config-merge',
+      rtcPolyfill: ConfigCapturingRTCPeerConnection as never,
+      ...config
+    })
+    const pc = peer.connection as unknown as ConfigCapturingRTCPeerConnection
+    assert.deepEqual(pc.rtcConfig, expected)
+    peer.destroy()
+  }
+})

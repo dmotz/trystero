@@ -1,47 +1,105 @@
-import type {OfferManager} from './offer-manager'
+import type {
+  BaseRelayConfig,
+  BaseRoomConfig,
+  InferPluginApi,
+  MaybePromise,
+  ResolvedIdentityPersistence,
+  UserIdentityPersistence
+} from './internal-types'
 
-export type JsonPrimitive = null | string | number | boolean
+type JsonPrimitive = null | string | number | boolean
 
 export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue}
 
+type NonJsonObject =
+  | ((...args: never[]) => unknown)
+  | Date
+  | RegExp
+  | Error
+  | Promise<unknown>
+  | ReadonlyMap<unknown, unknown>
+  | ReadonlySet<unknown>
+  | WeakMap<object, unknown>
+  | WeakSet<object>
+  | ArrayBuffer
+  | ArrayBufferView
+  | Blob
+
+export type JsonSerializable<T> = T extends JsonPrimitive
+  ? T
+  : T extends NonJsonObject | bigint | symbol | undefined
+    ? never
+    : T extends readonly (infer U)[]
+      ? readonly JsonSerializable<U>[]
+      : T extends object
+        ? {
+            [K in keyof T]: K extends symbol
+              ? never
+              : Exclude<T[K], undefined> extends infer V
+                ? [V] extends [never]
+                  ? undefined
+                  : JsonSerializable<V> | Extract<T[K], undefined>
+                : never
+          }
+        : never
+
 export type DataPayload = JsonValue | Blob | ArrayBuffer | ArrayBufferView
+
+export type DataPayloadValue<T> = T extends Blob | ArrayBuffer | ArrayBufferView
+  ? T
+  : JsonSerializable<T>
 
 export type PeerTarget = string | string[] | null
 
-export type TargetPeers = PeerTarget | undefined
+export type ActionErrorKind =
+  | 'timeout'
+  | 'disconnected'
+  | 'aborted'
+  | 'rejected'
 
-export type JoinError = {
-  error: string
+export type ActionError = Error & {
+  readonly kind: ActionErrorKind
+}
+
+export type RoomErrorBase = {
+  message: string
   appId: string
   roomId: string
-  peerId: string
+  cause?: unknown
 }
 
-export type JoinErrorHandler = (details: JoinError) => void
+export type RoomError =
+  | (RoomErrorBase & {code: 'room-full'; peerId: string})
+  | (RoomErrorBase & {code: 'banned'; peerId?: string; reason?: string})
+  | (RoomErrorBase & {code: 'relay-failed'})
+  | (RoomErrorBase & {code: 'identity-failed'})
+  | (RoomErrorBase & {code: 'plugin-failed'; plugin?: string})
+  | (RoomErrorBase & {
+      code: 'decrypt-failed'
+      peerId: string
+      stage: 'offer' | 'answer'
+    })
+  | (RoomErrorBase & {
+      code: 'peer-connect-failed'
+      peerId: string
+      turnConfigured: boolean
+    })
+  | (RoomErrorBase & {code: 'handshake-failed'; peerId: string})
+  | (RoomErrorBase & {code: 'peer-error'; peerId: string})
 
-export type HandshakePayload = {
-  data: DataPayload
-  metadata?: JsonValue
+export type RoomErrorCode = RoomError['code']
+
+export type RoomErrorHandler = (error: RoomError) => unknown
+
+export type Unsubscribe = () => void
+
+export type ListenerOptions = {
+  once?: boolean
+  signal?: AbortSignal
 }
 
-export type HandshakeSender = (
-  data: DataPayload,
-  metadata?: JsonValue
-) => Promise<void>
-
-export type HandshakeReceiver = () => Promise<HandshakePayload>
-
-export type PeerHandshake = (
-  peerId: string,
-  send: HandshakeSender,
-  receive: HandshakeReceiver,
-  isInitiator: boolean
-) => Promise<void>
-
-export type JoinRoomCallbacks = {
-  onJoinError?: JoinErrorHandler
-  onPeerHandshake?: PeerHandshake
-  handshakeTimeoutMs?: number
+export type ReplayListenerOptions = ListenerOptions & {
+  replay?: boolean
 }
 
 export type TurnServerConfig = {
@@ -51,56 +109,165 @@ export type TurnServerConfig = {
   credentialType?: string
 }
 
-export type BaseRelayConfig = {
-  manualReconnection?: boolean
-  warnOnRelayFailure?: boolean
-}
+export type RelayConnectivity = 'online' | 'offline' | 'auto'
 
 export type RelayConfig = BaseRelayConfig & {
   urls?: string[]
   redundancy?: number
 }
 
-export type BaseRoomConfig = {
-  appId: string
-  maxReceiveBytes?: number
-  password?: string
-  passive?: boolean
-  relayConfig?: BaseRelayConfig
-  trickleIce?: boolean
-  rtcConfig?: RTCConfiguration
-  rtcPolyfill?: typeof RTCPeerConnection
-  turnConfig?: TurnServerConfig[]
-  _test_only_mdnsHostFallbackToLoopback?: boolean
-  _test_only_sharedPeerIdleMs?: number
+export type ScaleConfig = {
+  maxDirectPeers?: number
 }
+
+export type TopologyRoute = {
+  nextHop: string
+  hops: number
+}
+
+export type TopologyStats = {
+  messagesSent: number
+  messagesReceived: number
+  messagesForwarded: number
+  duplicatesDropped: number
+  signatureFailures: number
+}
+
+export type TopologySnapshot = {
+  peerId: string
+  directPeerIds: string[]
+  roomPeerIds: string[]
+  routes: Record<string, TopologyRoute>
+  stats: TopologyStats
+}
+
+export type UserIdentity = {
+  userId: string
+  signPubJwk: JsonWebKey
+  /** Signs `payload` with ECDSA P-256 SHA-256, returning a 64-byte IEEE P1363 (`r || s`) signature. */
+  sign: (payload: Uint8Array) => MaybePromise<Uint8Array>
+  persistence?: ResolvedIdentityPersistence
+}
+
+export type UserIdentityLoaderContext = {
+  appId: string
+  roomId: string
+}
+
+export type UserIdentityLoader = (
+  context: UserIdentityLoaderContext
+) => MaybePromise<UserIdentity>
+
+export type UserIdentityConfig =
+  | UserIdentityPersistence
+  | UserIdentity
+  | UserIdentityLoader
+
+export type RolesConfig = {
+  selfAsAdmin?: boolean
+  admins?: readonly string[]
+}
+
+export type RoleCertificate = {
+  v: 1
+  certId: string
+  issuerPubKey: string
+  subUserId: string
+  appId: string
+  roomId: string
+  roles: string[]
+  seq: number
+  iat: number
+  sig: string
+}
+
+export type StateChangeContext<T = JsonValue> = {
+  prev: T
+  peerId: string
+  userId: string
+  roles: string[]
+  timestamp: number
+}
+
+export type StateConfig<T = JsonValue> = {
+  roles?: string | readonly string[]
+  maxBytes?: number
+  validate?: (next: T, context: StateChangeContext<T>) => boolean
+}
+
+export type SharedState<T = JsonValue> = {
+  get: () => T
+  set: (next: T | ((prev: T) => T)) => Promise<void>
+  getMeta: () => StateChangeContext<T> | null
+  readonly onChange: (
+    handler: (value: T, context: StateChangeContext<T>) => unknown,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+}
+
+export type UserStateChangeContext<T = JsonValue> = StateChangeContext<T> & {
+  self: boolean
+  online: boolean
+  removed: boolean
+}
+
+export type UserStateConfig<T = JsonValue> = {
+  roles?: string | readonly string[]
+  maxBytes?: number
+  validate?: (next: T, context: UserStateChangeContext<T>) => boolean
+}
+
+export type UserState<T = JsonValue> = {
+  get: (id?: string) => T
+  getAll: () => Readonly<Record<string, T>>
+  has: (id?: string) => boolean
+  set: (next: T | ((prev: T) => T)) => Promise<void>
+  clear: () => Promise<void>
+  getMeta: (id?: string) => UserStateChangeContext<T> | null
+  readonly onChange: (
+    handler: (
+      value: T | undefined,
+      context: UserStateChangeContext<T>
+    ) => unknown,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+}
+
+declare const pluginApiBrand: unique symbol
+
+export type RoomPlugin<
+  TName extends string = string,
+  TApi extends object = Record<never, never>
+> = {
+  readonly name: TName
+  readonly [pluginApiBrand]?: TApi
+}
+
+export type AnyRoomPlugin = RoomPlugin<string, object>
 
 export type JoinRoomConfig = BaseRoomConfig & {
   relayConfig?: RelayConfig
 }
 
-export type ProgressHandler = (
-  percent: number,
-  peerId: string,
-  metadata?: JsonValue
-) => void
-
 export type ActionProgressContext = {
   peerId: string
+  userId: string
   metadata?: JsonValue
 }
 
 export type ActionProgressHandler = (
   progress: number,
   context: ActionProgressContext
-) => void
+) => unknown
 
 export type ActionReceiveContext = {
   peerId: string
+  userId: string
   byteLength: number
   kind: 'message' | 'request' | 'response'
   signal: AbortSignal
   metadata?: JsonValue
+  roles: string[]
 }
 
 export type ActionReceiveHandler = (
@@ -109,20 +276,24 @@ export type ActionReceiveHandler = (
 
 export type MessageContext = {
   peerId: string
+  userId: string
   metadata?: JsonValue
+  roles: string[]
 }
 
 export type RequestContext = {
   peerId: string
+  userId: string
   metadata?: JsonValue
   signal: AbortSignal
+  roles: string[]
 }
 
-export type PeerResult<R extends DataPayload = DataPayload> =
-  | {peerId: string; status: 'fulfilled'; value: R}
-  | {peerId: string; status: 'timeout'}
-  | {peerId: string; status: 'rejected'; error: Error}
-  | {peerId: string; status: 'disconnected'}
+export type PeerResult<R = DataPayload> =
+  | {peerId: string; userId: string; status: 'fulfilled'; value: R}
+  | {peerId: string; userId: string; status: 'timeout'}
+  | {peerId: string; userId: string; status: 'rejected'; error: Error}
+  | {peerId: string; userId: string; status: 'disconnected'}
 
 export type SendOptions = {
   target?: PeerTarget
@@ -139,7 +310,7 @@ export type RequestOptions = {
   signal?: AbortSignal
 }
 
-export type RequestManyOptions<R extends DataPayload = DataPayload> = {
+export type RequestManyOptions<R = DataPayload> = {
   targets: string[]
   metadata?: JsonValue
   timeoutMs?: number
@@ -148,42 +319,60 @@ export type RequestManyOptions<R extends DataPayload = DataPayload> = {
   signal?: AbortSignal
 }
 
-export type MessageAction<T extends DataPayload = DataPayload> = {
+export type ActionMessageHandler<T = DataPayload> = (
+  data: T,
+  context: MessageContext
+) => unknown
+
+export type ActionRequestHandler<T = DataPayload, R = DataPayload> = (
+  data: T,
+  context: RequestContext
+) => R | Promise<R>
+
+export type MessageAction<T = DataPayload> = {
   send: (data: T, options?: SendOptions) => Promise<void>
-  onMessage: ((data: T, context: MessageContext) => void | Promise<void>) | null
-  onReceiveProgress: ActionProgressHandler | null
-  onReceive: ActionReceiveHandler | null
+  readonly onMessage: (
+    handler: ActionMessageHandler<T>,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onReceiveProgress: (
+    handler: ActionProgressHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onReceive: (
+    handler: ActionReceiveHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
 }
 
-export type RequestAction<
-  T extends DataPayload = DataPayload,
-  R extends DataPayload = DataPayload
-> = {
+export type RequestAction<T = DataPayload, R = DataPayload> = {
   request: (data: T, options: RequestOptions) => Promise<R>
   requestMany: (
     data: T,
     options: RequestManyOptions<R>
   ) => Promise<PeerResult<R>[]>
-  onRequest: ((data: T, context: RequestContext) => R | Promise<R>) | null
-  onReceiveProgress: ActionProgressHandler | null
-  onReceive: ActionReceiveHandler | null
+  readonly onRequest: (
+    handler: ActionRequestHandler<T, R>,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onReceiveProgress: (
+    handler: ActionProgressHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onReceive: (
+    handler: ActionReceiveHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
 }
 
-export type MessageActionConfig<T extends DataPayload = DataPayload> = {
+export type MessageActionConfig = {
   kind?: 'message'
-  onMessage?: (data: T, context: MessageContext) => void | Promise<void>
-  onReceiveProgress?: ActionProgressHandler
-  onReceive?: ActionReceiveHandler
+  roles?: string | readonly string[]
 }
 
-export type RequestActionConfig<
-  T extends DataPayload = DataPayload,
-  R extends DataPayload = DataPayload
-> = {
+export type RequestActionConfig = {
   kind: 'request'
-  onRequest?: (data: T, context: RequestContext) => R | Promise<R>
-  onReceiveProgress?: ActionProgressHandler
-  onReceive?: ActionReceiveHandler
+  roles?: string | readonly string[]
 }
 
 export type AddMediaOptions = {
@@ -195,320 +384,213 @@ export type RemoveMediaOptions = {
   target?: PeerTarget
 }
 
+export type ReplaceTrackOptions = {
+  target?: PeerTarget
+}
+
+export type PeerJoinContext = {
+  peerId: string
+  userId: string
+  roles: string[]
+}
+
+export type PeerLeaveContext = {
+  peerId: string
+  userId: string
+}
+
+export type UserJoinContext = {
+  userId: string
+  peerId: string
+  roles: string[]
+}
+
+export type UserLeaveContext = {
+  userId: string
+  peerId: string
+}
+
+export type PeerMediaContext = {
+  peerId: string
+  userId: string
+  metadata?: JsonValue
+}
+
+export type PeerInfo = {
+  userId: string
+  connection: RTCPeerConnection | null
+  direct: boolean
+  hops: number
+  roles: string[]
+}
+
+export type UserInfo = {
+  peerIds: string[]
+  roles: string[]
+}
+
+export type SelfInfo = {
+  peerId: string
+  userId: string
+  identityPersistence: ResolvedIdentityPersistence
+  roomId: string
+  baseRoomId: string
+  isAdmin: boolean
+  roles: string[]
+}
+
+type IsUnion<T, U = T> = T extends unknown
+  ? [U] extends [T]
+    ? false
+    : true
+  : never
+
+export type Widen<T> = [T] extends [never]
+  ? never
+  : [JsonValue] extends [T]
+    ? T
+    : [IsUnion<T>] extends [true]
+      ? T
+      : [T] extends [string]
+        ? string
+        : [T] extends [number]
+          ? number
+          : [T] extends [boolean]
+            ? boolean
+            : T extends readonly (infer U)[]
+              ? number extends T['length']
+                ? T extends (infer M)[]
+                  ? Widen<M>[]
+                  : readonly Widen<U>[]
+                : T['length'] extends 0
+                  ? T extends (infer M)[]
+                    ? Widen<M>[]
+                    : readonly Widen<U>[]
+                  : {[K in keyof T]: Widen<T[K]>}
+              : T extends object
+                ? {[K in keyof T]: Widen<T[K]>}
+                : T
+
+export type BanOptions = {
+  reason?: string
+}
+
+export type RoleChangeContext = {
+  userId: string
+  roles: string[]
+  previousRoles: string[]
+  local: boolean
+}
+
+export type RoleChangeHandler = (context: RoleChangeContext) => unknown
+
+export type RolesPluginApi = {
+  grantRole: (
+    targetId: string,
+    role: string | readonly string[]
+  ) => Promise<RoleCertificate>
+  revokeRole: (targetId: string, role?: string) => Promise<void>
+  getRoles: (targetId?: string) => string[]
+  ban: (targetId: string, options?: BanOptions) => Promise<void>
+  unban: (targetId: string) => Promise<void>
+  isBanned: (targetId: string) => boolean
+  readonly onRoleChange: (
+    handler: RoleChangeHandler,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+}
+
+export type ScalePluginApi = {
+  getTopology: () => TopologySnapshot
+}
+
 export type Room = {
+  ready: Promise<void>
   makeAction: {
-    <T extends DataPayload = DataPayload>(
-      namespace: string,
-      config?: MessageActionConfig<T>
+    <T = DataPayload>(
+      namespace: [T] extends [DataPayloadValue<T>] ? string : never,
+      config?: MessageActionConfig
     ): MessageAction<T>
-    <T extends DataPayload = DataPayload, R extends DataPayload = DataPayload>(
-      namespace: string,
-      config: RequestActionConfig<T, R>
+    <T = DataPayload, R = DataPayload>(
+      namespace: [T, R] extends [DataPayloadValue<T>, DataPayloadValue<R>]
+        ? string
+        : never,
+      config: RequestActionConfig
     ): RequestAction<T, R>
+  }
+  makeState: {
+    <T = JsonValue>(
+      namespace: [T] extends [JsonSerializable<T>] ? string : never,
+      initialValue?: null,
+      config?: StateConfig<Widen<T> | null>
+    ): SharedState<Widen<T> | null>
+    <T>(
+      namespace: string,
+      initialValue: T & JsonSerializable<T>,
+      config?: StateConfig<Widen<T>>
+    ): SharedState<Widen<T>>
+  }
+  makeUserState: {
+    <T = JsonValue>(
+      namespace: [T] extends [JsonSerializable<T>] ? string : never,
+      initialValue?: null,
+      config?: UserStateConfig<Widen<T> | null>
+    ): UserState<Widen<T> | null>
+    <T>(
+      namespace: string,
+      initialValue: T & JsonSerializable<T>,
+      config?: UserStateConfig<Widen<T>>
+    ): UserState<Widen<T>>
   }
   ping: (id: string) => Promise<number>
   leave: () => Promise<void>
-  isPassive: () => boolean
-  getPeers: () => Record<string, RTCPeerConnection>
-  addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>[]
+  getSelf: () => Promise<SelfInfo>
+  getPeers: () => Record<string, PeerInfo>
+  getUsers: () => Readonly<Record<string, UserInfo>>
+  addStream: (stream: MediaStream, options?: AddMediaOptions) => Promise<void>
   removeStream: (stream: MediaStream, options?: RemoveMediaOptions) => void
-  addTrack: (
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    options?: AddMediaOptions
-  ) => Promise<void>[]
-  removeTrack: (track: MediaStreamTrack, options?: RemoveMediaOptions) => void
   replaceTrack: (
     oldTrack: MediaStreamTrack,
     newTrack: MediaStreamTrack,
-    options?: AddMediaOptions
-  ) => Promise<void>[]
-  onPeerJoin: ((peerId: string) => void) | null
-  onPeerLeave: ((peerId: string) => void) | null
-  onPeerStream:
-    | ((stream: MediaStream, peerId: string, metadata?: JsonValue) => void)
-    | null
-  onPeerTrack:
-    | ((
-        track: MediaStreamTrack,
-        stream: MediaStream,
-        peerId: string,
-        metadata?: JsonValue
-      ) => void)
-    | null
+    options?: ReplaceTrackOptions
+  ) => Promise<void>
+  readonly onPeerJoin: (
+    handler: (context: PeerJoinContext) => unknown,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+  readonly onPeerLeave: (
+    handler: (context: PeerLeaveContext) => unknown,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onUserJoin: (
+    handler: (context: UserJoinContext) => unknown,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+  readonly onUserLeave: (
+    handler: (context: UserLeaveContext) => unknown,
+    options?: ListenerOptions
+  ) => Unsubscribe
+  readonly onPeerStream: (
+    handler: (stream: MediaStream, context: PeerMediaContext) => unknown,
+    options?: ReplayListenerOptions
+  ) => Unsubscribe
+  readonly onError: (
+    handler: RoomErrorHandler,
+    options?: ListenerOptions
+  ) => Unsubscribe
 }
 
-export type SessionSignal = {
-  type: RTCSdpType
-  sdp: string
-}
+type UnionToIntersection<U> = (
+  U extends unknown ? (k: U) => void : never
+) extends (k: infer I) => void
+  ? I
+  : never
 
-export type CandidateSignal = {
-  type: 'candidate'
-  sdp: string
-}
-
-export type Signal = SessionSignal | CandidateSignal
-
-export type PeerHandlers = {
-  data?: (data: ArrayBuffer) => void
-  connect?: () => void
-  close?: () => void
-  stream?: (stream: MediaStream) => void
-  track?: (track: MediaStreamTrack, stream: MediaStream) => void
-  signal?: (signal: Signal) => void
-  error?: (err: Error) => void
-}
-
-export type PeerHandle = {
-  connection: RTCPeerConnection
-  channel: RTCDataChannel | null
-  isDead: boolean
-  getOffer: (restartIce?: boolean) => Promise<Signal | void>
-  signal: (sdp: Signal) => Promise<Signal | void>
-  sendData: (data: Uint8Array) => void
-  destroy: () => void
-  setHandlers: (newHandlers: PeerHandlers) => void
-  addStream: (stream: MediaStream) => void
-  removeStream: (stream: MediaStream) => void
-  addTrack: (track: MediaStreamTrack, stream: MediaStream) => void
-  removeTrack: (track: MediaStreamTrack) => void
-  replaceTrack: (
-    oldTrack: MediaStreamTrack,
-    newTrack: MediaStreamTrack
-  ) => Promise<void> | undefined
-}
-
-export type SignalPeer = (
-  peerTopic: string,
-  signal: string
-) => void | Promise<void>
-
-export type StrategyMessage = string | Record<string, unknown>
-
-export type StrategyOnMessage = (
-  topic: string,
-  msg: StrategyMessage,
-  signalPeer: SignalPeer
-) => void | Promise<void>
-
-export type StrategyContext<TConfig extends BaseRoomConfig = JoinRoomConfig> = {
-  config: TConfig
-  appId: string
-  roomId: string
-  isPassive: boolean
-}
-
-export type TopicSubscriptionContext = {
-  kind: 'root' | 'self'
-  appId: string
-  roomId: string
-  rootTopic: string
-  selfTopic: string
-}
-
-export type TopicPublishContext = {
-  kind: 'announce' | 'signal'
-  appId: string
-  roomId: string
-  rootTopic: string
-  selfTopic: string
-}
-
-export type OfferRecord = {
-  peer: PeerHandle
-  offer: string
-  claim?: () => void
-  reclaim?: () => void
-}
-
-export type MaybePromise<T> = T | Promise<T>
-
-export type AnnounceResult =
-  | number
-  | {stopAnnouncing: true}
-  | {nextAnnounceMs: number; reannounceOnDisconnect?: boolean}
-
-export type StrategyAdapter<
-  TRelay,
-  TConfig extends BaseRoomConfig = JoinRoomConfig
-> = {
-  init: (config: TConfig) => MaybePromise<TRelay> | Array<MaybePromise<TRelay>>
-  subscribe: (
-    relay: TRelay,
-    rootTopic: string,
-    selfTopic: string,
-    onMessage: StrategyOnMessage,
-    getOffers: (n: number) => Promise<OfferRecord[]>,
-    context?: StrategyContext<TConfig>
-  ) => MaybePromise<() => void>
-  announce: (
-    relay: TRelay,
-    rootTopic: string,
-    selfTopic: string,
-    extraPayload?: Record<string, unknown>,
-    context?: StrategyContext<TConfig>
-  ) => MaybePromise<AnnounceResult | void>
-  deactivate?: (
-    relay: TRelay,
-    rootTopic: string,
-    selfTopic: string,
-    context?: StrategyContext<TConfig>
-  ) => MaybePromise<void>
-}
-
-export type TopicStrategyAdapter<
-  TRelay,
-  TConfig extends BaseRoomConfig = JoinRoomConfig
-> = {
-  steadyAnnounceIntervalMs?: number
-  reannounceOnDisconnect?: boolean
-  init: (config: TConfig) => MaybePromise<TRelay> | Array<MaybePromise<TRelay>>
-  subscribeTopic: (
-    relay: TRelay,
-    topic: string,
-    onMessage: (topic: string, msg: StrategyMessage) => void | Promise<void>,
-    context: TopicSubscriptionContext
-  ) => MaybePromise<() => void>
-  publishTopic: (
-    relay: TRelay,
-    topic: string,
-    msg: StrategyMessage,
-    context: TopicPublishContext
-  ) => MaybePromise<AnnounceResult | void>
-  unpublishTopic?: (
-    relay: TRelay,
-    topic: string,
-    context: TopicPublishContext
-  ) => MaybePromise<void>
-}
-
-export type JoinRoom<TConfig extends BaseRoomConfig = JoinRoomConfig> = (
-  config: TConfig,
-  roomId: string,
-  callbacks?: JoinRoomCallbacks
-) => Room
-
-export type SocketClient = {
-  socket: WebSocket
-  url: string
-  ready: Promise<SocketClient>
-  isClosed?: boolean
-  close?: () => void
-  send: (data: string) => void
-}
-
-export type RemoteTrackRef = {
-  track: MediaStreamTrack
-  stream: MediaStream
-}
-
-export type MediaIdentityCache = {
-  getStreamKey: (stream: MediaStream) => string
-  getTrackKey: (track: MediaStreamTrack) => string
-  rememberRemoteStream: (
-    key: string,
-    stream: MediaStream,
-    streamId?: string
-  ) => void
-  getRemoteStream: (key: string, streamId?: string) => MediaStream | undefined
-  rememberRemoteTrack: (
-    key: string,
-    track: MediaStreamTrack,
-    stream: MediaStream,
-    trackId?: string,
-    streamId?: string
-  ) => void
-  getRemoteTrack: (key: string, trackId?: string) => RemoteTrackRef | undefined
-  hasRemoteMedia: () => boolean
-  clearRemote: () => void
-}
-
-export type SharedMediaPeer = PeerHandle & {
-  __trysteroMedia?: MediaIdentityCache
-}
-
-export type SharedPeerBinding = {
-  roomId: string
-  roomToken: string | null
-  roomTokenPromise: Promise<string>
-  handlers: PeerHandlers
-  pendingData: ArrayBuffer[]
-  pendingSendData: Uint8Array[]
-  pendingTracks: Array<{track: MediaStreamTrack; stream: MediaStream}>
-  detach: () => void
-  proxy: PeerHandle
-}
-
-export type SharedPeerState = {
-  appId: string
-  peerId: string
-  peer: PeerHandle
-  bindings: Record<string, SharedPeerBinding>
-  bindingsByToken: Record<string, SharedPeerBinding>
-  pendingDataByToken: Map<string, ArrayBuffer[]>
-  remoteRoomTokens: Set<string>
-  idleTimer: ReturnType<typeof setTimeout> | null
-  controlRoomId: string | null
-  streamOwners: Map<MediaStream, Set<string>>
-  trackOwners: Map<MediaStreamTrack, {stream: MediaStream; rooms: Set<string>}>
-  media: MediaIdentityCache
-  idleMs: number
-  isClosing: boolean
-}
-
-export type PeerState = {
-  offerPeer: PeerHandle | null
-  offerId: string | null
-  offerSdp: string | null
-  offerInitPromise: Promise<{
-    peer: PeerHandle
-    offer: string
-    offerId: string
-  } | null> | null
-  offerAnswered: boolean
-  offerRelays: unknown[]
-  offerSignalRelays: Array<((signal: Signal) => void) | null>
-  offerSignalBacklog: Signal[]
-  offerRelayTimers: Array<ReturnType<typeof setTimeout> | null>
-  offerExpiryTimer: ReturnType<typeof setTimeout> | null
-  connectedPeer: PeerHandle | null
-  connectedPeerUnhealthySinceMs: number | null
-  answeringExpiryTimer: ReturnType<typeof setTimeout> | null
-  answeringPeer: PeerHandle | null
-  answerSent: boolean
-  answerReplay: {
-    offer: string
-    offerId: string | undefined
-    messages: string[]
-    lastSentAt: Array<number | undefined>
-    relays: Array<((message: string) => void) | undefined>
-  } | null
-  connectionErrorReported: boolean
-}
-
-export type SignalContext = {
-  appId: string
-  roomId: string
-  config: BaseRoomConfig
-  peerStates: Record<string, PeerState>
-  rootTopicPlaintext: string
-  rootTopicP: Promise<string>
-  selfTopicP: Promise<string>
-  toPlain: (signal: Signal) => Promise<Signal>
-  toCipher: (signal: Signal) => Promise<Signal>
-  isLeaving: () => boolean
-  isPassive: boolean
-  isActive: boolean
-  onJoinError: JoinErrorHandler | undefined
-  offerManager: OfferManager
-  encryptOffer: (peer: PeerHandle) => Promise<string>
-  initPeer: (initiator: boolean, config: BaseRoomConfig) => PeerHandle
-  connectPeer: (peer: PeerHandle, peerId: string) => void
-  disconnectPeer: (peer: PeerHandle, peerId: string) => void
-  reusePeer: (peerId: string) => boolean
-  checkDeactivate: () => void
-  announceIntervals: number[]
-  announceIntervalMs: number
-  requeueAnnounce?: () => void
-}
+export type RoomWithPlugins<
+  TPlugins extends readonly AnyRoomPlugin[] | undefined = undefined
+> = Room &
+  (TPlugins extends readonly (infer P)[]
+    ? [P] extends [never]
+      ? unknown
+      : UnionToIntersection<InferPluginApi<P>>
+    : unknown)

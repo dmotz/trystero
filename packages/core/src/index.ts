@@ -1,66 +1,45 @@
+export {roles} from './authority'
+export {hashTopic} from './crypto'
+export {
+  clearUserIdentity,
+  createUserIdentity,
+  exportUserIdentity,
+  importUserIdentity
+} from './identity'
+export {
+  encodeBytes,
+  fromJson,
+  libName,
+  mkErr,
+  socketInitialFailureSymbol,
+  toJson
+} from './primitives'
+export {
+  createRelayManager,
+  createRelayScopedStore,
+  getRelays,
+  makeSocket,
+  setRelayConnectivity,
+  type RelayScopedStore
+} from './relay-manager'
+export {scale} from './scale'
 export {default as createStrategy} from './strategy'
 export {default as createTopicStrategy} from './topic-strategy'
-export {hashWith, sha1} from './crypto'
-export {
-  all,
-  createRelayManager,
-  decodeBytes,
-  encodeBytes,
-  entries,
-  fromJson,
-  genId,
-  getRelays,
-  keys,
-  libName,
-  makeSocket,
-  pauseRelayReconnection,
-  resumeRelayReconnection,
-  selfId,
-  socketGetter,
-  strToNum,
-  toHex,
-  toJson,
-  values
-} from './utils'
+export {genId, unrefTimer} from './utils'
 
 export type {
-  ActionProgressContext,
-  ActionProgressHandler,
-  ActionReceiveContext,
-  ActionReceiveHandler,
-  AddMediaOptions,
+  AnnounceResult,
   BaseRelayConfig,
   BaseRoomConfig,
-  DataPayload,
-  HandshakePayload,
-  HandshakeReceiver,
-  HandshakeSender,
-  JoinError,
-  JoinErrorHandler,
+  CandidateSignal,
+  InferPluginApi,
   JoinRoom,
-  JoinRoomCallbacks,
-  JoinRoomConfig,
-  JsonPrimitive,
-  JsonValue,
-  MessageAction,
-  MessageActionConfig,
-  MessageContext,
   MaybePromise,
   OfferRecord,
   PeerHandle,
-  PeerHandshake,
   PeerHandlers,
-  PeerResult,
-  PeerTarget,
-  ProgressHandler,
-  RelayConfig,
-  RemoveMediaOptions,
-  RequestAction,
-  RequestActionConfig,
-  RequestContext,
-  RequestManyOptions,
-  RequestOptions,
-  Room,
+  ResolvedIdentityPersistence,
+  SessionSignal,
   Signal,
   SignalPeer,
   SocketClient,
@@ -68,11 +47,11 @@ export type {
   StrategyContext,
   StrategyMessage,
   StrategyOnMessage,
+  Timeout,
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext,
-  RemoteTrackRef,
-  SharedMediaPeer,
-  TargetPeers,
-  TurnServerConfig
-} from './types'
+  UserIdentityPersistence
+} from './internal-types'
+
+export type * from './types'

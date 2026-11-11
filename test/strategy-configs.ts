@@ -7,9 +7,27 @@ const wsRelayUrls = (process.env['TRYSTERO_WS_RELAY_URLS'] ?? '')
   .split(',')
   .filter(Boolean)
 
-export type StrategyConfig = Record<string, unknown>
+export type StrategyName =
+  | 'nostr'
+  | 'mqtt'
+  | 'torrent'
+  | 'ws-relay'
+  | 'firebase'
+  | 'supabase'
 
-export const strategyConfigs: Record<string, StrategyConfig> = {
+export type StrategyConfig = {
+  appId?: string
+  password?: string
+  relayConfig?: {
+    redundancy?: number
+    urls?: string[]
+    supabaseKey?: string
+    [key: string]: unknown
+  }
+  [key: string]: unknown
+}
+
+export const strategyConfigs: Record<StrategyName, StrategyConfig> = {
   nostr: {
     relayConfig: {
       redundancy: Math.min(defaultRelayRedundancy, nostrRelays.length)
@@ -32,6 +50,5 @@ export const strategyConfigs: Record<string, StrategyConfig> = {
     relayConfig: {
       supabaseKey: 'sb_publishable_Bimr4WAzoSgyXK70-dS2PQ_rkvLGGlc'
     }
-  },
-  ipfs: {}
+  }
 }

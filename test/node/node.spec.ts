@@ -45,7 +45,7 @@ const startPeer = ({
   roomId: string
   roomConfig: Record<string, unknown>
 }) => {
-  const child = spawn('pnpm', ['exec', 'jiti', peerScript], {
+  const child = spawn(process.execPath, [peerScript], {
     cwd: projectRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
@@ -110,7 +110,7 @@ const startPeer = ({
 }
 
 const runNodeTests = (
-  strategy: string,
+  strategy: keyof typeof strategyConfigs,
   options: {timeout?: number; skip?: boolean} = {}
 ) => {
   const {timeout = 120_000, skip = false} = options
@@ -230,16 +230,17 @@ const runNodeTests = (
   )
 }
 
-runNodeTests('nostr', {timeout: 20_000})
-runNodeTests('mqtt', {timeout: 20_000})
-runNodeTests('torrent', {timeout: 20_000})
-runNodeTests('firebase', {timeout: 20_000})
+const skipPublicRelays = process.env['TRYSTERO_SKIP_PUBLIC_RELAYS'] === '1'
+
+runNodeTests('nostr', {timeout: 20_000, skip: skipPublicRelays})
+runNodeTests('mqtt', {timeout: 20_000, skip: skipPublicRelays})
+runNodeTests('torrent', {timeout: 20_000, skip: skipPublicRelays})
+runNodeTests('firebase', {timeout: 20_000, skip: skipPublicRelays})
 runNodeTests('supabase', {timeout: 20_000, skip: true})
 runNodeTests('ws-relay', {timeout: 20_000})
-runNodeTests('ipfs', {timeout: 50_000, skip: true})
 
 const runPassiveNodeTest = (
-  strategy: string,
+  strategy: keyof typeof strategyConfigs,
   options: {timeout?: number; skip?: boolean} = {}
 ) => {
   const {timeout = 120_000, skip = false} = options
@@ -247,7 +248,7 @@ const runPassiveNodeTest = (
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
   const appId = (config['appId'] as string) ?? `trystero-node-passive-${suffix}`
   const roomId = `room-passive-${suffix}`
-  const baseRoomConfig = {
+  const baseRoomConfig: Record<string, unknown> = {
     appId,
     password: `p@ss1v3${Math.random()}`,
     ...config
@@ -257,23 +258,48 @@ const runPassiveNodeTest = (
     `Trystero: ${strategy} passive peer connects with active peer using node`,
     {timeout, skip},
     async () => {
+      const relays =
+        strategy === 'ws-relay'
+          ? [createWsRelayServer({port: 0}), createWsRelayServer({port: 0})]
+          : []
+      await Promise.all(relays.map(relay => relay.ready))
+
+      const effectiveRoomConfig =
+        strategy === 'ws-relay'
+          ? {
+              ...baseRoomConfig,
+              relayConfig: {
+                ...(baseRoomConfig['relayConfig'] as Record<string, unknown>),
+                urls: relays.map(relay => {
+                  const address = relay.address()
+                  assert.ok(address && typeof address === 'object')
+                  return `ws://localhost:${address.port}`
+                })
+              }
+            }
+          : baseRoomConfig
+
       // Start the passive responder first - it should stay dormant until
       // the active initiator joins
       const passiveResponder = startPeer({
         role: 'responder',
         strategy,
         roomId,
-        roomConfig: {...baseRoomConfig, passive: true}
+        roomConfig: {...effectiveRoomConfig, passive: true}
       })
 
       // Give the passive peer time to subscribe (but not announce)
-      await new Promise(res => setTimeout(res, 2_000))
+      if (strategy === 'ws-relay') {
+        await waitForSubscriptions(relays)
+      } else {
+        await new Promise(res => setTimeout(res, 2_000))
+      }
 
       const activeInitiator = startPeer({
         role: 'initiator',
         strategy,
         roomId,
-        roomConfig: baseRoomConfig
+        roomConfig: effectiveRoomConfig
       })
 
       const peers = [activeInitiator, passiveResponder]
@@ -320,11 +346,13 @@ const runPassiveNodeTest = (
         for (const {child} of peers) {
           child.kill('SIGTERM')
         }
+        await Promise.all(relays.map(relay => relay.close()))
       }
     }
   )
 }
 
-runPassiveNodeTest('torrent', {timeout: 60_000})
-runPassiveNodeTest('nostr', {timeout: 30_000})
-runPassiveNodeTest('mqtt', {timeout: 30_000})
+runPassiveNodeTest('torrent', {timeout: 60_000, skip: skipPublicRelays})
+runPassiveNodeTest('nostr', {timeout: 30_000, skip: skipPublicRelays})
+runPassiveNodeTest('mqtt', {timeout: 30_000, skip: skipPublicRelays})
+runPassiveNodeTest('ws-relay', {timeout: 20_000})

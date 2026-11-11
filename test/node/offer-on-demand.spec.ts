@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
-import {OfferManager} from '../../packages/core/src/offer-manager.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
+import {createOfferManager} from '../../packages/core/src/offer-manager.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 
 void test(
   'Trystero: strategy creates offers on demand and reclaims unused peers',
@@ -13,10 +12,10 @@ void test(
       readyState = 'connecting'
       binaryType = 'arraybuffer'
       bufferedAmountLowThreshold = 0
-      onmessage = null
-      onopen = null
-      onclose = null
-      onerror = null
+      onmessage: ((ev: {data: unknown}) => void) | null = null
+      onopen: (() => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: ((ev: unknown) => void) | null = null
 
       close() {
         this.readyState = 'closed'
@@ -34,13 +33,13 @@ void test(
       connectionState = 'new'
       iceConnectionState = 'new'
       signalingState = 'stable'
-      localDescription = null
-      onnegotiationneeded = null
-      onconnectionstatechange = null
-      ontrack = null
-      ondatachannel = null
+      localDescription: {type: string; sdp?: string} | null = null
+      onnegotiationneeded: (() => void) | null = null
+      onconnectionstatechange: (() => void) | null = null
+      ontrack: ((ev: unknown) => void) | null = null
+      ondatachannel: ((ev: unknown) => void) | null = null
       offerNum = 0
-      listeners = {}
+      listeners: Record<string, Set<() => void>> = {}
 
       constructor() {
         CountingRTCPeerConnection.created += 1
@@ -50,11 +49,11 @@ void test(
         return new MockDataChannel()
       }
 
-      addEventListener(event, fn) {
+      addEventListener(event: string, fn: () => void) {
         ;(this.listeners[event] ??= new Set()).add(fn)
       }
 
-      removeEventListener(event, fn) {
+      removeEventListener(event: string, fn: () => void) {
         this.listeners[event]?.delete(fn)
       }
 
@@ -65,7 +64,7 @@ void test(
         return {type: 'offer', sdp: `mock-offer-${this.offerNum}`}
       }
 
-      async setLocalDescription(description) {
+      async setLocalDescription(description?: {type: string; sdp?: string}) {
         if (description?.type === 'rollback') {
           this.signalingState = 'stable'
           return
@@ -103,11 +102,11 @@ void test(
       removeTrack() {}
     }
 
-    let complete = null
+    let complete: (() => void) | undefined
     let createdBeforeRequest = -1
     let createdAfterRequest = -1
     let closedAfterReclaim = -1
-    const completePromise = new Promise(res => {
+    const completePromise = new Promise<void>(res => {
       complete = res
     })
 
@@ -129,7 +128,8 @@ void test(
       {
         appId: `trystero-on-demand-offers-${Date.now()}`,
         password: 'offer-test',
-        rtcPolyfill: CountingRTCPeerConnection as any
+        rtcPolyfill:
+          CountingRTCPeerConnection as unknown as typeof RTCPeerConnection
       },
       'room'
     )
@@ -150,8 +150,8 @@ void test('Trystero: leaving during offer creation closes the pending peer', asy
   let release!: (offer: string) => void
   let closed = 0
   const pendingOffer = new Promise<string>(resolve => (release = resolve))
-  const manager = new OfferManager(
-    () => ({destroy: () => (closed += 1)}) as any
+  const manager = createOfferManager(
+    () => ({destroy: () => (closed += 1)}) as unknown as PeerHandle
   )
 
   const result = manager.checkout(1, false, async () => pendingOffer)
@@ -160,4 +160,59 @@ void test('Trystero: leaving during offer creation closes the pending peer', asy
 
   await assert.rejects(result, /room left while preparing offer/)
   assert.equal(closed, 1)
+})
+
+void test('Trystero: createOfferManager retries once on encrypt failure and manages leased peers', async () => {
+  let created = 0
+  let destroyed = 0
+  const makeFakePeer = () => {
+    created += 1
+    let isDead = false
+    return {
+      get isDead() {
+        return isDead
+      },
+      destroy() {
+        if (!isDead) {
+          isDead = true
+          destroyed += 1
+        }
+      }
+    } as unknown as PeerHandle
+  }
+
+  const manager = createOfferManager(makeFakePeer)
+  let attempts = 0
+  const [retriedRecord] = await manager.getOffers(1, async () => {
+    attempts += 1
+    if (attempts === 1) {
+      throw new Error('transient encrypt failure')
+    }
+    return 'encrypted-offer'
+  })
+
+  assert.equal(
+    created,
+    2,
+    'should allocate a second peer after transient failure'
+  )
+  assert.equal(
+    destroyed,
+    1,
+    'failed first peer should be destroyed immediately'
+  )
+  assert.equal(retriedRecord!.offer, 'encrypted-offer')
+
+  // Claiming a leased offer keeps the peer alive even when manager.destroy() runs
+  retriedRecord!.claim?.()
+  const [unclaimedRecord] = await manager.getOffers(1, async () => 'offer-2')
+  assert.equal(created, 3)
+
+  manager.destroy()
+  assert.equal(retriedRecord!.peer.isDead, false, 'claimed peer stays open')
+  assert.equal(
+    unclaimedRecord!.peer.isDead,
+    true,
+    'unclaimed leased peer is destroyed on manager.destroy()'
+  )
 })

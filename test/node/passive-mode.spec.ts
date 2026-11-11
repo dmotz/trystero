@@ -1,22 +1,41 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test from './test.ts'
 import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import type {
+  Room,
+  StrategyMessage,
+  StrategyOnMessage
+} from '../../packages/core/src/index.ts'
+import type {
+  PeerHandle,
+  PeerState
+} from '../../packages/core/src/internal-types.ts'
+import {
+  buildSignalAad,
+  createPeerState,
+  prunePeerStates
+} from '../../packages/core/src/signal-handler.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
-import {MockPeer, MockRTCPeerConnection, wait, waitFor} from './peer-harness.ts'
+import {
+  BufferedPeer,
+  joinAsTestPeer,
+  linkPeers,
+  lowerPeerId,
+  MockPeer,
+  MockRTCPeerConnection,
+  testPeerId,
+  wait,
+  waitFor
+} from './peer-harness.ts'
 
 type Subscriber = {
   rootTopic: string
   selfTopic: string
-  onMessage: (
-    topic: string,
-    msg: unknown,
-    signalPeer: (peerTopic: string, signal: string) => void
-  ) => Promise<void> | void
+  onMessage: StrategyOnMessage
 }
 
 void test(
-  'Trystero: passive peer does not announce until activated',
+  'Trystero: passive peer never announces on rootTopic',
   {timeout: 10_000},
   async () => {
     let announceCount = 0
@@ -37,23 +56,40 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
     const room = joinRoom(config, 'test-room')
 
     try {
       await waitFor(() => subscribers.length >= 1)
-
-      // Wait enough time for multiple announce cycles to have fired
       await wait(300)
 
+      assert.equal(announceCount, 0, 'passive peer should not announce on join')
+      assert.equal('isPassive' in room, false)
+
+      const sub = subscribers[0]!
+      const activePeer1 = testPeerId('active-peer-1')
+      const activePeer2 = testPeerId('active-peer-2')
+      await sub.onMessage(sub.rootTopic, {peerId: activePeer1}, () => {})
+
+      const encryptedOffer = await encrypt(
+        genKey('', appId, 'test-room'),
+        JSON.stringify({type: 'offer', sdp: 'offer-sdp'}),
+        buildSignalAad('offer', activePeer2, 'offer-1')
+      )
+      await sub.onMessage(
+        sub.selfTopic,
+        {peerId: activePeer2, offerId: 'offer-1', offer: encryptedOffer},
+        () => {}
+      )
+
+      await wait(300)
       assert.equal(
         announceCount,
         0,
-        'passive peer should not announce while inactive'
+        'passive peer should never announce even after interacting with active peers'
       )
-      assert.equal(room.isPassive(), true, 'isPassive() should return true')
     } finally {
       await room.leave().catch(() => {})
     }
@@ -81,7 +117,7 @@ void test(
     const appId = `active-announce-${Date.now()}`
     const config = {
       appId,
-      rtcPolyfill: MockRTCPeerConnection
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
     const room = joinRoom(config, 'test-room')
@@ -91,11 +127,7 @@ void test(
       await waitFor(() => announceCount > 0)
 
       assert.ok(announceCount > 0, 'non-passive peer should announce')
-      assert.equal(
-        room.isPassive(),
-        false,
-        'isPassive() should return false for non-passive peer'
-      )
+      assert.equal('isPassive' in room, false)
     } finally {
       await room.leave().catch(() => {})
     }
@@ -103,785 +135,7 @@ void test(
 )
 
 void test(
-  'Trystero: passive peer activates when receiving a non-passive announcement',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-activate-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-      await wait(200)
-
-      assert.equal(announceCount, 0, 'should not announce while inactive')
-
-      const sub = subscribers[0]
-
-      // Simulate an announcement from a non-passive active peer
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-1'}, () => {})
-
-      // After activation, the passive peer should start announcing
-      await waitFor(() => announceCount > 0, 5_000)
-
-      assert.ok(
-        announceCount > 0,
-        'passive peer should start announcing after activation'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: passive peer ignores messages from other passive peers',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-ignore-passive-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-      await wait(200)
-
-      const sub = subscribers[0]
-
-      // Simulate an announcement from another passive peer
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'passive-peer-2', passive: true},
-        () => {}
-      )
-
-      await wait(300)
-
-      assert.equal(
-        announceCount,
-        0,
-        'passive peer should not activate from another passive peer'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: passive peer ignores malformed and wrong-topic discovery messages',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-ignore-invalid-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-
-      const sub = subscribers[0]
-
-      await sub.onMessage(sub.rootTopic, {passive: false}, () => {})
-      await sub.onMessage('wrong-topic', {peerId: 'active-peer'}, () => {})
-      await sub.onMessage('not json', 'not-json', () => {})
-      await sub.onMessage(sub.rootTopic, null, () => {})
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer', offer: {sdp: 'not-a-string'}},
-        () => {}
-      )
-      await wait(300)
-
-      assert.equal(
-        announceCount,
-        0,
-        'invalid discovery messages should not activate a passive peer'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: passive peer deactivates after active peer disconnects',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    let deactivateCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      },
-      deactivate: () => {
-        deactivateCount++
-      }
-    })
-
-    const appId = `passive-deactivate-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-
-      const sub = subscribers[0]
-      const mockPeer = new MockPeer()
-
-      // Step 1: Activate by receiving an announcement from a non-passive peer
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
-
-      await waitFor(() => announceCount > 0, 5_000)
-      assert.ok(
-        announceCount > 0,
-        'passive peer should be active after announcement'
-      )
-
-      // Step 2: Establish connection via answer with mockPeer
-      const encryptedAnswer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'answer-sdp'
-      )
-
-      await sub.onMessage(
-        sub.rootTopic,
-        {
-          peerId: 'active-peer',
-          answer: encryptedAnswer,
-          peer: mockPeer
-        },
-        () => {}
-      )
-
-      await wait(100)
-
-      // Step 3: Disconnect the peer
-      mockPeer.destroy()
-
-      // After disconnect, checkDeactivate should fire and stop announces
-      await wait(500)
-
-      const announceCountAfterWait = announceCount
-
-      // Wait more and verify announces stopped
-      await wait(500)
-
-      assert.equal(
-        announceCount,
-        announceCountAfterWait,
-        'passive peer should stop announcing after last connection drops'
-      )
-      assert.ok(
-        deactivateCount > 0,
-        'passive deactivation should notify the strategy'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: passive peer includes passive flag in announce payload',
-  {timeout: 10_000},
-  async () => {
-    const announcePayloads: Array<Record<string, unknown> | undefined> = []
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: (_relay, _rootTopic, _selfTopic, extra) => {
-        announcePayloads.push(extra)
-      }
-    })
-
-    const appId = `passive-flag-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-
-      const sub = subscribers[0]
-
-      // Activate the passive peer
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-1'}, () => {})
-
-      await waitFor(() => announcePayloads.length > 0, 5_000)
-
-      assert.ok(
-        announcePayloads.every(p => p?.passive === true),
-        'passive peer should include passive: true in announce extra payload'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: non-passive peer does not include passive flag in announce payload',
-  {timeout: 10_000},
-  async () => {
-    const announcePayloads: Array<Record<string, unknown> | undefined> = []
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: (_relay, _rootTopic, _selfTopic, extra) => {
-        announcePayloads.push(extra)
-      }
-    })
-
-    const appId = `active-no-flag-${Date.now()}`
-    const config = {
-      appId,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => announcePayloads.length > 0)
-
-      assert.ok(
-        announcePayloads.every(p => p === undefined),
-        'non-passive peer should not include passive flag'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: two passive peers do not connect to each other',
-  {timeout: 10_000},
-  async () => {
-    const subscribers: Subscriber[] = []
-    let signalsSent = 0
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {}
-    })
-
-    const appId = `two-passives-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const roomA = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-
-      const subA = subscribers[0]
-
-      // Passive peer A receives an announcement from passive peer B
-      await subA.onMessage(
-        subA.rootTopic,
-        {peerId: 'passive-peer-b', passive: true},
-        () => {
-          signalsSent++
-        }
-      )
-
-      await wait(300)
-
-      assert.equal(
-        signalsSent,
-        0,
-        'passive peer should not send signals to another passive peer'
-      )
-    } finally {
-      await roomA.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: passive peer can reactivate after deactivating',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-reactivate-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-
-      const sub = subscribers[0]
-      const mockPeer = new MockPeer()
-
-      // Step 1: Activate by receiving an announcement from a non-passive peer
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
-
-      await waitFor(() => announceCount > 0, 5_000)
-
-      // Step 2: Establish connection via answer with mockPeer
-      const encryptedAnswer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'answer-sdp'
-      )
-
-      await sub.onMessage(
-        sub.rootTopic,
-        {
-          peerId: 'active-peer',
-          answer: encryptedAnswer,
-          peer: mockPeer
-        },
-        () => {}
-      )
-
-      await wait(100)
-
-      // Step 3: Deactivate by disconnecting the peer
-      mockPeer.destroy()
-      await wait(500)
-      const countAfterDeactivation = announceCount
-      await wait(500)
-
-      // Verify announces stopped
-      assert.equal(
-        announceCount,
-        countAfterDeactivation,
-        'should stop announcing after deactivation'
-      )
-
-      // Step 4: Reactivate via new active peer announcement
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-2'}, () => {})
-
-      await waitFor(() => announceCount > countAfterDeactivation, 5_000)
-
-      assert.ok(
-        announceCount > countAfterDeactivation,
-        'passive peer should reactivate and announce again'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: candidate from non-passive peer does not activate passive peer',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-candidate-no-activate-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-      await wait(200)
-
-      const sub = subscribers[0]
-
-      // Send a stray candidate from a non-passive peer
-      const encryptedCandidate = await encrypt(
-        genKey('', appId, 'test-room'),
-        'candidate:1234'
-      )
-
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-1', candidate: encryptedCandidate},
-        () => {}
-      )
-
-      await wait(300)
-
-      assert.equal(
-        announceCount,
-        0,
-        'candidate should not activate a passive peer'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: answer from non-passive peer does not activate passive peer',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-answer-no-activate-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-      await wait(200)
-
-      const sub = subscribers[0]
-
-      const encryptedAnswer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'answer-sdp'
-      )
-
-      await sub.onMessage(
-        sub.rootTopic,
-        {
-          peerId: 'active-peer-1',
-          answer: encryptedAnswer,
-          peer: new MockPeer()
-        },
-        () => {}
-      )
-
-      await wait(300)
-
-      assert.equal(
-        announceCount,
-        0,
-        'answer should not activate a passive peer'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: offer from non-passive peer activates passive peer',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-offer-activates-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-      await wait(200)
-
-      assert.equal(announceCount, 0, 'should not announce while inactive')
-
-      const sub = subscribers[0]
-
-      const encryptedOffer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'offer-sdp'
-      )
-
-      // Send an offer from a non-passive peer — should activate
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-1', offer: encryptedOffer},
-        () => {}
-      )
-
-      await waitFor(() => announceCount > 0, 5_000)
-
-      assert.ok(
-        announceCount > 0,
-        'offer from non-passive peer should activate passive peer'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: passive peer deactivates only after ALL active peers disconnect',
-  {timeout: 10_000},
-  async () => {
-    let announceCount = 0
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {
-        announceCount++
-      }
-    })
-
-    const appId = `passive-multi-peer-deactivate-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    try {
-      await waitFor(() => subscribers.length >= 1)
-
-      const sub = subscribers[0]
-      const mockPeerA = new MockPeer()
-      const mockPeerB = new MockPeer()
-
-      // Activate
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer-a'}, () => {})
-
-      await waitFor(() => announceCount > 0, 5_000)
-
-      const encryptedAnswer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'answer-sdp'
-      )
-
-      // Connect peer A
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-a', answer: encryptedAnswer, peer: mockPeerA},
-        () => {}
-      )
-
-      await wait(50)
-
-      // Connect peer B
-      await sub.onMessage(
-        sub.rootTopic,
-        {peerId: 'active-peer-b', answer: encryptedAnswer, peer: mockPeerB},
-        () => {}
-      )
-
-      await wait(50)
-
-      // Disconnect peer A — peer B is still connected
-      mockPeerA.destroy()
-      await wait(500)
-
-      const countAfterFirstDisconnect = announceCount
-      await wait(500)
-
-      // Announces should still be running because peer B is connected
-      assert.ok(
-        announceCount > countAfterFirstDisconnect,
-        'should keep announcing while at least one peer is connected'
-      )
-
-      // Now disconnect peer B — no peers left
-      mockPeerB.destroy()
-      await wait(500)
-
-      const countAfterAllDisconnect = announceCount
-      await wait(500)
-
-      assert.equal(
-        announceCount,
-        countAfterAllDisconnect,
-        'should stop announcing only after all peers disconnect'
-      )
-    } finally {
-      await room.leave().catch(() => {})
-    }
-  }
-)
-
-void test(
-  'Trystero: leaving room while passive and inactive succeeds cleanly',
-  {timeout: 10_000},
-  async () => {
-    const subscribers: Subscriber[] = []
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
-        subscribers.push({rootTopic, selfTopic, onMessage})
-        return () => {}
-      },
-      announce: () => {}
-    })
-
-    const appId = `passive-leave-inactive-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-
-    await waitFor(() => subscribers.length >= 1)
-    await wait(100)
-
-    // Leave while still dormant — should not throw
-    await room.leave()
-
-    // Verify the room is fully cleaned up by joining again
-    const room2 = joinRoom(config, 'test-room-2')
-    assert.equal(room2.isPassive(), true)
-    await room2.leave().catch(() => {})
-  }
-)
-
-void test(
-  'Trystero: passive peer includes passive flag in signaling messages',
+  'Trystero: passive peer responds with an offer when leading (selfId < peerId)',
   {timeout: 10_000},
   async () => {
     const signalPayloads: string[] = []
@@ -896,42 +150,34 @@ void test(
       announce: () => {}
     })
 
-    const appId = `passive-signal-flag-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
+    const appId = `passive-offer-leader-${Date.now()}`
+    const room = joinRoom(
+      {
+        appId,
+        passive: true,
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'test-room'
+    )
 
     try {
       await waitFor(() => subscribers.length >= 1)
+      const sub = subscribers[0]!
 
-      const sub = subscribers[0]
-
-      // Activate the passive peer with an announcement.
-      // Use a peerId > selfId (hex) so this peer leads the offer.
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: 'zzzz-active-peer'},
+        {peerId: 'z'.repeat(20)},
         (_topic, signal) => {
           signalPayloads.push(signal)
         }
       )
 
-      // Wait for the offer to be generated and sent
       await waitFor(() => signalPayloads.length > 0, 5_000)
 
-      // Each signal payload should contain passive: true
-      for (const raw of signalPayloads) {
-        const parsed = JSON.parse(raw)
-        assert.equal(
-          parsed.passive,
-          true,
-          `signaling message should include passive: true, got: ${raw}`
-        )
-      }
+      const firstSignal = JSON.parse(signalPayloads[0]!)
+      assert.equal(typeof firstSignal.offer, 'string')
+      assert.equal('passive' in firstSignal, false)
     } finally {
       await room.leave().catch(() => {})
     }
@@ -939,10 +185,10 @@ void test(
 )
 
 void test(
-  'Trystero: checkDeactivate cleans up idle peer states',
+  'Trystero: passive peer responds with a unicast counter-announcement when following (selfId > peerId)',
   {timeout: 10_000},
   async () => {
-    let announceCount = 0
+    const signalPayloads: string[] = []
     const subscribers: Subscriber[] = []
 
     const joinRoom = createStrategy({
@@ -951,70 +197,37 @@ void test(
         subscribers.push({rootTopic, selfTopic, onMessage})
         return () => {}
       },
-      announce: () => {
-        announceCount++
-      }
+      announce: () => {}
     })
 
-    const appId = `passive-gc-peers-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
+    const appId = `passive-counter-announce-${Date.now()}`
+    const room = joinRoom(
+      {
+        appId,
+        passive: true,
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'test-room'
+    )
 
     try {
+      const {peerId: selfId} = await room.getSelf()
       await waitFor(() => subscribers.length >= 1)
-
-      const sub = subscribers[0]
-      const mockPeer = new MockPeer()
-
-      // Activate
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
-
-      await waitFor(() => announceCount > 0, 5_000)
-
-      // Connect via answer
-      const encryptedAnswer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'answer-sdp'
-      )
+      const sub = subscribers[0]!
 
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: 'active-peer', answer: encryptedAnswer, peer: mockPeer},
-        () => {}
+        {peerId: lowerPeerId(selfId)},
+        (_topic, signal) => {
+          signalPayloads.push(signal)
+        }
       )
 
-      await wait(50)
+      await waitFor(() => signalPayloads.length === 1)
 
-      // Also trigger state creation for several other peers via announcements
-      for (let i = 0; i < 20; i++) {
-        await sub.onMessage(
-          sub.rootTopic,
-          {peerId: `transient-peer-${i}`},
-          () => {}
-        )
-      }
-
-      await wait(50)
-
-      // Disconnect the connected peer — triggers checkDeactivate which should
-      // clean up the idle transient peer states
-      mockPeer.destroy()
-      await wait(500)
-
-      // getPeers returns connected peers from the room layer, but we can
-      // verify cleanup indirectly: the room should accept new peers cleanly
-      // after reactivation without accumulating stale state
-      const peers = room.getPeers()
-      assert.equal(
-        Object.keys(peers).length,
-        0,
-        'no connected peers should remain after disconnect'
-      )
+      const reply = JSON.parse(signalPayloads[0]!)
+      assert.deepEqual(reply, {peerId: selfId})
     } finally {
       await room.leave().catch(() => {})
     }
@@ -1022,10 +235,10 @@ void test(
 )
 
 void test(
-  'Trystero: passive peer deactivates when last peer sends graceful @_leave while shared peer stays open',
+  'Trystero: passive peer ignores malformed and wrong-topic discovery messages',
   {timeout: 10_000},
   async () => {
-    let deactivateCount = 0
+    let signalsSent = 0
     const subscribers: Subscriber[] = []
 
     const joinRoom = createStrategy({
@@ -1034,64 +247,287 @@ void test(
         subscribers.push({rootTopic, selfTopic, onMessage})
         return () => {}
       },
-      announce: () => {},
-      deactivate: () => {
-        deactivateCount++
-      }
+      announce: () => {}
     })
 
-    const appId = `passive-graceful-leave-${Date.now()}`
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: MockRTCPeerConnection
-    }
-
-    const room = joinRoom(config, 'test-room')
-    const {peerA, peerB} = await import('./peer-harness.ts').then(
-      ({BufferedPeer, linkPeers}) =>
-        linkPeers(new BufferedPeer(), new BufferedPeer())
+    const appId = `passive-ignore-invalid-${Date.now()}`
+    const room = joinRoom(
+      {
+        appId,
+        passive: true,
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'test-room'
     )
 
     try {
       await waitFor(() => subscribers.length >= 1)
+      const sub = subscribers[0]!
+      const onSignal = () => {
+        signalsSent++
+      }
 
-      const sub = subscribers[0]
-      await sub.onMessage(sub.rootTopic, {peerId: 'active-peer'}, () => {})
-
-      const encryptedAnswer = await encrypt(
-        genKey('', appId, 'test-room'),
-        'answer-sdp'
+      const activePeer = testPeerId('active-peer')
+      await sub.onMessage(sub.rootTopic, {}, onSignal)
+      await sub.onMessage('wrong-topic', {peerId: activePeer}, onSignal)
+      await sub.onMessage('not json', 'not-json', onSignal)
+      await sub.onMessage(
+        sub.rootTopic,
+        null as unknown as StrategyMessage,
+        onSignal
       )
       await sub.onMessage(
         sub.rootTopic,
-        {peerId: 'active-peer', answer: encryptedAnswer, peer: peerA},
-        () => {}
+        {peerId: activePeer, offer: {sdp: 'not-a-string'}},
+        onSignal
+      )
+      await wait(200)
+
+      assert.equal(signalsSent, 0)
+    } finally {
+      await room.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: two passive peers in the same room never announce or connect to each other',
+  {timeout: 10_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+    let announces = 0
+
+    const makeJoinRoom = (peerId: string) =>
+      joinAsTestPeer(
+        peerId,
+        createStrategy({
+          init: () => ({}),
+          subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+            subscribers.push({rootTopic, selfTopic, onMessage})
+            return () => {}
+          },
+          announce: () => {
+            announces++
+          }
+        })
       )
 
-      const activeRoom = createStrategy({
+    const appId = `two-passives-${Date.now()}`
+    const roomA = makeJoinRoom('passive-a')(
+      {
+        appId,
+        passive: true,
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'test-room'
+    )
+    const roomB = makeJoinRoom('passive-b')(
+      {
+        appId,
+        passive: true,
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'test-room'
+    )
+
+    try {
+      await waitFor(() => subscribers.length === 2)
+      await wait(300)
+
+      assert.equal(announces, 0)
+      assert.deepEqual(roomA.getPeers(), {})
+      assert.deepEqual(roomB.getPeers(), {})
+    } finally {
+      await roomA.leave().catch(() => {})
+      await roomB.leave().catch(() => {})
+    }
+  }
+)
+
+void test(
+  'Trystero: leaving a passive room succeeds cleanly',
+  {timeout: 10_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+
+    const joinRoom = createStrategy({
+      init: () => ({}),
+      subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+        subscribers.push({rootTopic, selfTopic, onMessage})
+        return () => {}
+      },
+      announce: () => {}
+    })
+
+    const config = {
+      appId: `passive-leave-${Date.now()}`,
+      passive: true,
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+    }
+
+    const room = joinRoom(config, 'test-room')
+
+    await waitFor(() => subscribers.length >= 1)
+    await wait(50)
+    await room.leave()
+
+    const room2 = joinRoom(config, 'test-room-2')
+    assert.notEqual(room2, room)
+    await room2.leave().catch(() => {})
+  }
+)
+
+void test('Trystero: prunePeerStates deletes only completely idle peer states', () => {
+  const idleState = createPeerState()
+
+  const connectedState = createPeerState()
+  connectedState.connection = {
+    phase: 'connected',
+    peer: new MockPeer() as unknown as PeerHandle,
+    unhealthySince: null
+  }
+
+  const retryTimer = setTimeout(() => {}, 1000)
+  const retryingState = createPeerState()
+  retryingState.outbound = {
+    phase: 'advertising',
+    offerId: 'offer-1',
+    peer: new MockPeer() as unknown as PeerHandle,
+    offerSdp: 'enc-offer',
+    bufferedCandidates: [],
+    expiryTimer: retryTimer
+  }
+  retryingState.relaySlots.push({
+    phase: 'retrying',
+    retryTimer,
+    sendCandidate: () => {}
+  })
+
+  const peerStates = new Map<string, PeerState>([
+    ['idle', idleState],
+    ['connected', connectedState],
+    ['retrying', retryingState]
+  ])
+
+  try {
+    prunePeerStates(peerStates)
+    assert.equal(peerStates.has('idle'), false)
+    assert.equal(peerStates.has('connected'), true)
+    assert.equal(peerStates.has('retrying'), true)
+
+    connectedState.connection = {phase: 'disconnected'}
+    clearTimeout(retryTimer)
+    retryingState.relaySlots.length = 0
+    retryingState.outbound = {phase: 'idle'}
+
+    prunePeerStates(peerStates)
+    assert.equal(peerStates.size, 0)
+  } finally {
+    clearTimeout(retryTimer)
+  }
+})
+
+void test(
+  'Trystero: passive peer disconnects cleanly when active peer sends graceful @_leave',
+  {timeout: 10_000},
+  async () => {
+    const subscribers: Subscriber[] = []
+
+    const joinRoom = joinAsTestPeer(
+      'passive-peer',
+      createStrategy({
         init: () => ({}),
         subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
           subscribers.push({rootTopic, selfTopic, onMessage})
           return () => {}
         },
         announce: () => {}
-      })({appId, rtcPolyfill: MockRTCPeerConnection}, 'test-room')
+      })
+    )
+
+    const appId = `passive-graceful-leave-${Date.now()}`
+    const room = joinRoom(
+      {
+        appId,
+        passive: true,
+        rtcPolyfill:
+          MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+      },
+      'test-room'
+    )
+    let activeRoom: Room | null = null
+    const {peerA, peerB} = linkPeers(new BufferedPeer(), new BufferedPeer())
+
+    try {
+      await waitFor(() => subscribers.length >= 1)
+
+      activeRoom = joinAsTestPeer(
+        'active-peer',
+        createStrategy({
+          init: () => ({}),
+          subscribe: async (_relay, rootTopic, selfTopic, onMessage) => {
+            subscribers.push({rootTopic, selfTopic, onMessage})
+            return () => {}
+          },
+          announce: () => {}
+        })
+      )(
+        {
+          appId,
+          rtcPolyfill:
+            MockRTCPeerConnection as unknown as typeof RTCPeerConnection
+        },
+        'test-room'
+      )
 
       await waitFor(() => subscribers.length >= 2)
-      await subscribers[1].onMessage(
-        subscribers[1].rootTopic,
-        {peerId: 'passive-peer', answer: encryptedAnswer, peer: peerB},
+      const [{peerId: passivePeerId}, {peerId: activePeerId}] =
+        await Promise.all([room.getSelf(), activeRoom.getSelf()])
+
+      const sub = subscribers[0]!
+      const roomKey = genKey('', appId, 'test-room')
+      const encryptedAnswerForPassive = await encrypt(
+        roomKey,
+        'answer-sdp',
+        buildSignalAad('answer', activePeerId, 'offer-1')
+      )
+      await sub.onMessage(
+        sub.rootTopic,
+        {
+          peerId: activePeerId,
+          offerId: 'offer-1',
+          answer: encryptedAnswerForPassive,
+          peer: peerA
+        },
         () => {}
       )
 
-      await waitFor(() => 'active-peer' in room.getPeers())
+      const encryptedAnswerForActive = await encrypt(
+        roomKey,
+        'answer-sdp',
+        buildSignalAad('answer', passivePeerId, 'offer-1')
+      )
+      await subscribers[1]!.onMessage(
+        subscribers[1]!.rootTopic,
+        {
+          peerId: passivePeerId,
+          offerId: 'offer-1',
+          answer: encryptedAnswerForActive,
+          peer: peerB
+        },
+        () => {}
+      )
+
+      await waitFor(() => activePeerId in room.getPeers())
       await activeRoom.leave()
 
-      await waitFor(() => deactivateCount > 0)
-      assert.equal(peerA.isDead, false)
-      assert.equal(Object.keys(room.getPeers()).length, 0)
+      await waitFor(() => Object.keys(room.getPeers()).length === 0)
+      assert.equal(peerA.isDead, true)
     } finally {
+      await activeRoom?.leave().catch(() => {})
       await room.leave().catch(() => {})
       peerA.destroy()
       peerB.destroy()

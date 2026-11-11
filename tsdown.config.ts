@@ -4,7 +4,6 @@ const testBuild = process.env['TEST_BUILD'] === '1'
 
 const strategyNames = [
   'firebase',
-  'ipfs',
   'mqtt',
   'nostr',
   'supabase',
@@ -13,6 +12,7 @@ const strategyNames = [
 ]
 const ci = process.env['CI'] === 'true'
 const coreSourcePath = resolve('packages/core/src/index.ts')
+const coreTypesSourcePath = resolve('packages/core/src/types.ts')
 const empty = resolve('scripts/empty.ts')
 const packageDepsConfig = {
   deps: {
@@ -27,87 +27,70 @@ const browserBundleDepsConfig = {
   }
 }
 
-const dropDevLabelStatements = testBuild
-  ? {}
-  : {
-      inputOptions: {
-        transform: {
-          dropLabels: ['DEV']
-        }
-      }
-    }
-
 export default [
   {
     workspace: {
-      include: ['packages/*'],
-      exclude: ['packages/trystero']
+      include: ['packages/core']
     },
     entry: 'src/index.ts',
-    dts: true,
+    dts: {generator: 'oxc'},
     unbundle: true,
-    sourcemap: true,
-    exports: true,
+    sourcemap: false,
+    minify: false,
     ...packageDepsConfig,
     publint: ci,
-    attw: ci,
-    ...dropDevLabelStatements
+    attw: ci
   },
   {
     workspace: {
       include: ['packages/ws-relay']
     },
-    entry: {server: 'src/server.ts'},
-    dts: true,
+    entry: {
+      index: 'src/index.ts',
+      server: 'src/server.ts'
+    },
+    dts: {generator: 'oxc'},
     unbundle: true,
-    sourcemap: true,
-    clean: false,
-    exports: true,
+    sourcemap: false,
+    minify: false,
     ...packageDepsConfig,
     publint: ci,
-    attw: ci,
-    ...dropDevLabelStatements
+    attw: ci
   },
   {
     workspace: {
-      include: ['packages/trystero']
+      include: ['packages/*'],
+      exclude: ['packages/core', 'packages/ws-relay']
     },
-    entry: {
-      index: 'src/index.ts',
-      nostr: 'src/nostr.ts',
-      torrent: 'src/torrent.ts',
-      mqtt: 'src/mqtt.ts',
-      ipfs: 'src/ipfs.ts',
-      supabase: 'src/supabase.ts',
-      firebase: 'src/firebase.ts'
-    },
-    dts: true,
+    entry: 'src/index.ts',
+    dts: {generator: 'oxc'},
     unbundle: true,
-    sourcemap: true,
-    exports: true,
+    sourcemap: false,
+    minify: false,
     ...packageDepsConfig,
     publint: ci,
-    attw: ci,
-    ...dropDevLabelStatements
+    attw: ci
   },
-  ...strategyNames.map((name, index) => ({
-    workspace: false as const,
-    entry: {
-      [`trystero-${name}.min`]: `packages/${name}/src/index.ts`
-    },
-    outDir: 'dist',
-    dts: false,
-    format: 'es' as const,
-    platform: 'browser' as const,
-    sourcemap: true,
-    minify: !testBuild,
-    ...browserBundleDepsConfig,
-    alias: {
-      '@trystero-p2p/core': coreSourcePath,
-      crypto: empty,
-      'node:crypto': empty
-    },
-    clean: index === 0,
-    ...dropDevLabelStatements
-  }))
+  ...(testBuild
+    ? strategyNames.map((name, index) => ({
+        workspace: false as const,
+        entry: {
+          [`trystero-${name}`]: `packages/${name}/src/index.ts`
+        },
+        outDir: 'test/dist',
+        dts: false,
+        format: 'es' as const,
+        platform: 'browser' as const,
+        sourcemap: true,
+        minify: false,
+        ...browserBundleDepsConfig,
+        alias: {
+          '@trystero-p2p/core/types': coreTypesSourcePath,
+          '@trystero-p2p/core': coreSourcePath,
+          crypto: empty,
+          'node:crypto': empty
+        },
+        clean: index === 0
+      }))
+    : [])
 ]

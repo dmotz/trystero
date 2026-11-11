@@ -1,31 +1,97 @@
-import {schnorr} from '@noble/secp256k1'
 import {
+  clearUserIdentity,
   createRelayManager,
+  createRelayScopedStore,
   createTopicStrategy,
+  createUserIdentity,
+  exportUserIdentity,
   fromJson,
   genId,
   getRelays,
-  hashWith,
+  importUserIdentity,
   libName,
   makeSocket,
-  pauseRelayReconnection,
-  resumeRelayReconnection,
-  selfId,
-  strToNum,
-  toHex,
+  mkErr,
+  roles,
+  scale,
+  setRelayConnectivity,
   toJson,
+  unrefTimer,
   type JoinRoom,
   type JoinRoomConfig,
-  type SocketClient
+  type SocketClient,
+  type Timeout
 } from '@trystero-p2p/core'
+import {
+  createEvent,
+  createSigner,
+  eventMsgType,
+  subscribeSince,
+  tag,
+  topicToKind,
+  type NostrSigner
+} from './protocol'
 
-const relayManager = createRelayManager<SocketClient>(client => client.socket)
+type RelayHealthState =
+  | {readonly phase: 'healthy'}
+  | {
+      readonly phase: 'cooldown'
+      readonly delayMs: number
+      readonly untilMs: number
+    }
+  | {readonly phase: 'probation'; readonly lastDelayMs: number}
+  | {readonly phase: 'retired'}
+
+type RoomSignerEntry = {
+  refs: number
+  signer: NostrSigner | null
+}
+
+type AnnouncementRecord = {
+  readonly payload: string
+  readonly getSigner: () => NostrSigner
+}
+
+type TopicHandler = (topic: string, data: string) => void
+
+type BatchSyncState =
+  | {readonly phase: 'unsynced'}
+  | {
+      readonly phase: 'awaiting-eose'
+      readonly pendingSubIds: Set<string>
+      readonly requestedAt: number
+    }
+  | {readonly phase: 'synced'}
+
+type BatchState = {
+  subIds: string[]
+  topics: Map<string, Set<TopicHandler>>
+  flushTimer: Timeout | null
+  flushWaiters: Set<() => void>
+  sync: BatchSyncState
+  retryTimer: Timeout | null
+  retryMs: number
+}
+
+const unreachable = (x: never): never => {
+  throw mkErr(`unreachable: ${String(x)}`)
+}
+
+const cancelTimer = (timer: Timeout | null): null => {
+  if (timer !== null) {
+    clearTimeout(timer)
+  }
+  return null
+}
+
+const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
+  client => client.socket,
+  client => {
+    cleanupClientBatcher(client)
+    client.close?.()
+  }
+)
 const defaultRedundancy = 5
-const tag = 'x'
-const eventMsgType = 'EVENT'
-const {secretKey, publicKey} = schnorr.keygen()
-const pubkey = toHex(publicKey)
-const kindCache: Record<string, number> = {}
 const maxTopicsPerSubscription = 250
 
 // Newcomers announce immediately and wake subscribed incumbents, so the fast
@@ -35,129 +101,118 @@ const steadyAnnounceIntervalMs = 60_000
 const maxRelayBackoffMs = 15 * 60_000
 const subscriptionRetryMs = 5_333
 
-type RelayBackoffState = {
-  delayMs: number
-  untilMs: number
+const roomSigners = /*@__PURE__*/ new Map<string, RoomSignerEntry>()
+const relayHealth = /*@__PURE__*/ new WeakMap<SocketClient, RelayHealthState>()
+const announcementMessages =
+  /*@__PURE__*/ createRelayScopedStore<AnnouncementRecord>()
+const batchers = /*@__PURE__*/ new WeakMap<SocketClient, BatchState>()
+
+const getRoomKey = (rootTopic: string, selfTopic: string): string =>
+  `${rootTopic}\0${selfTopic}`
+
+const getRoomSigner = (key: string): NostrSigner => {
+  const entry = roomSigners.get(key)
+  if (!entry) {
+    return createSigner()
+  }
+  return (entry.signer ??= createSigner())
 }
 
-const relayBackoffs = new WeakMap<SocketClient, RelayBackoffState>()
-const announcementMessages = relayManager.scoped<string>()
-const retiredRelays = new WeakSet<SocketClient>()
+const getRelayHealth = (client: SocketClient): RelayHealthState => {
+  const state = relayHealth.get(client)
+  if (!state) {
+    return {phase: 'healthy'}
+  }
+  if (state.phase === 'cooldown' && Date.now() >= state.untilMs) {
+    const next: RelayHealthState = {
+      phase: 'probation',
+      lastDelayMs: state.delayMs
+    }
+    relayHealth.set(client, next)
+    return next
+  }
+  return state
+}
 
 const backoffRelay = (client: SocketClient): number => {
-  const previous = relayBackoffs.get(client)
-  const delayMs = Math.min(
-    previous?.delayMs
-      ? Math.max(steadyAnnounceIntervalMs, previous.delayMs * 2)
-      : steadyAnnounceIntervalMs,
-    maxRelayBackoffMs
-  )
-
-  relayBackoffs.set(client, {delayMs, untilMs: Date.now() + delayMs})
-
-  return delayMs
+  const current = getRelayHealth(client)
+  switch (current.phase) {
+    case 'retired':
+      return maxRelayBackoffMs
+    case 'healthy': {
+      const delayMs = steadyAnnounceIntervalMs
+      relayHealth.set(client, {
+        phase: 'cooldown',
+        delayMs,
+        untilMs: Date.now() + delayMs
+      })
+      return delayMs
+    }
+    case 'cooldown':
+    case 'probation': {
+      const prevDelay =
+        current.phase === 'cooldown' ? current.delayMs : current.lastDelayMs
+      const delayMs = Math.min(
+        Math.max(steadyAnnounceIntervalMs, prevDelay * 2),
+        maxRelayBackoffMs
+      )
+      relayHealth.set(client, {
+        phase: 'cooldown',
+        delayMs,
+        untilMs: Date.now() + delayMs
+      })
+      return delayMs
+    }
+    default:
+      return unreachable(current)
+  }
 }
 
-const getRelayBackoffMs = (client: SocketClient): number => {
-  const state = relayBackoffs.get(client)
-
-  if (!state) {
-    return 0
+const acknowledgeRelaySuccess = (client: SocketClient): void => {
+  if (getRelayHealth(client).phase === 'probation') {
+    relayHealth.set(client, {phase: 'healthy'})
   }
+}
 
-  const remainingMs = state.untilMs - Date.now()
-
-  if (remainingMs > 0) {
-    return remainingMs
-  }
-
-  return 0
+const getRelayCooldownMs = (client: SocketClient): number => {
+  const current = getRelayHealth(client)
+  return current.phase === 'cooldown'
+    ? Math.max(0, current.untilMs - Date.now())
+    : 0
 }
 
 const nextAnnounce = (nextAnnounceMs: number) => ({nextAnnounceMs})
 const stopAnnouncing = {stopAnnouncing: true} as const
 
 const retireRelay = (client: SocketClient): boolean => {
-  if (retiredRelays.has(client)) {
+  if (getRelayHealth(client).phase === 'retired') {
     return false
   }
 
-  retiredRelays.add(client)
-  relayBackoffs.delete(client)
+  relayHealth.set(client, {phase: 'retired'})
+  relayManager.evict(client)
+  cleanupClientBatcher(client)
   client.close?.()
   return true
 }
 
 export type NostrRoomConfig = JoinRoomConfig
 
-const now = (): number => Math.floor(Date.now() / 1000)
-
-const topicToKind = (topic: string): number =>
-  (kindCache[topic] ??= strToNum(topic, 10_000) + 20_000)
-
-export const createEvent = async (
-  topic: string,
-  content: string
-): Promise<string> => {
-  const payload = {
-    kind: topicToKind(topic),
-    tags: [[tag, topic]],
-    created_at: now(),
-    content,
-    pubkey
-  }
-
-  const id = await hashWith(
-    'SHA-256',
-    toJson([
-      0,
-      payload.pubkey,
-      payload.created_at,
-      payload.kind,
-      payload.tags,
-      payload.content
-    ])
-  )
-
-  return toJson([
-    eventMsgType,
-    {
-      ...payload,
-      id: toHex(id),
-      sig: toHex(await schnorr.signAsync(id, secretKey))
-    }
-  ])
-}
-
-export const subscribe = (subId: string, topic: string): string =>
-  toJson([
-    'REQ',
-    subId,
-    {
-      kinds: [topicToKind(topic)],
-      since: now(),
-      ['#' + tag]: [topic]
-    }
-  ])
-
-type TopicHandler = (topic: string, data: string) => void
-
-type BatchState = {
-  subIds: string[]
-  topics: Map<string, TopicHandler>
-  updateTimer: ReturnType<typeof setTimeout> | null
-  flushWaiters: Set<() => void>
-  retryTimer: ReturnType<typeof setTimeout> | null
-  retryMs: number
-  pendingEose: Set<string>
-  requestedAt: number
-}
-
-const batchers: Record<string, BatchState> = {}
-
 const resolveBatchFlush = (batcher: BatchState): void => {
   batcher.flushWaiters.forEach(resolve => resolve())
   batcher.flushWaiters.clear()
+}
+
+const cleanupClientBatcher = (client: SocketClient): void => {
+  const batcher = batchers.get(client)
+  if (!batcher) {
+    return
+  }
+  batcher.flushTimer = cancelTimer(batcher.flushTimer)
+  batcher.retryTimer = cancelTimer(batcher.retryTimer)
+  batcher.sync = {phase: 'unsynced'}
+  resolveBatchFlush(batcher)
+  batchers.delete(client)
 }
 
 const batchAdd = (
@@ -165,60 +220,74 @@ const batchAdd = (
   topic: string,
   handler: TopicHandler
 ): void => {
-  const batcher = (batchers[client.url] ??= {
-    subIds: [],
-    topics: new Map(),
-    updateTimer: null,
-    flushWaiters: new Set(),
-    retryTimer: null,
-    retryMs: subscriptionRetryMs,
-    pendingEose: new Set(),
-    requestedAt: 0
-  })
+  let batcher = batchers.get(client)
+  if (!batcher) {
+    batcher = {
+      subIds: [],
+      topics: new Map(),
+      flushTimer: null,
+      flushWaiters: new Set(),
+      sync: {phase: 'unsynced'},
+      retryTimer: null,
+      retryMs: subscriptionRetryMs
+    }
+    batchers.set(client, batcher)
+  }
 
-  batcher.topics.set(topic, handler)
-  scheduleBatchFlush(client, batcher)
+  let handlers = batcher.topics.get(topic)
+  const isNewTopic = !handlers
+  if (!handlers) {
+    handlers = new Set()
+    batcher.topics.set(topic, handlers)
+  }
+  handlers.add(handler)
+
+  if (isNewTopic || batcher.sync.phase === 'unsynced') {
+    scheduleBatchFlush(client, batcher)
+  }
 }
 
-const batchRemove = (client: SocketClient, topic: string): void => {
-  const batcher = batchers[client.url]
-
+const batchRemove = (
+  client: SocketClient,
+  topic: string,
+  handler: TopicHandler
+): boolean => {
+  const batcher = batchers.get(client)
   if (!batcher) {
-    return
+    return false
+  }
+
+  const handlers = batcher.topics.get(topic)
+  if (!handlers || !handlers.delete(handler)) {
+    return false
+  }
+
+  if (handlers.size > 0) {
+    return true
   }
 
   batcher.topics.delete(topic)
   delete announcementMessages.forRelay(client)[topic]
 
   if (batcher.topics.size === 0) {
-    if (batcher.retryTimer !== null) {
-      clearTimeout(batcher.retryTimer)
-    }
-    if (batcher.updateTimer !== null) {
-      clearTimeout(batcher.updateTimer)
-      batcher.updateTimer = null
-    }
-
-    resolveBatchFlush(batcher)
-
     batcher.subIds.forEach(subId => client.send(toJson(['CLOSE', subId])))
-    delete batchers[client.url]
-  } else {
-    scheduleBatchFlush(client, batcher)
+    cleanupClientBatcher(client)
+    return true
   }
+
+  scheduleBatchFlush(client, batcher)
+  return true
 }
 
 const scheduleBatchFlush = (
   client: SocketClient,
   batcher: BatchState
 ): void => {
-  if (batcher.updateTimer !== null) {
+  if (batcher.flushTimer !== null) {
     return
   }
-
-  batcher.updateTimer = setTimeout(() => {
-    batcher.updateTimer = null
-
+  batcher.flushTimer = setTimeout(() => {
+    batcher.flushTimer = null
     try {
       flushBatch(client)
     } finally {
@@ -228,25 +297,27 @@ const scheduleBatchFlush = (
 }
 
 const waitForBatchFlush = (client: SocketClient): Promise<void> => {
-  const batcher = batchers[client.url]
-
-  if (!batcher || batcher.updateTimer === null) {
+  const batcher = batchers.get(client)
+  if (!batcher || batcher.flushTimer === null) {
     return Promise.resolve()
   }
-
-  return new Promise(resolve => batcher.flushWaiters.add(resolve))
+  return new Promise(resolve => {
+    batcher.flushWaiters.add(resolve)
+  })
 }
 
 const flushBatch = (client: SocketClient): void => {
-  const batcher = batchers[client.url]
-
+  const batcher = batchers.get(client)
   if (!batcher || batcher.topics.size === 0) {
     return
   }
 
+  batcher.flushTimer = cancelTimer(batcher.flushTimer)
+  batcher.retryTimer = cancelTimer(batcher.retryTimer)
+
   const topics = [...batcher.topics.keys()]
   const chunks: string[][] = []
-  const since = now()
+  const since = subscribeSince()
 
   for (let i = 0; i < topics.length; i += maxTopicsPerSubscription) {
     chunks.push(topics.slice(i, i + maxTopicsPerSubscription))
@@ -254,17 +325,16 @@ const flushBatch = (client: SocketClient): void => {
 
   while (batcher.subIds.length > chunks.length) {
     const subId = batcher.subIds.pop()
-
     if (subId) {
       client.send(toJson(['CLOSE', subId]))
     }
   }
 
-  batcher.pendingEose.clear()
-  batcher.requestedAt = Date.now()
+  const pendingSubIds = new Set<string>()
+  const requestedAt = Date.now()
   chunks.forEach((chunk, i) => {
     const subId = (batcher.subIds[i] ??= genId(64))
-    batcher.pendingEose.add(subId)
+    pendingSubIds.add(subId)
 
     client.send(
       toJson([
@@ -278,19 +348,21 @@ const flushBatch = (client: SocketClient): void => {
       ])
     )
   })
+
+  batcher.sync = {
+    phase: 'awaiting-eose',
+    pendingSubIds,
+    requestedAt
+  }
+  resolveBatchFlush(batcher)
 }
 
 const resubscribeOnReconnect = (client: SocketClient): void => {
-  const batcher = batchers[client.url]
-
+  const batcher = batchers.get(client)
   if (batcher && batcher.topics.size > 0 && !client.isClosed) {
-    if (getRelayBackoffMs(client) > 0) {
+    if (getRelayCooldownMs(client) > 0) {
       retrySubscription(client, true)
       return
-    }
-    if (batcher.retryTimer !== null) {
-      clearTimeout(batcher.retryTimer)
-      batcher.retryTimer = null
     }
     flushBatch(client)
     replayAnnouncements(client)
@@ -299,66 +371,85 @@ const resubscribeOnReconnect = (client: SocketClient): void => {
 
 const replayAnnouncements = (client: SocketClient): void => {
   Object.entries(announcementMessages.forRelay(client)).forEach(
-    ([topic, payload]) => {
-      void publishMessage(client, topic, payload, true)
+    ([topic, {payload, getSigner}]) => {
+      void publishMessage(client, topic, payload, true, getSigner)
     }
   )
+}
+
+const getPublishBlockedResult = (
+  client: SocketClient,
+  isAnnouncement: boolean
+): typeof stopAnnouncing | {nextAnnounceMs: number} | undefined | null => {
+  const health = getRelayHealth(client)
+  if (health.phase === 'retired' || client.isClosed) {
+    return isAnnouncement ? stopAnnouncing : undefined
+  }
+  const remaining =
+    health.phase === 'cooldown' ? Math.max(0, health.untilMs - Date.now()) : 0
+  if (remaining > 0 || client.socket?.readyState !== 1) {
+    return isAnnouncement
+      ? nextAnnounce(Math.max(steadyAnnounceIntervalMs, remaining))
+      : undefined
+  }
+  return null
 }
 
 const publishMessage = async (
   client: SocketClient,
   topic: string,
   payload: string,
-  isAnnouncement: boolean
+  isAnnouncement: boolean,
+  getSigner: () => NostrSigner
 ) => {
-  if (retiredRelays.has(client) || client.isClosed) {
-    return isAnnouncement ? stopAnnouncing : undefined
+  const preBlocked = getPublishBlockedResult(client, isAnnouncement)
+  if (preBlocked !== null) {
+    return preBlocked
   }
-  const remaining = getRelayBackoffMs(client)
-  if (remaining > 0 || client.socket.readyState !== 1) {
-    return isAnnouncement
-      ? nextAnnounce(Math.max(steadyAnnounceIntervalMs, remaining))
-      : undefined
-  }
+
   // Relays deduplicate IDs, and created_at only has second precision. An
   // intentional discovery retry must remain distinct from the previous send.
   const event = await createEvent(
     topic,
     isAnnouncement
       ? toJson({...fromJson<Record<string, unknown>>(payload), nonce: genId(8)})
-      : payload
+      : payload,
+    getSigner()
   )
-  if (isAnnouncement && !batchers[client.url]?.topics.has(topic)) {
-    return nextAnnounce(steadyAnnounceIntervalMs)
-  }
+
   // Feedback or disconnection can arrive while another event is being signed.
-  if (
-    getRelayBackoffMs(client) > 0 ||
-    client.isClosed ||
-    client.socket.readyState !== 1
-  ) {
-    return isAnnouncement ? nextAnnounce(steadyAnnounceIntervalMs) : undefined
+  const postBlocked = getPublishBlockedResult(client, isAnnouncement)
+  if (postBlocked !== null) {
+    return postBlocked
   }
-  client.send(event)
-  if (isAnnouncement) {
+
+  if (isAnnouncement && !batchers.get(client)?.topics.has(topic)) {
     return nextAnnounce(steadyAnnounceIntervalMs)
   }
-  return undefined
+
+  client.send(event)
+  return isAnnouncement ? nextAnnounce(steadyAnnounceIntervalMs) : undefined
 }
 
 const retrySubscription = (
   client: SocketClient,
   rateLimited: boolean
 ): void => {
-  const batcher = batchers[client.url]
-  if (!batcher || (batcher.retryTimer !== null && !rateLimited)) {
+  const batcher = batchers.get(client)
+  if (!batcher || batcher.topics.size === 0 || client.isClosed) {
     return
   }
-  if (batcher.retryTimer !== null) {
-    clearTimeout(batcher.retryTimer)
+
+  if (batcher.retryTimer !== null && !rateLimited) {
+    return
   }
-  const delay = rateLimited ? getRelayBackoffMs(client) : batcher.retryMs
+
+  const delay = rateLimited ? getRelayCooldownMs(client) : batcher.retryMs
   batcher.retryMs = Math.min(batcher.retryMs * 2, steadyAnnounceIntervalMs)
+  if (batcher.sync.phase === 'synced') {
+    batcher.sync = {phase: 'unsynced'}
+  }
+  batcher.retryTimer = cancelTimer(batcher.retryTimer)
   batcher.retryTimer = setTimeout(
     () => {
       batcher.retryTimer = null
@@ -366,187 +457,235 @@ const retrySubscription = (
     },
     Math.max(delay, subscriptionRetryMs)
   )
+  unrefTimer(batcher.retryTimer)
 }
 
-export const joinRoom: JoinRoom<NostrRoomConfig> = createTopicStrategy({
-  init: config =>
-    getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
-      const client = relayManager.register(url, () =>
-        makeSocket(
-          url,
-          data => {
-            const [msgType, subId, payload, relayMsg] =
-              fromJson<
-                [
-                  string,
-                  string,
-                  {content: string; tags?: string[][]} | boolean | string,
-                  string
-                ]
-              >(data)
-
-            if (msgType !== eventMsgType) {
-              const prefix = `${libName}: relay failure from ${client.url} - `
-              const rejectionReason =
-                msgType === 'CLOSED' && typeof payload === 'string'
-                  ? payload
-                  : relayMsg
-              const didRejectEvent = msgType === 'OK' && payload === false
-              const isRateLimited =
-                (didRejectEvent || msgType === 'CLOSED') &&
-                rejectionReason?.startsWith('rate-limited:')
-              const isDuplicate =
-                didRejectEvent && rejectionReason?.startsWith('duplicate:')
-              const isTerminalRejection =
-                rejectionReason &&
-                /^(blocked|restricted|auth-required|pow):/.test(rejectionReason)
-
-              if (
-                msgType === 'OK' &&
-                payload === true &&
-                getRelayBackoffMs(client) === 0
-              ) {
-                relayBackoffs.delete(client)
+export const joinRoom: JoinRoom<NostrRoomConfig> =
+  /*@__PURE__*/ createTopicStrategy<SocketClient, NostrRoomConfig>({
+    init: config =>
+      getRelays(config, defaultRelayUrls, defaultRedundancy, true).map(url => {
+        const client = relayManager.register(url, () => {
+          const created = makeSocket(
+            url,
+            data => {
+              const parsed = fromJson<unknown>(data)
+              if (!Array.isArray(parsed)) {
+                return
               }
+              const [msgType, subId, payload, relayMsg] = parsed as [
+                string,
+                string,
+                {content: string; tags?: string[][]} | boolean | string,
+                string
+              ]
 
-              if (
-                (didRejectEvent || msgType === 'CLOSED') &&
-                isTerminalRejection &&
-                !retireRelay(client)
-              ) {
+              if (msgType !== eventMsgType) {
+                if (
+                  msgType === 'CLOSED' &&
+                  !batchers.get(created)?.subIds.includes(subId)
+                ) {
+                  return
+                }
+
+                const prefix = `${libName}: relay failure from ${created.url} - `
+                const rejectionReason =
+                  msgType === 'CLOSED' && typeof payload === 'string'
+                    ? payload
+                    : relayMsg
+                const didRejectEvent = msgType === 'OK' && payload === false
+                const isRateLimited =
+                  (didRejectEvent || msgType === 'CLOSED') &&
+                  rejectionReason?.startsWith('rate-limited:')
+                const isDuplicate =
+                  didRejectEvent && rejectionReason?.startsWith('duplicate:')
+                const isTerminalRejection =
+                  rejectionReason &&
+                  /^(blocked|restricted|auth-required|pow):/.test(
+                    rejectionReason
+                  )
+
+                if (msgType === 'OK' && payload === true) {
+                  acknowledgeRelaySuccess(created)
+                }
+
+                if (
+                  (didRejectEvent || msgType === 'CLOSED') &&
+                  isTerminalRejection &&
+                  !retireRelay(created)
+                ) {
+                  return
+                }
+
+                if (isRateLimited) {
+                  backoffRelay(created)
+                } else if (msgType === 'EOSE') {
+                  const batcher = batchers.get(created)
+                  if (
+                    batcher &&
+                    batcher.sync.phase === 'awaiting-eose' &&
+                    batcher.sync.pendingSubIds.delete(subId) &&
+                    batcher.sync.pendingSubIds.size === 0
+                  ) {
+                    const {requestedAt} = batcher.sync
+                    batcher.retryTimer = cancelTimer(batcher.retryTimer)
+                    batcher.retryMs = subscriptionRetryMs
+                    batcher.sync = {phase: 'synced'}
+                    // Do not wait for EOSE on the fast path. If installation was
+                    // slow, announce once when all batched subscriptions are ready.
+                    if (Date.now() - requestedAt >= 1_000) {
+                      replayAnnouncements(created)
+                    }
+                  }
+                }
+                if (msgType === 'CLOSED' && !isTerminalRejection) {
+                  retrySubscription(created, Boolean(isRateLimited))
+                }
+
+                if (
+                  !isDuplicate &&
+                  config.relayConfig?.warnOnRelayFailure !== false
+                ) {
+                  if (msgType === 'NOTICE') {
+                    console.warn(prefix + subId)
+                  } else if (didRejectEvent || msgType === 'CLOSED') {
+                    console.warn(prefix + rejectionReason)
+                  }
+                }
+
                 return
               }
 
-              if (isRateLimited) {
-                backoffRelay(client)
-              } else if (msgType === 'EOSE') {
-                const batcher = batchers[client.url]
-                if (
-                  batcher?.pendingEose.delete(subId) &&
-                  batcher.pendingEose.size === 0
-                ) {
-                  batcher.retryMs = subscriptionRetryMs
-                  if (batcher.retryTimer !== null) {
-                    clearTimeout(batcher.retryTimer)
-                    batcher.retryTimer = null
-                  }
-                  // Do not wait for EOSE on the fast path. If installation was
-                  // slow, announce once when all batched subscriptions are ready.
-                  if (Date.now() - batcher.requestedAt >= 1_000) {
-                    replayAnnouncements(client)
-                  }
-                }
-              }
-              if (msgType === 'CLOSED' && !isTerminalRejection) {
-                retrySubscription(client, Boolean(isRateLimited))
-              }
-
               if (
-                !isDuplicate &&
-                config.relayConfig?.warnOnRelayFailure !== false
+                payload &&
+                typeof payload === 'object' &&
+                'content' in payload
               ) {
-                if (msgType === 'NOTICE') {
-                  console.warn(prefix + subId)
-                } else if (didRejectEvent || msgType === 'CLOSED') {
-                  console.warn(prefix + rejectionReason)
-                }
-              }
+                const batcher = batchers.get(created)
 
-              return
-            }
-
-            if (
-              payload &&
-              typeof payload === 'object' &&
-              'content' in payload
-            ) {
-              const batcher = batchers[client.url]
-
-              if (batcher?.subIds.includes(subId) && payload.tags) {
-                const topicTag = payload.tags.find(t => t[0] === tag)
-
-                if (topicTag?.[1]) {
-                  batcher.topics.get(topicTag[1])?.(
-                    topicTag[1],
-                    payload.content
+                if (batcher?.subIds.includes(subId) && payload.tags) {
+                  const topicTag = payload.tags.find(
+                    t => Array.isArray(t) && t[0] === tag
                   )
+
+                  if (topicTag?.[1]) {
+                    const matchedTopic = topicTag[1]
+                    batcher.topics.get(matchedTopic)?.forEach(handler => {
+                      handler(matchedTopic, payload.content)
+                    })
+                  }
                 }
               }
-            }
-          },
-          () => resubscribeOnReconnect(client)
-        )
-      )
+            },
+            () => resubscribeOnReconnect(created)
+          )
+          return created
+        })
 
-      return client.ready
-    }),
+        return relayManager.lease(client, client.ready)
+      }),
 
-  subscribeTopic: (client, topic, onMessage, context) => {
-    const handler: TopicHandler = (topic, data) => void onMessage(topic, data)
-
-    batchAdd(client, topic, handler)
-
-    const cleanup = () => {
-      if (batchers[client.url]?.topics.get(topic) === handler) {
-        batchRemove(client, topic)
+    subscribeTopic: (client, topic, onMessage, context) => {
+      const key = getRoomKey(context.rootTopic, context.selfTopic)
+      const existingSigner = roomSigners.get(key)
+      if (existingSigner) {
+        existingSigner.refs += 1
+      } else {
+        roomSigners.set(key, {refs: 1, signer: null})
       }
+      let released = false
+      const handler: TopicHandler = (receivedTopic, data) =>
+        void onMessage(receivedTopic, data)
+
+      batchAdd(client, topic, handler)
+
+      const cleanup = (): void => {
+        if (released) {
+          return
+        }
+        released = true
+
+        const entry = roomSigners.get(key)
+        if (entry) {
+          if (entry.refs <= 1) {
+            roomSigners.delete(key)
+          } else {
+            entry.refs -= 1
+          }
+        }
+
+        batchRemove(client, topic, handler)
+      }
+
+      // Rooms add the self topic before the root topic. Waiting only on
+      // the root keeps both topics in one batch while guaranteeing the REQ is
+      // written before createStrategy starts announcing.
+      return context.kind === 'root'
+        ? waitForBatchFlush(client).then(() => cleanup)
+        : cleanup
+    },
+
+    publishTopic: (client, topic, msg, {kind, rootTopic, selfTopic}) => {
+      const payload = typeof msg === 'string' ? msg : toJson(msg)
+      const key = getRoomKey(rootTopic, selfTopic)
+      const getSigner = () => getRoomSigner(key)
+
+      if (kind === 'announce' && batchers.get(client)?.topics.has(topic)) {
+        announcementMessages.forRelay(client)[topic] = {payload, getSigner}
+      }
+
+      return publishMessage(
+        client,
+        topic,
+        payload,
+        kind === 'announce',
+        getSigner
+      )
     }
+  })
 
-    // Active rooms add the self topic before the root topic. Waiting only on
-    // the root keeps both topics in one batch while guaranteeing the REQ is
-    // written before createStrategy starts announcing.
-    return context.kind === 'root'
-      ? waitForBatchFlush(client).then(() => cleanup)
-      : cleanup
-  },
+export const getRelaySockets = (): Record<string, WebSocket> =>
+  relayManager.getSockets()
 
-  publishTopic: (client, topic, msg, {kind}) => {
-    const payload = typeof msg === 'string' ? msg : toJson(msg)
-    if (kind === 'announce') {
-      announcementMessages.forRelay(client)[topic] = payload
-    }
-    return publishMessage(client, topic, payload, kind === 'announce')
-  },
+export {
+  clearUserIdentity,
+  createUserIdentity,
+  exportUserIdentity,
+  importUserIdentity,
+  roles,
+  scale,
+  setRelayConnectivity
+}
+export type * from '@trystero-p2p/core/types'
 
-  unpublishTopic: (client, topic) => {
-    delete announcementMessages.forRelay(client)[topic]
-  }
-})
-
-export const getRelaySockets = relayManager.getSockets
-
-export {pauseRelayReconnection, resumeRelayReconnection, selfId}
-
-export const defaultRelayUrls = [
-  '0x-nostr-relay.fly.dev',
-  'bendernostur.duckdns.org:8443',
-  'cdn.satellite.earth',
-  'nos.lol',
-  'nostr.chaima.info',
-  'nostr.christiansass.de',
-  'nostr.rblb.it',
-  'nostr.red5d.dev',
-  'nostr.robosats.org',
-  'nostr.stakey.net',
-  'nostrcity-club.fly.dev',
-  'relay-dev.gulugulu.moe',
-  'relay.aarpia.com',
-  'relay.agentry.com',
-  'relay.bitmacro.cloud',
-  'relay.bullishbounty.com',
-  'relay.degmods.com',
-  'relay.flashapp.me',
-  'relay.grigic.org',
-  'relay.hackshed.dev',
-  'relay.kaleidoswap.com',
-  'relay.layer.systems',
-  'relay.nostr.blockhenge.com',
-  'relay.nostr.dev.br',
-  'relay.nostrmap.net',
-  'relay.novospes.com',
-  'relay.piazza.today',
-  'relay.routstr.com',
-  'testr.nymble.world'
-].map(url => 'wss://' + url)
-
-export type * from '@trystero-p2p/core'
+export const defaultRelayUrls: string[] = [
+  'wss://bucket.coracle.social',
+  'wss://fanfares.nostr1.com',
+  'wss://no.str.cr',
+  'wss://nostr-01.yakihonne.com',
+  'wss://nostr-pub.wellorder.net',
+  'wss://nostr.azzamo.net',
+  'wss://nostr.chaima.info',
+  'wss://nostr.data.haus',
+  'wss://nostr.hifish.org',
+  'wss://nostr.liberty.fans',
+  'wss://nostr.overmind.lol',
+  'wss://nostr.sathoarder.com',
+  'wss://nostrelay.circum.space',
+  'wss://relay.angor.io',
+  'wss://relay.ditto.pub',
+  'wss://relay.dwadziesciajeden.pl',
+  'wss://relay.fundstr.me',
+  'wss://relay.guggero.org',
+  'wss://relay.masize.com',
+  'wss://relay.minibolt.info',
+  'wss://relay.mostro.network',
+  'wss://relay.nostr.com',
+  'wss://relay.nostr.net',
+  'wss://relay.nostrhub.fr',
+  'wss://relay.notoshi.win',
+  'wss://relay.primal.net',
+  'wss://relay.snort.social',
+  'wss://relay.wavlake.com',
+  'wss://soloco.nl',
+  'wss://yabu.me'
+]

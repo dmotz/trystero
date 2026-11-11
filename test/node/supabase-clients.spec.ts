@@ -2,17 +2,21 @@ import assert from 'node:assert/strict'
 import {once} from 'node:events'
 import {WebSocketServer} from 'ws'
 import test from './test.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
+import type {Room} from '../../packages/core/src/index.ts'
 import {joinRoom} from '../../packages/supabase/src/index.ts'
 import {waitFor} from './peer-harness.ts'
 
 void test('Supabase shares identical clients and isolates project URLs and keys', async t => {
   const realTimeout = globalThis.setTimeout
   // Supabase keeps idle sockets for a grace period after the last channel leaves.
-  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+  t.mock.method(globalThis, 'setTimeout', ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
     const timer = realTimeout(callback, delay === 50_000 ? 0 : delay, ...args)
     return timer
-  })
+  }) as typeof setTimeout)
   const servers = [0, 1].map(
     () => new WebSocketServer({host: '127.0.0.1', port: 0})
   )
@@ -30,10 +34,13 @@ void test('Supabase shares identical clients and isolates project URLs and keys'
   let subscriptions = 0
   servers.forEach((server, index) =>
     server.on('connection', (socket, request) => {
-      connections[index].push(
+      connections[index]!.push(
         new URL(request.url!, 'http://local').searchParams.get('apikey')!
       )
-      socket.on('message', bytes => {
+      socket.on('message', (bytes, isBinary) => {
+        if (isBinary) {
+          return
+        }
         const [joinRef, ref, topic, event] = JSON.parse(
           new TextDecoder().decode(bytes as Uint8Array)
         )
@@ -64,30 +71,29 @@ void test('Supabase shares identical clients and isolates project URLs and keys'
     assert.ok(address && typeof address !== 'string')
     return {
       appId: `http://127.0.0.1:${address.port}`,
-      passive: true,
       relayConfig: {supabaseKey: 'key-one'}
     }
   })
-  const rooms = []
+  const rooms: Room[] = []
   try {
     rooms.push(
-      joinRoom(configs[0], 'first'),
-      joinRoom(configs[0], 'same-client')
+      joinRoom(configs[0]!, 'first'),
+      joinRoom(configs[0]!, 'same-client')
     )
-    rooms.push(joinRoom(configs[1], 'other-project'))
+    rooms.push(joinRoom(configs[1]!, 'other-project'))
     rooms.push(
       joinRoom(
-        {...configs[0], relayConfig: {supabaseKey: 'key-two'}},
+        {...configs[0]!, relayConfig: {supabaseKey: 'key-two'}},
         'other-key'
       )
     )
     await waitFor(
       () =>
-        connections[0].length >= 2 &&
-        connections[1].length >= 1 &&
-        subscriptions === 4
+        connections[0]!.length >= 2 &&
+        connections[1]!.length >= 1 &&
+        subscriptions === 8
     )
-    assert.deepEqual(connections[0].sort(), ['key-one', 'key-two'])
+    assert.deepEqual(connections[0]!.sort(), ['key-one', 'key-two'])
     assert.deepEqual(connections[1], ['key-one'])
   } finally {
     await Promise.all(rooms.map(room => room.leave()))

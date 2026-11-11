@@ -1,33 +1,50 @@
-export const joinEagerRoom = ([roomId, config, payload]) => {
+import type {StrategyConfig} from '../strategy-configs'
+
+export const joinEagerRoom = ([roomId, config, payload]: [
+  string,
+  StrategyConfig,
+  unknown
+]): Promise<[unknown, string, unknown]> => {
   window[roomId] = window.trystero.joinRoom(config, roomId)
 
   const eagerAction = window[roomId].makeAction('eager')
 
   let didSend = false
-  let sendInterval = null
+  let sendInterval: ReturnType<typeof setInterval> | undefined
 
   return new Promise(res => {
-    eagerAction.onMessage = (payload, ctx) => {
-      clearInterval(sendInterval)
-      res([payload, ctx.peerId, ctx.metadata])
-    }
-    window[roomId].onPeerJoin = peerId => {
-      if (!didSend) {
-        const send = () =>
-          eagerAction.send(payload, {target: peerId}).catch(() => {})
+    eagerAction.onMessage(
+      (received: unknown, ctx: {peerId: string; metadata?: unknown}) => {
+        clearInterval(sendInterval)
+        res([received, ctx.peerId, ctx.metadata])
+      },
+      {once: true}
+    )
+    window[roomId].onPeerJoin(
+      ({peerId}: {peerId: string}) => {
+        if (!didSend) {
+          const send = () =>
+            eagerAction.send(payload, {target: peerId}).catch(() => {})
 
-        send()
-        sendInterval = setInterval(send, 333)
-        window[roomId].__eagerSendInterval = sendInterval
-        didSend = true
-      }
-    }
+          send()
+          sendInterval = setInterval(send, 333)
+          window[roomId].__eagerSendInterval = sendInterval
+          didSend = true
+        }
+      },
+      {replay: true}
+    )
   })
 }
 
-export const getPeerId = roomId => Object.keys(window[roomId].getPeers())[0]
+export const getPeerId = (roomId: string): string | undefined =>
+  Object.keys(window[roomId].getPeers())[0]
 
-export const joinRoomAndWaitForPeer = ([roomId, config, timeoutMs = 10_000]) =>
+export const joinRoomAndWaitForPeer = ([roomId, config, timeoutMs = 10_000]: [
+  string,
+  StrategyConfig,
+  number?
+]): Promise<string> =>
   new Promise((res, rej) => {
     const room = (window[roomId] = window.trystero.joinRoom(config, roomId))
     const existingPeer = Object.keys(room.getPeers())[0]
@@ -37,15 +54,18 @@ export const joinRoomAndWaitForPeer = ([roomId, config, timeoutMs = 10_000]) =>
       return
     }
 
-    const timeout = setTimeout(
-      () => rej(new Error(`timed out joining ${roomId}`)),
-      timeoutMs
-    )
+    const timeout = setTimeout(() => {
+      unsub()
+      rej(new Error(`timed out joining ${roomId}`))
+    }, timeoutMs)
 
-    room.onPeerJoin = peerId => {
-      clearTimeout(timeout)
-      res(peerId)
-    }
+    const unsub = room.onPeerJoin(
+      ({peerId}: {peerId: string}) => {
+        clearTimeout(timeout)
+        res(peerId)
+      },
+      {once: true}
+    )
   })
 
 export const rejoinRoomAndWaitForPeer = async ([
@@ -53,10 +73,10 @@ export const rejoinRoomAndWaitForPeer = async ([
   config,
   timeoutMs = 4_000,
   attempts = 4
-]) => {
-  let lastError = null
+]: [string, StrategyConfig, number?, number?]): Promise<string> => {
+  let lastError: unknown = null
   const join = () =>
-    new Promise((res, rej) => {
+    new Promise<string>((res, rej) => {
       const room = (window[roomId] = window.trystero.joinRoom(config, roomId))
       const existingPeer = Object.keys(room.getPeers())[0]
 
@@ -65,15 +85,18 @@ export const rejoinRoomAndWaitForPeer = async ([
         return
       }
 
-      const timeout = setTimeout(
-        () => rej(new Error(`timed out joining ${roomId}`)),
-        timeoutMs
-      )
+      const timeout = setTimeout(() => {
+        unsub()
+        rej(new Error(`timed out joining ${roomId}`))
+      }, timeoutMs)
 
-      room.onPeerJoin = peerId => {
-        clearTimeout(timeout)
-        res(peerId)
-      }
+      const unsub = room.onPeerJoin(
+        ({peerId}: {peerId: string}) => {
+          clearTimeout(timeout)
+          res(peerId)
+        },
+        {once: true}
+      )
     })
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -89,6 +112,8 @@ export const rejoinRoomAndWaitForPeer = async ([
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
 
-export const leaveRoom = roomId => window[roomId]?.leave()
+export const leaveRoom = (roomId: string): Promise<void> | undefined =>
+  window[roomId]?.leave()
 
-export const ping = ([roomId, id]) => window[roomId].ping(id)
+export const ping = ([roomId, id]: [string, string]): Promise<number> =>
+  window[roomId].ping(id)

@@ -1,13 +1,12 @@
 {
   "name": "@trystero-p2p/core",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Simple, serverless WebRTC",
   "keywords": [
     "bittorrent",
     "chat",
     "decentralized",
     "firebase",
-    "ipfs",
     "matchmaking",
     "mqtt",
     "nostr",
@@ -29,13 +28,25 @@
     "email": "dan@oxism.com",
     "url": "https://oxism.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmotz/trystero.git",
+    "directory": "packages/core"
+  },
   "files": [
     "dist"
   ],
   "type": "module",
+  "sideEffects": false,
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
+    "./types": {
+      "types": "./dist/types.d.mts"
+    },
     "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/supabase",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Simple, serverless WebRTC (via Supabase)",
   "keywords": [
     "chat",
@@ -23,20 +23,26 @@
     "email": "dan@oxism.com",
     "url": "https://oxism.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmotz/trystero.git",
+    "directory": "packages/supabase"
+  },
   "files": [
     "dist"
   ],
   "type": "module",
+  "sideEffects": false,
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.117.2",
+    "@supabase/supabase-js": "^2.119.0",
     "@trystero-p2p/core": "workspace:*"
   },
-  "devDependencies": {
-    "@types/node": "^26.6.4"
+  "engines": {
+    "node": ">=22"
   }
 }

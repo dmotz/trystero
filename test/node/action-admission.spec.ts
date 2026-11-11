@@ -9,15 +9,17 @@ void test('expired inline request approval rejects once and cannot deliver after
   let approve: (allow: boolean) => void
   let handled = 0
   const receiver = pair.right.makeAction('approval', {
-    kind: 'request',
-    onReceive: () =>
+    kind: 'request'
+  })
+  const unsubReceive = receiver.onReceive(
+    () =>
       new Promise(resolve => {
         approve = resolve
-      }),
-    onRequest: () => {
-      handled++
-      return 'ok'
-    }
+      })
+  )
+  receiver.onRequest(() => {
+    handled++
+    return 'ok'
   })
   const sender = pair.left.makeAction('approval', {kind: 'request'})
   const result = assert.rejects(sender.request('hello', {target: 'right'}), {
@@ -31,7 +33,7 @@ void test('expired inline request approval rejects once and cannot deliver after
   await turn()
   assert.equal(handled, 0)
   assert.equal(pair.frames.filter(frame => frame.from === 'right').length, 1)
-  receiver.onReceive = null
+  unsubReceive()
   assert.equal(await sender.request('again', {target: 'right'}), 'ok')
   assert.equal(handled, 1)
 })
@@ -45,14 +47,14 @@ for (const asynchronous of [false, true]) {
       let delivered = 0
       const signals: AbortSignal[] = []
       const action = pair.right.makeAction('message')
-      action.onReceive = ({signal}) => {
+      action.onReceive(({signal}) => {
         calls++
         signals.push(signal)
-        action.onMessage = () => {
+        action.onMessage(() => {
           delivered++
-        }
+        })
         return asynchronous ? Promise.resolve(allow) : allow
-      }
+      })
       await pair.left.makeAction('message').send('hello')
       await turn()
       assert.equal(calls, 1)
@@ -66,15 +68,17 @@ void test('response approval cannot block another request to the same peer', asy
   const pair = linkedActions()
   t.after(pair.close)
   let approve: (allow: boolean) => void
-  pair.right.makeAction('slow', {kind: 'request', onRequest: () => 'slow'})
-  pair.right.makeAction('fast', {kind: 'request', onRequest: () => 'fast'})
+  pair.right.makeAction('slow', {kind: 'request'}).onRequest(() => 'slow')
+  pair.right.makeAction('fast', {kind: 'request'}).onRequest(() => 'fast')
   const slow = pair.left.makeAction('slow', {
-    kind: 'request',
-    onReceive: () =>
+    kind: 'request'
+  })
+  slow.onReceive(
+    () =>
       new Promise(resolve => {
         approve = resolve
       })
-  })
+  )
   const fast = pair.left.makeAction('fast', {kind: 'request'})
   const pending = slow.request('', {target: 'right', timeoutMs: 1000})
   void pending.catch(() => {})
@@ -83,7 +87,7 @@ void test('response approval cannot block another request to the same peer', asy
     await fast.request('', {target: 'right', timeoutMs: 100}),
     'fast'
   )
-  approve(true)
+  approve!(true)
   assert.equal(await pending, 'slow')
 })
 
@@ -92,16 +96,17 @@ void test('concurrent requests on the same action have independent response admi
   t.after(pair.close)
   let approve: (allow: boolean) => void
   let decisions = 0
-  pair.right.makeAction('echo', {kind: 'request', onRequest: data => data})
+  pair.right.makeAction('echo', {kind: 'request'}).onRequest(data => data)
   const action = pair.left.makeAction('echo', {
-    kind: 'request',
-    onReceive: () =>
-      ++decisions === 1
-        ? new Promise(resolve => {
-            approve = resolve
-          })
-        : true
+    kind: 'request'
   })
+  action.onReceive(() =>
+    ++decisions === 1
+      ? new Promise(resolve => {
+          approve = resolve
+        })
+      : true
+  )
   const first = action.request('first', {target: 'right', timeoutMs: 1000})
   void first.catch(() => {})
   await waitFor(() => Boolean(approve))
@@ -109,7 +114,7 @@ void test('concurrent requests on the same action have independent response admi
     await action.request('second', {target: 'right', timeoutMs: 100}),
     'second'
   )
-  approve(true)
+  approve!(true)
   assert.equal(await first, 'first')
 })
 
@@ -120,18 +125,19 @@ for (const cancel of ['timeout', 'abort'] as const) {
     let approve: (allow: boolean) => void
     let admissionSignal: AbortSignal
     const controller = new AbortController()
-    pair.right.makeAction('file', {
-      kind: 'request',
-      onRequest: () => new Uint8Array(256_000)
-    })
+    pair.right
+      .makeAction('file', {
+        kind: 'request'
+      })
+      .onRequest(() => new Uint8Array(256_000))
     const file = pair.left.makeAction('file', {
-      kind: 'request',
-      onReceive: ({signal}) => {
-        admissionSignal = signal
-        return new Promise(resolve => {
-          approve = resolve
-        })
-      }
+      kind: 'request'
+    })
+    file.onReceive(({signal}) => {
+      admissionSignal = signal
+      return new Promise(resolve => {
+        approve = resolve
+      })
     })
     const pending = file
       .request('', {
@@ -145,8 +151,8 @@ for (const cancel of ['timeout', 'abort'] as const) {
       controller.abort()
     }
     assert.equal(await pending, cancel === 'abort' ? 'aborted' : 'timeout')
-    assert.equal(admissionSignal.aborted, true)
-    approve(true)
+    assert.equal(admissionSignal!.aborted, true)
+    approve!(true)
     await turn()
     assert.equal(pair.frames.filter(frame => frame.kind === 2).length, 0)
     assert.ok(
@@ -159,7 +165,7 @@ for (const hasPolicy of [false, true]) {
   void test(`cancelling a streaming response releases its slot (policy: ${hasPolicy})`, async t => {
     const pair = linkedActions()
     t.after(pair.close)
-    let unblock: () => void
+    let unblock = () => {}
     const blocked = new Promise<void>(resolve => {
       unblock = resolve
     })
@@ -181,24 +187,26 @@ for (const hasPolicy of [false, true]) {
     }
     let admissionSignal: AbortSignal
     const controller = new AbortController()
-    pair.right.makeAction('file', {
-      kind: 'request',
-      onRequest: value =>
+    pair.right
+      .makeAction('file', {
+        kind: 'request'
+      })
+      .onRequest(value =>
         value === 'slow'
           ? new SlowBlob([new Uint8Array(100_000)])
           : new Uint8Array(32_000)
-    })
+      )
     const file = pair.left.makeAction('file', {
-      kind: 'request',
-      onReceive: hasPolicy
-        ? ({byteLength, signal}) => {
-            if (byteLength === 100_000) {
-              admissionSignal = signal
-            }
-            return true
-          }
-        : undefined
+      kind: 'request'
     })
+    if (hasPolicy) {
+      file.onReceive(({byteLength, signal}) => {
+        if (byteLength === 100_000) {
+          admissionSignal = signal
+        }
+        return true
+      })
+    }
     const pending = file
       .request('slow', {target: 'right', signal: controller.signal})
       .catch(error => error.kind)
@@ -207,7 +215,7 @@ for (const hasPolicy of [false, true]) {
     controller.abort()
     assert.equal(await pending, 'aborted')
     if (hasPolicy) {
-      assert.equal(admissionSignal.aborted, true)
+      assert.equal(admissionSignal!.aborted, true)
     }
     const result = await file.request('next', {target: 'right', timeoutMs: 100})
     assert.ok(result instanceof Uint8Array)
@@ -224,11 +232,10 @@ for (const saturation of ['policies', 'transfers'] as const) {
     const pair = linkedActions()
     t.after(pair.close)
     const approvals: ((allow: boolean) => void)[] = []
+    const inbox = pair.left.makeAction('inbox')
     if (saturation === 'policies') {
-      pair.left.makeAction('inbox', {
-        onMessage: () => {},
-        onReceive: () => new Promise(resolve => approvals.push(resolve))
-      })
+      inbox.onMessage(() => {})
+      inbox.onReceive(() => new Promise(resolve => approvals.push(resolve)))
     }
     const sends = Array.from({length: saturation === 'policies' ? 8 : 64}, () =>
       pair.right
@@ -241,19 +248,20 @@ for (const saturation of ['policies', 'transfers'] as const) {
       approvals.forEach(approve => approve(false))
       await Promise.all(sends)
     })
-    pair.right.makeAction('echo', {kind: 'request', onRequest: value => value})
+    pair.right.makeAction('echo', {kind: 'request'}).onRequest(value => value)
     const echo = pair.left.makeAction('echo', {kind: 'request'})
     assert.equal(
       await echo.request('hello', {target: 'right', timeoutMs: 100}),
       'hello'
     )
-    echo.onReceive = () =>
+    const unsubEchoReceive = echo.onReceive(() =>
       assert.fail('policy called after its quota was exhausted')
+    )
     await assert.rejects(
       echo.request('limited', {target: 'right', timeoutMs: 100}),
       {kind: 'rejected'}
     )
-    echo.onReceive = null
+    unsubEchoReceive()
     assert.equal(
       await echo.request('again', {target: 'right', timeoutMs: 100}),
       'again'
@@ -268,10 +276,11 @@ for (const size of [2048, 20_000]) {
     async t => {
       const pair = linkedActions(1024)
       t.after(pair.close)
-      pair.left.makeAction('file', {
-        kind: 'request',
-        onRequest: size => new Uint8Array(Number(size))
-      })
+      pair.left
+        .makeAction('file', {
+          kind: 'request'
+        })
+        .onRequest(reqSize => new Uint8Array(Number(reqSize)))
       const file = pair.right.makeAction('file', {kind: 'request'})
       await assert.rejects(file.request(size, {target: 'left'}), {
         kind: 'rejected'
@@ -287,7 +296,7 @@ for (const size of [2048, 20_000]) {
 void test('default inline request responses create no admission timers', async t => {
   const pair = linkedActions()
   t.after(pair.close)
-  pair.right.makeAction('echo', {kind: 'request', onRequest: value => value})
+  pair.right.makeAction('echo', {kind: 'request'}).onRequest(value => value)
   const echo = pair.left.makeAction('echo', {kind: 'request'})
   const timer = t.mock.method(globalThis, 'setTimeout')
   for (let i = 0; i < 100; i++) {
@@ -306,13 +315,14 @@ for (const size of [2048, 20_000]) {
       const pair = linkedActions(1024)
       t.after(pair.close)
       let handled = 0
-      pair.right.makeAction('upload', {
-        kind: 'request',
-        onRequest: () => {
+      pair.right
+        .makeAction('upload', {
+          kind: 'request'
+        })
+        .onRequest(() => {
           handled++
           return 'ok'
-        }
-      })
+        })
       const upload = pair.left.makeAction('upload', {kind: 'request'})
       await assert.rejects(
         upload.request(new Uint8Array(size), {target: 'right'}),
@@ -336,11 +346,10 @@ for (const saturation of ['policies', 'transfers']) {
       const pair = linkedActions()
       t.after(pair.close)
       const approvals: ((allow: boolean) => void)[] = []
+      const files = pair.right.makeAction('files')
       if (saturation === 'policies') {
-        pair.right.makeAction('files', {
-          onMessage: () => {},
-          onReceive: () => new Promise(resolve => approvals.push(resolve))
-        })
+        files.onMessage(() => {})
+        files.onReceive(() => new Promise(resolve => approvals.push(resolve)))
       }
       const sending = Array.from(
         {length: saturation === 'policies' ? 8 : 64},
@@ -355,11 +364,13 @@ for (const saturation of ['policies', 'transfers']) {
         approvals.forEach(resolve => resolve(false))
         await Promise.all(sending)
       })
-      pair.right.makeAction('limited', {
-        kind: 'request',
-        onRequest: () => assert.fail('refused request delivered'),
-        onReceive: () => assert.fail('full quota allowed a policy call')
+      const limitedRight = pair.right.makeAction('limited', {
+        kind: 'request'
       })
+      limitedRight.onRequest(() => assert.fail('refused request delivered'))
+      limitedRight.onReceive(() =>
+        assert.fail('full quota allowed a policy call')
+      )
       const limited = pair.left.makeAction('limited', {kind: 'request'})
       await assert.rejects(limited.request('hello', {target: 'right'}), {
         kind: 'rejected'
@@ -371,17 +382,19 @@ for (const saturation of ['policies', 'transfers']) {
 void test('remote request errors bypass the requester response policy', async t => {
   const pair = linkedActions()
   t.after(pair.close)
-  pair.right.makeAction('fail', {
-    kind: 'request',
-    onRequest: () => {
+  pair.right
+    .makeAction('fail', {
+      kind: 'request'
+    })
+    .onRequest(() => {
       throw new Error('handler failure')
-    }
-  })
+    })
   const action = pair.left.makeAction('fail', {
-    kind: 'request',
-    onReceive: () =>
-      assert.fail('response policy should not run on remote error')
+    kind: 'request'
   })
+  action.onReceive(() =>
+    assert.fail('response policy should not run on remote error')
+  )
   await assert.rejects(action.request('hello', {target: 'right'}), {
     kind: 'rejected',
     message: /handler failure/
@@ -391,14 +404,15 @@ void test('remote request errors bypass the requester response policy', async t 
 void test('rejected bulk responses do not emit a second error response frame', async t => {
   const pair = linkedActions()
   t.after(pair.close)
-  pair.right.makeAction('bulk', {
-    kind: 'request',
-    onRequest: () => new Uint8Array(100_000)
-  })
+  pair.right
+    .makeAction('bulk', {
+      kind: 'request'
+    })
+    .onRequest(() => new Uint8Array(100_000))
   const action = pair.left.makeAction('bulk', {
-    kind: 'request',
-    onReceive: () => false
+    kind: 'request'
   })
+  action.onReceive(() => false)
   await assert.rejects(action.request('hello', {target: 'right'}), {
     kind: 'rejected'
   })
@@ -415,18 +429,19 @@ void test('request actions report receive progress for bulk responses', async t 
   const pair = linkedActions()
   t.after(pair.close)
   const payload = new Uint8Array(100_000).fill(7)
-  pair.right.makeAction('download', {
-    kind: 'request',
-    onRequest: () => payload
-  })
+  pair.right
+    .makeAction('download', {
+      kind: 'request'
+    })
+    .onRequest(() => payload)
   const progresses: number[] = []
   const contexts: Array<{peerId: string; metadata?: unknown}> = []
   const download = pair.left.makeAction('download', {
-    kind: 'request',
-    onReceiveProgress: (progress, context) => {
-      progresses.push(progress)
-      contexts.push({peerId: context.peerId, metadata: context.metadata})
-    }
+    kind: 'request'
+  })
+  download.onReceiveProgress((progress, context) => {
+    progresses.push(progress)
+    contexts.push({peerId: context.peerId, metadata: context.metadata})
   })
   const result = await download.request('start', {
     target: 'right',
@@ -438,10 +453,11 @@ void test('request actions report receive progress for bulk responses', async t 
   assert.ok(contexts.every(context => context.peerId === 'right'))
 })
 
-void test('attaching onReceive before onMessage runs admission for already queued messages and bulk offers', async t => {
+void test('attaching onReceive before onMessage runs admission for already queued messages and bulk offers on registered actions', async t => {
   const pair = linkedActions()
   t.after(pair.close)
 
+  const receiver = pair.right.makeAction('deferred')
   const sender = pair.left.makeAction('deferred')
   await sender.send('blocked-inline')
   await sender.send('allowed-inline-message')
@@ -449,17 +465,16 @@ void test('attaching onReceive before onMessage runs admission for already queue
 
   await turn()
 
-  const receiver = pair.right.makeAction('deferred')
   const seenByteLengths: number[] = []
   const delivered: unknown[] = []
 
-  receiver.onReceive = ({byteLength}) => {
+  receiver.onReceive(({byteLength}) => {
     seenByteLengths.push(byteLength)
     return byteLength !== new TextEncoder().encode('blocked-inline').byteLength
-  }
-  receiver.onMessage = payload => {
+  })
+  receiver.onMessage(payload => {
     delivered.push(payload)
-  }
+  })
 
   await bulkSend
   await turn()

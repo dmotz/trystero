@@ -1,46 +1,83 @@
 import {
+  clearUserIdentity,
   createRelayManager,
+  createRelayScopedStore,
   createStrategy,
-  entries,
+  createUserIdentity,
+  exportUserIdentity,
   fromJson,
-  genId,
   getRelays,
-  keys,
+  hashTopic,
+  importUserIdentity,
   libName,
   makeSocket,
-  pauseRelayReconnection,
-  resumeRelayReconnection,
-  selfId,
-  sha1,
+  mkErr,
+  roles,
+  scale,
+  setRelayConnectivity,
   toJson,
+  unrefTimer,
   type JoinRoom,
   type JoinRoomConfig,
   type OfferRecord,
-  type SocketClient
+  type SocketClient,
+  type Timeout
 } from '@trystero-p2p/core'
 
-const relayManager = createRelayManager<SocketClient>(client => client.socket)
-const topicToInfoHash: Record<string, string> = {}
-const infoHashToTopic: Record<string, string> = {}
-type TopicState = {
-  announce: () => void | Promise<void>
-  announceMs: number
-  handler: (data: TrackerMessage) => void
-  isActive: boolean
-  startPassiveAnnouncements: () => void
-  stopPassiveAnnouncements: () => void
-  token: symbol
+const unreachable = (x: never): never => {
+  throw mkErr(`unreachable: ${String(x)}`)
 }
 
-const handledSignals: Record<string, number> = {}
-const topicStates = relayManager.scoped<TopicState>()
-const roomOutstandingOffers: Record<
-  string,
-  Record<string, OfferRecord & {createdAt: number}>
-> = {}
-const roomOfferGenerationPromises: Record<string, Promise<void> | undefined> =
-  {}
-const roomSubscriberCounts: Record<string, number> = {}
+type StoredOffer = OfferRecord & {readonly createdAt: number}
+
+type OfferPoolState =
+  | {
+      readonly phase: 'idle'
+      readonly offers: Map<string, StoredOffer>
+    }
+  | {
+      readonly phase: 'generating'
+      readonly offers: Map<string, StoredOffer>
+      readonly promise: Promise<void>
+      readonly generation: number
+    }
+  | {
+      readonly phase: 'closed'
+    }
+
+type PeerOfferSession = {
+  subscriberCount: number
+  nextGeneration: number
+  pool: OfferPoolState
+}
+
+type TorrentTopicSession = {
+  readonly rootTopic: string
+  closed: boolean
+  infoHash: string | null
+  infoHashP: Promise<string | null> | null
+  readonly peers: Map<string, PeerOfferSession>
+}
+
+type RelayTopicState = {
+  readonly announce: () => Promise<void>
+  announceMs: number
+  readonly handler: (data: TrackerMessage) => void
+  readonly peerId: string
+  passiveTimer: Timeout | null
+  readonly token: symbol
+}
+
+const relayManager = /*@__PURE__*/ createRelayManager<SocketClient>(
+  client => client.socket,
+  client => client.close?.()
+)
+const topicSessions = /*@__PURE__*/ new Map<string, TorrentTopicSession>()
+const infoHashToTopic = /*@__PURE__*/ new Map<string, string>()
+const handledSignals = /*@__PURE__*/ new Map<string, number>()
+const topicStates =
+  /*@__PURE__*/ createRelayScopedStore<Map<string, RelayTopicState>>()
+
 const trackerAction = 'announce'
 const hashLimit = 20
 const offersPerAnnounce = 1
@@ -64,391 +101,531 @@ type TrackerMessage = {
   }
   offer_id?: string
   peer_id?: string
+  to_peer_id?: string
   info_hash?: string
   interval?: number
   ['failure reason']?: string
   ['warning message']?: string
 }
 
-const getInfoHash = async (topic: string): Promise<string> => {
-  if (topicToInfoHash[topic]) {
-    return topicToInfoHash[topic]
+const resolveSessionInfoHash = (
+  topicSession: TorrentTopicSession
+): Promise<string | null> => {
+  if (topicSession.closed) {
+    return Promise.resolve(null)
   }
-
-  const hash = (await sha1(topic)).slice(0, hashLimit)
-  topicToInfoHash[topic] = hash
-  infoHashToTopic[hash] = topic
-
-  return hash
+  if (topicSession.infoHash !== null) {
+    return Promise.resolve(topicSession.infoHash)
+  }
+  return (topicSession.infoHashP ??= hashTopic(topicSession.rootTopic).then(
+    fullHash => {
+      if (topicSession.closed) {
+        return null
+      }
+      const hash = fullHash.slice(0, hashLimit)
+      topicSession.infoHash = hash
+      infoHashToTopic.set(hash, topicSession.rootTopic)
+      return hash
+    },
+    err => {
+      topicSession.infoHashP = null
+      throw err
+    }
+  ))
 }
 
-const send = async (
+const acquirePeerSession = (
+  rootTopic: string,
+  peerId: string
+): {topicSession: TorrentTopicSession; peerSession: PeerOfferSession} => {
+  let topicSession = topicSessions.get(rootTopic)
+  if (!topicSession || topicSession.closed) {
+    topicSession = {
+      rootTopic,
+      closed: false,
+      infoHash: null,
+      infoHashP: null,
+      peers: new Map()
+    }
+    topicSessions.set(rootTopic, topicSession)
+    void resolveSessionInfoHash(topicSession).catch(() => {})
+  }
+
+  let peerSession = topicSession.peers.get(peerId)
+  if (!peerSession) {
+    peerSession = {
+      subscriberCount: 0,
+      nextGeneration: 0,
+      pool: {phase: 'idle', offers: new Map()}
+    }
+    topicSession.peers.set(peerId, peerSession)
+  }
+  peerSession.subscriberCount += 1
+
+  return {topicSession, peerSession}
+}
+
+const disposeOfferPool = (peerSession: PeerOfferSession): void => {
+  switch (peerSession.pool.phase) {
+    case 'idle':
+    case 'generating': {
+      const existingOffers = [...peerSession.pool.offers.values()]
+      peerSession.pool.offers.clear()
+      peerSession.pool = {phase: 'closed'}
+      existingOffers.forEach(offer => {
+        offer.reclaim?.()
+      })
+      return
+    }
+    case 'closed':
+      return
+    default:
+      unreachable(peerSession.pool)
+  }
+}
+
+const releasePeerSession = (
+  topicSession: TorrentTopicSession,
+  peerId: string,
+  peerSession: PeerOfferSession
+): void => {
+  peerSession.subscriberCount = Math.max(0, peerSession.subscriberCount - 1)
+  if (peerSession.subscriberCount === 0) {
+    disposeOfferPool(peerSession)
+    if (topicSession.peers.get(peerId) === peerSession) {
+      topicSession.peers.delete(peerId)
+    }
+  }
+
+  if (topicSession.peers.size === 0 && !topicSession.closed) {
+    topicSession.closed = true
+    if (topicSession.infoHash !== null) {
+      infoHashToTopic.delete(topicSession.infoHash)
+    }
+    if (topicSessions.get(topicSession.rootTopic) === topicSession) {
+      topicSessions.delete(topicSession.rootTopic)
+    }
+  }
+}
+
+const send = (
   client: SocketClient,
-  topic: string,
+  topicSession: TorrentTopicSession,
+  peerId: string,
   payload: Record<string, unknown>
-): Promise<void> =>
-  client.send(
-    toJson({
-      action: trackerAction,
-      info_hash: await getInfoHash(topic),
-      peer_id: selfId,
-      ...payload
-    })
-  )
+): Promise<void> => {
+  const transmit = (infoHash: string | null): void => {
+    if (infoHash === null || client.isClosed) {
+      return
+    }
+    client.send(
+      toJson({
+        action: trackerAction,
+        info_hash: infoHash,
+        peer_id: peerId,
+        ...payload
+      })
+    )
+  }
+  if (topicSession.infoHash !== null && !topicSession.closed) {
+    transmit(topicSession.infoHash)
+    return Promise.resolve()
+  }
+  return resolveSessionInfoHash(topicSession).then(transmit)
+}
 
 const warn = (url: string, msg: string, didFail = false): void =>
   console.warn(
     `${libName}: torrent tracker ${didFail ? 'failure' : 'warning'} from ${url} - ${msg}`
   )
 
-const getRoomOutstandingOffers = (
-  rootTopic: string
-): Record<string, OfferRecord & {createdAt: number}> =>
-  (roomOutstandingOffers[rootTopic] ??= {})
-
-const deleteRoomOfferBookkeeping = (rootTopic: string): void => {
-  delete roomOutstandingOffers[rootTopic]
-  delete roomOfferGenerationPromises[rootTopic]
-}
-
 const takeOutstandingOffer = (
-  rootTopic: string,
+  peerSession: PeerOfferSession,
   offerId: string,
   action: 'claim' | 'reclaim'
-): OfferRecord | undefined => {
-  const outstandingOffers = roomOutstandingOffers[rootTopic]
-  const offer = outstandingOffers?.[offerId]
+): StoredOffer | undefined => {
+  if (peerSession.pool.phase === 'closed') {
+    return undefined
+  }
 
+  const offer = peerSession.pool.offers.get(offerId)
   if (!offer) {
-    return
+    return undefined
   }
 
-  delete outstandingOffers[offerId]
+  peerSession.pool.offers.delete(offerId)
   offer[action]?.()
-
-  if (!keys(outstandingOffers).length && !roomSubscriberCounts[rootTopic]) {
-    deleteRoomOfferBookkeeping(rootTopic)
-  }
-
   return offer
 }
 
-const reclaimAllOutstandingOffers = (rootTopic: string): void => {
-  keys(getRoomOutstandingOffers(rootTopic)).forEach(offerId =>
-    takeOutstandingOffer(rootTopic, offerId, 'reclaim')
-  )
-  deleteRoomOfferBookkeeping(rootTopic)
-}
+const pruneOutstandingOffers = (peerSession: PeerOfferSession): void => {
+  if (peerSession.pool.phase === 'closed') {
+    return
+  }
 
-const pruneOutstandingOffers = (rootTopic: string): void => {
   const now = Date.now()
-
-  entries(getRoomOutstandingOffers(rootTopic)).forEach(([offerId, offer]) => {
+  for (const [offerId, offer] of peerSession.pool.offers) {
     if (now - offer.createdAt > offerRetentionMs) {
-      takeOutstandingOffer(rootTopic, offerId, 'reclaim')
+      takeOutstandingOffer(peerSession, offerId, 'reclaim')
     }
-  })
+  }
 }
 
 const ensureOutstandingOffers = async (
-  rootTopic: string,
+  peerSession: PeerOfferSession,
   getOffers: (n: number) => Promise<OfferRecord[]>
-): Promise<Record<string, OfferRecord & {createdAt: number}>> => {
-  while (roomOfferGenerationPromises[rootTopic]) {
-    await roomOfferGenerationPromises[rootTopic]
+): Promise<Map<string, StoredOffer> | null> => {
+  while (peerSession.pool.phase === 'generating') {
+    await peerSession.pool.promise
   }
 
-  const nextPromise = (async () => {
-    pruneOutstandingOffers(rootTopic)
+  if (peerSession.pool.phase === 'closed') {
+    return null
+  }
 
-    const outstandingOffers = getRoomOutstandingOffers(rootTopic)
-    const outstandingCount = keys(outstandingOffers).length
-    const missingOffers = Math.max(0, offersPerAnnounce - outstandingCount)
+  pruneOutstandingOffers(peerSession)
 
-    if (missingOffers > 0) {
-      ;(await getOffers(missingOffers)).forEach(peerAndOffer => {
-        outstandingOffers[genId(hashLimit)] = {
-          ...peerAndOffer,
-          createdAt: Date.now()
-        }
+  if (peerSession.pool.phase !== 'idle') {
+    return null
+  }
+
+  const {offers} = peerSession.pool
+  const missingOffers = Math.max(0, offersPerAnnounce - offers.size)
+
+  if (missingOffers === 0) {
+    return offers
+  }
+
+  const generation = ++peerSession.nextGeneration
+  const {promise, resolve} = Promise.withResolvers<void>()
+  peerSession.pool = {
+    phase: 'generating',
+    offers,
+    promise,
+    generation
+  }
+
+  try {
+    const allocated = await getOffers(missingOffers)
+
+    if (
+      peerSession.pool.phase !== 'generating' ||
+      peerSession.pool.generation !== generation
+    ) {
+      allocated.forEach(offer => {
+        offer.reclaim?.()
       })
+      return null
     }
-  })().finally(() => {
-    if (roomOfferGenerationPromises[rootTopic] === nextPromise) {
-      delete roomOfferGenerationPromises[rootTopic]
+
+    const createdAt = Date.now()
+    allocated.forEach(peerAndOffer => {
+      offers.set(peerAndOffer.offerId, {
+        ...peerAndOffer,
+        createdAt
+      })
+    })
+    peerSession.pool = {phase: 'idle', offers}
+    return offers
+  } catch (err) {
+    if (
+      peerSession.pool.phase === 'generating' &&
+      peerSession.pool.generation === generation
+    ) {
+      peerSession.pool = {phase: 'idle', offers}
     }
-  })
-
-  roomOfferGenerationPromises[rootTopic] = nextPromise
-  await nextPromise
-
-  return getRoomOutstandingOffers(rootTopic)
+    throw err
+  } finally {
+    resolve()
+  }
 }
 
-const joinRoomStrategy: JoinRoom<TorrentRoomConfig> = createStrategy({
-  init: config =>
-    getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
-      const client = relayManager.register(rawUrl, () =>
-        makeSocket(
-          rawUrl,
-          rawData => {
-            const data = fromJson<TrackerMessage>(rawData)
-            const errMsg = data['failure reason']
-            const warnMsg = data['warning message']
-            const {interval} = data
-            const topic = data.info_hash
-              ? infoHashToTopic[data.info_hash]
-              : undefined
-
-            if (errMsg) {
-              if (config.relayConfig?.warnOnRelayFailure !== false) {
-                warn(client.url, errMsg, true)
-              }
-
-              return
-            }
-
-            if (warnMsg && config.relayConfig?.warnOnRelayFailure !== false) {
-              warn(client.url, warnMsg)
-            }
-
-            const state = topic ? topicStates.forKey(rawUrl)[topic] : undefined
-
-            if (interval && state) {
-              state.announceMs = Math.min(
-                Math.max(interval * 1000, defaultAnnounceMs),
-                offerRetentionMs
-              )
-            }
-
-            if ((data.offer || data.answer) && topic && data.offer_id) {
-              if (data.peer_id === selfId) {
-                return
-              }
-
-              const signalType = data.offer ? 'offer' : 'answer'
-              const signalKey = `${topic}:${signalType}:${data.offer_id}:${data.peer_id ?? ''}`
-              const nowMs = Date.now()
-              const lastHandledMs = handledSignals[signalKey]
-
+export const joinRoom: JoinRoom<TorrentRoomConfig> =
+  /*@__PURE__*/ createStrategy<SocketClient, TorrentRoomConfig>({
+    defaultConfig: {trickleIce: false},
+    init: config =>
+      getRelays(config, defaultRelayUrls, defaultRedundancy).map(rawUrl => {
+        const client = relayManager.register(rawUrl, () => {
+          const created = makeSocket(
+            rawUrl,
+            rawData => {
+              const parsed = fromJson<unknown>(rawData)
               if (
-                typeof lastHandledMs === 'number' &&
-                nowMs - lastHandledMs < signalDedupeWindowMs
+                !parsed ||
+                typeof parsed !== 'object' ||
+                Array.isArray(parsed)
               ) {
                 return
               }
+              const data = parsed as TrackerMessage
+              const errMsg = data['failure reason']
+              const warnMsg = data['warning message']
+              const {interval} = data
+              const topic =
+                typeof data.info_hash === 'string'
+                  ? infoHashToTopic.get(data.info_hash)
+                  : undefined
 
-              handledSignals[signalKey] = nowMs
-
-              entries(handledSignals).forEach(([key, handledAtMs]) => {
-                if (nowMs - handledAtMs > signalDedupeWindowMs * 6) {
-                  delete handledSignals[key]
+              if (errMsg) {
+                if (config.relayConfig?.warnOnRelayFailure !== false) {
+                  warn(created.url, errMsg, true)
                 }
-              })
+                return
+              }
 
-              state?.handler(data)
-            }
-          },
-          () =>
-            Object.values(topicStates.forKey(rawUrl)).forEach(
-              state => void state.announce()
-            )
-        )
-      )
+              if (warnMsg && config.relayConfig?.warnOnRelayFailure !== false) {
+                warn(created.url, warnMsg)
+              }
 
-      return client.ready
-    }),
+              const peerMap = topic
+                ? topicStates.forRelay(created)[topic]
+                : undefined
 
-  subscribe: (client, rootTopic, _, onMessage, getOffers, context) => {
-    const states = topicStates.forRelay(client)
-    const subscriptionToken = Symbol(rootTopic)
+              if (!peerMap || !topic) {
+                return
+              }
 
-    roomSubscriberCounts[rootTopic] = (roomSubscriberCounts[rootTopic] ?? 0) + 1
+              if (interval) {
+                const clampedMs = Math.min(
+                  Math.max(interval * 1000, defaultAnnounceMs),
+                  offerRetentionMs
+                )
+                peerMap.forEach(state => {
+                  state.announceMs = clampedMs
+                })
+              }
 
-    let passiveAnnounceTimeout: ReturnType<typeof setTimeout> | undefined
-    const stopPassiveAnnouncements = (): void => {
-      clearTimeout(passiveAnnounceTimeout)
-      passiveAnnounceTimeout = undefined
-    }
-    const topicState: TopicState = {
-      announce: async () => {
-        if (states[rootTopic]?.token !== subscriptionToken) {
-          return
-        }
+              if ((data.offer || data.answer) && data.offer_id) {
+                const signalType = data.offer ? 'offer' : 'answer'
+                const nowMs = Date.now()
 
-        if (!topicState.isActive) {
-          void send(client, rootTopic, {
-            left: 0,
-            numwant: requestedPeers,
-            offers: []
-          })
-          return
-        }
+                for (const [key, handledAtMs] of handledSignals) {
+                  if (nowMs - handledAtMs > signalDedupeWindowMs * 6) {
+                    handledSignals.delete(key)
+                  }
+                }
 
-        let outstandingOffers: Record<string, OfferRecord & {createdAt: number}>
+                for (const state of peerMap.values()) {
+                  if (state.peerId && data.peer_id === state.peerId) {
+                    continue
+                  }
+                  if (
+                    data.to_peer_id &&
+                    state.peerId &&
+                    data.to_peer_id !== state.peerId
+                  ) {
+                    continue
+                  }
 
-        try {
-          outstandingOffers = await ensureOutstandingOffers(
-            rootTopic,
-            getOffers
+                  const signalKey = `${topic}:${state.peerId}:${signalType}:${data.offer_id}:${data.peer_id ?? ''}`
+                  const lastHandledMs = handledSignals.get(signalKey)
+
+                  if (
+                    typeof lastHandledMs === 'number' &&
+                    nowMs - lastHandledMs < signalDedupeWindowMs
+                  ) {
+                    continue
+                  }
+
+                  handledSignals.set(signalKey, nowMs)
+                  state.handler(data)
+                }
+              }
+            },
+            () =>
+              Object.values(topicStates.forRelay(created)).forEach(peerMap =>
+                peerMap.forEach(state => void state.announce())
+              )
           )
-        } catch (error) {
-          if (states[rootTopic]?.token !== subscriptionToken) {
+          return created
+        })
+
+        return relayManager.lease(client, client.ready)
+      }),
+
+    subscribe: (client, rootTopic, _, onMessage, getOffers, context) => {
+      const relayTopics = topicStates.forRelay(client)
+      const subscriptionToken = Symbol(rootTopic)
+      const isPassive = Boolean(context?.config.passive)
+      const peerId = context?.peerId ?? ''
+      const {topicSession, peerSession} = acquirePeerSession(rootTopic, peerId)
+      const peerMap = (relayTopics[rootTopic] ??= new Map())
+
+      const prevState = peerMap.get(peerId)
+      if (prevState && prevState.passiveTimer !== null) {
+        clearTimeout(prevState.passiveTimer)
+        prevState.passiveTimer = null
+      }
+
+      const topicState: RelayTopicState = {
+        announce: async () => {
+          if (peerMap.get(peerId)?.token !== subscriptionToken) {
             return
           }
 
-          throw error
-        }
+          if (isPassive) {
+            await send(client, topicSession, peerId, {
+              left: 0,
+              numwant: requestedPeers,
+              offers: []
+            })
+            return
+          }
 
-        if (
-          states[rootTopic]?.token !== subscriptionToken ||
-          !topicState.isActive
-        ) {
-          return
-        }
+          let outstandingOffers: Map<string, StoredOffer> | null
+          try {
+            outstandingOffers = await ensureOutstandingOffers(
+              peerSession,
+              getOffers
+            )
+          } catch (error) {
+            if (peerMap.get(peerId)?.token !== subscriptionToken) {
+              return
+            }
+            throw error
+          }
 
-        const offers = entries(outstandingOffers).map(([id, {offer}]) => ({
-          offer_id: id,
-          offer: {type: 'offer', sdp: offer}
-        }))
+          if (
+            !outstandingOffers ||
+            peerMap.get(peerId)?.token !== subscriptionToken
+          ) {
+            return
+          }
 
-        void send(client, rootTopic, {
-          numwant: requestedPeers,
-          offers
-        })
-      },
-      announceMs: defaultAnnounceMs,
-      handler: (data: TrackerMessage): void => {
-        if (data.offer && data.peer_id && data.offer_id) {
-          void onMessage(
-            rootTopic,
-            {
-              offer: data.offer.sdp,
-              offerId: data.offer_id,
-              peerId: data.peer_id
-            },
-            (_, signal) =>
-              void send(client, rootTopic, {
-                answer: {
-                  type: 'answer',
-                  sdp: fromJson<{answer: string}>(signal).answer
-                },
-                offer_id: data.offer_id,
-                to_peer_id: data.peer_id
-              })
+          const offers = [...outstandingOffers.entries()].map(
+            ([id, {offer}]) => ({
+              offer_id: id,
+              offer: {type: 'offer', sdp: offer}
+            })
           )
-        } else if (data.answer && data.offer_id && data.peer_id) {
-          const offer = takeOutstandingOffer(rootTopic, data.offer_id, 'claim')
 
-          if (offer) {
+          await send(client, topicSession, peerId, {
+            numwant: requestedPeers,
+            offers
+          })
+        },
+        announceMs: defaultAnnounceMs,
+        handler: (data: TrackerMessage): void => {
+          if (data.offer && data.peer_id && data.offer_id) {
             void onMessage(
               rootTopic,
               {
-                answer: data.answer.sdp,
+                offer: data.offer.sdp,
                 offerId: data.offer_id,
-                peerId: data.peer_id,
-                peer: offer.peer
+                peerId: data.peer_id
               },
-              () => {}
+              (_, signal) =>
+                void send(client, topicSession, peerId, {
+                  answer: {
+                    type: 'answer',
+                    sdp: fromJson<{answer: string}>(signal).answer
+                  },
+                  offer_id: data.offer_id,
+                  to_peer_id: data.peer_id
+                })
             )
-            void topicState.announce()
-          }
-        }
-      },
-      isActive: !context?.isPassive,
-      startPassiveAnnouncements: (): void => {
-        stopPassiveAnnouncements()
+          } else if (data.answer && data.offer_id && data.peer_id) {
+            const offer = takeOutstandingOffer(
+              peerSession,
+              data.offer_id,
+              'claim'
+            )
 
-        if (
-          states[rootTopic]?.token !== subscriptionToken ||
-          topicState.isActive
-        ) {
+            if (offer) {
+              void onMessage(
+                rootTopic,
+                {
+                  answer: data.answer.sdp,
+                  offerId: data.offer_id,
+                  peerId: data.peer_id,
+                  peer: offer.peer
+                },
+                () => {}
+              )
+              void topicState.announce()
+            }
+          }
+        },
+        peerId,
+        passiveTimer: null,
+        token: subscriptionToken
+      }
+
+      peerMap.set(peerId, topicState)
+
+      if (isPassive) {
+        const schedulePassiveAnnounce = (): void => {
+          if (peerMap.get(peerId)?.token !== subscriptionToken) {
+            return
+          }
+          void topicState.announce()
+          if (peerMap.get(peerId)?.token !== subscriptionToken) {
+            return
+          }
+          if (topicState.passiveTimer !== null) {
+            clearTimeout(topicState.passiveTimer)
+          }
+          topicState.passiveTimer = setTimeout(
+            schedulePassiveAnnounce,
+            Math.max(topicState.announceMs, dormantAnnounceMs)
+          )
+          unrefTimer(topicState.passiveTimer)
+        }
+
+        schedulePassiveAnnounce()
+      }
+
+      let closed = false
+      return () => {
+        if (closed) {
           return
         }
+        closed = true
+        if (topicState.passiveTimer !== null) {
+          clearTimeout(topicState.passiveTimer)
+          topicState.passiveTimer = null
+        }
 
-        void topicState.announce()
-        passiveAnnounceTimeout = setTimeout(
-          topicState.startPassiveAnnouncements,
-          Math.max(topicState.announceMs, dormantAnnounceMs)
-        )
-      },
-      stopPassiveAnnouncements,
-      token: subscriptionToken
-    }
+        if (peerMap.get(peerId)?.token === subscriptionToken) {
+          peerMap.delete(peerId)
+          if (peerMap.size === 0 && relayTopics[rootTopic] === peerMap) {
+            delete relayTopics[rootTopic]
+          }
+        }
 
-    states[rootTopic] = topicState
-
-    if (!topicState.isActive) {
-      topicState.startPassiveAnnouncements()
-    }
-
-    return () => {
-      topicState.stopPassiveAnnouncements()
-      roomSubscriberCounts[rootTopic] = Math.max(
-        0,
-        (roomSubscriberCounts[rootTopic] ?? 1) - 1
-      )
-
-      if (!roomSubscriberCounts[rootTopic]) {
-        delete roomSubscriberCounts[rootTopic]
-        reclaimAllOutstandingOffers(rootTopic)
+        releasePeerSession(topicSession, peerId, peerSession)
       }
-
-      if (states[rootTopic]?.token === subscriptionToken) {
-        delete states[rootTopic]
-      }
-    }
-  },
-
-  announce: async (client, rootTopic) => {
-    const state = topicStates.forRelay(client)[rootTopic]
-
-    if (state) {
-      state.stopPassiveAnnouncements()
-      state.isActive = true
-      await state.announce()
-    }
-
-    return state?.announceMs ?? defaultAnnounceMs
-  },
-
-  deactivate: (client, rootTopic) => {
-    const state = topicStates.forRelay(client)[rootTopic]
-
-    if (state) {
-      state.isActive = false
-    }
-
-    reclaimAllOutstandingOffers(rootTopic)
-
-    state?.startPassiveAnnouncements()
-  }
-})
-
-export const joinRoom: JoinRoom<TorrentRoomConfig> = (
-  config,
-  roomId,
-  callbacks
-) =>
-  joinRoomStrategy(
-    {
-      ...config,
-      trickleIce: config.trickleIce ?? false
     },
-    roomId,
-    callbacks
-  )
 
-export const getRelaySockets = relayManager.getSockets
+    announce: async (client, rootTopic, _selfTopic, context) => {
+      const state = topicStates
+        .forRelay(client)
+        [rootTopic]?.get(context?.peerId ?? '')
 
-export {pauseRelayReconnection, resumeRelayReconnection, selfId}
+      await state?.announce()
 
-export const defaultRelayUrls = [
-  'open.ftorrent.com',
-  'tracker.webtorrent.dev',
-  'tracker.openwebtorrent.com',
-  'tracker.btorrent.xyz',
-  'tracker.files.fm:7073/announce'
-].map(url => 'wss://' + url)
+      return state?.announceMs ?? defaultAnnounceMs
+    }
+  })
 
-export type * from '@trystero-p2p/core'
+export const getRelaySockets = (): Record<string, WebSocket> =>
+  relayManager.getSockets()
+
+export {
+  clearUserIdentity,
+  createUserIdentity,
+  exportUserIdentity,
+  importUserIdentity,
+  roles,
+  scale,
+  setRelayConnectivity
+}
+export type * from '@trystero-p2p/core/types'
+
+export const defaultRelayUrls: string[] = [
+  'wss://open.ftorrent.com',
+  'wss://tracker.webtorrent.dev',
+  'wss://tracker.openwebtorrent.com',
+  'wss://tracker.btorrent.xyz',
+  'wss://tracker.files.fm:7073/announce'
+]

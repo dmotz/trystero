@@ -1,100 +1,33 @@
 # ✨🤝✨ Trystero
 
-**Build instant multiplayer web apps, no server required**
+**Instant peer-to-peer multiplayer for the web — no server required.**
 
 👉 **[Try it live on trystero.dev](https://trystero.dev)** 👈
 
-Trystero makes browsers discover each other and communicate directly. No
-accounts. No deploying infrastructure. Just import and connect.
+Making your app work with multiple users usually means a detour into setting up
+servers, auth, billing, databases, etc. — all so two browsers can say hello.
 
-Peers can connect via 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, ⚡️ Supabase, 🔥Firebase,
-🪐 IPFS, or a 🔌 self-hosted WebSocket relay – all using the same API.
-
-Besides making peer matching automatic, Trystero offers some nice abstractions
-on top of WebRTC:
-
-- 👂📣 Rooms / broadcasting
-- 🔢📩 Automatic serialization / deserialization of data
-- 🎥🏷 Attach metadata to binary data and media streams
-- ✂️⏳ Automatic chunking and throttling of large data
-- ⏱🤞 Progress events and promises for data transfers
-- 🔐📝 Session data encryption
-- 🏭⚡ Can run peers server-side on Node, Bun, and Deno
-- ⚛️🪝 React hooks
-
-You can see what people are building with Trystero
-[here](https://github.com/jeremyckahn/awesome-trystero).
+**Trystero skips the backend entirely.** Import the library, join a room by
+name, and browsers discover each other automatically and connect directly over
+fast, end-to-end encrypted WebRTC. Out of the box, you get verified user
+identities, synced user and room state, host permissions, RPC, chunked file
+transfers, and live audio/video. The web was meant to be decentralized and
+Trystero makes it easy to build apps where data flows without middlemen.
 
 ---
 
-## Contents
+## Quickstart
 
-- [How it works](#how-it-works)
-- [Get started](#get-started)
-- [Listen for events](#listen-for-events)
-- [Broadcast events](#broadcast-events)
-- [Audio and video](#audio-and-video)
-- [Advanced](#advanced)
-  - [Binary metadata](#binary-metadata)
-  - [Receiving files](#receiving-files)
-  - [Action promises](#action-promises)
-  - [Progress updates](#progress-updates)
-  - [Encryption](#encryption)
-  - [React hooks](#react-hooks)
-  - [Troubleshooting connection issues](#troubleshooting-connection-issues)
-  - [Running server-side (Node, Bun, Deno)](#running-server-side-node-bun-deno)
-  - [Self-hosted WebSocket relay](#self-hosted-websocket-relay)
-  - [Write your own strategy](#write-your-own-strategy)
-  - [Supabase setup](#supabase-setup)
-  - [Firebase setup](#firebase-setup)
-- [API](#api)
-  - [`joinRoom(config, roomId, [callbacks])`](#joinroomconfig-roomid-callbacks)
-  - [`selfId`](#selfid)
-  - [`getRelaySockets()`](#getrelaysockets)
-  - [`pauseRelayReconnection()`](#pauserelayreconnection)
-  - [`resumeRelayReconnection()`](#resumerelayreconnection)
-- [Which strategy should I choose?](#which-strategy-should-i-choose)
-
----
-
-## How it works
-
-👉 **If you just want to try out Trystero, you can skip this explainer and
-[jump into using it](#get-started).**
-
-To establish a direct peer-to-peer connection with WebRTC, a signalling channel
-is needed to exchange peer information
-([SDP](https://en.wikipedia.org/wiki/Session_Description_Protocol)). Typically
-this involves running your own matchmaking server but Trystero abstracts this
-away for you and offers multiple strategies for connecting peers (currently
-BitTorrent, Nostr, MQTT, Supabase, Firebase, IPFS, and self-hosted WebSocket
-relay).
-
-The important point to remember is this:
-
-> 🔒
->
-> Beyond peer discovery, your app's data never touches the strategy medium and
-> is sent directly peer-to-peer and end-to-end encrypted between users.
->
-> 👆
-
-You can [compare strategies here](#which-strategy-should-i-choose).
-
-## Get started
-
-Install Trystero with your preferred package manager, then import it in your
-code:
+Install Trystero from npm:
 
 ```sh
 npm i trystero
 ```
 
-```js
-import {joinRoom} from 'trystero'
-```
-
-No package manager? You can also use a CDN:
+<details>
+<summary>
+(Or skip the build step and import from a script tag)
+</summary>
 
 ```html
 <script type="module">
@@ -102,1066 +35,337 @@ No package manager? You can also use a CDN:
 </script>
 ```
 
-The default Trystero package runs on the Nostr network, but you can swap in any
-other stategy by changing which package you import:
+</details>
+
+Join a room with a unique app ID and room name and start syncing state. Here's a
+complete multiplayer cursor canvas in a dozen lines:
 
 ```js
-import {joinRoom} from '@trystero-p2p/mqtt'
-// or
-import {joinRoom} from '@trystero-p2p/torrent'
-// or
-import {joinRoom} from '@trystero-p2p/supabase'
-// or
-import {joinRoom} from '@trystero-p2p/firebase'
-// or
-import {joinRoom} from '@trystero-p2p/ipfs'
-// or
-import {joinRoom} from '@trystero-p2p/ws-relay'
+import {joinRoom} from 'trystero'
+
+// No API keys, accounts, or backend setup. Just pick a globally unique appId
+// (e.g. your app's domain or 'username/app-name') and a room name
+const room = joinRoom({appId: 'pixel-party.example.com'}, 'studio-49')
+
+// Give every user their own signed state slot
+const cursor = room.makeUserState('cursor', {x: 0, y: 0})
+
+window.addEventListener('pointermove', e =>
+  cursor.set({x: e.clientX, y: e.clientY})
+)
+
+cursor.onChange((pos, {userId, self, removed}) => {
+  if (self) {
+    return
+  }
+  if (removed) {
+    removeCursor(userId)
+  } else {
+    drawCursor(userId, pos)
+  }
+})
 ```
 
-Next, join the user to a room with an ID:
+Open your page in two browsers anywhere in the world and watch the cursors move.
+
+> **Local testing tip:** Tabs in the same browser profile share your `userId`
+> automatically. Open a Private/Incognito window (or pass `identity: 'none'` in
+> the room config) when simulating a second person on one machine.
+
+---
+
+## What you can build with it
+
+### 1. Synced user & room state
+
+Most multiplayer apps need two kinds of live state: **per-user state** that each
+participant owns (names, avatars, ready flags, cursors) and **shared room
+state** for the group (a game board, round timer, or watch-party queue).
+
+Trystero builds both right onto `room`. Updates apply immediately locally,
+coalesce rapid writes on the wire, verify who wrote them, and sync automatically
+to late joiners — even if the person who last updated shared state has already
+closed their laptop.
 
 ```js
-const config = {appId: 'san_narciso_3d'}
-const room = joinRoom(config, 'yoyodyne')
+// Each player controls only their own signed slot — nobody can overwrite yours
+const profile = room.makeUserState('profile', {name: 'Anon', ready: false})
+profile.set({name: 'Oedipa', ready: true})
+
+// Snapshot of everyone currently in the room: { [userId]: { name, ready } }
+console.log(profile.getAll())
+
+// Shared state for the whole room, synced automatically to latecomers
+const track = room.makeState('track', {url: 'chill-beat.mp3', paused: true})
+
+track.onChange((next, {userId}) => {
+  syncAudioPlayer(next)
+  console.log(`Updated by ${userId}`)
+})
+
+await track.set(prev => ({...prev, paused: false}))
 ```
 
-The first argument is a configuration object that requires an `appId`. This
-should be a completely unique identifier for your app¹. The second argument is
-the room ID.
+Using React? Both `makeUserState` and `makeState` plug straight into
+`useSyncExternalStore` — no `useEffect` glue or manual join/leave maps:
 
-> Why rooms? Browsers can only handle a limited amount of WebRTC connections at
-> a time so it's recommended to design your app such that users are divided into
-> groups (or rooms, or namespaces, or channels... whatever you'd like to call
-> them).
+```jsx
+import {useSyncExternalStore} from 'react'
 
-¹ When using Firebase, `appId` should be your `databaseURL` and when using
-Supabase, it should be your project URL.
+function Lobby() {
+  const players = useSyncExternalStore(profile.onChange, profile.getAll)
+  const nowPlaying = useSyncExternalStore(track.onChange, track.get)
+  // render directly from `players` and `nowPlaying`
+}
+```
 
-## Listen for events
+👉 **[Shared & Per-User State guide →](./docs/state.md)**
 
-Listen for peers joining the room:
+---
+
+### 2. Unforgeable user identity, passwords & room caps
+
+Every participant gets a persistent, cryptographically verified `userId` out of
+the box — no login screens or auth servers required. If someone refreshes the
+page or opens your app in two tabs at once, Trystero recognizes them as the same
+user automatically. (Want strictly throwaway IDs or keys loaded from your own
+backend? One config option switches modes.)
+
+Combine `password` and `maxUsers` to spin up private, seat-capped matches like a
+2-player chess table or a 4-player co-op lobby:
 
 ```js
-room.onPeerJoin = peerId => console.log(`${peerId} joined`)
+const room = joinRoom(
+  {
+    appId: 'chess.example.com',
+    password: 'knight-takes-f7-secret', // encrypts discovery so outsiders stay out
+    maxUsers: 2 // cap this match at 2 unique players (you + 1 opponent)
+  },
+  'table-7'
+)
+
+const {userId} = await room.getSelf()
+
+room.onUserJoin(({userId}) => console.log(`Opponent ${userId} sat down`))
+room.onUserLeave(({userId}) => console.log(`Opponent ${userId} left`))
+
+room.onError(err => {
+  if (err.code === 'room-full' && Object.keys(room.getPeers()).length === 0) {
+    showBanner('Sorry, both seats at this table are taken!')
+  }
+})
 ```
 
-Listen for peers leaving the room:
+👉 **[Identity, Presence & Room Access guide →](./docs/identity.md)**
+
+---
+
+### 3. Serverless hosts, custom roles & moderation
+
+In a typical P2P app, everyone is equal — which gets awkward the moment someone
+opens DevTools in your game and awards themselves a million points.
+
+Import the tree-shakeable `roles()` plugin to create rooms with mathematically
+verified admins, custom roles (like `'dj'` or `'moderator'`), authoritative
+state that only authorized roles can edit, and peer banning — still with zero
+backend:
 
 ```js
-room.onPeerLeave = peerId => console.log(`${peerId} left`)
+import {joinRoom, roles} from 'trystero'
+
+// Host creates a room where their userId has verified admin authority
+const room = joinRoom(
+  {appId: 'oedipa/friday-trivia', use: [roles({selfAsAdmin: true})]},
+  'quiz-night'
+)
+
+// Share `roomId` (e.g. "quiz-night~9fX2kLm...") in an invite link;
+// guests join with `use: [roles()]` and automatically verify the host
+const {roomId} = await room.getSelf()
+
+// With roles() enabled, makeState defaults to admin-only writes —
+// everyone can read `game`, and peers reject forged edits automatically
+const game = room.makeState('game', {round: 1, prompt: 'Ready?'})
+await game.set({round: 2, prompt: 'Name the moons of Mars'})
+
+// Promote helpers or boot troublemakers
+await room.grantRole(friendId, 'cohost')
+await room.ban(grieferId, {reason: 'spoiling answers'})
 ```
 
-Listen for peers sending their audio/video streams:
+👉 **[Admins, Roles & Moderation guide →](./docs/roles.md)**
+
+---
+
+### 4. Events, RPC & direct P2P file drop
+
+For ephemeral events, request/response calls, and binary transfers, create typed
+channels with `room.makeAction()`. Pass strings, JSON objects, `Blob`s, `File`s,
+or `TypedArray`s — Trystero handles serialization, chunking, backpressure,
+metadata headers, and transfer progress automatically, with zero cloud storage
+bills:
 
 ```js
-room.onPeerStream = (stream, peerId) =>
-  (peerElements[peerId].video.srcObject = stream)
+const drop = room.makeAction('file-drop')
+
+// Optionally add a predicate too accept based on max byteLength
+drop.onReceive(({byteLength}) => byteLength <= 100 * 1024 ** 2)
+
+// Listen for progress events to show a loading bar
+drop.onReceiveProgress((pct, {metadata}) => showDownloadBar(metadata.name, pct))
+
+// When the file is done being received, save it
+drop.onMessage((bytes, {userId, metadata}) => saveFile(bytes, metadata.name))
+
+// Send a file to the room with optional metadata
+await drop.send(file, {
+  metadata: {name: file.name},
+  onProgress: pct => showUploadBar(pct)
+})
+
+// Create a request action where you ask a peer for something and they provide
+// an answer
+const roll = room.makeAction('roll-check', {kind: 'request'})
+
+// Respond to roll requests from other peers
+roll.onRequest(() => Math.ceil(Math.random() * 20))
+
+// Ask a specific friendId for their roll number
+const result = await roll.request(null, {target: friendId, timeoutMs: 2000})
 ```
 
-To unsubscribe from events, leave the room:
+👉 **[Actions, RPC & File Transfers guide →](./docs/actions.md)**
 
-```js
-room.leave()
-```
+---
 
-You can access the local user's peer ID by importing `selfId` like so:
+### 5. Voice, video & screen sharing
 
-```js
-import {selfId} from 'trystero'
-
-console.log(`my peer ID is ${selfId}`)
-```
-
-## Broadcast events
-
-Send peers your video stream:
+Drop live audio, webcam video, screen captures, or Web Audio streams into any
+room, and tag streams with `metadata` so peers can tell a facecam from a screen
+share:
 
 ```js
 const stream = await navigator.mediaDevices.getUserMedia({
   audio: true,
   video: true
 })
-room.addStream(stream)
-```
 
-Send and subscribe to custom peer-to-peer actions:
-
-```js
-const drink = room.makeAction('drink')
-
-// buy drink for a friend
-drink.send({drink: 'negroni', withIce: true}, {target: friendId})
-
-// buy round for the house
-drink.send({drink: 'mezcal', withIce: false})
-
-// listen for drinks sent to you
-drink.onMessage = (data, {peerId}) =>
-  console.log(
-    `got a ${data.drink} with${data.withIce ? '' : 'out'} ice from ${peerId}`
-  )
-```
-
-Actions can also use request/response semantics:
-
-```js
-const isEven = room.makeAction('is-even', {
-  kind: 'request',
-  onRequest: n => n % 2 === 0
-})
-
-const result = await isEven.request(42, {
-  target: friendId,
-  timeoutMs: 1000
-})
-```
-
-To ask multiple peers at once, use `requestMany()`. It resolves with a
-peer-labeled result for every target, while `onResult` lets you react as each
-peer answers:
-
-```js
-const availability = room.makeAction('availability', {
-  kind: 'request',
-  onRequest: ({date}) => calendar.isFree(date)
-})
-
-const results = await availability.requestMany(
-  {date: '2026-05-04'},
-  {
-    targets: teammateIds,
-    timeoutMs: 1000,
-    onResult: result => {
-      if (result.status === 'fulfilled') {
-        updateAvailabilityBadge(result.peerId, result.value)
-      }
-    }
-  }
+// Send to everyone here now, plus anyone who joins later
+await room.addStream(stream, {metadata: {type: 'webcam'}})
+room.onUserJoin(({userId}) =>
+  room.addStream(stream, {target: userId, metadata: {type: 'webcam'}})
 )
 
-const freePeers = results
-  .filter(result => result.status === 'fulfilled' && result.value)
-  .map(result => result.peerId)
+// Add a video when receiving a stream from someone else
+room.onPeerStream((remoteStream, {userId, metadata}) =>
+  attachVideo(userId, remoteStream, metadata.type)
+)
 ```
 
-If you're using TypeScript, you can add a type hint to the action:
+👉 **[Audio, Video & Screen Sharing guide →](./docs/media.md)**
 
-```typescript
-type CursorMove = {x: number; y: number}
+---
 
-const cursor = room.makeAction<CursorMove>('cursor-move')
-```
+### 6. Scale to large numbers of peers
 
-You can also use actions to send binary data, like images:
+Standard WebRTC connects every browser directly to every other browser, which is
+ideal for smaller hangouts and matches. Building a 100-person collaborative
+canvas or a crowded party lobby? Opt into the `scale()` plugin:
 
 ```js
-const pic = room.makeAction('pic')
+import {joinRoom, scale} from 'trystero'
 
-// blobs are automatically handled, as are any form of TypedArray
-canvas.toBlob(blob => pic.send(blob))
-
-// binary data is received as raw ArrayBuffers so your handling code should
-// interpret it in a way that makes sense
-pic.onMessage = (data, {peerId}) =>
-  (imgs[peerId].src = URL.createObjectURL(new Blob([data])))
+const room = joinRoom({appId: 'canvas.example.com', use: [scale()]}, 'plaza')
 ```
 
-Let's say we want users to be able to name themselves:
+Small rooms stay in a fast direct mesh with zero extra overhead. As more people
+pile in, Trystero automatically forms a multi-hop gossip network so no single
+browser gets overwhelmed — while your state, action, and media code stays
+exactly the same.
 
-```js
-const idsToNames = {}
-const name = room.makeAction('name')
+👉 **[Scaling Large Rooms guide →](./docs/scaling.md)**
 
-// tell new peers your name when they connect
-room.onPeerJoin = peerId => name.send('Oedipa', {target: peerId})
+---
 
-// listen for peers naming themselves
-name.onMessage = (value, {peerId}) => (idsToNames[peerId] = value)
+### 7. Run headless peers in Node, Bun & Deno
 
-// tell all peers at once when your name changes
-nameInput.addEventListener('change', e => name.send(e.target.value))
-
-room.onPeerLeave = peerId =>
-  console.log(`${idsToNames[peerId] || 'a weird stranger'} left`)
-```
-
-> Actions are smart and handle serialization and chunking for you behind the
-> scenes. This means you can send very large files and whatever data you send
-> will be received on the other side as the same type (a number as a number, a
-> string as a string, an object as an object, binary as binary, etc.). See
-> [receiving files](#receiving-files) for optional size limits and acceptance
-> callbacks.
-
-## Audio and video
-
-Here's a simple example of how you could create an audio chatroom:
-
-```js
-// this object can store audio instances for later
-const peerAudios = {}
-
-// get a local audio stream from the microphone
-const selfStream = await navigator.mediaDevices.getUserMedia({
-  audio: true,
-  video: false
-})
-
-// send stream to peers currently in the room
-room.addStream(selfStream)
-
-// send stream to peers who join later
-room.onPeerJoin = peerId => room.addStream(selfStream, {target: peerId})
-
-// handle streams from other peers
-room.onPeerStream = (stream, peerId) => {
-  // create an audio instance and set the incoming stream
-  const audio = new Audio()
-  audio.srcObject = stream
-  audio.autoplay = true
-
-  // add the audio to peerAudios object if you want to address it for something
-  // later (volume, etc.)
-  peerAudios[peerId] = audio
-}
-```
-
-Doing the same with video is similar, just be sure to add incoming streams to
-video elements in the DOM:
-
-```js
-const peerVideos = {}
-const videoContainer = document.getElementById('videos')
-
-room.onPeerStream = (stream, peerId) => {
-  let video = peerVideos[peerId]
-
-  // if this peer hasn't sent a stream before, create a video element
-  if (!video) {
-    video = document.createElement('video')
-    video.autoplay = true
-
-    // add video element to the DOM
-    videoContainer.appendChild(video)
-  }
-
-  video.srcObject = stream
-  peerVideos[peerId] = video
-}
-```
-
-## Advanced
-
-### Binary metadata
-
-Let's say your app supports sending various types of files and you want to
-annotate the raw bytes being sent with metadata about how they should be
-interpreted. Instead of manually adding metadata bytes to the buffer you can
-simply pass a metadata argument in the sender action for your binary payload:
-
-```js
-const file = room.makeAction('file')
-
-file.onMessage = (data, {peerId, metadata}) =>
-  console.log(
-    `got a file (${metadata.name}) from ${peerId} with type ${metadata.type}`,
-    data
-  )
-
-file.send(buffer, {
-  metadata: {name: 'The Courierʼs Tragedy', type: 'application/pdf'}
-})
-```
-
-### Receiving files
-
-Incoming data is accepted automatically. Use `onReceive` to accept or decline
-payloads based on their size, sender, or metadata:
-
-```js
-const file = room.makeAction('file', {
-  onReceive: ({byteLength}) => byteLength <= 100 * 1024 ** 2,
-  onMessage: (data, {metadata}) => saveFile(data, metadata.name)
-})
-```
-
-Return `true` or `false`, or a promise of either. Large payloads wait for
-approval before sending their contents; declined small messages are discarded
-after arrival. You can also assign `file.onReceive` later or set it to `null` to
-restore automatic acceptance.
-
-`byteLength` is the payload size in bytes (UTF-8 for strings/JSON), excluding
-metadata. The context's `signal` aborts when the transfer ends; use it to
-dismiss pending approval UI.
-
-Each room defaults to a 256 MiB receive budget. Set `maxReceiveBytes` in the
-room config to allow larger files or reduce memory use. Concurrent transfers
-queue automatically when the budget is occupied. Received files must fit in
-memory.
-
-### Action promises
-
-Sender promises resolve when local sending finishes; they do not confirm
-delivery or application handling. If a receiver declines a large transfer, the
-promise rejects with `error.kind === 'rejected'`. Use request actions when you
-need a response.
-
-```js
-await file.send(amplePayload)
-console.log('done sending to all peers')
-```
-
-### Progress updates
-
-Action sender functions also take an optional callback function that will be
-continuously called as the transmission progresses. This can be used for showing
-a progress bar to the sender for large transfers. The callback is called with a
-percentage value between 0 and 1 and the receiving peer's ID:
-
-```js
-file.send(payload, {
-  target: [peerIdA, peerIdB, peerIdC],
-  metadata: {filename: 'paranoids.flac'},
-  onProgress: (percent, {peerId}) => (loadingBars[peerId].value = percent)
-})
-```
-
-Similarly you can listen for progress events as a receiver like this:
-
-```js
-const file = room.makeAction('file')
-
-file.onReceiveProgress = (percent, {peerId, metadata}) =>
-  console.log(
-    `${percent * 100}% done receiving ${metadata.filename} from ${peerId}`
-  )
-```
-
-Notice that any metadata is sent with progress events so you can show the
-receiving user that there is a transfer in progress with perhaps the name of the
-incoming file.
-
-Since a peer can send multiple transmissions in parallel, you can also use
-metadata to differentiate between them, e.g. by sending a unique ID.
-
-### Encryption
-
-Once peers are connected to each other all of their communications are
-end-to-end encrypted. During the initial connection / discovery process, peers'
-[SDPs](https://en.wikipedia.org/wiki/Session_Description_Protocol) are sent via
-the chosen peering strategy medium. By default the SDP is encrypted using a key
-derived from your app ID and room ID to prevent plaintext session data from
-appearing in logs. This is fine for most use cases, however a relay strategy
-operator can reverse engineer the key using the room and app IDs. A more secure
-option is to pass a `password` parameter in the app configuration object which
-will be used to derive the encryption key:
-
-```js
-joinRoom({appId: 'kinneret', password: 'MuchoMaa$'}, 'w_a_s_t_e__v_i_p')
-```
-
-This is a shared secret that must be known ahead of time and the password must
-match for all peers in the room for them to be able to connect. An example use
-case might be a private chat room where users learn the password via external
-means.
-
-### React hooks
-
-Trystero functions are idempotent so they already work out of the box as React
-hooks.
-
-Here's a simple example component where each peer syncs their favorite color to
-everyone else:
-
-```jsx
-import {joinRoom} from 'trystero'
-import {useState} from 'react'
-
-const trysteroConfig = {appId: 'thurn-und-taxis'}
-
-export default function App({roomId}) {
-  const room = joinRoom(trysteroConfig, roomId)
-  const colorAction = room.makeAction('color')
-  const [myColor, setMyColor] = useState('#c0ffee')
-  const [peerColors, setPeerColors] = useState({})
-
-  // whenever new peers join the room, send my color to them:
-  room.onPeerJoin = peer => colorAction.send(myColor, {target: peer})
-
-  // listen for peers sending their colors and update the state accordingly:
-  colorAction.onMessage = (color, {peerId}) =>
-    setPeerColors(peerColors => ({...peerColors, [peerId]: color}))
-
-  const updateColor = e => {
-    const {value} = e.target
-
-    // when updating my own color, broadcast it to all peers:
-    colorAction.send(value)
-    setMyColor(value)
-  }
-
-  return (
-    <>
-      <h1>Trystero + React</h1>
-
-      <h2>My color:</h2>
-      <input type="color" value={myColor} onChange={updateColor} />
-
-      <h2>Peer colors:</h2>
-      <ul>
-        {Object.entries(peerColors).map(([peerId, color]) => (
-          <li key={peerId} style={{backgroundColor: color}}>
-            {peerId}: {color}
-          </li>
-        ))}
-      </ul>
-    </>
-  )
-}
-```
-
-Astute readers may notice the above example is simple and doesn't consider if we
-want to change the component's room ID or unmount it. For those scenarios you
-can use this simple `useRoom()` hook that unsubscribes from room events
-accordingly:
-
-```js
-import {joinRoom} from 'trystero'
-import {useEffect, useRef} from 'react'
-
-export const useRoom = (roomConfig, roomId) => {
-  const roomRef = useRef(joinRoom(roomConfig, roomId))
-  const lastRoomIdRef = useRef(roomId)
-
-  useEffect(() => {
-    if (roomId !== lastRoomIdRef.current) {
-      roomRef.current.leave()
-      roomRef.current = joinRoom(roomConfig, roomId)
-      lastRoomIdRef.current = roomId
-    }
-
-    return () => roomRef.current.leave()
-  }, [roomConfig, roomId])
-
-  return roomRef.current
-}
-```
-
-### Troubleshooting connection issues
-
-WebRTC is powerful but some networks simply don't allow direct P2P connections
-using it. If you find that certain user pairings aren't working in Trystero,
-you're likely encountering an issue at the network provider level. To solve this
-you can configure a TURN server which will act as a proxy layer for peers that
-aren't able to connect directly to one another.
-
-1. If you can, confirm that the issue is specific to particular network
-   conditions (e.g. user with ISP X cannot connect to a user with ISP Y). If
-   other user pairings are working (like those between two browsers on the same
-   machine), this likely confirms that Trystero is working correctly.
-2. Sign up for a TURN service or host your own. There are various hosted TURN
-   services you can find online like
-   [Cloudflare](https://developers.cloudflare.com/calls/turn/) (which offers a
-   free tier with 1,000 GB traffic per month) or
-   [Open Relay](https://www.metered.ca/stun-turn). You can also host an open
-   source TURN server like [coturn](https://github.com/coturn/coturn),
-   [Pion TURN](https://github.com/pion/turn),
-   [Violet](https://github.com/paullouisageneau/violet), or
-   [eturnal](https://github.com/processone/eturnal). Keep in mind data will only
-   go through the TURN server for peers that can't directly connect and will
-   still be end-to-end encrypted.
-3. Once you have a TURN server, configure Trystero with it like this:
-   ```js
-   const room = joinRoom(
-     {
-       // ...your app config
-       turnConfig: [
-         {
-           // single string or list of strings of URLs to access TURN server
-           urls: ['turn:your-turn-server.ok:1979'],
-           username: 'username',
-           credential: 'password'
-         }
-       ]
-     },
-     'roomId'
-   )
-   ```
-
-### Running server-side (Node, Bun, Deno)
-
-Trystero works outside browsers too, like in Node, Bun, or Deno. Why would you
-want to run something that helps you avoid servers on a server? One reason is if
-you want an always-on peer which can be useful for remembering the last state of
-data, broadcasting it to new users. Another reason might be to run peers that
-are lighter weight and don't need a full browser running, like an embedded
-device or Raspberry Pi.
-
-Running server-side uses the same syntax as in the browser, but you need to
-import a polyfill for WebRTC support:
+Trystero runs outside the browser too. Drop a lightweight peer onto a Raspberry
+Pi, build a game bot, or run a silent `passive: true` peer on a tiny box to keep
+shared room state warm even when every browser tab closes:
 
 ```js
 import {joinRoom} from 'trystero'
 import {RTCPeerConnection} from 'werift'
 
 const room = joinRoom(
-  {appId: 'your-app-id', rtcPolyfill: RTCPeerConnection},
-  'your-room-name'
+  {appId: 'oedipa/synth-jam', rtcPolyfill: RTCPeerConnection, passive: true},
+  'room-1'
 )
+
+// Silently caches and syncs the latest pattern for newcomers
+room.makeState('pattern', {bpm: 120, steps: []})
 ```
 
-### Self-hosted WebSocket relay
+👉 **[Running in Node, Bun & Deno guide →](./docs/server-side.md)**
 
-If you want a tiny relay that you control, use the WebSocket relay package.
-Start the relay on Node, Bun, or Deno:
+---
 
-```js
-import {createWsRelayServer} from '@trystero-p2p/ws-relay/server'
+## How does Trystero connect users with no backend?
 
-createWsRelayServer({port: 8080})
-```
+WebRTC lets browsers talk directly to each other, peer-to-peer, without routing
+traffic through a central server. The one catch with WebRTC has always been
+_signaling_: two browsers need a brief introduction to swap connection info
+before they can link up.
 
-Then in the browser:
+Trystero handles that introduction automatically out of the box using
+decentralized public relays — nothing to deploy or configure. Once peers
+connect, **your app's data never touches a relay**: state, messages, files, and
+media flow straight from browser to browser, end-to-end encrypted.
 
-```js
-import {joinRoom} from '@trystero-p2p/ws-relay'
-
-const room = joinRoom(
-  {
-    appId: 'app-id',
-    relayConfig: {
-      urls: ['wss://localhost:8080']
-    }
-  },
-  'room-id'
-)
-```
-
-The `relayConfig.urls` config option is required for this strategy because there
-are no public default servers. You can pass multiple.
-
-### Write your own strategy
-
-If you want to provide your own signaling backend, you can build a custom
-strategy with `createTopicStrategy`. This is the recommended helper for simple
-pub/sub relays because Trystero handles room lifecycle details like passive
-mode, announce scheduling, and peer-specific signaling topics.
-
-The example below assumes a WebSocket relay that does simple pub/sub routing:
-
-- Client sends
-  `{"type": "subscribe" | "unsubscribe" | "publish", "topic", "payload"}`
-- Server broadcasts `{"topic", "payload"}` to subscribers of each topic
-
-This is just to show you how it works; if you want a simple self-hosted
-solution, use the `ws-relay` package explained above.
-
-```js
-import {createTopicStrategy, toJson} from '@trystero-p2p/core'
-
-export const joinRoom = createTopicStrategy({
-  // Define init as a function that returns a promise of your signaling client.
-  // Resolve the promise when your client is ready to send messages.
-  // You can also return an array of client promises for redundancy.
-  // In this case, the client is a single WebSocket.
-  init: config =>
-    new Promise((resolve, reject) => {
-      const ws = new WebSocket(config.relayConfig.urls[0])
-      ws.addEventListener('open', () => resolve(ws), {once: true})
-      ws.addEventListener('error', reject, {once: true})
-    }),
-
-  // Subscribe to one topic. Trystero decides which topics are needed and when.
-  subscribeTopic: (client, topic, onMessage) => {
-    const onWsMessage = event => {
-      const message = JSON.parse(String(event.data))
-
-      if (message.topic !== topic) {
-        return
-      }
-
-      onMessage(message.topic, message.payload)
-    }
-
-    client.addEventListener('message', onWsMessage)
-    client.send(toJson({type: 'subscribe', topic}))
-
-    return () => {
-      client.send(toJson({type: 'unsubscribe', topic}))
-      client.removeEventListener('message', onWsMessage)
-    }
-  },
-
-  // Publish a payload to one topic.
-  publishTopic: (client, topic, payload) =>
-    client.send(
-      toJson({
-        type: 'publish',
-        topic,
-        payload
-      })
-    )
-})
-
-const room = joinRoom(
-  {appId: 'my-app-id', relayConfig: {urls: ['wss://my-relay.example']}},
-  'my-room-id'
-)
-```
-
-`createTopicStrategy` uses a short startup announcement burst followed by a
-60-second steady interval and repeats the burst after a peer drops. Set
-`reannounceOnDisconnect: false` when the signaling backend stores peer presence
-rather than delivering announcements as transient events.
-
-For non-pub/sub signaling protocols, such as trackers that exchange offers in
-bulk, `createStrategy` is available as a lower-level advanced API.
-
-### Supabase setup
-
-To use the Supabase strategy:
-
-1. Create a [Supabase](https://supabase.com) project or use an existing one
-2. On the dashboard, go to Project Settings -> API
-3. Copy the Project URL and set that as the `appId` in the Trystero config, copy
-   the `anon public` API key and set it as `relayConfig.supabaseKey` in the
-   Trystero config
-
-### Firebase setup
-
-If you want to use the Firebase strategy and don't have an existing project:
-
-1. Create a [Firebase](https://firebase.google.com/) project
-2. Create a new Realtime Database
-3. Copy the `databaseURL` and use it as the `appId` in your Trystero config
+Prefer to run your own signaling setup with Nostr, MQTT, BitTorrent, Supabase,
+Firebase, or a tiny self-hosted WebSocket relay? You can swap strategies with a
+one-line import change — see the
+**[Signaling & Relays guide](./docs/signaling.md)**.
 
 <details>
-  <summary>
-  Optional: configure the database with security rules to limit activity:
-  </summary>
+  <summary>Peek under the hood: how serverless discovery and security work</summary>
 
-```json
-{
-  "rules": {
-    ".read": false,
-    ".write": false,
-    "__trystero__": {
-      ".read": false,
-      ".write": false,
-      "$room_id": {
-        ".read": true,
-        ".write": true
-      }
-    }
-  }
-}
-```
-
-These rules ensure room peer presence is only readable if the room namespace is
-known ahead of time.
+- **Encrypted signaling**: Connection offers (SDPs) are encrypted with
+  AES-256-GCM before touching any relay. Adding a room `password` derives the
+  key via WebCrypto `PBKDF2-SHA256` (600,000 iterations) so outsiders and relay
+  operators can't read handshakes or join the room.
+- **Self-certifying identities**: Every user (`userId`) and browser tab
+  (`peerId`) is derived from a WebCrypto ECDSA P-256 public keypair. During
+  connection setup, peers verify each other's keys against the WebRTC DTLS
+  certificate fingerprint
+  ([RFC 8827](https://www.rfc-editor.org/rfc/rfc8827.html)), preventing spoofing
+  and man-in-the-middle relays.
+- **Signed state & roles**: Updates to `makeUserState`, `makeState`, and
+  `roles()` carry cryptographic signatures and Hybrid Logical Clock timestamps,
+  allowing peers (including late joiners) to verify who wrote what without a
+  central server.
 
 </details>
 
-## API
-
-### `joinRoom(config, roomId, [callbacks])`
-
-Adds local user to room whereby other peers in the same namespace will open
-communication channels and send events. Calling `joinRoom()` multiple times with
-the same namespace will return the same room instance.
-
-- `config` - Configuration object containing the following keys:
-  - `appId` - **(required)** A unique string identifying your app. When using
-    Supabase, this should be set to your project URL (see
-    [Supabase setup instructions](#supabase-setup)). If using Firebase, this
-    should be the `databaseURL` from your Firebase config (also see
-    `relayConfig.firebaseApp` below for an alternative way of configuring the
-    Firebase strategy).
-
-  - `password` - **(optional)** A string to encrypt session descriptions via
-    AES-GCM as they are passed through the peering medium. If not set, session
-    descriptions will be encrypted with a key derived from the app ID and room
-    name. A custom password must match between any peers in the room for them to
-    connect. See [encryption](#encryption) for more details.
-
-  - `maxReceiveBytes` - **(optional)** Maximum payload size and budget for
-    concurrent large incoming transfers per room, in bytes. Defaults to
-    `256 * 1024 ** 2` (256 MiB). Must be a positive integer. Raise it for larger
-    files or lower it to reduce memory use.
-
-  - `passive` - **(optional)** Boolean for backup or relay peers that should
-    listen for active peers without announcing themselves while a room is
-    dormant. Passive peers activate only after hearing a non-passive peer and
-    include a passive flag in their signaling so passive peers do not connect to
-    each other. For BitTorrent, dormant passive rooms announce as seeders
-    (`left: 0`) without offers, which avoids passive-to-passive discovery while
-    keeping tracker load low.
-
-  - `relayConfig` - **(optional unless required by your chosen strategy)**
-    Object containing strategy-specific relay settings:
-    - `urls` - **(optional for 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT; required for 🔌
-      WebSocket relay)** Custom list of URLs for the strategy to use to
-      bootstrap P2P connections. These would be BitTorrent trackers, Nostr
-      relays, MQTT brokers, and WebSocket relays, respectively. They must
-      support secure WebSocket connections.
-
-    - `redundancy` - **(optional, 🌊 BitTorrent, 🐦 Nostr, 📡 MQTT only)**
-      Integer specifying how many default relay endpoints to connect to
-      simultaneously. Passing a `urls` option will cause this option to be
-      ignored as the entire list will be used.
-
-    - `manualReconnection` - **(optional, 🐦 Nostr and 🌊 BitTorrent only)**
-      Boolean (default: `false`) that when set to `true` disables automatically
-      pausing and resuming reconnection attempts when the browser goes offline
-      and comes back online. This is useful if you want to manage this behavior
-      yourself.
-
-    - `warnOnRelayFailure` - **(optional)** Boolean (default: `true`) that when
-      set to `false` suppresses warnings caused by relay failures. This includes
-      failed announce attempts and strategy-specific failure messages from
-      relays or trackers.
-
-    - `supabaseKey` - **(required, ⚡️ Supabase only)** Your Supabase project's
-      `anon public` API key.
-
-    - `firebaseApp` - **(optional, 🔥 Firebase only)** You can pass an already
-      initialized Firebase app instance instead of an `appId`. Normally Trystero
-      will initialize a Firebase app based on the `appId` but this will fail if
-      you've already initialized it for use elsewhere.
-
-    - `firebasePath` - **(optional, 🔥 Firebase only)** String specifying path
-      where Trystero writes its matchmaking data in your database
-      (`'__trystero__'` by default). Changing this is useful if you want to run
-      multiple apps using the same database and don't want to worry about
-      namespace collisions.
-
-  - `rtcConfig` - **(optional)** Specifies a custom
-    [`RTCConfiguration`](https://developer.mozilla.org/en-US/docs/Web/API/RTCConfiguration)
-    for all peer connections.
-
-  - `trickleIce` - **(optional)** Boolean controlling whether ICE candidates are
-    sent incrementally (`true`) or bundled with SDP (`false`). Default is
-    strategy-dependent: `true` for most strategies, `false` for BitTorrent and
-    IPFS unless explicitly set.
-
-  - `turnConfig` - **(optional)** Specifies a custom list of TURN servers to use
-    (see
-    [Troubleshooting connection issues](#troubleshooting-connection-issues)).
-    Each item in the list should correspond to an
-    [ICE server config object](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection#iceservers).
-    When passing a TURN config like this, Trystero's default STUN servers will
-    also be used. To override this and use both custom STUN and TURN servers,
-    instead pass the config via the above `rtcConfig.iceServers` option as a
-    list of both STUN/TURN servers — this won't inherit Trystero's defaults.
-
-  - `rtcPolyfill` - **(optional)** Use this to pass a custom
-    [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/RTCPeerConnection)-compatible
-    constructor. This is useful for running outside of a browser, such as in
-    Node (still experimental).
-
-- `roomId` - A string to namespace peers and events within a room.
-
-- `callbacks` - **(optional)** Callback config object containing:
-  - `onJoinError(details)` - Called when room join fails due to an incorrect
-    password, when handshake admission fails (including timeout), or when peers
-    exchange SDP but WebRTC still cannot establish a direct connection. This
-    last case usually means TURN servers are needed or misconfigured (see
-    [Troubleshooting connection issues](#troubleshooting-connection-issues)).
-    `details` is an object containing `appId`, `roomId`, `peerId`, and `error`
-    describing the failure.
-
-  - `onPeerHandshake(peerId, send, receive, isInitiator)` - Async predicate that
-    runs after the transport connects but before the peer becomes active.
-    Return/resolve to accept the peer, throw/reject to deny the peer.
-    - `peerId` - ID of the pending peer.
-    - `send(data, [metadata])` - Sends handshake payloads to the pending peer.
-    - `receive()` - Resolves to the next handshake message from the peer as
-      `{data, metadata}`.
-    - `isInitiator` - Deterministic role flag for avoiding protocol deadlocks.
-
-  - `handshakeTimeoutMs` - Timeout for pending handshakes in milliseconds
-    (`10000` by default). If exceeded, the peer is denied and `onJoinError` is
-    called.
-
-  During handshake, the peer remains pending and is not included in `getPeers()`
-  and does not trigger Trystero API events (`onPeerJoin`, action receivers,
-  stream/track callbacks). Non-handshake data received while pending is dropped.
-
-  Minimal handshake example:
-
-  ```js
-  import {joinRoom} from 'trystero'
-
-  const room = joinRoom({appId: 'my-app'}, 'secure-room', {
-    onPeerHandshake: async (_, send, receive, isInitiator) => {
-      if (isInitiator) {
-        await send({challenge: 'prove-you-know-the-secret'})
-        const {data} = await receive()
-
-        if (data?.response !== 'shared-secret') {
-          throw new Error('handshake rejected')
-        }
-      } else {
-        const {data} = await receive()
-
-        if (data?.challenge !== 'prove-you-know-the-secret') {
-          throw new Error('handshake rejected')
-        }
-
-        await send({response: 'shared-secret'})
-      }
-    }
-  })
-  ```
-
-Returns an object with the following methods:
-
-- ### `leave()`
-
-  Remove local user from room and unsubscribe from room events.
-
-- ### `getPeers()`
-
-  Returns a map of
-  [`RTCPeerConnection`](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection)s
-  for the peers present in room (not including the local user). The keys of this
-  object are the respective peers' IDs.
-
-- ### `isPassive()`
-
-  Returns whether the room was joined with `passive: true`.
-
-- ### `addStream(stream, [options])`
-
-  Broadcasts media stream to other peers.
-  - `stream` - A `MediaStream` with audio and/or video to send to peers in the
-    room.
-
-  - `options.target` - **(optional)** If specified, the stream is sent only to
-    the target peer ID (string) or list of peer IDs (array). Passing `null` or
-    omitting this option sends to all peers in the room.
-
-  - `options.metadata` - **(optional)** Additional metadata (any serializable
-    type) to be sent with the stream. This is useful when sending multiple
-    streams so recipients know which is which (e.g. a webcam versus a screen
-    capture).
-
-- ### `removeStream(stream, [options])`
-
-  Stops sending previously sent media stream to other peers.
-  - `stream` - A previously sent `MediaStream` to stop sending.
-
-  - `options.target` - **(optional)** If specified, the stream is removed only
-    from the target peer ID (string) or list of peer IDs (array).
-
-- ### `addTrack(track, stream, [options])`
-
-  Adds a new media track to a stream.
-  - `track` - A `MediaStreamTrack` to add to an existing stream.
-
-  - `stream` - The target `MediaStream` to attach the new track to.
-
-  - `options.target` - **(optional)** If specified, the track is sent only to
-    the target peer ID (string) or list of peer IDs (array).
-
-  - `options.metadata` - **(optional)** Additional metadata (any serializable
-    type) to be sent with the track. See `metadata` notes for `addStream()`
-    above for more details.
-
-- ### `removeTrack(track, [options])`
-
-  Removes a media track.
-  - `track` - The `MediaStreamTrack` to remove.
-
-  - `options.target` - **(optional)** If specified, the track is removed only
-    from the target peer ID (string) or list of peer IDs (array).
-
-- ### `replaceTrack(oldTrack, newTrack, [options])`
-
-  Replaces a media track with a new one.
-  - `oldTrack` - The `MediaStreamTrack` to remove.
-
-  - `newTrack` - A `MediaStreamTrack` to attach.
-
-  - `options.target` - **(optional)** If specified, the track is replaced only
-    for the target peer ID (string) or list of peer IDs (array).
-
-  - `options.metadata` - **(optional)** Additional metadata (any serializable
-    type) to be sent with the replacement track.
-
-- ### `onPeerJoin`
-
-  A callback property that will be called when a peer joins the room. Assigning
-  a new function replaces the previous handler; assigning `null` clears it.
-  Existing active peers are immediately replayed to a newly assigned handler.
-  - `callback(peerId)` - Function to run whenever a peer joins, called with the
-    peer's ID.
-
-  Example:
-
-  ```js
-  room.onPeerJoin = peerId => console.log(`${peerId} joined`)
-  ```
-
-- ### `onPeerLeave`
-
-  A callback property that will be called when a peer leaves the room. Assigning
-  a new function replaces the previous handler; assigning `null` clears it.
-  - `callback(peerId)` - Function to run whenever a peer leaves, called with the
-    peer's ID.
-
-  Example:
-
-  ```js
-  room.onPeerLeave = peerId => console.log(`${peerId} left`)
-  ```
-
-- ### `onPeerStream`
-
-  A callback property that will be called when a peer sends a media stream.
-  Assigning a new function replaces the previous handler; assigning `null`
-  clears it.
-  - `callback(stream, peerId, metadata)` - Function to run whenever a peer sends
-    a media stream, called with the the peer's stream, ID, and optional metadata
-    (see `addStream()` above for details).
-
-  Example:
-
-  ```js
-  room.onPeerStream = (stream, peerId) =>
-    console.log(`got stream from ${peerId}`, stream)
-  ```
-
-- ### `onPeerTrack`
-
-  A callback property that will be called when a peer sends a media track.
-  Assigning a new function replaces the previous handler; assigning `null`
-  clears it.
-  - `callback(track, stream, peerId, metadata)` - Function to run whenever a
-    peer sends a media track, called with the the peer's track, attached stream,
-    ID, and optional metadata (see `addTrack()` above for details).
-
-  Example:
-
-  ```js
-  room.onPeerTrack = (track, stream, peerId) =>
-    console.log(`got track from ${peerId}`, track)
-  ```
-
-- ### `makeAction(actionId, [config])`
-
-  Listen for and send custom data actions.
-  - `actionId` - A string to register this action consistently among all peers.
-
-  If `config.kind` is omitted, the action is a one-way message action. Passing
-  `kind: 'request'` creates a request/response action.
-
-  Message actions expose:
-  - `send(data, [options])` - Sends data to peers and resolves when local
-    sending is complete. To cancel an in-progress send, pass an
-    `AbortController`'s `signal` in the options (e.g.
-    `send(data, {signal: controller.signal})`) and call `controller.abort()`.
-  - `onMessage` - Nullable callback property for received messages.
-  - `onReceiveProgress` - Nullable callback property for inbound progress.
-
-  Request actions expose:
-  - `request(data, options)` - Sends to one peer and resolves with its response.
-  - `requestMany(data, options)` - Sends to many peers and resolves with
-    peer-labeled settled results.
-  - `onRequest` - Nullable callback property that returns the response.
-  - `onReceiveProgress` - Nullable callback property for inbound progress.
-
-  Both kinds expose `onReceive`, a nullable callback accepting
-  `{byteLength, peerId, metadata, kind, signal}` and returning a boolean or a
-  promise of a boolean. It can also be provided in `config`. `kind` is
-  `'message'`, `'request'`, or `'response'`; request actions apply it to both
-  requests and responses. Responses have no metadata. See
-  [receiving files](#receiving-files).
-
-  Send options use `target`, `metadata`, `onProgress`, and `signal`. Request
-  options use `target`, `metadata`, `timeoutMs`, `onProgress`, and `signal`.
-  `requestMany()` uses `targets` plus optional `onResult` for each peer result
-  as it arrives. Request timeouts cover approval, sending, and the response.
-
-  Example:
-
-  ```js
-  const cursor = room.makeAction('cursormove')
-
-  window.addEventListener('mousemove', e => cursor.send([e.clientX, e.clientY]))
-
-  cursor.onMessage = ([x, y], {peerId}) => {
-    const peerCursor = cursorMap[peerId]
-    peerCursor.style.left = x + 'px'
-    peerCursor.style.top = y + 'px'
-  }
-  ```
-
-- ### `ping(peerId)`
-
-  Takes a peer ID and returns a promise that resolves to the milliseconds the
-  round-trip to that peer took. Use this for measuring latency.
-  - `peerId` - Peer ID string of the target peer.
-
-  Example:
-
-  ```js
-  // log round-trip time every 2 seconds
-  room.onPeerJoin = peerId =>
-    setInterval(
-      async () => console.log(`took ${await room.ping(peerId)}ms`),
-      2000
-    )
-  ```
-
-### `selfId`
-
-A unique ID string other peers will know the local user as globally across
-rooms.
-
-### `getRelaySockets()`
-
-**(🌊 BitTorrent, 🐦 Nostr, 📡 MQTT, 🔌 WebSocket relay only)** Returns an
-object of relay URL keys mapped to their WebSocket connections. This can be
-useful for determining the state of the user's connection to the relays and
-handling any connection failures.
-
-Example:
-
-```js
-import {getRelaySockets} from '@trystero-p2p/torrent'
-
-console.log(getRelaySockets())
-// => Object {
-//  "wss://tracker.webtorrent.dev": WebSocket,
-//  "wss://tracker.openwebtorrent.com": WebSocket
-//  }
-```
-
-### `pauseRelayReconnection()`
-
-**(🐦 Nostr, 🌊 BitTorrent only)** Normally Trystero will try to automatically
-reconnect to relay sockets unless `relayConfig.manualReconnection: true` is set
-in the room config. Calling this function stops relay reconnection attempts
-until `resumeRelayReconnection()` is called.
-
-### `resumeRelayReconnection()`
-
-**(🐦 Nostr, 🌊 BitTorrent only)** Allows relay reconnection attempts to resume.
-(See `pauseRelayReconnection()` above).
-
-## Which strategy should I choose?
-
-By default Trystero uses the Nostr network which is highly decentralized with
-hundreds of active relays running. This is a good choice if you're interested in
-decentralization and high redundancy. The other decentralized strategies are
-recommended in the order of MQTT, BitTorrent, and IPFS, based on robustness.
-These networks have far less relay redundancy than Nostr, but you might prefer
-them for other reasons. You can of course host your own relay server for any of
-these strategies.
-
-For a middleground between using public relays and self-hosting, the built-in
-Supabase and Firebase strategies are a good option.
+---
+
+## Documentation
+
+Dive deeper into any feature or browse the full API:
+
+| Guide                                                            | What's inside                                                                                                                 |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| **[Shared & Per-User State](./docs/state.md)**                   | `makeUserState`, `makeState`, validation rules, late-joiner sync, and React (`useSyncExternalStore`)                          |
+| **[Identity, Presence & Room Access](./docs/identity.md)**       | `userId` vs `peerId`, multi-tab presence, custom identity keys, room `password`s, `maxUsers`, and `onError`                   |
+| **[Admins, Roles & Moderation](./docs/roles.md)**                | `roles()`, self-certifying rooms, fixed admins, custom roles, authoritative state, and banning                                |
+| **[Actions, RPC & File Transfers](./docs/actions.md)**           | `makeAction`, `send`, `request` & `requestMany`, TypeScript types, binary metadata, progress bars, and `onReceive`            |
+| **[Audio, Video & Screen Sharing](./docs/media.md)**             | `addStream`, `onPeerStream`, `removeStream`, camera/screen switching (`replaceTrack`), and stream metadata                    |
+| **[Scaling Large Rooms](./docs/scaling.md)**                     | Multi-hop routing with `scale()`, direct media/file promotion, and `getTopology()`                                            |
+| **[Signaling & Relays](./docs/signaling.md)**                    | Default zero-config relays, Supabase, Firebase, MQTT, BitTorrent, self-hosted `ws-relay`, custom strategies, and bundle sizes |
+| **[Running in Node, Bun & Deno](./docs/server-side.md)**         | Headless peers, Raspberry Pi / IoT setups, and `passive` state backup peers                                                   |
+| **[NAT Traversal & Troubleshooting](./docs/troubleshooting.md)** | Configuring TURN servers, diagnosing strict firewalls, and `ping()`                                                           |
+| **[Full API Reference](./docs/api.md)**                          | Complete function signatures, TypeScript types, config options, and error codes                                               |
+| **[Upgrading to 0.27.0](./MIGRATION.md)**                        | Architectural overview, breaking changes, and before/after migration examples                                                 |
 
 ---
 

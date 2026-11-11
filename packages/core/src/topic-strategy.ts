@@ -1,27 +1,17 @@
-import {shouldActivatePassiveRoom} from './signal-handler'
-import createStrategy from './strategy'
-import {mkErr, selfId, toJson} from './utils'
 import type {
   BaseRoomConfig,
   JoinRoom,
-  JoinRoomConfig,
   StrategyContext,
+  StrategyMessage,
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext
-} from './types'
+} from './internal-types'
+import createStrategy from './strategy'
+import type {JoinRoomConfig} from './types'
+import {noOp} from './utils'
 
 const defaultSteadyAnnounceIntervalMs = 60_000
-
-const requireContext = <TConfig extends BaseRoomConfig>(
-  context?: StrategyContext<TConfig>
-): StrategyContext<TConfig> => {
-  if (!context) {
-    throw mkErr('topic strategy missing room context')
-  }
-
-  return context
-}
 
 const makeTopicContext = <
   TConfig extends BaseRoomConfig,
@@ -37,23 +27,26 @@ const makeTopicContext = <
   roomId: string
   rootTopic: string
   selfTopic: string
+  peerId: string
 } => ({
   kind,
   appId: context.appId,
   roomId: context.roomId,
   rootTopic,
-  selfTopic
+  selfTopic,
+  peerId: context.peerId
 })
 
 export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
+  defaultConfig,
   steadyAnnounceIntervalMs = defaultSteadyAnnounceIntervalMs,
   reannounceOnDisconnect = true,
   init,
   subscribeTopic,
-  publishTopic,
-  unpublishTopic
+  publishTopic
 }: TopicStrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig> =>
   createStrategy<TRelay, TConfig>({
+    ...(defaultConfig === undefined ? {} : {defaultConfig}),
     init,
 
     subscribe: async (
@@ -62,122 +55,94 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       selfTopic,
       onMessage,
       _getOffers,
-      rawContext
+      context
     ) => {
-      const context = requireContext(rawContext)
-      const signalPeer = (peerTopic: string, signal: string) =>
-        void publishTopic(
-          relay,
-          peerTopic,
-          signal,
-          makeTopicContext(context, 'signal', rootTopic, selfTopic)
-        )
+      let closed = false
 
-      let selfCleanup: (() => void) | null = null
-      let selfCleanupDone = false
-      let selfSubscriptionP: Promise<void> | null = null
-      let didCleanup = false
-
-      const cleanupSelf = (cleanup: () => void): void => {
-        if (selfCleanupDone) {
+      const signalPeer = (peerTopic: string, signal: string): void => {
+        if (closed) {
           return
         }
-
-        selfCleanupDone = true
-        cleanup()
-      }
-
-      const ensureSelfSubscription = (): Promise<void> => {
-        if (!selfSubscriptionP) {
-          selfSubscriptionP = Promise.resolve(
-            subscribeTopic(
+        try {
+          void Promise.resolve(
+            publishTopic(
               relay,
-              selfTopic,
-              (topic, msg) => {
-                if (!didCleanup) {
-                  void onMessage(topic, msg, signalPeer)
-                }
-              },
-              makeTopicContext(context, 'self', rootTopic, selfTopic)
+              peerTopic,
+              signal,
+              makeTopicContext(context, 'signal', rootTopic, selfTopic)
             )
-          ).then(cleanup => {
-            selfCleanup = cleanup
-
-            if (didCleanup) {
-              cleanupSelf(cleanup)
-            }
-          })
+          ).catch(noOp)
+        } catch {
+          // Ignore synchronous publish failures during fire-and-forget signaling
         }
-
-        return selfSubscriptionP
       }
 
-      if (!context.isPassive) {
-        await ensureSelfSubscription()
+      const forwardMessage = (topic: string, msg: StrategyMessage) => {
+        if (!closed) {
+          return onMessage(topic, msg, signalPeer)
+        }
       }
 
-      const rootCleanup = await subscribeTopic(
+      const selfCleanup = await subscribeTopic(
         relay,
-        rootTopic,
-        async (topic, msg) => {
-          if (didCleanup) {
-            return
-          }
-
-          if (context.isPassive && shouldActivatePassiveRoom(msg)) {
-            await ensureSelfSubscription()
-          }
-
-          if (!didCleanup) {
-            await onMessage(topic, msg, signalPeer)
-          }
-        },
-        makeTopicContext(context, 'root', rootTopic, selfTopic)
+        selfTopic,
+        forwardMessage,
+        makeTopicContext(context, 'self', rootTopic, selfTopic)
       )
 
+      let rootCleanup: () => void
+      try {
+        rootCleanup = await subscribeTopic(
+          relay,
+          rootTopic,
+          forwardMessage,
+          makeTopicContext(context, 'root', rootTopic, selfTopic)
+        )
+      } catch (err) {
+        closed = true
+        selfCleanup()
+        throw err
+      }
+
       return () => {
-        didCleanup = true
-
-        if (selfCleanup) {
-          cleanupSelf(selfCleanup)
-        } else {
-          void selfSubscriptionP
+        if (closed) {
+          return
         }
-
+        closed = true
+        selfCleanup()
         rootCleanup()
       }
     },
 
-    announce: async (relay, rootTopic, selfTopic, extraPayload, rawContext) => {
-      const context = requireContext(rawContext)
+    announce: async (relay, rootTopic, selfTopic, context) => {
       const result = await publishTopic(
         relay,
         rootTopic,
-        toJson({peerId: selfId, ...extraPayload}),
+        {
+          peerId: context.peerId
+        },
         makeTopicContext(context, 'announce', rootTopic, selfTopic)
       )
 
-      return typeof result === 'number' ||
-        (result !== undefined && 'stopAnnouncing' in result)
-        ? result
-        : {
-            nextAnnounceMs: result?.nextAnnounceMs ?? steadyAnnounceIntervalMs,
-            reannounceOnDisconnect:
-              result?.reannounceOnDisconnect ?? reannounceOnDisconnect
-          }
-    },
+      if (typeof result === 'number') {
+        return result
+      }
 
-    ...(unpublishTopic
-      ? {
-          deactivate: (relay, rootTopic, selfTopic, rawContext) => {
-            const context = requireContext(rawContext)
-
-            return unpublishTopic(
-              relay,
-              rootTopic,
-              makeTopicContext(context, 'announce', rootTopic, selfTopic)
-            )
-          }
+      if (typeof result === 'object' && result !== null) {
+        if ('stopAnnouncing' in result) {
+          return result
         }
-      : {})
+
+        return {
+          nextAnnounceMs: result.nextAnnounceMs ?? steadyAnnounceIntervalMs,
+          reannounceOnDisconnect:
+            result.reannounceOnDisconnect ?? reannounceOnDisconnect
+        }
+      }
+
+      return {
+        nextAnnounceMs: steadyAnnounceIntervalMs,
+        reannounceOnDisconnect
+      }
+    }
   })

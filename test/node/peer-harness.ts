@@ -1,10 +1,57 @@
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionManager} from '../../packages/core/src/actions.ts'
 import assert from 'node:assert/strict'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
+import type {
+  InternalRoomContext,
+  KernelRolesProvider,
+  KernelScaleProvider,
+  PeerHandle
+} from '../../packages/core/src/internal-types.ts'
+import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
+import {
+  base62Alphabet,
+  pluginSlotSymbol
+} from '../../packages/core/src/primitives.ts'
 import createRoom from '../../packages/core/src/room.ts'
+import type {
+  Room,
+  RoomPlugin,
+  UserIdentity
+} from '../../packages/core/src/types.ts'
+import {internalActionPrefix} from '../../packages/core/src/utils.ts'
+import {
+  allocTestPeerIds,
+  createSortedJoinRooms,
+  getTestEndpointByPeerId,
+  joinAsTestPeer,
+  testEndpoint,
+  testPeerId,
+  withTestPeerId
+} from './test-identity.ts'
 
-type PeerHandlers = Record<string, (...args: any[]) => void>
+export {
+  allocTestPeerIds,
+  createSortedJoinRooms,
+  getTestEndpointByPeerId,
+  internalActionPrefix,
+  joinAsTestPeer,
+  testEndpoint,
+  testPeerId,
+  withTestPeerId
+}
+
+type PeerHandlers = {
+  connect?: () => void
+  close?: () => void
+  data?: (data: ArrayBuffer) => void
+  stream?: (stream: TestMediaStream | MediaStream) => void
+  track?: (
+    track: TestMediaTrack | MediaStreamTrack,
+    stream: TestMediaStream | MediaStream
+  ) => void
+  signal?: (sdp: unknown) => void
+  error?: (err: Error) => void
+  [key: string]: ((...args: any[]) => void) | undefined
+}
 type TestMediaTrack = {id: string}
 type TestMediaStream = {
   id: string
@@ -35,7 +82,7 @@ export const waitFor = async (
   }
 }
 
-export const withTimeout = (promise, ms = 500) =>
+export const withTimeout = <T>(promise: Promise<T>, ms = 500): Promise<T> =>
   Promise.race([
     promise,
     wait(ms).then(() => {
@@ -43,46 +90,18 @@ export const withTimeout = (promise, ms = 500) =>
     })
   ])
 
-export const encodeInternalAction = type => {
-  const typeBytes = encoder.encode(type)
+export const encodeInternalAction = (type: string): ArrayBuffer => {
+  const wireType = type.startsWith(internalActionPrefix)
+    ? type
+    : `${internalActionPrefix}${type}`
+  const typeBytes = encoder.encode(wireType)
   assert.ok(typeBytes.byteLength <= internalTypeByteLimit)
 
   const packet = new Uint8Array(36)
-  packet[0] = 2 // wire version; inline empty string, with no metadata
+  packet[0] = 3 // wire version; inline empty string, with no metadata
   packet.set(typeBytes, 2)
 
   return packet.buffer
-}
-
-export const roomFrame = (
-  token: string,
-  payloadOrSize: ArrayBuffer | Uint8Array | number[] | number = 16_384
-) => {
-  const name = encoder.encode(token)
-  const payload =
-    typeof payloadOrSize === 'number'
-      ? new Uint8Array(payloadOrSize)
-      : payloadOrSize instanceof Uint8Array
-        ? payloadOrSize
-        : Array.isArray(payloadOrSize)
-          ? Uint8Array.from(payloadOrSize)
-          : new Uint8Array(payloadOrSize)
-  const bytes = new Uint8Array(3 + name.length + payload.byteLength)
-  bytes[0] = 1
-  new DataView(bytes.buffer).setUint16(1, name.length)
-  bytes.set(name, 3)
-  bytes.set(payload, 3 + name.length)
-  return bytes.buffer
-}
-
-export const presenceFrame = (token: string, present = true) => {
-  const bytes = encoder.encode(token)
-  const frame = new Uint8Array(4 + bytes.length)
-  frame[0] = 2
-  frame[1] = Number(present)
-  new DataView(frame.buffer).setUint16(2, bytes.length)
-  frame.set(bytes, 4)
-  return frame.buffer
 }
 
 export const actionStartFrame = (
@@ -107,7 +126,7 @@ export const actionStartFrame = (
   const header = payload ? 36 : 48
   const bytes = new Uint8Array(header + meta.length + (payload?.length ?? 0))
   const view = new DataView(bytes.buffer)
-  bytes[0] = 2
+  bytes[0] = 3
   bytes[1] = (payload ? 0 : 1) | (format << 4)
   bytes.set(encoder.encode(type), 2)
   view.setUint16(34, meta.length)
@@ -127,17 +146,17 @@ export class MockDataChannel {
   binaryType = 'arraybuffer'
   bufferedAmount = 0
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((ev: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((ev: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
     this.onclose?.()
   }
 
-  send() {}
+  send(_data?: unknown) {}
 }
 
 export class MockRTCPeerConnection {
@@ -145,23 +164,23 @@ export class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  remoteDescription = null
-  onnegotiationneeded = null
-  onconnectionstatechange = null
-  ontrack = null
-  ondatachannel = null
-  listeners = {}
+  localDescription: {type: string; sdp: string} | null = null
+  remoteDescription: {type: string; sdp: string} | null = null
+  onnegotiationneeded: (() => void) | null = null
+  onconnectionstatechange: (() => void) | null = null
+  ontrack: ((ev: unknown) => void) | null = null
+  ondatachannel: ((ev: {channel: MockDataChannel}) => void) | null = null
+  listeners: Record<string, Set<(...args: any[]) => void>> = {}
 
-  createDataChannel() {
+  createDataChannel(_label?: string) {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: (...args: any[]) => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: (...args: any[]) => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -171,13 +190,15 @@ export class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: {type: string; sdp?: string}) {
     if (description?.type === 'rollback') {
       this.signalingState = 'stable'
       return
     }
 
-    const nextDescription = description ?? (await this.createOffer())
+    const nextDescription = description
+      ? {type: description.type, sdp: description.sdp ?? ''}
+      : await this.createOffer()
     this.localDescription = nextDescription
     this.signalingState =
       nextDescription.type === 'offer' ? 'have-local-offer' : 'stable'
@@ -185,8 +206,10 @@ export class MockRTCPeerConnection {
     this.listeners['icegatheringstatechange']?.forEach(listener => listener())
   }
 
-  async setRemoteDescription(description) {
-    this.remoteDescription = description ?? {type: 'answer', sdp: 'mock-answer'}
+  async setRemoteDescription(description?: {type: string; sdp?: string}) {
+    this.remoteDescription = description
+      ? {type: description.type, sdp: description.sdp ?? ''}
+      : {type: 'answer', sdp: 'mock-answer'}
     this.signalingState = 'stable'
   }
 
@@ -207,6 +230,16 @@ export class MockRTCPeerConnection {
   removeTrack() {}
 }
 
+let mockFingerprintCounter = 0
+
+const nextMockFingerprintSdp = () => {
+  const n = ++mockFingerprintCounter
+  const b0 = ((n >>> 16) & 0xff).toString(16).padStart(2, '0').toUpperCase()
+  const b1 = ((n >>> 8) & 0xff).toString(16).padStart(2, '0').toUpperCase()
+  const b2 = (n & 0xff).toString(16).padStart(2, '0').toUpperCase()
+  return `v=0\r\na=fingerprint:sha-256 AA:BB:CC:${b0}:${b1}:${b2}\r\n`
+}
+
 export class MockPeer {
   created = Date.now()
   isDead = false
@@ -216,6 +249,8 @@ export class MockPeer {
   connection = {
     connectionState: 'connected',
     iceConnectionState: 'connected',
+    localDescription: {type: 'offer', sdp: nextMockFingerprintSdp()},
+    remoteDescription: {type: 'answer', sdp: nextMockFingerprintSdp()},
     getSenders: () => []
   }
   channel = {
@@ -244,17 +279,17 @@ export class MockPeer {
     this.handlers.close?.()
   }
 
-  setHandlers(newHandlers) {
+  setHandlers(newHandlers: PeerHandlers) {
     Object.assign(this.handlers, newHandlers)
   }
 
-  addStream() {}
-  removeStream() {}
-  addTrack() {
+  addStream(_stream?: unknown) {}
+  removeStream(_stream?: unknown) {}
+  addTrack(_track?: unknown, _stream?: unknown) {
     return {}
   }
-  removeTrack() {}
-  replaceTrack() {}
+  removeTrack(_track?: unknown) {}
+  async replaceTrack(_oldTrack?: unknown, _newTrack?: unknown) {}
 }
 
 export class LinkedPeer {
@@ -263,10 +298,12 @@ export class LinkedPeer {
   handlers: PeerHandlers = {}
   offerPromise = Promise.resolve()
   partner: LinkedPeer | null = null
-  lastSentData = null
+  lastSentData: ArrayBuffer | null = null
   connection = {
     connectionState: 'connected',
     iceConnectionState: 'connected',
+    localDescription: {type: 'offer', sdp: nextMockFingerprintSdp()},
+    remoteDescription: {type: 'answer', sdp: nextMockFingerprintSdp()},
     getSenders: () => []
   }
   channel = {
@@ -279,9 +316,10 @@ export class LinkedPeer {
 
   async signal() {}
 
-  sendData(data) {
-    this.lastSentData = data.slice().buffer
-    this.partner?.handlers.data?.(data.slice().buffer)
+  sendData(data: Uint8Array | ArrayBuffer) {
+    const view = data instanceof Uint8Array ? data : new Uint8Array(data)
+    this.lastSentData = view.slice().buffer
+    this.partner?.handlers.data?.(view.slice().buffer)
   }
 
   destroy() {
@@ -295,17 +333,17 @@ export class LinkedPeer {
     this.handlers.close?.()
   }
 
-  setHandlers(newHandlers) {
+  setHandlers(newHandlers: PeerHandlers) {
     Object.assign(this.handlers, newHandlers)
   }
 
   addStream(_stream?: TestMediaStream) {}
-  removeStream() {}
+  removeStream(_stream?: TestMediaStream) {}
   addTrack(_track?: TestMediaTrack, _stream?: TestMediaStream) {
     return {}
   }
-  removeTrack() {}
-  replaceTrack() {}
+  removeTrack(_track?: TestMediaTrack) {}
+  async replaceTrack(_oldTrack?: TestMediaTrack, _newTrack?: TestMediaTrack) {}
 }
 
 export class BufferedPeer extends LinkedPeer {
@@ -315,8 +353,9 @@ export class BufferedPeer extends LinkedPeer {
     this.handlers.connect?.()
   }
 
-  override sendData(data: Uint8Array) {
-    const payload = data.slice().buffer
+  override sendData(data: Uint8Array | ArrayBuffer) {
+    const view = data instanceof Uint8Array ? data : new Uint8Array(data)
+    const payload = view.slice().buffer
     const partner = this.partner as BufferedPeer
 
     queueMicrotask(() => {
@@ -325,20 +364,25 @@ export class BufferedPeer extends LinkedPeer {
     })
   }
 
-  override setHandlers(handlers) {
+  override setHandlers(handlers: PeerHandlers) {
     super.setHandlers(handlers)
     this.flush()
   }
 
   flush() {
-    if (this.handlers.data) {
-      this.inbox.splice(0).forEach(data => this.handlers.data(data))
+    const onData = this.handlers.data
+    if (onData) {
+      this.inbox.splice(0).forEach(data => onData(data))
     }
   }
 }
 
 export class LinkedMediaPeer extends LinkedPeer {
   addStreamCalls = 0
+  addTrackCalls = 0
+  removeTrackCalls = 0
+  replaceTrackCalls = 0
+  replacedTrackIds = new Map<string, string>()
   remoteStreams = new Map<
     string,
     {stream: TestMediaStream; tracksById: Map<string, TestMediaTrack>}
@@ -370,7 +414,7 @@ export class LinkedMediaPeer extends LinkedPeer {
     return {stream: streamEntry.stream, track: remoteTrack, isNew: true}
   }
 
-  addStream(stream: TestMediaStream) {
+  override addStream(stream: TestMediaStream) {
     this.addStreamCalls += 1
 
     stream.getTracks().forEach(track => {
@@ -379,24 +423,46 @@ export class LinkedMediaPeer extends LinkedPeer {
       )?.ensureRemoteTrack(track, stream)
 
       if (remote?.isNew) {
-        this.partner?.handlers.track?.(remote.track, remote.stream)
         this.partner?.handlers.stream?.(remote.stream)
       }
     })
   }
 
-  addTrack(track: TestMediaTrack, stream: TestMediaStream) {
+  override removeStream(stream: TestMediaStream) {
+    ;(this.partner as LinkedMediaPeer | null)?.remoteStreams.delete(stream.id)
+  }
+
+  override addTrack(track: TestMediaTrack, stream: TestMediaStream) {
+    this.addTrackCalls += 1
     const remote = (this.partner as LinkedMediaPeer | null)?.ensureRemoteTrack(
       track,
       stream
     )
 
     if (remote?.isNew) {
-      this.partner?.handlers.track?.(remote.track, remote.stream)
       this.partner?.handlers.stream?.(remote.stream)
     }
 
     return {}
+  }
+
+  override removeTrack(track: TestMediaTrack) {
+    this.removeTrackCalls += 1
+    const targetId = this.replacedTrackIds.get(track.id) ?? track.id
+    ;(this.partner as LinkedMediaPeer | null)?.remoteStreams.forEach(entry => {
+      entry.tracksById.delete(targetId)
+    })
+  }
+
+  override async replaceTrack(
+    oldTrack: TestMediaTrack,
+    newTrack: TestMediaTrack
+  ) {
+    this.replaceTrackCalls += 1
+    if (oldTrack?.id && newTrack?.id) {
+      const originalId = this.replacedTrackIds.get(oldTrack.id) ?? oldTrack.id
+      this.replacedTrackIds.set(newTrack.id, originalId)
+    }
   }
 }
 
@@ -406,39 +472,65 @@ export const linkPeers = <A extends LinkedPeer, B extends LinkedPeer>(
 ): {peerA: A; peerB: B} => {
   peerA.partner = peerB
   peerB.partner = peerA
+  peerA.connection.remoteDescription = {
+    type: 'answer',
+    sdp: peerB.connection.localDescription.sdp
+  }
+  peerB.connection.remoteDescription = {
+    type: 'answer',
+    sdp: peerA.connection.localDescription.sdp
+  }
 
   return {peerA, peerB}
 }
 
 export const createJoinedRooms = async () => {
-  let registerPeerA = null
-  let registerPeerB = null
+  const epA = testEndpoint('joined-room-a')
+  const epB = testEndpoint('joined-room-b')
+  let registerPeerA: ((peer: PeerHandle, id: string) => void) | null = null
+  let registerPeerB: ((peer: PeerHandle, id: string) => void) | null = null
   const roomA = createRoom(
     f => {
       registerPeerA = f
     },
     () => {},
-    () => {}
+    () => {},
+    {endpointIdentity: epA, appId: 'joined-app', roomId: 'joined-room'}
   )
   const roomB = createRoom(
     f => {
       registerPeerB = f
     },
     () => {},
-    () => {}
+    () => {},
+    {endpointIdentity: epB, appId: 'joined-app', roomId: 'joined-room'}
   )
-  const joinA = new Promise(resolve => (roomA.onPeerJoin = resolve))
-  const joinB = new Promise(resolve => (roomB.onPeerJoin = resolve))
+  const joinA = new Promise(resolve => roomA.onPeerJoin(resolve, {once: true}))
+  const joinB = new Promise(resolve => roomB.onPeerJoin(resolve, {once: true}))
   const {peerA, peerB} = linkPeers(new LinkedPeer(), new LinkedPeer())
 
-  assert.ok(registerPeerA, 'expected first room to register its peer callback')
-  assert.ok(registerPeerB, 'expected second room to register its peer callback')
-  registerPeerA(peerA, 'peer-b')
-  registerPeerB(peerB, 'peer-a')
+  if (!registerPeerA || !registerPeerB) {
+    assert.fail('expected both rooms to register their peer callbacks')
+  }
+  ;(registerPeerA as (peer: PeerHandle, id: string) => void)(
+    peerA as unknown as PeerHandle,
+    epB.peerId
+  )
+  ;(registerPeerB as (peer: PeerHandle, id: string) => void)(
+    peerB as unknown as PeerHandle,
+    epA.peerId
+  )
 
   await Promise.all([joinA, joinB])
 
-  return {roomA, roomB, peerA, peerB}
+  return {
+    roomA,
+    roomB,
+    peerA,
+    peerB,
+    peerIdA: epA.peerId,
+    peerIdB: epB.peerId
+  }
 }
 
 export const linkedActions = (maxReceiveBytes?: number) => {
@@ -446,15 +538,14 @@ export const linkedActions = (maxReceiveBytes?: number) => {
   const frames: {from: string; kind: number; id: number}[] = []
   const peer = (from: string, deliver: (data: ArrayBuffer) => void) => ({
     sendData: (bytes: Uint8Array) => {
+      const b1 = bytes[1] ?? 0
       frames.push({
         from,
-        kind: bytes[1] & 15,
+        kind: b1 & 15,
         id:
-          (bytes[1] & 15) === 0
+          (b1 & 15) === 0
             ? -1
-            : new DataView(bytes.buffer).getUint32(
-                (bytes[1] & 15) === 1 ? 36 : 2
-              )
+            : new DataView(bytes.buffer).getUint32((b1 & 15) === 1 ? 36 : 2)
       })
       deliver(bytes.slice().buffer)
     },
@@ -469,7 +560,7 @@ export const linkedActions = (maxReceiveBytes?: number) => {
       disconnected = true
       left.clearPeer(id, error)
     },
-    getPeer: () => toRight as never,
+    getTransport: () => createDirectPeerTransport(toRight as never),
     getPeerIds: () => ['right'],
     canReceiveFromPeer: () => !disconnected
   })
@@ -478,7 +569,7 @@ export const linkedActions = (maxReceiveBytes?: number) => {
       disconnected = true
       right.clearPeer(id, error)
     },
-    getPeer: () => toLeft as never,
+    getTransport: () => createDirectPeerTransport(toLeft as never),
     getPeerIds: () => ['left'],
     canReceiveFromPeer: () => !disconnected,
     ...(maxReceiveBytes === undefined ? {} : {maxReceiveBytes})
@@ -494,3 +585,291 @@ export const linkedActions = (maxReceiveBytes?: number) => {
     }
   }
 }
+
+export const makeTrack = (
+  id: string,
+  readyState: MediaStreamTrackState = 'live'
+): MediaStreamTrack =>
+  ({
+    id,
+    kind: 'video',
+    readyState
+  }) as unknown as MediaStreamTrack
+
+export const makeStream = (
+  id: string,
+  tracks: MediaStreamTrack[],
+  active?: boolean
+): MediaStream =>
+  ({
+    id,
+    ...(active === undefined ? {} : {active}),
+    getTracks: () => tracks
+  }) as unknown as MediaStream
+
+export const createLinkedHandlePair = () => {
+  let handlersA: Parameters<PeerHandle['setHandlers']>[0] = {}
+  let handlersB: Parameters<PeerHandle['setHandlers']>[0] = {}
+  let deadA = false
+  let deadB = false
+  const sdpA = nextMockFingerprintSdp()
+  const sdpB = nextMockFingerprintSdp()
+
+  const makeEndpoint = (
+    isA: boolean
+  ): PeerHandle & {
+    emitRemoteStream: (stream: MediaStream) => void
+  } => ({
+    get isDead() {
+      return isA ? deadA : deadB
+    },
+    connection: {
+      connectionState: 'connected',
+      iceConnectionState: 'connected',
+      signalingState: 'stable',
+      localDescription: {type: 'offer', sdp: isA ? sdpA : sdpB},
+      remoteDescription: {type: 'answer', sdp: isA ? sdpB : sdpA},
+      getSenders: () => [],
+      getTransceivers: () => []
+    } as unknown as RTCPeerConnection,
+    channel: {
+      readyState: 'open',
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    } as unknown as RTCDataChannel,
+    getOffer: async () => undefined,
+    signal: async () => undefined,
+    sendData: data => {
+      const copy = new Uint8Array(data.byteLength)
+      copy.set(
+        data instanceof Uint8Array
+          ? data
+          : new Uint8Array(data as ArrayBufferLike)
+      )
+      queueMicrotask(() => {
+        const target = isA ? handlersB : handlersA
+        const targetDead = isA ? deadB : deadA
+        if (!targetDead) {
+          target.data?.(copy.buffer)
+        }
+      })
+    },
+    destroy: () => {
+      if (isA) {
+        if (deadA) {
+          return
+        }
+        deadA = true
+        queueMicrotask(() => {
+          if (!deadB) {
+            deadB = true
+            handlersB.close?.()
+          }
+        })
+      } else {
+        if (deadB) {
+          return
+        }
+        deadB = true
+        queueMicrotask(() => {
+          if (!deadA) {
+            deadA = true
+            handlersA.close?.()
+          }
+        })
+      }
+    },
+    setHandlers: next => {
+      if (isA) {
+        handlersA = {...handlersA, ...next}
+      } else {
+        handlersB = {...handlersB, ...next}
+      }
+    },
+    addStream: stream => {
+      const target = isA ? handlersB : handlersA
+      queueMicrotask(() => {
+        target.stream?.(stream)
+      })
+    },
+    removeStream: () => {},
+    addTrack: (_track, stream) => {
+      const target = isA ? handlersB : handlersA
+      queueMicrotask(() => {
+        target.stream?.(stream)
+      })
+      return {} as RTCRtpSender
+    },
+    removeTrack: () => {},
+    replaceTrack: async () => {},
+    emitRemoteStream: stream => {
+      const local = isA ? handlersA : handlersB
+      local.stream?.(stream)
+    }
+  })
+
+  return {
+    peerA: makeEndpoint(true),
+    peerB: makeEndpoint(false)
+  }
+}
+
+export const connectVerifiedPeers = (
+  regMap: Map<string, (peer: PeerHandle, id: string) => void>,
+  _roomA: Room,
+  idA: string,
+  _userA: UserIdentity,
+  _roomB: Room,
+  idB: string,
+  _userB: UserIdentity
+) => {
+  const link = createLinkedHandlePair()
+  regMap.get(idA)!(link.peerA, idB)
+  regMap.get(idB)!(link.peerB, idA)
+  return link
+}
+
+export const higherPeerId = (selfId: string): string => {
+  for (let i = 0; i < selfId.length; i++) {
+    const idx = base62Alphabet.indexOf(selfId[i]!)
+    if (idx >= 0 && idx < base62Alphabet.length - 1) {
+      return selfId.slice(0, i) + base62Alphabet[idx + 1]! + selfId.slice(i + 1)
+    }
+  }
+  throw new Error(`cannot compute peerId higher than ${selfId}`)
+}
+
+export const lowerPeerId = (selfId: string): string => {
+  for (let i = 0; i < selfId.length; i++) {
+    const idx = base62Alphabet.indexOf(selfId[i]!)
+    if (idx > 0) {
+      return selfId.slice(0, i) + base62Alphabet[idx - 1]! + selfId.slice(i + 1)
+    }
+  }
+  throw new Error(`cannot compute peerId lower than ${selfId}`)
+}
+
+export const makeTestPluginSlot = <
+  TName extends 'roles' | 'scale',
+  TApi extends Record<string, unknown> = Record<string, never>
+>(
+  kind: TName,
+  setupApi: (
+    kernel: InternalRoomContext,
+    effectiveRoomIdP?: Promise<string>
+  ) => TApi,
+  options: {
+    selfAsAdmin?: boolean
+    provider?: Partial<KernelRolesProvider & KernelScaleProvider>
+  } = {}
+): RoomPlugin<TName, TApi> =>
+  ({
+    name: kind,
+    [pluginSlotSymbol]:
+      kind === 'roles'
+        ? {
+            kind: 'roles' as const,
+            selfAsAdmin: Boolean(options.selfAsAdmin),
+            setup: (
+              kernel: InternalRoomContext,
+              effectiveRoomIdP?: Promise<string>
+            ) => ({
+              provider: {
+                isAuthorityResolved: () => true,
+                getEffectiveRoomId: () => kernel.getRoomId(),
+                getPeerRoles: () => [],
+                isPeerBanned: () => false,
+                getBanReason: () => undefined,
+                getLocalActionCert: async () => null,
+                authorizePeerAction: () => true,
+                getStateWriteCert: async () => ({cert: null, roles: []}),
+                verifyStateRecordRoles: async () => ({valid: true, roles: []}),
+                onPeerDescriptorCert: () => {},
+                getAuthorityInfo: async () => ({
+                  userId: (await kernel.getLocalUserIdentity()).userId,
+                  roomId: kernel.getRoomId(),
+                  baseRoomId: kernel.initialRoomId,
+                  isAdmin: false,
+                  roles: []
+                }),
+                ...(options.provider as Partial<KernelRolesProvider>)
+              },
+              api: {
+                grantRole: async () => {},
+                revokeRole: async () => {},
+                getRoles: () => [],
+                onRoleChange: () => () => {},
+                ban: async () => {},
+                unban: async () => {},
+                isBanned: () => false,
+                ...setupApi(kernel, effectiveRoomIdP)
+              } as never
+            })
+          }
+        : {
+            kind: 'scale' as const,
+            setup: (kernel: InternalRoomContext) => ({
+              provider: {
+                isDirectPeer: () => false,
+                isVirtualPeer: () => false,
+                getRoute: () => undefined,
+                getSnapshot: () => ({
+                  peerId: kernel.selfId,
+                  directPeerIds: kernel.getDirectActivePeerIds(),
+                  roomPeerIds: kernel.getActivePeerIds(),
+                  routes: {},
+                  stats: {
+                    messagesSent: 0,
+                    messagesRelayed: 0,
+                    messagesReceived: 0,
+                    duplicatesDropped: 0,
+                    signatureFailures: 0,
+                    directMediaConnections: 0
+                  }
+                }),
+                handleFrame: () => false,
+                addDirectPeer: () => {},
+                removeDirectPeer: () => {},
+                prepareMediaPeer: async () => {
+                  throw new Error('peer disconnected')
+                },
+                setPeerMediaPinned: () => {},
+                broadcastInline: () => false,
+                requireDirectPeer: () => {},
+                notePeerDiscovered: () => false,
+                shouldConnectPeer: () => true,
+                getTargetNeighbors: () => new Set<string>(),
+                setOnTargetsChanged: () => {},
+                announceLeave: async () => {},
+                destroy: () => {},
+                getPeerUserId: () => undefined,
+                setPeerSignPublicKey: () => {},
+                setLocalRoleCertificate: () => {},
+                markPeerBanned: () => {},
+                unmarkPeerBanned: () => {},
+                isPeerBanned: () => false,
+                registerActionAuthority: () => {},
+                ...(options.provider as Partial<KernelScaleProvider>)
+              },
+              api: {
+                getTopology: () => ({
+                  peerId: kernel.selfId,
+                  directPeerIds: kernel.getDirectActivePeerIds(),
+                  roomPeerIds: kernel.getActivePeerIds(),
+                  routes: {},
+                  stats: {
+                    messagesSent: 0,
+                    messagesRelayed: 0,
+                    messagesReceived: 0,
+                    duplicatesDropped: 0,
+                    signatureFailures: 0,
+                    directMediaConnections: 0
+                  }
+                }),
+                ...setupApi(kernel)
+              } as never
+            })
+          }
+  }) as unknown as RoomPlugin<TName, TApi>

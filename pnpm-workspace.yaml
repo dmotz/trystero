@@ -4,3 +4,4 @@ allowBuilds:
   '@firebase/util': true
   protobufjs: true
 minimumReleaseAge: 0
+engineStrict: true

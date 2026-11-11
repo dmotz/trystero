@@ -183,19 +183,15 @@ const startPeer = (
   roomId: string,
   config: Record<string, unknown>
 ): PeerProcess => {
-  const child = spawn(
-    process.execPath,
-    ['--import', 'jiti/register', peerScript],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        TRYSTERO_NOSTR_MEASURE_CONFIG: JSON.stringify(config),
-        TRYSTERO_NOSTR_MEASURE_ROOM: roomId,
-        TRYSTERO_NOSTR_MEASURE_ROLE: role
-      }
+  const child = spawn(process.execPath, [peerScript], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      TRYSTERO_NOSTR_MEASURE_CONFIG: JSON.stringify(config),
+      TRYSTERO_NOSTR_MEASURE_ROOM: roomId,
+      TRYSTERO_NOSTR_MEASURE_ROLE: role
     }
-  )
+  })
   let stderr = ''
   let settled = false
   const connected = new Promise<PeerResult>((resolve, reject) => {

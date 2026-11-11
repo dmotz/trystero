@@ -1,38 +1,185 @@
-import type {BaseRoomConfig, RelayConfig, SocketClient} from './types'
+import {createEventEmitter, initSingleHandler} from './emitter'
+import type {KernelRoomErrorInput, Timeout} from './internal-types'
+import {
+  base62Alphabet,
+  base64UrlRe,
+  createBoundedCache,
+  createBoundedSet,
+  decodeBytes,
+  domainTag,
+  encodeBytes,
+  encodeBytesInto,
+  fromBase64Url,
+  fromJson,
+  hash32,
+  libId,
+  libName,
+  mkErr,
+  toBase64Url,
+  toJson,
+  unreachable,
+  userIdLength,
+  utf8ByteLength
+} from './primitives'
+import type {DataPayload, RoleCertificate} from './types'
 
-const {floor, min, sin} = Math
+export {
+  base64UrlRe,
+  createBoundedCache,
+  createBoundedSet,
+  createEventEmitter,
+  decodeBytes,
+  domainTag,
+  encodeBytes,
+  encodeBytesInto,
+  fromBase64Url,
+  fromJson,
+  initSingleHandler,
+  libId,
+  libName,
+  mkErr,
+  toBase64Url,
+  toJson,
+  unreachable,
+  utf8ByteLength
+}
 
-export const libName = 'Trystero'
+export const lockMethods = <T extends object>(
+  target: T,
+  methodNames: readonly (keyof T & string)[]
+): T => {
+  for (const name of methodNames) {
+    const fn = target[name]
+    Object.defineProperty(target, name, {
+      get: () => fn,
+      set: () => {
+        throw new TypeError(
+          `${libName}: ${name} is a method; call ${name}(handler), which returns an unsubscribe function`
+        )
+      },
+      enumerable: true,
+      configurable: true
+    })
+  }
+  return target
+}
+
+export const authMetaKey: string = `__${libId}Auth`
+export const cmpStr = (a: string, b: string): number =>
+  a < b ? -1 : a > b ? 1 : 0
+export const internalActionPrefix = '@_'
+
+export const warn = (msg: string): void => console.warn(`${libName}: ${msg}`)
+
+export const warnNoPeer = (id: string): void =>
+  warn(`no peer with id ${id} found`)
+
+export const warnEphemeralAdmin = (): void =>
+  warn(
+    "roles({selfAsAdmin: true}) with an ephemeral identity orphans the room on close; use identity: 'local' or an imported UserIdentity"
+  )
+
+export const logErr = (kind: string, err: unknown): void =>
+  console.error(`${libName} ${kind} error:`, err)
+
+export const logActionHandlerErr = (err: unknown): void =>
+  logErr('action handler', err)
+
+export const peerDisconnectedMsg = 'peer disconnected'
+export const peerDisconnectedErr: Error =
+  /*@__PURE__*/ mkErr(peerDisconnectedMsg)
+export const peerBannedMsg = 'peer banned'
+export const peerBannedErr: Error = /*@__PURE__*/ mkErr(peerBannedMsg)
+export const mkBannedErr = (
+  reason?: string,
+  peerId?: string
+): KernelRoomErrorInput => ({
+  code: 'banned',
+  message: reason ? `${peerBannedMsg}: ${reason}` : peerBannedMsg,
+  ...(reason !== undefined ? {reason} : {}),
+  ...(peerId ? {peerId} : {})
+})
+export const peerLeftRoomErr: Error = /*@__PURE__*/ mkErr('peer left room')
+export const roomLeftErr: Error = /*@__PURE__*/ mkErr('room left')
+export const roomFullMsg = 'room full'
+export const roomFullErr: Error = /*@__PURE__*/ mkErr(roomFullMsg)
+export const operationAbortedMsg = 'operation aborted'
+export const insufficientAuthPrefix = 'insufficient authority'
+export const invalidP256KeyErr: Error = /*@__PURE__*/ mkErr(
+  'invalid ECDSA P-256 public key'
+)
+
+export const posSafeIntErr = (name: string): Error =>
+  mkErr(`${name} must be a positive safe integer`)
+
+export const requiresRolesErr = (feature: string): Error =>
+  mkErr(`${feature} requires roles() in joinRoom config`)
+
+export const selfCertRoomRolesErr: Error = /*@__PURE__*/ requiresRolesErr(
+  'self-certifying room ID'
+)
+
+export const actionRedefinedErr = (type: string): Error =>
+  mkErr(`action type "${type}" cannot be redefined`)
+
+export const invalidActionMsg = (what: string): string =>
+  `invalid action ${what}`
+
+export const noActivePeerMsg = (id: string): string =>
+  `no active peer with id ${id}`
+
+export const requiredErr = (field: string): Error =>
+  mkErr(`${field} is required`)
+
+const {floor} = Math
 
 export const alloc = <T>(n: number, f: (v: undefined, i: number) => T): T[] =>
   Array(n).fill(undefined).map(f)
 
-const charSet = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'
+const base62UnbiasedLimit = 248 // 62 * 4 (largest multiple of 62 <= 256)
 
-export const genId = (n: number): string =>
-  alloc(n, () => charSet[floor(Math.random() * charSet.length)] ?? '').join('')
+export const genId = (n: number): string => {
+  if (n <= 0) {
+    return ''
+  }
+  const buf = new Uint8Array(Math.ceil(n * 1.15) + 4)
+  let out = ''
+  while (out.length < n) {
+    crypto.getRandomValues(buf)
+    for (let i = 0; i < buf.byteLength && out.length < n; i++) {
+      const b = buf[i]!
+      if (b < base62UnbiasedLimit) {
+        out += base62Alphabet[b % 62]!
+      }
+    }
+  }
+  return out
+}
 
-export const selfId = genId(20)
+export const all: typeof Promise.all = /*@__PURE__*/ Promise.all.bind(Promise)
 
-export const all = Promise.all.bind(Promise)
+export const isBrowser: boolean = typeof window !== 'undefined'
 
-export const isBrowser = typeof window !== 'undefined'
-
-export const {entries, fromEntries, keys, values} = Object
+export const entries: typeof Object.entries = Object.entries
+export const fromEntries: typeof Object.fromEntries = Object.fromEntries
+export const keys: typeof Object.keys = Object.keys
+export const values: typeof Object.values = Object.values
 
 export const noOp = (): void => {}
 
 export const candidateType = 'candidate'
 
-export const resetTimer = (timer: number | null | undefined): null => {
-  if (timer !== null) {
+export const resetTimer = (timer: Timeout | null | undefined): null => {
+  if (timer !== null && timer !== undefined) {
     clearTimeout(timer)
   }
 
   return null
 }
 
-export const mkErr = (msg: string): Error => new Error(`${libName}: ${msg}`)
+export const unrefTimer = (t: unknown): void => {
+  ;(t as {unref?: () => void})?.unref?.()
+}
 
 export const toErrorMessage = (reason: unknown, fallback: string): string => {
   if (reason instanceof Error && reason.message) {
@@ -49,25 +196,16 @@ export const toErrorMessage = (reason: unknown, fallback: string): string => {
 export const toError = (reason: unknown, fallback: string): Error =>
   reason instanceof Error ? reason : mkErr(toErrorMessage(reason, fallback))
 
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
-
-export const encodeBytes = (txt: string): Uint8Array => encoder.encode(txt)
-
-export const decodeBytes = (
-  buffer: ArrayBufferLike | ArrayBufferView
-): string => decoder.decode(buffer)
-
-export const toHex = (buffer: Uint8Array): string =>
-  buffer.reduce((a, c) => a + c.toString(16).padStart(2, '0'), '')
-
-export const topicPath = (...parts: string[]): string => parts.join('@')
+export const topicPath = (...parts: string[]): string => toJson(parts)
 
 export const shuffle = <T>(xs: readonly T[], seed: number): T[] => {
   const a = [...xs]
+  let state = (Math.trunc(seed) || 1) >>> 0
   const rand = (): number => {
-    const x = sin(seed++) * 10_000
-    return x - floor(x)
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = Math.imul(state ^ (state >>> 15), 1 | state)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 0x1_0000_0000
   }
 
   let i = a.length
@@ -82,228 +220,125 @@ export const shuffle = <T>(xs: readonly T[], seed: number): T[] => {
   return a
 }
 
-export const getRelays = <
-  TConfig extends BaseRoomConfig & {relayConfig?: RelayConfig}
->(
-  config: TConfig,
-  defaults: string[],
-  defaultN: number,
-  deriveFromAppId = false
-): string[] =>
-  config.relayConfig?.urls ||
-  (deriveFromAppId
-    ? shuffle(defaults, strToNum(config.appId))
-    : defaults
-  ).slice(0, config.relayConfig?.redundancy ?? defaultN)
-
-export const toJson = JSON.stringify
-
-export const fromJson = <T>(s: string): T => {
-  try {
-    return JSON.parse(s)
-  } catch {
-    throw mkErr(`failed to parse JSON: ${s}`)
-  }
-}
-
 export const strToNum = (
   str: string,
-  limit = Number.MAX_SAFE_INTEGER
-): number => str.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % limit
+  limit: number = Number.MAX_SAFE_INTEGER
+): number => hash32(str) % limit
 
-const defaultRetryMs = 3333
-const maxRetryMs = 60_000
-const socketRetryPeriods: Record<string, number> = {}
+const protocolViolations = /*@__PURE__*/ new WeakSet<Error>()
 
-let reconnectionLockingPromise: Promise<void> | null = null
-let resolver: (() => void) | null = null
-
-export const pauseRelayReconnection = (): void => {
-  if (!reconnectionLockingPromise) {
-    reconnectionLockingPromise = new Promise<void>(resolve => {
-      resolver = resolve
-    }).finally(() => {
-      resolver = null
-      reconnectionLockingPromise = null
-    })
-  }
+export const markProtocolViolation = (err: Error): Error => {
+  protocolViolations.add(err)
+  return err
 }
 
-export const resumeRelayReconnection = (): void => {
-  resolver?.()
+export const isProtocolViolation = (err: unknown): boolean =>
+  err instanceof Error && protocolViolations.has(err)
+
+export const mkViolationErr = (msg: string): Error =>
+  markProtocolViolation(mkErr(msg))
+
+export const userIdRegex: RegExp = /*@__PURE__*/ new RegExp(
+  `^[0-9A-Za-z]{${userIdLength}}$`
+)
+
+export const selfCertifyingRoomRegex: RegExp = /*@__PURE__*/ new RegExp(
+  `^(.+)~([0-9A-Za-z]{${userIdLength}})$`
+)
+
+export const splitSelfCertRoom = (
+  roomId: string
+): readonly [base: string, uid: string | null] => {
+  const match = selfCertifyingRoomRegex.exec(roomId)
+  return match?.[1] && match[2] ? [match[1], match[2]] : [roomId, null]
 }
 
-export const makeSocket = (
-  url: string,
-  onMessage: (data: string) => void,
-  onReconnect?: () => void
-): SocketClient => {
-  const client = {} as SocketClient
-  let didOpen = false
-  let isReconnectPending = false
-  let retryTimer: ReturnType<typeof setTimeout> | undefined
-  let resolveReady: (_: SocketClient) => void = noOp
+export const formatSelfCertifyingRoomId = (
+  base: string,
+  userId: string
+): string => `${splitSelfCertRoom(base)[0]}~${userId}`
 
-  client.isClosed = false
-  client.ready = new Promise(res => (resolveReady = res))
-
-  const init = (): void => {
-    if (client.isClosed) {
-      return
-    }
-
-    retryTimer = undefined
-    isReconnectPending = false
-
-    const socket = new WebSocket(url)
-
-    socket.onclose = () => {
-      if (client.isClosed || isReconnectPending) {
-        return
-      }
-
-      isReconnectPending = true
-
-      if (reconnectionLockingPromise) {
-        void reconnectionLockingPromise.then(init)
-        return
-      }
-
-      const period = (socketRetryPeriods[url] ??= defaultRetryMs)
-
-      retryTimer = setTimeout(init, Math.random() * period)
-      socketRetryPeriods[url] = min(period * 2, maxRetryMs)
-    }
-
-    socket.onmessage = e => onMessage(String(e.data))
-    client.socket = socket
-    client.url = socket.url
-
-    socket.onopen = () => {
-      const isReconnect = didOpen
-
-      didOpen = true
-      resolveReady(client)
-      socketRetryPeriods[url] = defaultRetryMs
-
-      if (isReconnect) {
-        onReconnect?.()
-      }
-    }
-
-    client.send = data => {
-      if (socket.readyState === 1) {
-        socket.send(data)
-      }
-    }
+export const toPayloadSource = (
+  data: DataPayload
+): readonly [format: 0 | 1 | 2, source: Blob | Uint8Array] => {
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    return [2, data]
   }
-
-  client.close = () => {
-    client.isClosed = true
-
-    if (retryTimer !== undefined) {
-      clearTimeout(retryTimer)
-      retryTimer = undefined
-    }
-
-    client.socket.close()
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+    return [
+      2,
+      data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    ]
   }
-
-  init()
-
-  return client
+  const isText = typeof data === 'string'
+  return [isText ? 0 : 1, encodeBytes(isText ? data : toJson(data))]
 }
 
-export const socketGetter =
-  <T extends {socket: WebSocket}>(
-    clientMap: Record<string, T>
-  ): (() => Record<string, WebSocket>) =>
-  () =>
-    fromEntries(
-      entries(clientMap).map(([url, client]) => [url, client.socket])
-    ) as Record<string, WebSocket>
+export const hasIceUrl = (
+  servers: readonly RTCIceServer[],
+  pattern: RegExp
+): boolean =>
+  servers.some(({urls}) => [urls].flat().some(url => pattern.test(url)))
 
-type RelayScopedStore<T, TRelay extends object> = {
-  forKey: (key: string) => Record<string, T>
-  forRelay: (relay: TRelay) => Record<string, T>
-}
+export const isObj = (v: unknown): v is Record<string, unknown> =>
+  Boolean(v && typeof v === 'object' && !Array.isArray(v))
 
-export const createRelayManager = <TRelay extends object>(
-  getSocket: (relay: TRelay) => WebSocket | undefined
-): {
-  register: (key: string, createRelay: () => TRelay) => TRelay
-  keyOf: (relay: TRelay) => string
-  scoped: <T>() => RelayScopedStore<T, TRelay>
-  getSockets: () => Record<string, WebSocket>
-} => {
-  const relays: Record<string, TRelay> = {}
-  const keysByRelay = new WeakMap<TRelay, string>()
+export const isStr = (v: unknown): v is string =>
+  typeof v === 'string' && v.length > 0
 
-  const keyOf = (relay: TRelay): string => {
-    const key = keysByRelay.get(relay)
+export const isPosSafeInt = (n: unknown): n is number =>
+  typeof n === 'number' && Number.isSafeInteger(n) && n > 0
 
-    if (!key) {
-      throw mkErr('relay bookkeeping missing registration for relay client')
-    }
+export const isValidSig = (s: unknown): s is string =>
+  typeof s === 'string' && s.length >= 64 && s.length <= 128
 
-    return key
-  }
+export const validateRoleCertificateShape = (
+  c: unknown
+): c is RoleCertificate =>
+  isObj(c) &&
+  c['v'] === 1 &&
+  isStr(c['certId']) &&
+  isStr(c['issuerPubKey']) &&
+  isStr(c['subUserId']) &&
+  isStr(c['appId']) &&
+  isStr(c['roomId']) &&
+  Array.isArray(c['roles']) &&
+  c['roles'].length > 0 &&
+  c['roles'].every(isStr) &&
+  isPosSafeInt(c['seq']) &&
+  isPosSafeInt(c['iat']) &&
+  isValidSig(c['sig'])
 
-  const scoped = <T>(): RelayScopedStore<T, TRelay> => {
-    const store: Record<string, Record<string, T>> = {}
-    const forKey = (key: string): Record<string, T> => (store[key] ??= {})
+export type WindowCounter = readonly [
+  hit: (id: string) => boolean,
+  reset: (id: string) => void,
+  over: (id: string) => boolean
+]
 
-    return {
-      forKey,
-      forRelay: relay => forKey(keyOf(relay))
-    }
-  }
-
-  const store = (key: string, relay: TRelay): TRelay => {
-    relays[key] = relay
-    keysByRelay.set(relay, key)
-
-    return relay
-  }
-
-  return {
-    register: (key, createRelay) => {
-      const relay = relays[key]
-
-      if (relay) {
-        return relay
+export const createWindowCounter = (
+  maxEntries: number,
+  limit: number,
+  windowMs = 30_000
+): WindowCounter => {
+  const map = createBoundedCache<string, [n: number, t: number]>(maxEntries)
+  return [
+    id => {
+      const now = Date.now()
+      let cur = map.get(id)
+      if (!cur || now - cur[1] > windowMs) {
+        cur = [0, now]
+        map.set(id, cur)
       }
-
-      return store(key, createRelay())
+      return ++cur[0] >= limit
     },
-    keyOf,
-    scoped,
-    getSockets: () =>
-      fromEntries(
-        entries(relays).flatMap(([key, relay]) => {
-          const socket = getSocket(relay)
-
-          return socket ? [[key, socket]] : []
-        })
-      ) as Record<string, WebSocket>
-  }
+    id => {
+      map.delete(id)
+    },
+    id => {
+      const cur = map.get(id)
+      return Boolean(cur && Date.now() - cur[1] <= windowMs && cur[0] >= limit)
+    }
+  ]
 }
-
-export const watchOnline = (): (() => void) => {
-  if (isBrowser) {
-    const controller = new AbortController()
-
-    addEventListener('online', resumeRelayReconnection, {
-      signal: controller.signal
-    })
-    addEventListener('offline', pauseRelayReconnection, {
-      signal: controller.signal
-    })
-
-    return () => controller.abort()
-  }
-
-  return noOp
-}
-
-export const log = (...args: unknown[]): void => console.log(...args)

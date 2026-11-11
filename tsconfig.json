@@ -1,29 +1,7 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "composite": false,
-    "noEmit": true,
-    "strict": false,
-    "noImplicitAny": false,
-    "strictNullChecks": false,
-    "exactOptionalPropertyTypes": false,
-    "strictPropertyInitialization": false,
-    "useUnknownInCatchVariables": false,
-    "noPropertyAccessFromIndexSignature": false,
-    "noUncheckedIndexedAccess": false,
-    "noImplicitOverride": false,
     "types": ["node"]
   },
-  "include": ["playwright.config.ts", "test/**/*.ts"],
-  "references": [
-    {"path": "./packages/core"},
-    {"path": "./packages/nostr"},
-    {"path": "./packages/torrent"},
-    {"path": "./packages/mqtt"},
-    {"path": "./packages/ipfs"},
-    {"path": "./packages/supabase"},
-    {"path": "./packages/firebase"},
-    {"path": "./packages/ws-relay"},
-    {"path": "./packages/trystero"}
-  ]
+  "include": ["playwright.config.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }

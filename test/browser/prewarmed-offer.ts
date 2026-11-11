@@ -1,48 +1,41 @@
 import {expect, test} from '@playwright/test'
+import {installLoopbackMdnsPeerConnection} from './mdns-loopback'
 
 test('Trystero: torrent: a prewarmed offer attaches after its data channel opens', async ({
   page,
   browserName
 }) => {
-  await page.goto(`https://127.0.0.1:${process.env.TRYSTERO_TEST_PORT}/test`)
-  const attached = await page.evaluate(async useLoopbackFallback => {
+  if (browserName !== 'chromium') {
+    await installLoopbackMdnsPeerConnection(page)
+  }
+  await page.goto(`https://127.0.0.1:${process.env['TRYSTERO_TEST_PORT']}/test`)
+  const attached = await page.evaluate(async () => {
     const peerModule = '../packages/core/dist/peer.mjs'
-    const sharedModule = '../packages/core/dist/shared-peer.mjs'
-    const [{default: initPeer}, {SharedPeerManager}] = await Promise.all([
-      import(peerModule),
-      import(sharedModule)
-    ])
+    const {default: initPeer} = await import(peerModule)
     const config = {
       appId: 'prewarmed-browser-test',
       trickleIce: false,
       rtcConfig: {iceServers: []},
-      ...(useLoopbackFallback
-        ? {_test_only_mdnsHostFallbackToLoopback: true}
-        : {})
+      rtcPolyfill: window.RTCPeerConnection
     }
     const initiator = initPeer(true, config)
     const answerer = initPeer(false, config)
-    const managers = [new SharedPeerManager(), new SharedPeerManager()]
-    const joined = [0, 0]
-    const rooms = managers.map((manager, index) =>
-      manager.registerRoom(config.appId, 'room', Promise.resolve('token'), {
-        active: true,
-        onPeer: proxy => {
-          joined[index]++
-          proxy.setHandlers({data: () => {}, signal: () => {}})
-        },
-        onDetach: () => {}
-      })
-    )
+    const joined: [number, number] = [0, 0]
 
     try {
       // The offer is published before a signaling handler exists, as with Torrent.
       const offer = await initiator.getOffer()
       initiator.setHandlers({
-        connect: () => rooms[0].connect('answerer', initiator, 60_000)
+        connect: () => {
+          joined[0]++
+          initiator.setHandlers({data: () => {}, signal: () => {}})
+        }
       })
       answerer.setHandlers({
-        connect: () => rooms[1].connect('initiator', answerer, 60_000)
+        connect: () => {
+          joined[1]++
+          answerer.setHandlers({data: () => {}, signal: () => {}})
+        }
       })
       const answer = await answerer.signal(offer)
       await initiator.signal(answer)
@@ -56,11 +49,10 @@ test('Trystero: torrent: a prewarmed offer attaches after its data channel opens
         closed: [initiator.isDead, answerer.isDead]
       }
     } finally {
-      rooms.forEach(room => room.leave())
       initiator.destroy()
       answerer.destroy()
     }
-  }, browserName !== 'chromium')
+  })
 
   expect(attached.joined).toEqual([1, 1])
   expect(attached.channels).toEqual(['open', 'open'])

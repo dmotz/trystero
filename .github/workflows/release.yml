@@ -1,4 +1,4 @@
-name: Publish packages and release bundles
+name: Publish packages and create release
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -31,11 +32,10 @@ jobs:
         with:
           node-version: '26'
           cache: pnpm
-          cache-dependency-path: package.json
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Validate release tag
         id: version
@@ -50,8 +50,32 @@ jobs:
             fi
           fi
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          if [[ "${VERSION}" == *-* ]]; then
+            echo "npm_tag=beta" >> "${GITHUB_OUTPUT}"
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "npm_tag=latest" >> "${GITHUB_OUTPUT}"
+            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          fi
 
-      - name: Build packages and browser bundles
+      - name: Build packages
+        run: pnpm build
+
+      - name: Check types, lint, and formatting
+        run: pnpm typecheck && pnpm lint && pnpm format
+
+      - name: Run Node test suite
+        env:
+          TRYSTERO_SKIP_PUBLIC_RELAYS: '1'
+        run: pnpm test:node
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright ws-relay browser suite
+        run: pnpm run build:test && npx playwright test test/ws-relay.spec.ts
+
+      - name: Build clean release packages
         run: pnpm build
 
       - name: Copy README into each package
@@ -60,7 +84,10 @@ jobs:
       - name: Publish all packages to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm -r publish --no-git-checks --access public
+          NPM_TAG: ${{ steps.version.outputs.npm_tag }}
+        run:
+          pnpm -r publish --provenance --no-git-checks --access public --tag
+          "${NPM_TAG}"
 
       - name: Check if GitHub release already exists
         id: gh_release
@@ -74,7 +101,7 @@ jobs:
             echo "exists=false" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Create GitHub release with JS bundles
+      - name: Create GitHub release
         if: steps.gh_release.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
@@ -82,6 +109,4 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          files: |
-            dist/trystero-*.min.js
-            dist/trystero-*.min.js.map
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}

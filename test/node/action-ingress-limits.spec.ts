@@ -1,80 +1,18 @@
 import assert from 'node:assert/strict'
 import test from './test.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
-import {SharedPeerManager} from '../../packages/core/src/shared-peer.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createRoom from '../../packages/core/src/room.ts'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import createPeer from '../../packages/core/src/peer.ts'
+import type {PeerHandle} from '../../packages/core/src/internal-types.ts'
 import {
   MockPeer,
   MockRTCPeerConnection,
   encodeInternalAction,
-  presenceFrame,
-  roomFrame,
   turn
 } from './peer-harness.ts'
 
-void test('unresolved room-token buffering is bounded across tokens', t => {
-  t.mock.method(console, 'warn', () => {})
-  const manager = new SharedPeerManager()
-  const peer = new MockPeer()
-  const shared = manager.register('app', 'peer', peer as never, 60_000)
-  t.after(() => manager.clear('app', 'peer', {destroyPeer: true}))
-  manager.bind('joining', new Promise(() => {}), shared, {onDetach: () => {}})
-  for (let id = 0; id < 64; id++) {
-    peer.handlers.data(roomFrame(`unknown-${id}`))
-  }
-  assert.equal(shared.pendingDataByToken.size, 64)
-  peer.handlers.data(roomFrame('one-too-many'))
-  assert.equal(peer.isDead, false)
-  assert.equal(shared.pendingDataByToken.size, 64)
-})
-
-void test('unclaimed room data expires instead of persisting for the connection lifetime', t => {
-  t.mock.timers.enable({apis: ['setTimeout']})
-  t.mock.method(console, 'warn', () => {})
-  const manager = new SharedPeerManager()
-  const peer = new MockPeer()
-  const shared = manager.register('app', 'peer', peer as never, 60_000)
-  t.after(() => manager.clear('app', 'peer', {destroyPeer: true}))
-  manager.bind('joining', new Promise(() => {}), shared, {onDetach: () => {}})
-  peer.handlers.data(roomFrame('unclaimed'))
-  t.mock.timers.tick(10_000)
-  assert.equal(peer.isDead, false)
-  assert.equal(shared.pendingDataByToken.size, 0)
-})
-
-void test('registered rooms without handlers share the same physical-peer queue limit', async t => {
-  t.mock.method(console, 'warn', () => {})
-  const manager = new SharedPeerManager()
-  const peer = new MockPeer()
-  const shared = manager.register('app', 'peer', peer as never, 60_000)
-  manager.bind('one', Promise.resolve('one'), shared, {onDetach: () => {}})
-  manager.bind('two', Promise.resolve('two'), shared, {onDetach: () => {}})
-  await turn()
-  for (let i = 0; i < 65; i++) {
-    peer.handlers.data(roomFrame(i % 2 ? 'one' : 'two'))
-  }
-  assert.equal(peer.isDead, true)
-  assert.deepEqual(Object.keys(shared.bindings), [])
-})
-
-void test('room presence tokens cannot grow without bound', t => {
-  t.mock.method(console, 'warn', () => {})
-  const manager = new SharedPeerManager()
-  const peer = new MockPeer()
-  const shared = manager.register('app', 'peer', peer as never, 60_000)
-  for (let i = 0; i < 65; i++) {
-    peer.handlers.data(presenceFrame(`room-${i}`))
-  }
-  assert.equal(peer.isDead, true)
-  assert.equal(shared.remoteRoomTokens.size, 0)
-})
-
 void test('local leave completes without receipts from a connected peer', async t => {
   t.mock.timers.enable({apis: ['setTimeout', 'Date']})
-  let acceptPeer
+  let acceptPeer: ((peer: PeerHandle, id: string) => void) | undefined
   let left = false
   const room = createRoom(
     callback => {
@@ -86,8 +24,8 @@ void test('local leave completes without receipts from a connected peer', async 
     }
   )
   const peer = new MockPeer()
-  acceptPeer(peer, 'peer')
-  peer.handlers.data(encodeInternalAction('@_hsready'))
+  acceptPeer!(peer as unknown as PeerHandle, 'peer')
+  peer.handlers.data!(encodeInternalAction('hsready'))
   await turn()
   const leaving = room.leave()
   t.mock.timers.tick(100)
@@ -98,7 +36,7 @@ void test('local leave completes without receipts from a connected peer', async 
 
 void test('local leave also cancels a blocked data-channel send', async t => {
   t.mock.timers.enable({apis: ['setTimeout', 'Date']})
-  let acceptPeer
+  let acceptPeer: ((peer: PeerHandle, id: string) => void) | undefined
   let left = false
   const room = createRoom(
     callback => {
@@ -119,14 +57,15 @@ void test('local leave also cancels a blocked data-channel send', async t => {
   }
   peer.channel.bufferedAmount = 100_000
   Object.assign(peer.channel, {
-    addEventListener: (event, fn) => {
-      const listeners = events.get(event) ?? new Set()
+    addEventListener: (event: string, fn: () => void) => {
+      const listeners = events.get(event) ?? new Set<() => void>()
       listeners.add(fn)
       events.set(event, listeners)
     },
-    removeEventListener: (event, fn) => events.get(event)?.delete(fn)
+    removeEventListener: (event: string, fn: () => void) =>
+      events.get(event)?.delete(fn)
   })
-  acceptPeer(peer, 'peer')
+  acceptPeer!(peer as unknown as PeerHandle, 'peer')
   await turn()
   const leaving = room.leave()
   t.mock.timers.tick(100)
@@ -147,7 +86,7 @@ void test('physical data received before handler registration is bounded and exp
     })
     const channel = peer.channel!
     for (let i = 0; i < (overCount ? 65 : 1); i++) {
-      channel.onmessage!({data: roomFrame('room')} as MessageEvent)
+      channel.onmessage!({data: new ArrayBuffer(16)} as MessageEvent)
     }
     if (!overCount) {
       t.mock.timers.tick(10_000)
@@ -175,11 +114,11 @@ void test('intentional SCTP aborts close the peer without reporting a transport 
     )
     channel.onerror!({error} as RTCErrorEvent)
   }
-  assert.deepEqual(errors, [])
+  assert.deepEqual<Error[]>(errors, [])
   channel.onclose!({} as Event)
   channel.onerror!({error: new Error('late channel error')} as RTCErrorEvent)
   assert.equal(closes, 1)
-  assert.deepEqual(errors, [])
+  assert.deepEqual<Error[]>(errors, [])
 
   const failed = createPeer(true, {
     appId: 'test',
@@ -194,51 +133,4 @@ void test('intentional SCTP aborts close the peer without reporting a transport 
   assert.deepEqual(errors, [failure])
   peer.destroy()
   failed.destroy()
-})
-
-void test('bound room data still closes the peer when its handler deadline expires', async t => {
-  t.mock.timers.enable({apis: ['setTimeout']})
-  t.mock.method(console, 'warn', () => {})
-  const manager = new SharedPeerManager()
-  const peer = new MockPeer()
-  const shared = manager.register('app', 'peer', peer as never, 60_000)
-  t.after(() => manager.clear('app', 'peer', {destroyPeer: true}))
-  manager.bind('room', Promise.resolve('room'), shared, {onDetach: () => {}})
-  await Promise.resolve()
-  peer.handlers.data(roomFrame('room'))
-  t.mock.timers.tick(10_000)
-  assert.equal(peer.isDead, true)
-  assert.equal(manager.get('app', 'peer'), undefined)
-})
-
-void test('expiring earlier unclaimed token data does not shorten a bound room handler deadline', async t => {
-  t.mock.timers.enable({apis: ['setTimeout']})
-  t.mock.method(console, 'warn', () => {})
-  const manager = new SharedPeerManager()
-  const peer = new MockPeer()
-  const shared = manager.register('app', 'peer', peer as never, 60_000)
-  t.after(() => manager.clear('app', 'peer', {destroyPeer: true}))
-  manager.bind('joining', new Promise(() => {}), shared, {onDetach: () => {}})
-  peer.handlers.data(roomFrame('unclaimed', [1]))
-  t.mock.timers.tick(8_000)
-
-  const {proxy} = manager.bind('room', Promise.resolve('room'), shared, {
-    onDetach: () => {}
-  })
-  await Promise.resolve()
-  peer.handlers.data(roomFrame('room', [42]))
-
-  // At t = 11s, the unclaimed token expires without killing the peer,
-  // while the bound room still has 7s left to attach its handler.
-  t.mock.timers.tick(3_000)
-  assert.equal(shared.pendingDataByToken.size, 0)
-  assert.equal(peer.isDead, false)
-
-  const received: number[][] = []
-  proxy.setHandlers({
-    data: data => received.push([...new Uint8Array(data)])
-  })
-  assert.deepEqual(received, [[42]])
-  t.mock.timers.tick(10_000)
-  assert.equal(peer.isDead, false)
 })

@@ -215,7 +215,7 @@ const stop = child =>
   })
 
 const main = async strategy => {
-  const bundle = readFileSync(join(root, `dist/trystero-${strategy}.min.js`))
+  const bundle = readFileSync(join(root, `test/dist/trystero-${strategy}.js`))
   const turnPort = await freeUdpPort()
   const username = `trystero-${randomUUID()}`
   const password = randomBytes(18).toString('hex')
@@ -319,7 +319,9 @@ const main = async strategy => {
           'room'
         )
         state.room = room
-        room.onPeerJoin = () => (state.joined = true)
+        room.onPeerJoin(() => {
+          state.joined = true
+        })
       }, params)
 
     await joinRoom(pages[0])
@@ -364,7 +366,7 @@ const main = async strategy => {
     for (const page of pages) {
       const result = await page.evaluate(async () => {
         const peers = Object.values(window.__turnTest.room.getPeers())
-        const stats = await peers[0].getStats()
+        const stats = await peers[0].connection.getStats()
         return {
           created: window.__turnTest.created.length,
           relayCandidate: [...stats.values()].some(

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import {once} from 'node:events'
-import test from 'node:test'
+import test from './test.ts'
 import WebSocket from 'ws'
 import {createWsRelayServer} from '@trystero-p2p/ws-relay/server'
 
@@ -113,6 +113,72 @@ void test('WebSocket relay bounds subscriptions and releases them on close', asy
     sixth.send('x'.repeat(257))
     assert.equal((await sixthClosed)[0], 1009)
     assert.equal(relay.getSubscriberCount(), 2)
+  } finally {
+    clients.forEach(socket => socket.terminate())
+    await relay.close()
+  }
+})
+
+void test('H11 & H12: WebSocket relay closes malformed JSON, invalid topic characters, and rate-exceeding clients with 1008 without firing server onError', async () => {
+  const serverErrors: Error[] = []
+  const relay = createWsRelayServer({
+    port: 0,
+    host: '127.0.0.1',
+    maxMessagesPerSecond: 5,
+    maxBurstMessages: 8,
+    onError: error => serverErrors.push(error)
+  })
+  await relay.ready
+  const address = relay.address()
+  assert.ok(address && typeof address === 'object')
+  const url = `ws://127.0.0.1:${address.port}`
+  const clients: WebSocket[] = []
+  const connect = async (): Promise<WebSocket> => {
+    const socket = new WebSocket(url)
+    clients.push(socket)
+    await once(socket, 'open')
+    return socket
+  }
+
+  try {
+    // H11: Malformed JSON closes offending socket with 1008 and never emits server onError
+    const badJsonSocket = await connect()
+    const badJsonClosed = once(badJsonSocket, 'close', {
+      signal: AbortSignal.timeout(1_000)
+    })
+    badJsonSocket.send('{not-valid-json')
+    assert.equal((await badJsonClosed)[0], 1008)
+    assert.deepEqual(serverErrors, [])
+
+    // H12a: Topic containing invalid characters (outside base64url [A-Za-z0-9_-]) closes with 1008
+    for (const badTopic of ['bad/topic', 'space topic', 'semi;colon', '']) {
+      const badTopicSocket = await connect()
+      const badTopicClosed = once(badTopicSocket, 'close', {
+        signal: AbortSignal.timeout(1_000)
+      })
+      badTopicSocket.send(JSON.stringify({type: 'subscribe', topic: badTopic}))
+      assert.equal((await badTopicClosed)[0], 1008)
+    }
+    assert.deepEqual(serverErrors, [])
+
+    // H12b: Per-socket message rate limiter closes flooder with 1008
+    const floodSocket = await connect()
+    const floodClosed = once(floodSocket, 'close', {
+      signal: AbortSignal.timeout(2_000)
+    })
+    for (let i = 0; i < 20; i++) {
+      floodSocket.send(
+        JSON.stringify({
+          type: 'publish',
+          topic: 'valid_topic-1',
+          payload: 'ping'
+        })
+      )
+    }
+    const [code, reasonBuf] = await floodClosed
+    assert.equal(code, 1008)
+    assert.match(String(reasonBuf), /rate limit exceeded/i)
+    assert.deepEqual(serverErrors, [])
   } finally {
     clients.forEach(socket => socket.terminate())
     await relay.close()

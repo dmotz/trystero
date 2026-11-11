@@ -1,94 +1,146 @@
-import {all, alloc, mkErr, resetTimer} from './utils'
-import type {OfferRecord, PeerHandle} from './types'
+import type {
+  OfferCheckoutFn,
+  OfferRecord,
+  PeerHandle,
+  Timeout
+} from './internal-types'
+import {
+  all,
+  alloc,
+  genId,
+  mkErr,
+  resetTimer,
+  unreachable,
+  unrefTimer
+} from './utils'
 
 const offerLeaseTtlMs = 180_000
+const defaultOfferIdSize = 20
+const offerRoomLeftErr = /*@__PURE__*/ mkErr('room left while preparing offer')
 
-export class OfferManager {
-  private leased = new Map<PeerHandle, ReturnType<typeof setTimeout>>()
-  private destroyed = false
+type LeaseEntryState =
+  | {readonly phase: 'leased'; readonly timer: Timeout}
+  | {readonly phase: 'claimed'}
+  | {readonly phase: 'closed'}
 
-  constructor(private makeOffer: () => PeerHandle) {}
-
-  claimLeased(peer: PeerHandle): void {
-    const timer = this.leased.get(peer)
-
-    if (timer) {
-      resetTimer(timer)
-      this.leased.delete(peer)
-    }
-  }
-
-  reclaimLeased(peer: PeerHandle): void {
-    if (this.leased.has(peer)) {
-      this.claimLeased(peer)
-      peer.destroy()
-    }
-  }
-
-  checkout(
+export type OfferManager = {
+  checkout: OfferCheckoutFn
+  getOffers: (
     n: number,
-    leaseOffers: boolean,
-    encryptOffer: (peer: PeerHandle) => Promise<string>
-  ): Promise<OfferRecord[]> {
+    encryptOffer: (peer: PeerHandle, offerId: string) => Promise<string>
+  ) => Promise<OfferRecord[]>
+  claimLeased: (peer: PeerHandle) => boolean
+  reclaimLeased: (peer: PeerHandle) => void
+  destroy: () => void
+}
+
+export const createOfferManager = (
+  makeOffer: () => PeerHandle
+): OfferManager => {
+  const leaseStates = new WeakMap<PeerHandle, LeaseEntryState>()
+  const activeLeases = new Set<PeerHandle>()
+  let destroyed = false
+
+  const closeLease = (peer: PeerHandle): void => {
+    const entry = leaseStates.get(peer)
+    if (entry?.phase === 'leased') {
+      resetTimer(entry.timer)
+    }
+    activeLeases.delete(peer)
+    leaseStates.set(peer, {phase: 'closed'})
+    peer.destroy()
+  }
+
+  const claimLeased = (peer: PeerHandle): boolean => {
+    if (destroyed || peer.isDead) {
+      return false
+    }
+    const entry = leaseStates.get(peer)
+    if (!entry) {
+      return true
+    }
+    switch (entry.phase) {
+      case 'leased':
+        resetTimer(entry.timer)
+        activeLeases.delete(peer)
+        leaseStates.set(peer, {phase: 'claimed'})
+        return true
+      case 'claimed':
+        return true
+      case 'closed':
+        return false
+      default:
+        return unreachable(entry)
+    }
+  }
+
+  const reclaimLeased = (peer: PeerHandle): void => {
+    if (leaseStates.get(peer)?.phase === 'leased') {
+      closeLease(peer)
+    }
+  }
+
+  const checkout: OfferCheckoutFn = (
+    n,
+    leaseOffers,
+    encryptOffer,
+    offerIdSize = defaultOfferIdSize
+  ) => {
     const toRecord = async (didRetry = false): Promise<OfferRecord> => {
-      if (this.destroyed) {
-        throw mkErr('room left while preparing offer')
+      if (destroyed) {
+        throw offerRoomLeftErr
       }
-
-      const peer = this.makeOffer()
-
+      const peer = makeOffer()
+      const offerId = genId(offerIdSize)
       try {
-        const offer = await encryptOffer(peer)
-
-        if (this.destroyed) {
-          throw mkErr('room left while preparing offer')
+        const offer = await encryptOffer(peer, offerId)
+        if (destroyed) {
+          throw offerRoomLeftErr
         }
-
         if (leaseOffers) {
-          this.leased.set(
-            peer,
-            setTimeout(() => {
-              this.leased.delete(peer)
-              peer.destroy()
-            }, offerLeaseTtlMs)
-          )
-
+          const timer = setTimeout(() => {
+            if (leaseStates.get(peer)?.phase === 'leased') {
+              closeLease(peer)
+            }
+          }, offerLeaseTtlMs)
+          unrefTimer(timer)
+          leaseStates.set(peer, {phase: 'leased', timer})
+          activeLeases.add(peer)
           return {
             peer,
             offer,
-            claim: () => this.claimLeased(peer),
-            reclaim: () => this.reclaimLeased(peer)
+            offerId,
+            claim: () => {
+              claimLeased(peer)
+            },
+            reclaim: () => reclaimLeased(peer)
           }
         }
-
-        return {peer, offer}
+        return {peer, offer, offerId}
       } catch (error) {
         peer.destroy()
-
-        if (!didRetry && !this.destroyed) {
+        if (!didRetry && !destroyed) {
           return toRecord(true)
         }
-
         throw error
       }
     }
-
     return all(alloc(n, () => toRecord()))
   }
 
-  getOffers(
-    n: number,
-    encryptOffer: (peer: PeerHandle) => Promise<string>
-  ): Promise<OfferRecord[]> {
-    return this.checkout(n, true, encryptOffer)
-  }
-
-  destroy(): void {
-    this.destroyed = true
-    this.leased.forEach((timer, peer) => {
-      resetTimer(timer)
-      peer.destroy()
-    })
-    this.leased.clear()
+  return {
+    checkout,
+    getOffers: (n, encryptOffer) => checkout(n, true, encryptOffer),
+    claimLeased,
+    reclaimLeased,
+    destroy: () => {
+      if (destroyed) {
+        return
+      }
+      destroyed = true
+      for (const peer of Array.from(activeLeases)) {
+        closeLease(peer)
+      }
+    }
   }
 }

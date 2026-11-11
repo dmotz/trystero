@@ -1,8 +1,22 @@
-import {expect} from '@playwright/test'
+import {expect, type Page} from '@playwright/test'
+import type {StrategyConfig, StrategyName} from '../strategy-configs'
 import {concurrentRooms, withStrategyBrowserPair} from './harness'
 import {getPeerId, joinEagerRoom, ping} from './room-helpers'
 
-export const registerActionsAndMediaTests = (strategy, overrides) =>
+type RoomPairParams = {
+  page: Page
+  page2: Page
+  roomNs: string
+  peer1Id: string
+  peer2Id: string
+}
+
+type BinaryActionResult = [string, unknown, number, number, number, number]
+
+export const registerActionsAndMediaTests = (
+  strategy: StrategyName,
+  overrides: StrategyConfig = {}
+): void =>
   withStrategyBrowserPair(
     strategy,
     overrides,
@@ -32,7 +46,11 @@ export const registerActionsAndMediaTests = (strategy, overrides) =>
             makeRoomId: () =>
               `testRoom-${roomNum}-${Math.random().toString().replace('.', '')}`,
             join: joinEagerRoom,
-            makeArgs: nextRoomId => [nextRoomId, roomConfig, eagerPayload]
+            makeArgs: (nextRoomId): [string, StrategyConfig, number] => [
+              nextRoomId,
+              roomConfig,
+              eagerPayload
+            ]
           }).catch(err => {
             initialConnectionResults[roomNum] = 'failed'
 
@@ -46,28 +64,42 @@ export const registerActionsAndMediaTests = (strategy, overrides) =>
           expect(peer1Data).toEqual([eagerPayload, selfId1])
           expect(peer2Data).toEqual([eagerPayload, selfId2])
 
-          const isRoomIdentical = await page.evaluate(
-            ([roomId, config]) =>
-              window.trystero.joinRoom(config, roomId) === window[roomId],
-            [roomNs, roomConfig]
+          const duplicateJoinThrew = await page.evaluate(
+            ([roomId, config]: [string, StrategyConfig]) => {
+              try {
+                window.trystero.joinRoom(config, roomId)
+                return false
+              } catch (err) {
+                return (
+                  err instanceof Error && /already joined/i.test(err.message)
+                )
+              }
+            },
+            [roomNs, roomConfig] satisfies [string, StrategyConfig]
           )
 
-          expect(isRoomIdentical).toBe(true)
+          expect(duplicateJoinThrew).toBe(true)
 
           await verifyMediaMetadata({page, page2, roomNs, peer1Id, peer2Id})
 
           expect(await page.evaluate(getPeerId, roomNs)).toEqual(peer2Id)
           expect(await page2.evaluate(getPeerId, roomNs)).toEqual(peer1Id)
 
-          expect(await page.evaluate(ping, [roomNs, peer2Id])).toBeLessThan(
-            1000
-          )
-          expect(await page2.evaluate(ping, [roomNs, peer1Id])).toBeLessThan(
-            1000
-          )
+          expect(
+            await page.evaluate(ping, [roomNs, peer2Id] satisfies [
+              string,
+              string
+            ])
+          ).toBeLessThan(1000)
+          expect(
+            await page2.evaluate(ping, [roomNs, peer1Id] satisfies [
+              string,
+              string
+            ])
+          ).toBeLessThan(1000)
           const [concurrentPingA, concurrentPingB] = await Promise.all([
-            page.evaluate(ping, [roomNs, peer2Id]),
-            page.evaluate(ping, [roomNs, peer2Id])
+            page.evaluate(ping, [roomNs, peer2Id] satisfies [string, string]),
+            page.evaluate(ping, [roomNs, peer2Id] satisfies [string, string])
           ])
 
           expect(concurrentPingA).toBeLessThan(1000)
@@ -117,7 +149,13 @@ export const registerActionsAndMediaTests = (strategy, overrides) =>
     }
   )
 
-const warmMediaDevices = async ({page, page2}) => {
+const warmMediaDevices = async ({
+  page,
+  page2
+}: {
+  page: Page
+  page2: Page
+}): Promise<void> => {
   const warm = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: true,
@@ -130,18 +168,34 @@ const warmMediaDevices = async ({page, page2}) => {
   await Promise.all([page.evaluate(warm), page2.evaluate(warm)])
 }
 
-const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
-  const onPeerStream = ([roomId, streamMeta]) =>
+const verifyMediaMetadata = async ({
+  page,
+  page2,
+  roomNs,
+  peer1Id,
+  peer2Id
+}: RoomPairParams): Promise<void> => {
+  const onPeerStream = ([roomId, streamMeta]: [string, {id: number}]): Promise<{
+    peerId: string
+    meta: unknown
+    streamType: string
+  }> =>
     new Promise((res, rej) => {
       const timeout = setTimeout(
         () => rej(new Error('timed out waiting for metadata stream')),
         10_000
       )
 
-      window[roomId].onPeerStream = (stream, peerId, meta) => {
-        clearTimeout(timeout)
-        res({peerId, meta, streamType: stream.constructor.name})
-      }
+      window[roomId].onPeerStream(
+        (
+          stream: MediaStream,
+          {peerId, metadata: meta}: {peerId: string; metadata?: unknown}
+        ) => {
+          clearTimeout(timeout)
+          res({peerId, meta, streamType: stream.constructor.name})
+        },
+        {once: true}
+      )
 
       setTimeout(async () => {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -153,7 +207,7 @@ const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
     })
 
   const streamMeta = {id: Math.random()}
-  const streamArgs = [roomNs, streamMeta]
+  const streamArgs: [string, {id: number}] = [roomNs, streamMeta]
   const [peer2StreamInfo, peer1StreamInfo] = await Promise.all([
     page.evaluate(onPeerStream, streamArgs),
     page2.evaluate(onPeerStream, streamArgs)
@@ -170,62 +224,25 @@ const verifyMediaMetadata = async ({page, page2, roomNs, peer1Id, peer2Id}) => {
     meta: streamMeta,
     streamType
   })
-
-  const onPeerTrack = ([roomId, streamMeta]) =>
-    new Promise((res, rej) => {
-      const timeout = setTimeout(
-        () => rej(new Error('timed out waiting for metadata track')),
-        10_000
-      )
-
-      window[roomId].onPeerTrack = (track, stream, peerId, meta) => {
-        clearTimeout(timeout)
-        res({
-          peerId,
-          meta,
-          streamType: stream.constructor.name,
-          trackType: track.constructor.name
-        })
-      }
-
-      setTimeout(async () => {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: true
-        })
-        window[roomId].addTrack(stream.getTracks()[0], stream, {
-          metadata: streamMeta
-        })
-      }, 999)
-    })
-
-  const [peer2TrackInfo, peer1TrackInfo] = await Promise.all([
-    page.evaluate(onPeerTrack, streamArgs),
-    page2.evaluate(onPeerTrack, streamArgs)
-  ])
-
-  const trackType = 'MediaStreamTrack'
-
-  expect(peer1TrackInfo).toEqual({
-    peerId: peer1Id,
-    meta: streamMeta,
-    streamType,
-    trackType
-  })
-  expect(peer2TrackInfo).toEqual({
-    peerId: peer2Id,
-    meta: streamMeta,
-    streamType,
-    trackType
-  })
 }
 
-const verifyMessageActions = async ({page, page2, roomNs}) => {
-  const makeAction = ([roomId, message]) => {
+const verifyMessageActions = async ({
+  page,
+  page2,
+  roomNs
+}: {
+  page: Page
+  page2: Page
+  roomNs: string
+}): Promise<void> => {
+  const makeAction = <T extends number | string>([roomId, message]: [
+    string,
+    T
+  ]): Promise<unknown> => {
     const messageAction = window[roomId].makeAction('message')
 
     return new Promise(res => {
-      messageAction.onMessage = res
+      messageAction.onMessage((data: unknown) => res(data), {once: true})
       setTimeout(() => messageAction.send(message), 333)
     })
   }
@@ -234,8 +251,8 @@ const verifyMessageActions = async ({page, page2, roomNs}) => {
   const message2 = Math.random()
 
   const [receivedMessage1, receivedMessage2] = await Promise.all([
-    page.evaluate(makeAction, [roomNs, message1]),
-    page2.evaluate(makeAction, [roomNs, message2])
+    page.evaluate(makeAction, [roomNs, message1] satisfies [string, number]),
+    page2.evaluate(makeAction, [roomNs, message2] satisfies [string, number])
   ])
 
   expect(receivedMessage1).toEqual(message2)
@@ -244,8 +261,8 @@ const verifyMessageActions = async ({page, page2, roomNs}) => {
   const empty = ''
 
   const [receivedMessage3, receivedMessage4] = await Promise.all([
-    page.evaluate(makeAction, [roomNs, empty]),
-    page2.evaluate(makeAction, [roomNs, empty])
+    page.evaluate(makeAction, [roomNs, empty] satisfies [string, string]),
+    page2.evaluate(makeAction, [roomNs, empty] satisfies [string, string])
   ])
 
   expect(receivedMessage3).toEqual(empty)
@@ -253,10 +270,10 @@ const verifyMessageActions = async ({page, page2, roomNs}) => {
 
   expect(
     await page.evaluate(
-      ([roomId, actionName]) =>
+      ([roomId, actionName]: [string, string]) =>
         window[roomId].makeAction(actionName) ===
         window[roomId].makeAction(actionName + ''),
-      [roomNs, 'mucho']
+      [roomNs, 'mucho'] satisfies [string, string]
     )
   ).toBe(true)
 }
@@ -267,29 +284,32 @@ const verifyRequestActions = async ({
   roomNs,
   peer1Id,
   peer2Id
-}) => {
-  const setupRequestActions = roomId => {
-    window[roomId].makeAction('is-even', {
-      kind: 'request',
-      onRequest: n => n % 2 === 0
-    })
+}: RoomPairParams): Promise<void> => {
+  const setupRequestActions = (roomId: string) => {
+    window[roomId]
+      .makeAction('is-even', {
+        kind: 'request'
+      })
+      .onRequest((n: number) => n % 2 === 0)
 
-    window[roomId].makeAction('request-rejects', {
-      kind: 'request',
-      onRequest: () => {
+    window[roomId]
+      .makeAction('request-rejects', {
+        kind: 'request'
+      })
+      .onRequest(() => {
         throw new Error('request denied')
-      }
-    })
+      })
 
     window[roomId].makeAction('late-request', {kind: 'request'})
 
-    window[roomId].makeAction('slow-request', {
-      kind: 'request',
-      onRequest: async value => {
+    window[roomId]
+      .makeAction('slow-request', {
+        kind: 'request'
+      })
+      .onRequest(async (value: unknown) => {
         await new Promise(res => setTimeout(res, 100))
         return value
-      }
-    })
+      })
   }
 
   await Promise.all([
@@ -297,68 +317,101 @@ const verifyRequestActions = async ({
     page2.evaluate(setupRequestActions, roomNs)
   ])
 
-  const requestIsEven = ([roomId, peerId, value]) =>
+  const requestIsEven = ([roomId, peerId, value]: [
+    string,
+    string,
+    number
+  ]): Promise<boolean> =>
     window[roomId]
       .makeAction('is-even', {kind: 'request'})
       .request(value, {target: peerId, timeoutMs: 1000})
 
-  expect(await page.evaluate(requestIsEven, [roomNs, peer2Id, 42])).toEqual(
-    true
-  )
-  expect(await page2.evaluate(requestIsEven, [roomNs, peer1Id, 41])).toEqual(
-    false
-  )
+  expect(
+    await page.evaluate(requestIsEven, [roomNs, peer2Id, 42] satisfies [
+      string,
+      string,
+      number
+    ])
+  ).toEqual(true)
+  expect(
+    await page2.evaluate(requestIsEven, [roomNs, peer1Id, 41] satisfies [
+      string,
+      string,
+      number
+    ])
+  ).toEqual(false)
 
-  const requestRejects = ([roomId, peerId]) =>
+  const requestRejects = ([roomId, peerId]: [
+    string,
+    string
+  ]): Promise<string> =>
     window[roomId]
       .makeAction('request-rejects', {kind: 'request'})
       .request('please', {target: peerId, timeoutMs: 1000})
       .then(
         () => 'resolved',
-        err => String(err?.message ?? err)
+        (err: Error | null | undefined) => String(err?.message ?? err)
       )
 
-  expect(await page.evaluate(requestRejects, [roomNs, peer2Id])).toMatch(
-    /request denied/
-  )
+  expect(
+    await page.evaluate(requestRejects, [roomNs, peer2Id] satisfies [
+      string,
+      string
+    ])
+  ).toMatch(/request denied/)
 
-  const requestLate = ([roomId, peerId]) =>
+  const requestLate = ([roomId, peerId]: [string, string]): Promise<string> =>
     window[roomId]
       .makeAction('late-request', {kind: 'request'})
       .request('hello', {target: peerId, timeoutMs: 1000})
 
-  const lateRequest = page.evaluate(requestLate, [roomNs, peer2Id])
+  const lateRequest = page.evaluate(requestLate, [roomNs, peer2Id] satisfies [
+    string,
+    string
+  ])
 
   await new Promise(res => setTimeout(res, 50))
-  await page2.evaluate(roomId => {
-    window[roomId].makeAction('late-request', {
-      kind: 'request'
-    }).onRequest = () => 'hello back'
+  await page2.evaluate((roomId: string) => {
+    window[roomId]
+      .makeAction('late-request', {
+        kind: 'request'
+      })
+      .onRequest(() => 'hello back')
   }, roomNs)
 
   expect(await lateRequest).toEqual('hello back')
 
-  const requestMany = ([roomId, peerId]) => {
-    const seen = []
+  const requestMany = ([roomId, peerId]: [string, string]): Promise<{
+    seen: string[]
+    results: Array<{peerId: string; status: string; value?: unknown}>
+  }> => {
+    const seen: string[] = []
 
     return window[roomId]
       .makeAction('is-even', {kind: 'request'})
       .requestMany(8, {
         targets: ['missing-peer', peerId],
         timeoutMs: 1000,
-        onResult: result => seen.push(result.status)
+        onResult: (result: {status: string}) => seen.push(result.status)
       })
-      .then(results => ({
-        seen: seen.sort((a, b) => a.localeCompare(b)),
-        results: results.map(({peerId, status, value}) => ({
-          peerId,
-          status,
-          value
-        }))
-      }))
+      .then(
+        (
+          results: Array<{peerId: string; status: string; value?: unknown}>
+        ) => ({
+          seen: seen.sort((a, b) => a.localeCompare(b)),
+          results: results.map(({peerId, status, value}) => ({
+            peerId,
+            status,
+            value
+          }))
+        })
+      )
   }
 
-  const many = await page.evaluate(requestMany, [roomNs, peer2Id])
+  const many = await page.evaluate(requestMany, [roomNs, peer2Id] satisfies [
+    string,
+    string
+  ])
 
   expect(many.results).toEqual([
     {peerId: 'missing-peer', status: 'disconnected'},
@@ -366,7 +419,9 @@ const verifyRequestActions = async ({
   ])
   expect(many.seen).toEqual(['disconnected', 'fulfilled'])
 
-  const abortRequest = ([roomId, peerId]) => {
+  const abortRequest = ([roomId, peerId]: [string, string]): Promise<
+    string | undefined
+  > => {
     const controller = new AbortController()
     const result = window[roomId]
       .makeAction('slow-request', {kind: 'request'})
@@ -376,7 +431,7 @@ const verifyRequestActions = async ({
       })
       .then(
         () => 'resolved',
-        err => err?.name
+        (err: {name?: string} | null | undefined) => err?.name
       )
 
     controller.abort()
@@ -384,16 +439,34 @@ const verifyRequestActions = async ({
     return result
   }
 
-  expect(await page.evaluate(abortRequest, [roomNs, peer2Id])).toEqual(
-    'AbortError'
-  )
+  expect(
+    await page.evaluate(abortRequest, [roomNs, peer2Id] satisfies [
+      string,
+      string
+    ])
+  ).toEqual('AbortError')
 }
 
-const verifyActionIsolation = async ({page, page2, roomConfig, roomNs}) => {
+const verifyActionIsolation = async ({
+  page,
+  page2,
+  roomConfig,
+  roomNs
+}: {
+  page: Page
+  page2: Page
+  roomConfig: StrategyConfig
+  roomNs: string
+}): Promise<void> => {
   const isolatedRoomA = roomNs + '-isolation-a'
   const isolatedRoomB = roomNs + '-isolation-b'
 
-  const evaluateActionIsolation = ([roomA, roomB, config, label]) => {
+  const evaluateActionIsolation = ([roomA, roomB, config, label]: [
+    string,
+    string,
+    StrategyConfig,
+    string
+  ]) => {
     const roomARef = window.trystero.joinRoom(config, roomA)
     const roomBRef = window.trystero.joinRoom(config, roomB)
     window[roomA] = roomARef
@@ -403,12 +476,24 @@ const verifyActionIsolation = async ({page, page2, roomConfig, roomNs}) => {
     const sharedB = roomBRef.makeAction('shared')
 
     return Promise.all([
-      new Promise(res => (roomARef.onPeerJoin = res)),
-      new Promise(res => (roomBRef.onPeerJoin = res))
+      new Promise<string>(res =>
+        roomARef.onPeerJoin(({peerId}: {peerId: string}) => res(peerId), {
+          once: true
+        })
+      ),
+      new Promise<string>(res =>
+        roomBRef.onPeerJoin(({peerId}: {peerId: string}) => res(peerId), {
+          once: true
+        })
+      )
     ]).then(([peerA, peerB]) =>
       Promise.all([
-        new Promise(res => (sharedA.onMessage = res)),
-        new Promise(res => (sharedB.onMessage = res)),
+        new Promise(res =>
+          sharedA.onMessage((data: unknown) => res(data), {once: true})
+        ),
+        new Promise(res =>
+          sharedB.onMessage((data: unknown) => res(data), {once: true})
+        ),
         sharedA.send({room: roomA, from: label}, {target: peerA}),
         sharedB.send({room: roomB, from: label}, {target: peerB})
       ]).then(([receivedA, receivedB]) => ({receivedA, receivedB}))
@@ -421,13 +506,13 @@ const verifyActionIsolation = async ({page, page2, roomConfig, roomNs}) => {
       isolatedRoomB,
       roomConfig,
       'page-1'
-    ]),
+    ] satisfies [string, string, StrategyConfig, string]),
     page2.evaluate(evaluateActionIsolation, [
       isolatedRoomA,
       isolatedRoomB,
       roomConfig,
       'page-2'
-    ])
+    ] satisfies [string, string, StrategyConfig, string])
   ])
 
   expect(isolationResult1).toEqual({
@@ -439,7 +524,8 @@ const verifyActionIsolation = async ({page, page2, roomConfig, roomNs}) => {
     receivedB: {room: isolatedRoomB, from: 'page-1'}
   })
 
-  const leaveRoom = roomId => window[roomId]?.leave()
+  const leaveRoom = (roomId: string): Promise<void> | undefined =>
+    window[roomId]?.leave()
 
   await Promise.all([
     page.evaluate(leaveRoom, isolatedRoomA),
@@ -455,8 +541,12 @@ const verifyBinaryPayloads = async ({
   roomNs,
   peer1Id,
   peer2Id
-}) => {
-  const makeBinaryAction = ([roomId, message, metadata]) => {
+}: RoomPairParams): Promise<void> => {
+  const makeBinaryAction = ([roomId, message, metadata]: [
+    string,
+    string,
+    Record<string, string>
+  ]): Promise<BinaryActionResult> => {
     const binaryAction = window[roomId].makeAction('binary')
 
     let senderPercent = 0
@@ -464,31 +554,37 @@ const verifyBinaryPayloads = async ({
     let senderCallCount = 0
     let receiverCallCount = 0
 
-    binaryAction.onReceiveProgress = p => {
+    binaryAction.onReceiveProgress((p: number) => {
       receiverPercent = p
       receiverCallCount++
-    }
+    })
 
     return Promise.all([
-      new Promise(res => {
-        binaryAction.onMessage = (payload, {metadata: receivedMeta}) =>
-          res([
-            new TextDecoder().decode(payload).slice(-message.length),
-            receivedMeta
-          ])
+      new Promise<[string, unknown]>(res => {
+        binaryAction.onMessage(
+          (
+            payload: Uint8Array,
+            {metadata: receivedMeta}: {metadata?: unknown}
+          ) =>
+            res([
+              new TextDecoder().decode(payload).slice(-message.length),
+              receivedMeta
+            ]),
+          {once: true}
+        )
       }),
 
       new Promise(res => setTimeout(res, 1233)).then(() =>
         binaryAction.send(new TextEncoder().encode(message.repeat(50000)), {
           metadata,
-          onProgress: p => {
+          onProgress: (p: number) => {
             senderPercent = p
             senderCallCount++
           }
         })
       )
-    ]).then(([received]) => {
-      const [payload, meta] = received as [string, unknown]
+    ]).then(([received]): BinaryActionResult => {
+      const [payload, meta] = received
 
       return [
         payload,
@@ -504,8 +600,16 @@ const verifyBinaryPayloads = async ({
   const mockMeta = {foo: 'bar', baz: 'qux'}
 
   const payloads = await Promise.all([
-    page.evaluate(makeBinaryAction, [roomNs, peer1Id, mockMeta]),
-    page2.evaluate(makeBinaryAction, [roomNs, peer2Id, mockMeta])
+    page.evaluate(makeBinaryAction, [roomNs, peer1Id, mockMeta] satisfies [
+      string,
+      string,
+      Record<string, string>
+    ]),
+    page2.evaluate(makeBinaryAction, [roomNs, peer2Id, mockMeta] satisfies [
+      string,
+      string,
+      Record<string, string>
+    ])
   ])
 
   expect(payloads[0][0]).toEqual(peer2Id)

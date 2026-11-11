@@ -16,7 +16,6 @@
     "no-else-return": "error",
     "no-extra-label": "error",
     "no-lonely-if": "error",
-    "no-unused-labels": "off",
     "no-self-compare": "error",
     "no-template-curly-in-string": "error",
     "no-throw-literal": "error",
@@ -24,12 +23,23 @@
     "prefer-const": "error",
     "prefer-rest-params": "error",
     "prefer-spread": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/switch-exhaustiveness-check": [
+      "error",
+      {
+        "considerDefaultExhaustiveForUnions": false,
+        "requireDefaultForNonUnion": false
+      }
+    ],
     "unicorn/no-new-array": "off"
   },
   "overrides": [
     {
-      "files": ["playwright.config.ts", "test/**/*.ts"],
+      "files": ["playwright.config.ts", "scripts/**/*.ts", "test/**/*.ts"],
       "rules": {
+        "typescript/no-explicit-any": "off",
+        "typescript/no-misused-promises": "off",
         "typescript/no-useless-default-assignment": "off"
       }
     }

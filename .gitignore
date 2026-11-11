@@ -1,10 +1,11 @@
 node_modules
 dist
+test/dist
 packages/*/README.md
+packages/*/LICENSE
 test-results
 playwright-report
 *.tsbuildinfo
 _ignore
 knip.json
-pnpm-lock.yaml
 .pnpm-store

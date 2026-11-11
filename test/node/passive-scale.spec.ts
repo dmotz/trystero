@@ -1,28 +1,23 @@
-// @ts-nocheck
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import {encrypt, genKey} from '../../packages/core/src/crypto.ts'
+import test from './test.ts'
+import type {Room, StrategyOnMessage} from '../../packages/core/src/index.ts'
 import createStrategy from '../../packages/core/src/strategy.ts'
 
 type Subscriber = {
   roomId?: string
   rootTopic: string
   selfTopic: string
-  onMessage: (
-    topic: string,
-    msg: unknown,
-    signalPeer: (peerTopic: string, signal: string) => void
-  ) => Promise<void> | void
+  onMessage: StrategyOnMessage
 }
 
 class MockDataChannel {
   readyState = 'connecting'
   binaryType = 'arraybuffer'
   bufferedAmountLowThreshold = 0
-  onmessage = null
-  onopen = null
-  onclose = null
-  onerror = null
+  onmessage: ((ev: {data: unknown}) => void) | null = null
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: ((ev: unknown) => void) | null = null
 
   close() {
     this.readyState = 'closed'
@@ -37,22 +32,22 @@ class MockRTCPeerConnection {
   connectionState = 'new'
   iceConnectionState = 'new'
   signalingState = 'stable'
-  localDescription = null
-  onnegotiationneeded = null
-  onconnectionstatechange = null
-  ontrack = null
-  ondatachannel = null
-  listeners = {}
+  localDescription: {type: string; sdp?: string} | null = null
+  onnegotiationneeded: (() => void) | null = null
+  onconnectionstatechange: (() => void) | null = null
+  ontrack: ((ev: unknown) => void) | null = null
+  ondatachannel: ((ev: unknown) => void) | null = null
+  listeners: Record<string, Set<() => void>> = {}
 
   createDataChannel() {
     return new MockDataChannel()
   }
 
-  addEventListener(event, fn) {
+  addEventListener(event: string, fn: () => void) {
     ;(this.listeners[event] ??= new Set()).add(fn)
   }
 
-  removeEventListener(event, fn) {
+  removeEventListener(event: string, fn: () => void) {
     this.listeners[event]?.delete(fn)
   }
 
@@ -62,7 +57,7 @@ class MockRTCPeerConnection {
     return {type: 'offer', sdp: `mock-offer-${Math.random()}`}
   }
 
-  async setLocalDescription(description) {
+  async setLocalDescription(description?: {type: string; sdp?: string}) {
     if (description?.type === 'rollback') {
       this.signalingState = 'stable'
       return
@@ -95,52 +90,6 @@ class MockRTCPeerConnection {
   }
 
   removeTrack() {}
-}
-
-class MockPeer {
-  created = Date.now()
-  isDead = false
-  destroyCount = 0
-  handlers = {}
-  offerPromise = Promise.resolve()
-  connection = {
-    connectionState: 'connected',
-    iceConnectionState: 'connected',
-    getSenders: () => []
-  }
-  channel = {readyState: 'open'}
-
-  async getOffer() {}
-
-  async signal() {
-    this.handlers.connect?.()
-  }
-
-  sendData() {}
-
-  destroy() {
-    if (this.isDead) {
-      return
-    }
-
-    this.isDead = true
-    this.destroyCount += 1
-    this.connection.connectionState = 'closed'
-    this.connection.iceConnectionState = 'closed'
-    this.handlers.close?.()
-  }
-
-  setHandlers(newHandlers) {
-    Object.assign(this.handlers, newHandlers)
-  }
-
-  addStream() {}
-  removeStream() {}
-  addTrack() {
-    return {}
-  }
-  removeTrack() {}
-  replaceTrack() {}
 }
 
 const wait = (ms: number) => new Promise(res => setTimeout(res, ms))
@@ -184,14 +133,13 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
     const memBefore = process.memoryUsage()
     const timeBefore = performance.now()
 
-    const rooms = []
+    const rooms: Room[] = []
     for (let i = 0; i < roomCount; i++) {
       rooms.push(joinRoom(config, `room-${i}`))
     }
@@ -229,12 +177,6 @@ void test(
       `expected ${roomCount} subscriptions`
     )
 
-    // Sanity: all rooms report as passive
-    assert.ok(
-      rooms.every(r => r.isPassive()),
-      'all rooms should be passive'
-    )
-
     // All rooms should be ready (subscribed) within 60 seconds
     assert.ok(
       readyTimeMs < 60_000,
@@ -253,126 +195,12 @@ void test(
 )
 
 void test(
-  'Trystero: 1000 passive rooms share a single connection per peer',
-  {timeout: 120_000},
-  async () => {
-    const roomCount = 1_000
-    const subscribers: Subscriber[] = []
-
-    // Count RTCPeerConnection instantiations to verify connection sharing
-    let rtcCreated = 0
-    class CountingRTCPeerConnection extends MockRTCPeerConnection {
-      constructor(...args) {
-        super(...args)
-        rtcCreated++
-      }
-    }
-
-    const joinRoom = createStrategy({
-      init: () => ({}),
-      subscribe: async (
-        _relay,
-        rootTopic,
-        selfTopic,
-        onMessage,
-        _getOffers,
-        context
-      ) => {
-        subscribers.push({
-          roomId: context.roomId,
-          rootTopic,
-          selfTopic,
-          onMessage
-        })
-        return () => {}
-      },
-      announce: () => {}
-    })
-
-    const appId = `scale-shared-${Date.now()}`
-    const peerId = '~active-peer'
-    const config = {
-      appId,
-      passive: true,
-      rtcPolyfill: CountingRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
-    }
-
-    const rooms = []
-    for (let i = 0; i < roomCount; i++) {
-      rooms.push(joinRoom(config, `room-${i}`))
-    }
-
-    await waitFor(() => subscribers.length >= roomCount, 60_000)
-
-    const rtcBeforeConnect = rtcCreated
-
-    // Activate room-0 and connect a mock peer
-    const sub0 = subscribers.find(sub => sub.roomId === 'room-0')
-    assert.ok(sub0, 'expected room-0 subscriber')
-    await sub0.onMessage(sub0.rootTopic, {peerId}, () => {})
-
-    const mockPeer = new MockPeer()
-    const encryptedAnswer = await encrypt(
-      genKey('', appId, 'room-0'),
-      'answer-sdp'
-    )
-
-    await sub0.onMessage(
-      sub0.rootTopic,
-      {peerId, answer: encryptedAnswer, peer: mockPeer},
-      () => {}
-    )
-
-    await wait(100)
-
-    const rtcAfterFirstConnect = rtcCreated
-
-    // Now send announcements from the same peer to all other rooms.
-    // The shared peer manager should reuse the existing WebRTC connection
-    // rather than creating new ones.
-    for (let i = 1; i < roomCount; i++) {
-      const sub = subscribers[i]
-      await sub.onMessage(sub.rootTopic, {peerId}, () => {})
-    }
-
-    await wait(500)
-
-    const rtcAfterAllRooms = rtcCreated
-
-    // The mock peer should not have been destroyed/recreated
-    assert.equal(
-      mockPeer.destroyCount,
-      0,
-      'shared peer should not be destroyed when reused across rooms'
-    )
-
-    // No additional RTCPeerConnections should be created when reusing the
-    // shared peer across rooms 1-999
-    assert.equal(
-      rtcAfterAllRooms - rtcAfterFirstConnect,
-      0,
-      `expected 0 new RTCPeerConnections for rooms 1-999, ` +
-        `got ${rtcAfterAllRooms - rtcAfterFirstConnect}`
-    )
-
-    console.log(
-      `  ${roomCount} rooms, ` +
-        `${rtcAfterFirstConnect - rtcBeforeConnect} RTC connection(s) for first room, ` +
-        `${rtcAfterAllRooms - rtcAfterFirstConnect} additional for remaining ${roomCount - 1} rooms`
-    )
-
-    // Clean up
-    await Promise.all(rooms.map(room => room.leave().catch(() => {})))
-  }
-)
-
-void test(
-  'Trystero: activating one passive room does not activate all passive rooms',
+  'Trystero: signaling one passive room only triggers a response in that room and never announces',
   {timeout: 120_000},
   async () => {
     const roomCount = 100
-    const announcePayloads: Map<string, number> = new Map()
+    let announceCount = 0
+    const signaledRooms = new Set<number>()
     const subscribers: Subscriber[] = []
 
     const joinRoom = createStrategy({
@@ -381,51 +209,35 @@ void test(
         subscribers.push({rootTopic, selfTopic, onMessage})
         return () => {}
       },
-      announce: (_relay, rootTopic) => {
-        announcePayloads.set(
-          rootTopic,
-          (announcePayloads.get(rootTopic) ?? 0) + 1
-        )
+      announce: () => {
+        announceCount++
       }
     })
 
-    const appId = `scale-selective-activation-${Date.now()}`
+    const appId = `scale-selective-signal-${Date.now()}`
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
-    const rooms = []
+    const rooms: Room[] = []
     for (let i = 0; i < roomCount; i++) {
       rooms.push(joinRoom(config, `room-${i}`))
     }
 
     await waitFor(() => subscribers.length >= roomCount, 60_000)
 
-    // Activate only room-0 by sending it an announcement
-    const sub0 = subscribers[0]
-    await sub0.onMessage(sub0.rootTopic, {peerId: 'active-peer'}, () => {})
+    const sub0 = subscribers[0]!
+    await sub0.onMessage(sub0.rootTopic, {peerId: 'z'.repeat(20)}, () => {
+      signaledRooms.add(0)
+    })
 
-    await waitFor(() => announcePayloads.size > 0, 5_000)
+    await waitFor(() => signaledRooms.size > 0, 5_000)
     await wait(300)
 
-    // Only room-0's topic should have announced
-    assert.equal(
-      announcePayloads.size,
-      1,
-      `expected 1 topic to announce, got ${announcePayloads.size}`
-    )
-    assert.ok(
-      announcePayloads.has(sub0.rootTopic),
-      'only the activated room should announce'
-    )
-
-    console.log(
-      `  activated 1 of ${roomCount} rooms, ` +
-        `${announcePayloads.size} topic(s) announced`
-    )
+    assert.equal(announceCount, 0, 'passive rooms should never announce')
+    assert.deepEqual([...signaledRooms], [0])
 
     // Clean up
     await Promise.all(rooms.map(room => room.leave().catch(() => {})))
@@ -456,11 +268,10 @@ void test(
     const config = {
       appId,
       passive: true,
-      rtcPolyfill: MockRTCPeerConnection,
-      _test_only_sharedPeerIdleMs: 60
+      rtcPolyfill: MockRTCPeerConnection as unknown as typeof RTCPeerConnection
     }
 
-    const rooms = []
+    const rooms: Room[] = []
     for (let i = 0; i < roomCount; i++) {
       rooms.push(joinRoom(config, `room-${i}`))
     }
@@ -504,7 +315,7 @@ void test(
 
     // Should be able to join fresh rooms after full cleanup
     const freshRoom = joinRoom(config, 'fresh-room')
-    assert.equal(freshRoom.isPassive(), true)
+    assert.ok(freshRoom)
     await freshRoom.leave().catch(() => {})
   }
 )

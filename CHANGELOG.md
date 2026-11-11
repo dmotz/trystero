@@ -1,5 +1,125 @@
 # Changelog
 
+## [0.27.0](https://github.com/dmotz/trystero/releases/tag/0.27.0) - 2026-11-11
+
+### Improvements
+
+- 🪪 **Persistent user identities & multi-tab presence (`userId`)** - every
+  participant gets an unforgeable `userId` alongside each tab's `peerId`
+  (`await room.getSelf()`), persisted across browser reloads and open tabs by
+  default (`identity: 'local'`). Pass `identity: 'none'` for throwaway IDs,
+  reset saved browser identity with `clearUserIdentity(appId)`, or bring
+  portable keys across devices and servers with `createUserIdentity()`,
+  `exportUserIdentity()`, and `importUserIdentity()`. Track unique users instead
+  of individual tabs with `room.onUserJoin()`, `room.onUserLeave()`, and
+  `room.getUsers()`, and pass either a `userId` or `peerId` to `target` /
+  `targets` across actions, media, `ping()`, and moderation.
+- 🗂️ **Synced per-user & shared room state (`makeUserState` & `makeState`)** -
+  built-in JSON state primitives that apply local updates synchronously, support
+  custom `validate(next, context)` rules, and plug directly into React's
+  `useSyncExternalStore`:
+  - `room.makeUserState(name, initialValue?, config?)` gives each user their own
+    presence-scoped slot (`.get()`, `.getAll()`, `.has()`, `.set()`, `.clear()`,
+    `.onChange()`), ready to read inside `onUserJoin` and cleaned up
+    automatically when they leave.
+  - `room.makeState(name, initialValue?, config?)` syncs shared state across the
+    room (`.get()`, `.set()`, `.onChange()`), including to late joiners even
+    after the original writer has left.
+- 👑 **Room admins, custom roles & moderation (`roles()`)** - pass
+  `use: [roles(...)]` to `joinRoom()` for serverless permissions and moderation.
+  Create host-owned rooms with `roles({selfAsAdmin: true})` (which embeds the
+  host's `userId` in `roomId` for shareable invite links and restores admin
+  rights on rejoin) or pin trusted IDs with `roles({admins: [...]})`. Admins can
+  manage custom roles (`grantRole`, `revokeRole`, `getRoles`, `onRoleChange`)
+  and ban/unban users (`ban`, `unban`, `isBanned`), while `makeState`,
+  `makeUserState`, and `makeAction` accept `{roles}` to restrict who can write
+  or send (`makeState` defaults to admin-only writes when `roles()` is enabled;
+  pass `roles: '*'` to allow everyone).
+- 🕸️ **Large-room scaling (`scale()`)** - pass `use: [scale({maxDirectPeers?})]`
+  to `joinRoom()` to scale rooms to dozens of peers without changing your state,
+  action, or media code (with `room.getTopology()` to inspect active connections
+  and routes).
+- 🚪 **Room size limits (`maxUsers`)** - cap how many unique users can join a
+  room (`joinRoom({appId, maxUsers: 2}, roomId)`); extra joiners are rejected
+  with `{code: 'room-full'}` on `room.onError()`.
+- 🔔 **Composable event subscriptions** - room, action, and state `on*()`
+  methods now support multiple independent listeners, return an `unsubscribe()`
+  function, and accept `{once, signal}` options plus `{replay: true}` to emit
+  already-active users, peers, streams, roles, or state to late subscribers.
+- 🚨 **Structured error handling (`room.onError` & `ActionError`)** -
+  `room.onError()` emits typed `RoomError` codes (`'room-full'`, `'banned'`,
+  `'decrypt-failed'`, `'peer-connect-failed'`, `'relay-failed'`, etc.), and
+  rejected `action.send()` / `action.request()` calls expose a typed
+  `ActionError` (`err.kind`:
+  `'timeout' | 'disconnected' | 'aborted' | 'rejected'`).
+
+### ⚠️ Breaking changes
+
+`0.27.0` uses a new wire protocol and is **not compatible with `0.26.x` peers**
+— upgrade all clients sharing a room together. See the
+**[0.27.0 migration guide](./MIGRATION.md)** for full before/after examples.
+
+- **Event listeners are now `on*(fn, options?)` methods** - replace property
+  assignments (`room.onPeerJoin = fn`, `action.onMessage = fn`) and `makeAction`
+  config callbacks with `on*()` calls (`room.onUserJoin`, `room.onPeerJoin`,
+  `room.onPeerStream`, `action.onMessage`, `action.onRequest`,
+  `action.onReceive`, `action.onReceiveProgress`), which return an
+  `unsubscribe()` function:
+  - Room and media callbacks now receive `{userId, peerId, ...}` context objects
+    instead of a bare `peerId` string (`onPeerStream` passes
+    `(stream, {userId, peerId, metadata})`).
+  - Join, stream, role, and state listeners only fire for new events by default;
+    pass `{replay: true}` to synchronously emit existing items on subscribe.
+  - `action.onRequest` and `action.onReceive` allow one active handler per
+    action at a time (call `unsubscribe()` before replacing).
+
+  ```js
+  const room = joinRoom({appId: 'example.com/my-app'}, 'lobby')
+  const {userId, peerId} = await room.getSelf()
+
+  const offJoin = room.onUserJoin(({userId}) => console.log(`${userId} joined`))
+  room.onPeerStream((stream, {userId, metadata}) =>
+    attachVideo(userId, stream, metadata)
+  )
+  room.onError(err => console.error(err.code, err.message))
+
+  const chat = room.makeAction('chat')
+  chat.onMessage((text, {userId}) => renderMessage(userId, text))
+  ```
+
+- **`selfId` replaced by `await room.getSelf()`** - the top-level `selfId`
+  export has been removed; read `{userId, peerId}` from `await room.getSelf()`
+  after joining a room (or await `room.ready`).
+- **`joinRoom(config, roomId)` takes 2 arguments and throws on duplicate active
+  joins** - move `onJoinError` to `room.onError(err => ...)`. `onPeerHandshake`
+  and `handshakeTimeoutMs` have been removed in favor of verified `userId`s,
+  `makeUserState`, `maxUsers`, `roles()`, and `action.onReceive`. Calling
+  `joinRoom()` while `(appId, roomId)` is already active now throws instead of
+  returning the existing room (call `await room.leave()` before rejoining), and
+  `room.isPassive()` has been removed.
+- **Targeted `action.send()` rejects on disconnected targets** - passing
+  `{target}` to `action.send(data, {target})` now rejects if a targeted `userId`
+  or `peerId` is not connected (broadcast `send(data)` without `target` still
+  resolves when the room is empty).
+- **Streamlined `MediaStream` API** - `addStream()` and `replaceTrack()` now
+  return `Promise<void>` instead of `Promise<void>[]`. `addTrack`,
+  `removeTrack`, `onPeerTrack`, and `metadata` on `replaceTrack` have been
+  removed — mutate tracks on your `MediaStream` and re-call idempotent
+  `await room.addStream(stream, {metadata})` to sync track or metadata updates.
+- **`room.getPeers()` returns `PeerInfo` objects** - `getPeers()` now returns
+  `{[peerId]: {userId, connection, direct, hops, roles}}` instead of raw
+  `RTCPeerConnection` instances (`peers[peerId].connection` accesses the
+  underlying connection on direct peers; prefer `room.getUsers()` for
+  participant lists).
+- **Relay connectivity & package exports** - `relayConfig.manualReconnection`,
+  `pauseRelayReconnection()`, and `resumeRelayReconnection()` have been replaced
+  by `setRelayConnectivity('offline' | 'online' | 'auto')`. Deprecated
+  `trystero/<strategy>` subpaths, prebuilt `.min.js` bundles, and
+  `@trystero-p2p/ipfs` have been removed — import `trystero` (Nostr) or
+  `@trystero-p2p/<strategy>` directly. TypeScript projects now require
+  **TypeScript >= 5.0**, and `ws` is an optional peer dependency needed only for
+  `@trystero-p2p/ws-relay/server`.
+
 ## [0.26.0](https://github.com/dmotz/trystero/releases/tag/0.26.0) - 2026-10-04
 
 ### Improvements

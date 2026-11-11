@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/mqtt",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Simple, serverless WebRTC (via MQTT)",
   "keywords": [
     "chat",
@@ -23,10 +23,16 @@
     "email": "dan@oxism.com",
     "url": "https://oxism.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmotz/trystero.git",
+    "directory": "packages/mqtt"
+  },
   "files": [
     "dist"
   ],
   "type": "module",
+  "sideEffects": false,
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
@@ -34,6 +40,9 @@
   },
   "dependencies": {
     "@trystero-p2p/core": "workspace:*",
-    "mqtt": "^5.16.0"
+    "mqtt": "^5.16.1"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

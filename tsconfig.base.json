@@ -5,7 +5,7 @@
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": ["ES2024", "ES2025.Collection", "DOM", "DOM.Iterable"],
     "strict": true,
     "noImplicitAny": true,
     "noImplicitReturns": true,
@@ -16,16 +16,26 @@
     "noImplicitOverride": true,
     "useUnknownInCatchVariables": true,
     "isolatedModules": true,
+    "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": false,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "composite": true,
+    "skipLibCheck": true,
+    "noEmit": true,
     "noEmitOnError": true,
     "newLine": "lf",
-    "types": []
+    "types": [],
+    "paths": {
+      "@trystero-p2p/core": ["./packages/core/src/index.ts"],
+      "@trystero-p2p/core/types": ["./packages/core/src/types.ts"],
+      "@trystero-p2p/firebase": ["./packages/firebase/src/index.ts"],
+      "@trystero-p2p/mqtt": ["./packages/mqtt/src/index.ts"],
+      "@trystero-p2p/nostr": ["./packages/nostr/src/index.ts"],
+      "@trystero-p2p/supabase": ["./packages/supabase/src/index.ts"],
+      "@trystero-p2p/torrent": ["./packages/torrent/src/index.ts"],
+      "@trystero-p2p/ws-relay": ["./packages/ws-relay/src/index.ts"],
+      "@trystero-p2p/ws-relay/server": ["./packages/ws-relay/src/server.ts"],
+      "trystero": ["./packages/trystero/src/index.ts"]
+    }
   }
 }

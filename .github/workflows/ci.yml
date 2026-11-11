@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - next
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Check types, lint, and formatting
+        run: pnpm typecheck && pnpm lint && pnpm format
+
+      - name: Check bundle size budgets
+        run: node scripts/get-bundle-sizes.ts --check
+
+      - name: Run Node test suite
+        env:
+          TRYSTERO_SKIP_PUBLIC_RELAYS: '1'
+        run: pnpm test:node
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright ws-relay browser suite
+        run: pnpm run build:test && npx playwright test test/ws-relay.spec.ts

@@ -1,11 +1,12 @@
 import {expect, test} from '@playwright/test'
+import type {StrategyConfig} from '../strategy-configs'
 import {sleep, withStrategyBrowserPair} from './harness'
 import {joinRoomAndWaitForPeer, leaveRoom, ping} from './room-helpers'
 
-test('Trystero: browser: restarting an unanswered data channel offer retains its media section', async ({
+test('Trystero: browser: repeated unanswered data channel getOffer retains its media section', async ({
   page
 }) => {
-  await page.goto(`https://127.0.0.1:${process.env.TRYSTERO_TEST_PORT}/test`)
+  await page.goto(`https://127.0.0.1:${process.env['TRYSTERO_TEST_PORT']}/test`)
   const offers = await page.evaluate(async () => {
     const peerModule = '../packages/core/dist/peer.mjs'
     const {default: initPeer} = await import(peerModule)
@@ -13,12 +14,11 @@ test('Trystero: browser: restarting an unanswered data channel offer retains its
 
     try {
       const initial = await peer.getOffer()
-      const replacement = await peer.getOffer(true)
+      const repeated = await peer.getOffer()
       return {
         initial: initial?.sdp,
-        replacement: replacement?.sdp,
+        repeated: repeated?.sdp,
         initialIceUfrag: initial?.sdp.match(/^a=ice-ufrag:(.*)$/m)?.[1],
-        replacementIceUfrag: replacement?.sdp.match(/^a=ice-ufrag:(.*)$/m)?.[1],
         state: peer.connection.signalingState,
         remoteDescription: peer.connection.remoteDescription?.type ?? null
       }
@@ -28,10 +28,8 @@ test('Trystero: browser: restarting an unanswered data channel offer retains its
   })
 
   expect(offers.initial).toMatch(/^m=application/m)
-  expect(offers.replacement).toMatch(/^m=application/m)
+  expect(offers.repeated).toBe(offers.initial)
   expect(offers.initialIceUfrag).toBeTruthy()
-  expect(offers.replacementIceUfrag).toBeTruthy()
-  expect(offers.replacementIceUfrag).not.toBe(offers.initialIceUfrag)
   expect(offers.state).toBe('have-local-offer')
   expect(offers.remoteDescription).toBeNull()
 })
@@ -49,17 +47,20 @@ withStrategyBrowserPair(
 
     try {
       await idlePage.evaluate(
-        ([roomId, config]) => {
+        ([roomId, config]: [string, StrategyConfig]) => {
           window[roomId] = window.trystero.joinRoom(config, roomId)
         },
-        [roomId, roomConfig]
+        [roomId, roomConfig] satisfies [string, StrategyConfig]
       )
       // Let any prewarmed native ICE gather, then advance only Date past its TTL.
       await sleep(250)
       await idlePage.clock.setFixedTime(Date.now() + 62_000)
 
       expect(
-        await freshPage.evaluate(joinRoomAndWaitForPeer, [roomId, roomConfig])
+        await freshPage.evaluate(joinRoomAndWaitForPeer, [
+          roomId,
+          roomConfig
+        ] satisfies [string, StrategyConfig])
       ).toBe(idleId)
       await expect
         .poll(() =>
@@ -69,9 +70,12 @@ withStrategyBrowserPair(
           )
         )
         .toEqual([freshId])
-      expect(await idlePage.evaluate(ping, [roomId, freshId])).toBeLessThan(
-        1000
-      )
+      expect(
+        await idlePage.evaluate(ping, [roomId, freshId] satisfies [
+          string,
+          string
+        ])
+      ).toBeLessThan(1000)
     } finally {
       await idlePage.clock.resume()
       await Promise.all([

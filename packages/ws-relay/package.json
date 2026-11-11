@@ -1,6 +1,6 @@
 {
   "name": "@trystero-p2p/ws-relay",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Simple, serverless WebRTC (via WebSocket)",
   "keywords": [
     "chat",
@@ -23,10 +23,16 @@
     "email": "dan@oxism.com",
     "url": "https://oxism.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmotz/trystero.git",
+    "directory": "packages/ws-relay"
+  },
   "files": [
     "dist"
   ],
   "type": "module",
+  "sideEffects": false,
   "types": "./dist/index.d.mts",
   "exports": {
     ".": "./dist/index.mjs",
@@ -34,8 +40,21 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@trystero-p2p/core": "workspace:*",
+    "@trystero-p2p/core": "workspace:*"
+  },
+  "devDependencies": {
     "@types/ws": "^8.18.2",
-    "ws": "^8.22.0"
+    "ws": "^8.22.2"
+  },
+  "peerDependencies": {
+    "ws": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

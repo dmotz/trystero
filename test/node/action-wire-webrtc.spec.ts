@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import test from './test.ts'
 import {waitFor} from './peer-harness.ts'
 import {RTCPeerConnection} from 'werift'
-// @ts-expect-error Internal source import crosses a referenced package boundary.
 import {createActionManager} from '../../packages/core/src/actions.ts'
+import {createDirectPeerTransport} from '../../packages/core/src/peer-transport.ts'
 
 void test(
   'action proposals and binary transfers work over a local WebRTC data channel',
@@ -41,7 +41,7 @@ void test(
         left.clearPeer(id, error)
         void sender.close()
       },
-      getPeer: () => toReceiver as never,
+      getTransport: () => createDirectPeerTransport(toReceiver as never),
       getPeerIds: () => ['receiver'],
       canReceiveFromPeer: () => true
     })
@@ -50,7 +50,7 @@ void test(
         right.clearPeer(id, error)
         void receiver.close()
       },
-      getPeer: () => toSender as never,
+      getTransport: () => createDirectPeerTransport(toSender as never),
       getPeerIds: () => ['sender'],
       canReceiveFromPeer: () => true
     })
@@ -78,11 +78,10 @@ void test(
     )
 
     const received: unknown[] = []
-    const file = right.makeAction('file', {
-      onReceive: ({byteLength}) => byteLength <= 300_000,
-      onMessage: data => {
-        received.push(data)
-      }
+    const file = right.makeAction('file')
+    const unsubReceive = file.onReceive(({byteLength}) => byteLength <= 300_000)
+    file.onMessage(data => {
+      received.push(data)
     })
     const send = left.makeAction('file').send
     const payload = new Uint8Array(256_000).fill(42)
@@ -90,7 +89,7 @@ void test(
     await waitFor(() => received.length === 1)
     assert.deepEqual(received, [payload])
     await assert.rejects(send(new Uint8Array(400_000)), {kind: 'rejected'})
-    file.onReceive = null
+    unsubReceive()
     await send('still connected')
     await waitFor(() => received.length === 2)
     assert.equal(received.at(-1), 'still connected')
