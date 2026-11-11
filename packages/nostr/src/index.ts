@@ -19,7 +19,8 @@ import {
   unrefTimer,
   type JoinRoom,
   type JoinRoomConfig,
-  type SocketClient
+  type SocketClient,
+  type Timeout
 } from '@trystero-p2p/core'
 import {
   createEvent,
@@ -61,8 +62,6 @@ type BatchSyncState =
       readonly requestedAt: number
     }
   | {readonly phase: 'synced'}
-
-type Timeout = ReturnType<typeof setTimeout>
 
 type BatchState = {
   subIds: string[]

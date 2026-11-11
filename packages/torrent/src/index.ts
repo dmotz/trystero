@@ -20,10 +20,9 @@ import {
   type JoinRoom,
   type JoinRoomConfig,
   type OfferRecord,
-  type SocketClient
+  type SocketClient,
+  type Timeout
 } from '@trystero-p2p/core'
-
-type Timeout = ReturnType<typeof setTimeout>
 
 const unreachable = (x: never): never => {
   throw mkErr(`unreachable: ${String(x)}`)

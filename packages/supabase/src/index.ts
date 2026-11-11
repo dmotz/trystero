@@ -16,10 +16,9 @@ import {
   unrefTimer,
   type BaseRelayConfig,
   type BaseRoomConfig,
-  type JoinRoom
+  type JoinRoom,
+  type Timeout
 } from '@trystero-p2p/core'
-
-type Timeout = ReturnType<typeof setTimeout>
 
 const unreachable = (x: never): never => {
   throw mkErr(`unreachable: ${String(x)}`)

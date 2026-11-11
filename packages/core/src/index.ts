@@ -47,6 +47,7 @@ export type {
   StrategyContext,
   StrategyMessage,
   StrategyOnMessage,
+  Timeout,
   TopicPublishContext,
   TopicStrategyAdapter,
   TopicSubscriptionContext,
