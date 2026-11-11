@@ -7,11 +7,6 @@ identities**, **multi-tab presence**, **synced player & room state**,
 **serverless room admins & moderation**, and **multi-hop room scaling** to every
 signaling strategy out of the box.
 
-> [!IMPORTANT] **Wire-protocol notice:** `0.27.0` uses a new authenticated wire
-> protocol (DTLS-bound P-256 handshakes, signed state records, and v3 action
-> frames) and is **not wire-compatible with `0.26.x` or earlier peers**. Upgrade
-> all clients sharing a room together.
-
 ---
 
 ## 60-Second Upgrade Checklist
