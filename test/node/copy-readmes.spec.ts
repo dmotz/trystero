@@ -97,16 +97,16 @@ void test('resolveGitRef prefers release tag in CI and maps prerelease vs stable
     mkdirSync(join(tmp, 'packages/trystero'), {recursive: true})
     writeFileSync(
       join(tmp, 'packages/trystero/package.json'),
-      JSON.stringify({name: 'trystero', version: '0.27.0-beta1'})
+      JSON.stringify({name: 'trystero', version: '0.27.0'})
     )
 
     assert.equal(resolveGitRef(tmp, {}), 'next')
     assert.equal(
       resolveGitRef(tmp, {
         GITHUB_REF_TYPE: 'tag',
-        GITHUB_REF_NAME: '0.27.0-beta1'
+        GITHUB_REF_NAME: '0.27.0'
       }),
-      '0.27.0-beta1'
+      '0.27.0'
     )
     assert.equal(
       resolveGitRef(tmp, {
