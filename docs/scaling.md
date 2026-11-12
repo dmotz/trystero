@@ -2,9 +2,7 @@
 
 [← Back to README](../README.md) · [API Reference](./api.md)
 
-> [!NOTE] `scale()` is **experimental** and built for cooperative rooms with
-> dozens of peers (tested up to 48 concurrent browser instances and 250+
-> simulated peers).
+> `scale()` is **experimental**
 
 In a standard WebRTC room, every browser opens a direct connection to every
 other browser (a full mesh). For 2 to ~10 people — chess, poker, a band jam, a
