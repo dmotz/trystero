@@ -97,16 +97,16 @@ void test('resolveGitRef prefers release tag in CI and maps prerelease vs stable
     mkdirSync(join(tmp, 'packages/trystero'), {recursive: true})
     writeFileSync(
       join(tmp, 'packages/trystero/package.json'),
-      JSON.stringify({name: 'trystero', version: '0.27.0'})
+      JSON.stringify({name: 'trystero', version: '1.2.3-beta.1'})
     )
 
     assert.equal(resolveGitRef(tmp, {}), 'next')
     assert.equal(
       resolveGitRef(tmp, {
         GITHUB_REF_TYPE: 'tag',
-        GITHUB_REF_NAME: '0.27.0'
+        GITHUB_REF_NAME: '1.2.3-beta.1'
       }),
-      '0.27.0'
+      '1.2.3-beta.1'
     )
     assert.equal(
       resolveGitRef(tmp, {
@@ -118,9 +118,16 @@ void test('resolveGitRef prefers release tag in CI and maps prerelease vs stable
 
     writeFileSync(
       join(tmp, 'packages/trystero/package.json'),
-      JSON.stringify({name: 'trystero', version: '0.27.0'})
+      JSON.stringify({name: 'trystero', version: '1.2.3'})
     )
     assert.equal(resolveGitRef(tmp, {}), 'main')
+    assert.equal(
+      resolveGitRef(tmp, {
+        GITHUB_REF_TYPE: 'tag',
+        GITHUB_REF_NAME: '1.2.3'
+      }),
+      '1.2.3'
+    )
   } finally {
     rmSync(tmp, {recursive: true, force: true})
   }
@@ -138,21 +145,18 @@ void test('copyReadmes writes rewritten README.md and verbatim LICENSE into ever
 
     writeFileSync(join(tmp, 'README.md'), rootReadme)
     writeFileSync(join(tmp, 'LICENSE'), rootLicense)
-    writeFileSync(
-      join(tmp, 'package.json'),
-      JSON.stringify({version: '0.27.0'})
-    )
+    writeFileSync(join(tmp, 'package.json'), JSON.stringify({version: '1.2.3'}))
 
     mkdirSync(join(tmp, 'packages/alpha'), {recursive: true})
     writeFileSync(
       join(tmp, 'packages/alpha/package.json'),
-      JSON.stringify({name: 'alpha', version: '0.27.0'})
+      JSON.stringify({name: 'alpha', version: '1.2.3'})
     )
 
     mkdirSync(join(tmp, 'packages/beta'), {recursive: true})
     writeFileSync(
       join(tmp, 'packages/beta/package.json'),
-      JSON.stringify({name: 'beta', version: '0.27.0'})
+      JSON.stringify({name: 'beta', version: '1.2.3'})
     )
 
     // Directory without package.json and plain file should be ignored
