@@ -30,6 +30,7 @@ const disconnectedCloseDelayMs = 5_000
 const iceCandidateEvent = 'icecandidate'
 const iceStateEvent = 'icegatheringstatechange'
 const iceConnectionStateEvent = 'iceconnectionstatechange'
+const signalingStateEvent = 'signalingstatechange'
 const offerType = 'offer'
 const answerType = 'answer'
 const outOfRangePattern = /out of range/i
@@ -73,6 +74,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
   })
 
   let connectHandler: (() => void) | undefined
+  let didConnect = false
   let closeHandler: (() => void) | undefined
   let errorHandler: ((err: Error) => void) | undefined
 
@@ -133,6 +135,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       resetTimer(lifecycle.timer)
     }
     lifecycle = {phase: 'closed'}
+    pc.removeEventListener(signalingStateEvent, maybeConnect)
+    connectHandler = undefined
     offerGeneration += 1
     negotiation = {phase: 'idle'}
     settleInitialOffer()
@@ -156,6 +160,24 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       emitClose()
     }
     return lifecycle.phase === 'closed'
+  }
+
+  const hasDescriptions = (): boolean =>
+    Boolean(pc.localDescription?.sdp && pc.remoteDescription?.sdp)
+
+  const maybeConnect = (): void => {
+    if (
+      didConnect ||
+      !connectHandler ||
+      isClosed() ||
+      dataChannel?.readyState !== 'open' ||
+      !hasDescriptions()
+    ) {
+      return
+    }
+    didConnect = true
+    pc.removeEventListener(signalingStateEvent, maybeConnect)
+    connectHandler()
   }
 
   const emitSignal = (signal: Signal): void => {
@@ -376,8 +398,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       }
     }
     channel.onopen = () => {
-      if (dataChannel === channel && !isClosed()) {
-        connectHandler?.()
+      if (dataChannel === channel) {
+        maybeConnect()
       }
     }
     channel.onclose = () => {
@@ -398,6 +420,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
       errorHandler?.(toError(error, 'data channel error'))
     }
+    maybeConnect()
   }
 
   const expectsTurnCandidate = hasIceUrl(iceServers, /^turns?:/i)
@@ -481,6 +504,8 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     return signal
   }
 
+  pc.addEventListener(signalingStateEvent, maybeConnect)
+
   if (initiator) {
     dataChannel = pc.createDataChannel('data')
     setupDataChannel(dataChannel)
@@ -518,6 +543,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       if (isClosed() || offerGeneration !== gen) {
         return
       }
+      maybeConnect()
       return await emitLocalDescriptionSignal(gen)
     } catch (err) {
       if (offerGeneration !== gen) {
@@ -680,6 +706,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
       if (
         dataChannel?.readyState === 'open' &&
+        hasDescriptions() &&
         !sdp.sdp?.includes('a=rtpmap')
       ) {
         return
@@ -714,6 +741,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
           await flushPendingRemoteCandidates()
           await pc.setLocalDescription()
+          maybeConnect()
           return await emitLocalDescriptionSignal()
         }
 
@@ -722,6 +750,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
           try {
             await pc.setRemoteDescription(rtcSdp)
+            maybeConnect()
             await flushPendingRemoteCandidates()
           } finally {
             if (negotiation.phase === 'applying-remote-answer') {
@@ -749,6 +778,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     },
 
     destroy: () => {
+      connectHandler = undefined
       clearDisconnectedGrace()
       settleInitialOffer()
       dataChannel?.close()
@@ -806,6 +836,10 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
             streamHandler(stream)
           }
         }
+      }
+
+      if ('connect' in newHandlers) {
+        maybeConnect()
       }
     },
 
