@@ -413,6 +413,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
       const {
         checkout: checkoutOffers,
         getOffers,
+        acceptsSignal: acceptsLeasedSignal,
         claimLeased: claimLeasedOffer,
         reclaimLeased: reclaimLeasedOffer,
         destroy: destroyOffers
@@ -511,6 +512,7 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
         isLeaving: isRoomInactive,
         onError: emitError,
         checkoutOffers,
+        acceptsLeasedSignal,
         claimLeasedOffer,
         reclaimLeasedOffer,
         encryptOffer,
@@ -697,8 +699,19 @@ export default <TRelay, TConfig extends BaseRoomConfig = JoinRoomConfig>({
             handleMessage(i),
             n =>
               selfIdP.then(sid =>
-                getOffers(n, (peer, offerId) =>
-                  encryptOffer(peer, sid, offerId)
+                getOffers(
+                  n,
+                  (peer, offerId) => encryptOffer(peer, sid, offerId),
+                  effectiveConfig.trickleIce === false
+                    ? undefined
+                    : {
+                        encrypt: async (signal, offerId) =>
+                          (await toCipher(signal, sid, offerId)).sdp,
+                        isActive: () =>
+                          !isRoomInactive() &&
+                          slot.subscription.phase !== 'closed' &&
+                          slot.subscription.phase !== 'boot-failed'
+                      }
                 )
               ),
             strategyContext

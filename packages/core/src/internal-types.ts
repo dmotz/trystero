@@ -393,6 +393,7 @@ export type OfferRecord = {
   offerId: string
   claim?: () => void
   reclaim?: () => void
+  onCandidate?: (send: (candidate: string) => MaybePromise<void>) => () => void
 }
 
 export type AnnounceResult =
@@ -559,7 +560,16 @@ export type SignalContext = {
   isLeaving: () => boolean
   onError: ((error: RoomError) => void) | undefined
   checkoutOffers: OfferCheckoutFn
-  claimLeasedOffer: (peer: PeerHandle) => boolean
+  acceptsLeasedSignal?: (
+    peer: PeerHandle,
+    offerId: string,
+    peerId: string,
+    type: 'answer' | 'candidate'
+  ) => boolean
+  claimLeasedOffer: (
+    peer: PeerHandle,
+    answer?: {offerId: string; peerId: string}
+  ) => boolean
   reclaimLeasedOffer: (peer: PeerHandle) => void
   encryptOffer: (
     peer: PeerHandle,

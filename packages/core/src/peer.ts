@@ -34,6 +34,7 @@ const offerType = 'offer'
 const answerType = 'answer'
 const outOfRangePattern = /out of range/i
 const maxPendingRemoteCandidates = 128
+const maxPendingLocalCandidates = 128
 const maxRemoteCandidateSdpLength = 8_192
 
 type SdpDescription = {
@@ -173,7 +174,10 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
 
     if (signalHandler) {
       signalHandler(signal)
-    } else {
+    } else if (
+      signal.type !== candidateType ||
+      pendingSignals.length < maxPendingLocalCandidates
+    ) {
       pendingSignals.push(signal)
     }
   }

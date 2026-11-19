@@ -452,6 +452,7 @@ export const createSignalHandler = (
     isLeaving,
     onError,
     checkoutOffers,
+    acceptsLeasedSignal,
     claimLeasedOffer,
     reclaimLeasedOffer,
     encryptOffer,
@@ -1151,6 +1152,12 @@ export const createSignalHandler = (
     if (!offerId) {
       return
     }
+    const acceptsPeer = (target: PeerHandle): boolean =>
+      !target.isDead &&
+      (acceptsLeasedSignal?.(target, offerId, peerId, candidateType) ?? true)
+    if (peer && !acceptsPeer(peer)) {
+      return
+    }
     const state = peerStates.get(peerId)
     if (!peer && !state?.offerPeer && !state?.answeringPeer) {
       return
@@ -1168,17 +1175,18 @@ export const createSignalHandler = (
     }
 
     const currentState = peerStates.get(peerId)
-    const targetPeer =
-      peer && !peer.isDead
+    const targetPeer = peer
+      ? acceptsPeer(peer)
         ? peer
-        : currentState && hasLiveOutboundOffer(currentState, undefined, offerId)
-          ? currentState.outbound.peer
-          : currentState?.inbound.phase === 'answering' &&
-              currentState.inbound.offerId === offerId
-            ? currentState.inbound.peer
-            : null
+        : null
+      : currentState && hasLiveOutboundOffer(currentState, undefined, offerId)
+        ? currentState.outbound.peer
+        : currentState?.inbound.phase === 'answering' &&
+            currentState.inbound.offerId === offerId
+          ? currentState.inbound.peer
+          : null
 
-    if (targetPeer && !targetPeer.isDead) {
+    if (!isLeaving() && targetPeer && !targetPeer.isDead) {
       void targetPeer.signal(plainCandidate)
     }
   }
@@ -1190,6 +1198,12 @@ export const createSignalHandler = (
     peer: PeerHandle | undefined
   ): Promise<void> => {
     if (!offerId) {
+      return
+    }
+    const acceptsPeer = (target: PeerHandle): boolean =>
+      !target.isDead &&
+      (acceptsLeasedSignal?.(target, offerId, peerId, 'answer') ?? true)
+    if (peer && !acceptsPeer(peer)) {
       return
     }
     if (
@@ -1220,6 +1234,9 @@ export const createSignalHandler = (
       )
     } catch (err) {
       if (peer) {
+        if (!acceptsPeer(peer)) {
+          return
+        }
         reclaimLeasedOffer(peer)
         destroyAlive(peer)
       }
@@ -1227,9 +1244,11 @@ export const createSignalHandler = (
       return
     }
 
+    if (isLeaving()) {
+      return
+    }
     if (peer) {
-      if (!claimLeasedOffer(peer) || peer.isDead) {
-        destroyAlive(peer)
+      if (!claimLeasedOffer(peer, {offerId, peerId}) || peer.isDead) {
         return
       }
       const state = getState(peerStates, peerId)
