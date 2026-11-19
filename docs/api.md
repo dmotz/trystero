@@ -666,6 +666,16 @@ function createStrategy<
 >(adapter: StrategyAdapter<TRelay, TConfig>): JoinRoom<TConfig>
 ```
 
+With trickle ICE enabled, each leased offer returned by `getOffers(n)` has an
+`onCandidate(send)` method. Call it once after publishing the offer to send
+encrypted candidates with that record's `offerId`. Core sends buffered and new
+candidates in gathering order and waits for each send to finish. The returned
+function stops delivery. Delivery also stops when the lease is reclaimed or
+expires, the peer connects or closes, the room leaves, or the send fails. Core
+drops new candidates while the queue is full. After processing the incoming
+offer through `onMessage`, pass its candidates to `onMessage` as
+`{peerId, offerId, candidate}`.
+
 `@trystero-p2p/core` also exports helper utilities used by official strategy
 packages: `hashTopic`, `createRelayManager`, `createRelayScopedStore`,
 `getRelays`, `makeSocket`, `toJson`, `fromJson`, `encodeBytes`, `genId`,
