@@ -62,7 +62,13 @@ type InboundDataChannelState =
   | {readonly phase: 'closed'}
 
 export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
-  const {trickleIce, rtcConfig, rtcPolyfill, turnConfig} = config
+  const {
+    preparePeerConnection,
+    trickleIce,
+    rtcConfig,
+    rtcPolyfill,
+    turnConfig
+  } = config
   const iceServers = [
     ...(rtcConfig?.iceServers ?? defaultIceServers),
     ...(turnConfig ?? [])
@@ -71,6 +77,16 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
     ...rtcConfig,
     iceServers
   })
+
+  if (initiator) {
+    try {
+      preparePeerConnection?.(pc, 'initiator')
+    } catch (err) {
+      pc.close()
+      throw err
+    }
+  }
+  let prepareAnswer = initiator ? undefined : preparePeerConnection
 
   let connectHandler: (() => void) | undefined
   let closeHandler: (() => void) | undefined
@@ -156,6 +172,16 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       emitClose()
     }
     return lifecycle.phase === 'closed'
+  }
+
+  const destroy = (): void => {
+    clearDisconnectedGrace()
+    settleInitialOffer()
+    dataChannel?.close()
+    if (pc.connectionState !== 'closed') {
+      pc.close()
+    }
+    emitClose()
   }
 
   const emitSignal = (signal: Signal): void => {
@@ -712,6 +738,23 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
             await pc.setRemoteDescription(rtcSdp)
           }
 
+          if (prepareAnswer && !isClosed()) {
+            const prepare = prepareAnswer
+            prepareAnswer = undefined
+            try {
+              prepare(pc, 'responder')
+            } catch (err) {
+              try {
+                errorHandler?.(
+                  toError(err, 'failed to prepare peer connection')
+                )
+              } finally {
+                destroy()
+              }
+              return
+            }
+          }
+
           await flushPendingRemoteCandidates()
           await pc.setLocalDescription()
           return await emitLocalDescriptionSignal()
@@ -748,15 +791,7 @@ export default (initiator: boolean, config: BaseRoomConfig): PeerHandle => {
       dataChannel.send(data as unknown as never)
     },
 
-    destroy: () => {
-      clearDisconnectedGrace()
-      settleInitialOffer()
-      dataChannel?.close()
-      if (pc.connectionState !== 'closed') {
-        pc.close()
-      }
-      emitClose()
-    },
+    destroy,
 
     setHandlers: newHandlers => {
       if ('connect' in newHandlers) {

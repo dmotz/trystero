@@ -52,6 +52,10 @@ export interface BaseRoomConfig {
   trickleIce?: boolean
   rtcConfig?: RTCConfiguration
   rtcPolyfill?: typeof RTCPeerConnection
+  preparePeerConnection?: (
+    connection: RTCPeerConnection,
+    role: 'initiator' | 'responder'
+  ) => undefined
   turnConfig?: TurnServerConfig[]
 }
 
