@@ -92,6 +92,41 @@ function joinRoom<
 | **`trickleIce`**      | `boolean`                                                 | `false` on `torrent`, `true` elsewhere          | Send ICE candidates incrementally (`true`) or bundled into the SDP (`false`).                                                                                                                                                                                                                                                                                                                         |
 | **`rtcPolyfill`**     | `typeof RTCPeerConnection`                                | Global `RTCPeerConnection`                      | Custom WebRTC constructor (such as `werift`) for [Node, Bun, or Deno](./server-side.md).                                                                                                                                                                                                                                                                                                              |
 
+### `config.preparePeerConnection`
+
+Set this optional synchronous callback to configure a connection for its first
+offer or answer. It receives the `RTCPeerConnection` (including when provided by
+`rtcPolyfill`) and a role of `'initiator'` or `'responder'`.
+
+- The initiator calls it before creating the initial offer, including when
+  preparing an offer before a remote peer is known.
+- The responder calls it after applying the initial remote offer and before
+  creating the answer, when the transceivers from that offer are available.
+
+It runs once per connection. Complete changes synchronously and let Trystero
+manage SDP and signaling. If the callback throws, Trystero closes the connection
+and aborts the offer or answer.
+
+```js
+const room = joinRoom(
+  {
+    appId: 'voice.example.com',
+    preparePeerConnection(pc, role) {
+      if (role === 'initiator') {
+        pc.addTransceiver('audio', {direction: 'sendrecv'})
+      } else {
+        for (const transceiver of pc.getTransceivers()) {
+          if (transceiver.receiver.track.kind === 'audio') {
+            transceiver.direction = 'sendrecv'
+          }
+        }
+      }
+    }
+  },
+  'voice'
+)
+```
+
 ### Strategy-specific `config.relayConfig` options
 
 | Property             | Strategies                                                       | Type          | Description                                                                                          |
